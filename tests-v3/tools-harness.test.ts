@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
@@ -11,13 +11,16 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
-import { reassembleSse } from "../src/transport/sse.js";
+import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
+import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
+import { TransportFailure } from "../src/transport/http.js";
 import { attachTransportTiming, readTransportTiming } from "../src/transport/timing.js";
 import { harnessTransportAdapter, normalizedToOpenAiChat } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
+import { toolBudgetRoute } from "../src/tools/budget.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
@@ -870,6 +873,210 @@ test("#1464 review: an exploratory round starting above the reserve gets a bound
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
   assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1598 review: the failover wall-clock cap narrows the fallback loop's envelope, reserve included", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // TOOL_LOOP_WALL_CLOCK_SEC 600 would put the exploration boundary at
+  // anchor+570, but the failover caller caps the envelope at the remaining
+  // 100s: the effective wall clock is 100 → reserve 30 → boundary anchor+70.
+  // The clock advances 10s per read and saturates at 80 — the exact #1464
+  // 100s shape — so the loop must stop at the reserve INSIDE the capped
+  // envelope instead of running to the 600s ceiling. The fallback tier's
+  // own lane keys (AI_FALLBACK_*) prove the capped loop is the failover one.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    wallClockSecCap: 100,
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 10, 80);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.deepEqual(timeouts, [30, 30]);
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 30s of 100s wall clock \(#1464\)/);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1598 review: an unset wall-clock cap keeps the configured envelope byte-for-byte", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  // With no cap the fallback tier's envelope is the configured 600s: the
+  // clock saturating at 80 is far from the anchor+570 boundary, so the loop
+  // runs past round 1 (unlike the capped run above) and its verdict turn
+  // is granted the whole-deadline remaining, never a reserve clamp.
+  let clock = 0;
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, _timeout) => {
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
+test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-resolution of the route-rebound env", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // The engine rebinds the base AI_* keys to the primary override on the
+  // auto route (src/engine/review.ts) AFTER resolving the tier profiles, so
+  // an env re-resolution inside the harness would hand an inherited fallback
+  // lane the primary-override endpoint and credential. The bound lane is the
+  // one the fallback verdict came from — the loop must dial exactly it.
+  const dialed: Array<{ baseUrl: string; apiKey: string; model: string; apiFormat: string; effort: unknown }> = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  let clock = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      // Post-rebind base keys: the primary-override lane's values. No
+      // AI_FALLBACK_* URL/key — the fallback lane inherits the base, which
+      // is exactly why re-resolution here would diverge. The rebound effort
+      // is the primary lane's; the bound lane's own effort must win.
+      AI_BASE_URL: "http://primary-override.test/v1",
+      AI_API_KEY: "primary-override-key",
+      AI_REASONING_EFFORT: "low",
+    },
+    fallbackLane: {
+      baseUrl: "http://fallback-lane.test/v1",
+      model: "fallback-m",
+      apiFormat: "openai",
+      apiKey: "fallback-lane-key",
+      reasoningEffort: "high",
+    },
+    transport: async (baseUrl, apiFormat, payload, apiKey) => {
+      dialed.push({
+        baseUrl,
+        apiKey,
+        model: String((payload as Record<string, unknown>).model),
+        apiFormat,
+        effort: (payload as Record<string, unknown>).reasoning_effort,
+      });
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.ok(dialed.every((call) => call.baseUrl === "http://fallback-lane.test/v1"
+    && call.apiKey === "fallback-lane-key"
+    && call.model === "fallback-m"
+    && call.apiFormat === "openai"
+    && call.effort === "high"), `unexpected dial: ${JSON.stringify(dialed)}`);
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
+test("#1598 review (info): a loop that stops before its wall-clock ceiling records measured elapsed_sec, not the ceiling", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Uncapped loop: the 600s ceiling (reserve 150, exploration boundary
+  // anchor+450) never binds — the model stops making tool calls after one
+  // round. The clock advances 1s per read so the artifact's
+  // tool_loop_telemetry.usage.elapsed_sec must be the MEASURED loop delta,
+  // not the configured TOOL_LOOP_WALL_CLOCK_SEC. Read map follows the
+  // #1464 tests: anchor 1, loop start 2, then per round: exceeded,
+  // reserve, model-wait clamp, executor entry, executor remaining; the
+  // common-exit elapsed close-out reads right after the loop's final
+  // between-rounds pair.
+  let clock = 0;
+  let transportCalls = 0;
+  const reads: number[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("investigation complete, no more tools"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "600" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey) => scripted[transportCalls++],
+    timeFn: () => {
+      clock += 1;
+      reads.push(clock);
+      return clock;
+    },
+  }));
+  assert.equal(transportCalls, 3, "one exploratory round, the no-tool-call stop turn, then the closing verdict");
+  assert.equal(result.stop_reason, "model-stopped", "the loop finished on its own, not on the clock");
+  assert.equal(result.rounds, 2, "the tool round plus the no-tool-call stop turn");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  const elapsed = Number((telemetry.usage as Record<string, unknown>).elapsed_sec);
+  assert.ok(Number.isFinite(elapsed) && elapsed >= 0);
+  assert.equal((telemetry.budget as Record<string, unknown>).wall_clock_sec, 600, "the ceiling itself is still reported in the budget block");
+  assert.ok(elapsed < 600, `elapsed must be the measured loop delta, not the configured ceiling, got ${elapsed}`);
+  // Pin the read map: read 2 is the loop start, the loop's final read is the
+  // elapsed close-out; elapsed equals exactly that measured delta.
+  assert.equal(reads[1], 2, "the loop start is the second budget-clock read");
+  const loopEndRead = reads[10]!;
+  assert.equal(elapsed, loopEndRead - 2, "elapsed_sec is final-minus-start on the fake clock");
+  assert.equal(elapsed, 9);
 });
 
 test("#1464 review: #1459 shape — the last allowed round cannot push the remaining below the reserve and the verdict gets the full slice", async () => {
@@ -2232,6 +2439,22 @@ test("#922: a declared window scales the loop's context limits per tier", () => 
   assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 100000);
 });
 
+test("#1598 review: the fallback tier's context limits read the FALLBACK window, not the primary one", () => {
+  // A smaller fallback window is enforced even when the primary declares a
+  // larger one — the fallback loop dials the fallback model.
+  assert.deepEqual(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", FALLBACK_MODEL_CONTEXT_TOKENS: "262144" }, "fallback"),
+    { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 },
+  );
+  assert.equal(loopContextLimits({ FALLBACK_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback").maxConversationTokens, 250000);
+  // Unset falls to the global key, then the v3.1 constants — and a primary
+  // window alone must NOT size the fallback tier.
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "fallback").maxConversationTokens, 100000);
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  // The LOOP LIMITS still resolve on the primary profile's keys.
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2", TOOL_LOOP_WALL_CLOCK_SEC: "120" }, "fallback"), [2, 120, true]);
+});
+
 test("#922: explicit byte inputs override the window-derived limits", () => {
   const limits = loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", TOOL_CORPUS_MAX_BYTES: "70000", TOOL_MAX_RESPONSE_BYTES: "20000" }, "primary");
   assert.equal(limits.corpusMaxBytes, 70000);
@@ -3261,6 +3484,161 @@ test("#1379: dependency-evidence families reserve a budget tail; other kinds res
   assert.equal(dependencyEvidenceReserveFromClassification(() => '["image_update"]', 24), 0);
 });
 
+test("#1595: the reserve and tracked obligations derive from the artifact's must_check rows", () => {
+  // The #1595 scoped lockfile-only artifact: the must_check names exactly
+  // ONE obligation (the aggregate advisory row) — the reserve is the tracked
+  // set plus ONE spare no-lockout attempt (a zero-slack tail would let a
+  // single non-crediting evidence attempt void the advisory credit path).
+  const advisoryOnly = JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    version: 1,
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+  });
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => advisoryOnly, 24), {
+    reserve: 2,
+    obligations: ["security_advisory"],
+  });
+  // Budget rails keep: the minimum budget still reserves its sole request
+  // (the spare is clamped away by the tail); a degenerate budget resolves 0.
+  assert.equal(dependencyEvidenceReserveFromClassification(() => advisoryOnly, 1), 1);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => advisoryOnly, 0), 0);
+  // A partially-scoped must_check tracks exactly the distinct obligations it
+  // still names, in canonical order — with the same one-spare-attempt slack
+  // (2 tracked + 1 spare).
+  const partial = JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    must_check: [
+      "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+      "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+    ],
+  });
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => partial, 24), {
+    reserve: 3,
+    obligations: ["provenance", "security_advisory"],
+  });
+  // Full-set must_check: byte-identical to the pre-#1595 behavior
+  // (reserve 4 = DEPENDENCY_EVIDENCE_RESERVE, all three tracked).
+  const full = JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+    ],
+  });
+  assert.equal(dependencyEvidenceReserveFromClassification(() => full, 24), 4);
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => full, 24).obligations, [
+    "provenance",
+    "release_delta",
+    "security_advisory",
+  ]);
+  // Absent must_check (the hand-written #1379 fixture shape) keeps the
+  // full-set default.
+  const minimal = JSON.stringify({ pr_kind: "image_update", version: 1 });
+  assert.equal(dependencyEvidenceReserveFromClassification(() => minimal, 24), 4);
+  // Unusable must_check shapes fail closed to the full set.
+  for (const bad of [null, 42, [], ["run full test suite after upgrade"], ["verify x", 7]]) {
+    const body = JSON.stringify({ pr_kind: "dependency_upgrade", must_check: bad });
+    assert.equal(dependencyEvidenceReserveFromClassification(() => body, 24), 4, JSON.stringify(bad));
+  }
+});
+
+test("#1595: runToolHarness wires the scoped lockfile-only reserve (spare + one obligation)", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    version: 1,
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+  }));
+  const payloads: Array<Record<string, unknown>> = [];
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("advisories reported as not performed"),
+    validVerdict(),
+  ];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+      payloads.push(payload);
+      return scripted[n++];
+    },
+    log: (line: string) => logs.push(line),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  // The first request carries the SCOPED priority note: it names exactly the
+  // tracked obligation (security advisories) and steers at neither
+  // provenance nor the release delta — the full-trio note would burn the
+  // reserved tail on obligations the scoped must_check scoped away (#1579's
+  // unresolved-evidence partial-review symptom).
+  const firstTexts = ((payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(firstTexts.includes("dependency evidence comes first: check upstream security advisories (or record the check as not performed)"));
+  assert.ok(!firstTexts.includes("establish upstream provenance, inspect the exact old-to-new upstream release delta"));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  // Reserve 2 (the tracked obligation plus its spare no-lockout attempt),
+  // exactly one tracked obligation — not the canonical three.
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 2);
+  assert.equal(telemetry.budget?.required_evidence_required, 1);
+  // #1595 (review): the lead claim enforces the window from the FIRST
+  // request, so the scripted optional read_file is refused mid-budget —
+  // spending nothing (6-request budget, nothing executed).
+  assert.equal(telemetry.budget?.required_evidence_refusals, 1);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 0);
+  assert.equal(telemetry.budget?.required_evidence_released, false);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, []);
+  // #1595 (review): the SCOPED plan claims its obligation first — the loop
+  // ran with the lead-claim flag on.
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, true);
+  assert.ok(logs.some((l) => l.includes("dependency-evidence reserve: 2 tool request(s), 1 obligation(s)")));
+});
+
+test("#1595 (review): a FULL-set must_check keeps tail-only behavior — no lead-claim telemetry", async () => {
+  // The full-trio plan never sets the lead claim: the obligation window
+  // stays a reserved-tail mechanism, byte-identically. The persisted
+  // telemetry must NOT carry the lead-claim key.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+    ],
+  }));
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, _payload: Record<string, unknown>) => scripted[n++],
+    log: () => {},
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, undefined);
+});
+
 test("#1379: runToolHarness wires the classification-driven dependency-evidence reserve into the loop", async () => {
   const run = async (prKind: string) => {
     const { root, deps } = workspace();
@@ -3728,6 +4106,7 @@ test("#1466: the #1459 MiniMax/LiteLLM streamed body reports its real prompt and
   // The transport probe rides the body (the production adapter attaches it).
   attachTransportTiming(projection, {
     firstEventSec: 0.3,
+    firstSseEventSec: 0.5,
     firstContentSec: 2.5,
     totalSec: 14.2,
     wireCalls: 1,
@@ -3792,6 +4171,7 @@ test("#1466: the verdict record carries the turn's token counts and the accepted
       // The transport probe rides the body the transport returned.
       return attachTransportTiming(body as Record<string, unknown>, {
         firstEventSec: 0.4,
+        firstSseEventSec: null,
         firstContentSec: 1.1,
         totalSec: 3.6,
         wireCalls: 1,
@@ -3852,8 +4232,8 @@ test("#1466: a verdict turn whose streamed attempt failed reports the accepted (
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -3905,8 +4285,8 @@ test("#1466: a retried verdict turn sums its token counts over BOTH attempts and
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -4031,4 +4411,352 @@ test("#1466: the production transport adapter attaches the probe to BOTH respons
   } finally {
     await server.close();
   }
+});
+
+test("#1628: the reassembly-quality probe survives the harness adapter's streamed projection", async () => {
+  // #252 discipline: the seam itself is the boundary — the quality probe is
+  // attached by `reassembleSse`, but the caller receives the NEW projected
+  // object, so only a test through `harnessTransportAdapter` proves the
+  // re-attach. Without it every malformed-empty stream would silently
+  // degrade to `empty_completion`.
+  const malformedBody = 'data: {"id":"x","choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"\n\n';
+  const healthyBody = [
+    'data: {"id":"1","choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{}"}}]}}]}',
+    'data: {"id":"1","choices":[{"finish_reason":"tool_calls"}]}',
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  let reply = malformedBody;
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(reply);
+  });
+  try {
+    const adapter = harnessTransportAdapter({} as StageEnv);
+    const malformed = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const quality = readSseReassemblyQuality(malformed);
+    assert.ok(quality !== null, "the projected streamed body carries the quality probe");
+    assert.ok((quality?.malformedFrames ?? 0) >= 1, "the unparseable frame was counted");
+    assert.equal(quality?.sawTermination, false, "a torn stream never terminated");
+    // End-to-end through the seam's own classifier: malformed, not empty.
+    assert.equal(classifyUnusableStreamedBody(malformed, "openai")?.reason, "sse_malformed");
+    reply = healthyBody;
+    const healthy = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const healthyQuality = readSseReassemblyQuality(healthy);
+    assert.ok(healthyQuality !== null && healthyQuality.sawTermination, "a terminated stream reports termination");
+    assert.equal(healthyQuality?.malformedFrames, 0);
+    assert.equal(classifyUnusableStreamedBody(healthy, "openai"), null, "a tools stream is never discarded");
+  } finally {
+    await server.close();
+  }
+});
+
+// ── #1598: the fallback evidence-failover tier ──────────────────────────────
+
+test("#1598: TOOL_HARNESS_TIER=fallback runs the native loop on the RESOLVED fallback lane", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  const seen: Array<{ baseUrl: string; apiKey: string; payload: Record<string, unknown> }> = [];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      // Primary lane values that must NOT be used by the fallback loop.
+      AI_BASE_URL: "http://primary.test/v1",
+      AI_MODEL: "primary-m",
+      AI_API_KEY: "primary-key",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-key",
+      AI_STREAM: "false",
+    },
+    transport: async (baseUrl, _format, payload, apiKey) => {
+      seen.push({ baseUrl, apiKey, payload: payload as Record<string, unknown> });
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.ok(seen.length >= 3, `expected the loop turns + verdict, got ${seen.length}`);
+  for (const call of seen) {
+    assert.equal(call.baseUrl, "http://fallback.test/v1", "the fallback loop must dial the fallback lane's endpoint");
+    assert.equal(call.apiKey, "fallback-key", "the fallback loop must use the fallback lane's credential");
+    assert.equal(call.payload.model, "fallback-m", "the fallback loop must send the fallback lane's model");
+  }
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8"));
+  assert.equal(artifact.tier, "fallback");
+  assert.equal(artifact.stop_reason, "model-stopped");
+  assert.ok((artifact.executed_request_count ?? 0) >= 1);
+  assert.ok(fs.existsSync(path.join(root, "ai-response.fallback.json")));
+  assert.ok(!fs.existsSync(path.join(root, "tool-harness.json")), "the fallback tier must not write into the primary slot");
+});
+
+test("#1598: the fallback loop streams and reasons on the fallback lane's own settings", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "true",
+      AI_FALLBACK_REASONING_EFFORT: "low",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, true, "ai-fallback-stream=true must reach the fallback loop's requests");
+    assert.equal(payload.reasoning_effort, "low", "the fallback lane's effort override must reach the loop");
+  }
+});
+
+test("#1598: an empty ai-fallback-stream inherits the base stream setting", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, false, "an empty ai-fallback-stream inherits the base ai-stream");
+    assert.equal(payload.reasoning_effort, undefined, "an unconfigured fallback effort sends nothing");
+  }
+});
+
+test("#1598: the fallback tier maps to the primary loop-limit profile and budget route", () => {
+  assert.equal(loopLimitsProfile("fallback"), "primary");
+  assert.equal(toolBudgetRoute("fallback", {}), "primary");
+  assert.equal(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" } as Record<string, string | undefined>, "fallback")[0], 2);
+});
+
+test("#1598: an unknown tool harness tier still fails closed", async () => {
+  const { deps } = workspace();
+  await assert.rejects(
+    runToolHarness(deps({ env: { TOOL_HARNESS_TIER: "quantum" } })),
+    /invalid tool harness tier/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// #1628: streamed native-loop failure recovery is attributable and bounded
+// per attempt.
+// ---------------------------------------------------------------------------
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("#1628: a pair of fallback rounds reports their own reasons and times, not two booleans", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Round 1 discards like the #12074 lead: an HTTP 524 whose bytes arrived
+  // late (the wire observation rides the failure). Round 2 discards a 200
+  // body carrying a provider error object — a different reason, a different
+  // time. Each must say so on its own record.
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(60);
+        throw attachTransportTiming(
+          new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524, body: "gateway timed out" }),
+          { firstEventSec: 0.05, firstSseEventSec: null, firstContentSec: null, totalSec: 0.06 },
+        );
+      }
+      if (turn === 1) { await sleepMs(40); return openAiCall("c1", "read_file", '{"path":"src.ts"}'); }
+      if (turn === 2) return { error: { type: "server_error", message: "the wire broke here" } };
+      if (turn === 3) { await sleepMs(30); return openAiText("evidence gathered"); }
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  const first = rounds[0].stream_failure;
+  const second = rounds[1].stream_failure;
+  assert.equal(rounds[0].streamed_fallback, true);
+  assert.equal(rounds[1].streamed_fallback, true);
+  // Each discarded attempt reports its OWN reason, status, and times.
+  assert.equal(first.reason, "http_status");
+  assert.equal(first.status, 524);
+  assert.ok(first.elapsed_sec >= 0.05 && first.elapsed_sec < 2, `elapsed must be the attempt's own time, got ${first.elapsed_sec}`);
+  assert.equal(first.first_byte_sec, 0.05);
+  assert.equal(first.first_sse_event_sec, null, "a 524 body carries no SSE data event");
+  assert.equal(first.first_content_sec, null);
+  assert.ok(first.retry_elapsed_sec !== null && first.retry_elapsed_sec >= 0.03, "the recovery's own time rides the record");
+  assert.equal(first.route, "primary");
+  assert.equal(second.reason, "provider_error_object");
+  assert.equal(second.status, null);
+  assert.notEqual(second.reason, first.reason, "two fallback rounds are no longer the same boolean");
+  assert.ok(second.elapsed_sec < first.elapsed_sec, "each record keeps its own (distinct) time");
+  assert.ok(second.retry_elapsed_sec !== null);
+  // Content-free: neither the 524 body nor the error object's message can
+  // ride the round telemetry.
+  const roundsJson = JSON.stringify(rounds);
+  assert.ok(!roundsJson.includes("gateway timed out"));
+  assert.ok(!roundsJson.includes("the wire broke here"));
+  // The concise logs carry the same facts.
+  assert.ok(logs.some((l) => l.includes("streamed turn unusable (reason=http_status status=524")), `missing the discarded-attempt line: ${logs.join("\n")}`);
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed recovered")), "the recovery gets its own line");
+  assert.ok(logs.some((l) => l.includes("streamed attempt discarded reason=provider_error_object")), "the round heartbeat names the reason");
+});
+
+test("#1628: a proven terminal failure bounds the non-streamed retry to the turn's remaining budget", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The streamed attempt spent ~1.1s of the 2s turn timeout; the 524 is a
+  // PROVEN terminal class, so the recovery may not restart a full turn wait:
+  // its timeout is the pair budget (2 - 1.1 → floored at 1), not 2.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1628: the terminal-class bound floors at 1s when the discarded attempt overspent the turn", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(2100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The discarded attempt spent MORE than the whole 2s turn budget, so the
+  // pair's remaining figure (2 − ~2.1) is NEGATIVE: the max(1, ...) floor is
+  // the only thing between the recovery and a zero/negative timeout. Without
+  // the guard this asserts against −0, not 1.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1628: an ambiguous timeout keeps the configured deadline for the retry", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("request_timeout", "model request timed out");
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The idle case is NOT assumed guilty: the configured turn timeout stays
+  // the retry's authority (the run deadline still clamps it above).
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 2);
+});
+
+test("#1628: a cancelled streamed attempt reports its record and is never retried", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const streams: unknown[] = [];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      streams.push(payload.stream);
+      const turn = n++;
+      if (turn === 0) throw new TransportFailure("cancelled", "model request cancelled");
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  // No non-streamed recovery was ever dialed for the cancelled loop turn.
+  assert.ok(streams.every((s) => s === true), `cancelled attempt must not retry non-streamed: ${JSON.stringify(streams)}`);
+  assert.ok(logs.some((l) => l.includes("streamed turn cancelled") && l.includes("not retried")));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, false, "no recovery fired, so no fallback is claimed");
+  assert.equal(round.stream_failure.reason, "cancelled");
+  assert.equal(round.stream_failure.retry_elapsed_sec, null);
+});
+
+test("#1628: a streamed empty completion is discarded and the recovery's failure is attributed", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      const turn = n++;
+      if (turn === 0) return { choices: [{ message: { content: "" }, finish_reason: "stop" }] };
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, true);
+  assert.equal(round.stream_failure.reason, "empty_completion");
+  assert.ok(round.stream_failure.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed FAILED") && l.includes("retry_reason=connection_closed")));
+  // Null provider usage on the stopped turn — a discarded turn fabricates
+  // nothing.
+  assert.equal(round.prompt_tokens, null);
+  assert.equal(round.ttft_sec, null);
 });

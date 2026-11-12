@@ -6,14 +6,27 @@ review a pull request, and publish the review.
 
 ## Current state
 
-The harness script is not implemented yet. It is
-`tests/self_hosted_e2e_qualification.sh`, and it lands with issue #1482.
-The scenario families land one at a time (#1482, #1483, #1484, #1485).
+The harness script is `tests/self_hosted_e2e_qualification.sh`. Its
+first scenario family, the two normal-review paths on GitHub and
+Forgejo, landed with #1482. The failure, restart, supersession and
+idempotency scenario family landed with #1483: a duplicate webhook, a
+webhook burst that settles into one paid newest-head review, queued and
+running supersession, a stale-result refusal, a worker crash and
+requeue, a controller crash with a running worker and with queued
+settle-window work, a cancelled review, a publication retry with no
+second model call, single-counted usage across those retries and
+restarts, a primary model failure, and a missed webhook found by
+reconciliation. The remaining scenario families land one at a time
+(#1484, #1485).
 
-Until the harness lands, a dispatched CI job fails closed: it exits
-non-zero instead of reporting a qualification that did not run. The
-`make self-hosted-qualification` target reports that the harness is
-absent. No qualification has run yet.
+A dispatched CI run executes the harness and reports its pass/fail.
+The job still fails closed when the script is absent, so a green run
+can never mean a qualification that did not run. The
+`make self-hosted-qualification` target builds the v3 runtime bundle
+when it is missing and then runs the harness. No qualification has run
+yet: only a dispatched run makes one happen. A run now spends roughly
+one model call per scenario on the disposable Forgejo instance (a
+cancelled, superseded-in-queue, or failed-model scenario spends none).
 
 The qualification program is issue #739. This page covers the harness and
 its run steps only. The deployment of the controller and the worker is
@@ -24,8 +37,9 @@ covered by [Self-hosted deployment](self-hosted-deployment.md).
 The harness must prove these paths. Each path is one scenario.
 
 - A normal GitHub review through an adopted repository, with no
-  per-repository workflow.
-- A normal Forgejo review through the same job and engine boundary.
+  per-repository workflow (#1482).
+- A normal Forgejo review through the same job and engine boundary
+  (#1482).
 - A duplicate webhook event.
 - A webhook burst that settles into one paid review of the newest head.
 - A missed webhook event that the reconciler finds, with no duplicate work.
@@ -77,7 +91,15 @@ a remote forge. The gate checks the CI job for the same.
    `AI_API_KEY`.
 3. Set the GitHub App settings. The harness reads
    `PR_REVIEWER_GITHUB_APP_ID` and `PR_REVIEWER_GITHUB_APP_PRIVATE_KEY`.
-4. Run the harness.
+4. Name the GitHub test repository and the App installation. The harness
+   reads `SELF_HOSTED_GITHUB_REPOSITORY` (`owner/name`) and
+   `PR_REVIEWER_GITHUB_APP_INSTALLATION_ID`. The App must be installed
+   on the repository's owner, and the repository must hold exactly one
+   open pull request: the reconciler discovers that pull request through
+   the GitHub App capability and the harness reviews it. Keep the test
+   repository clean, because a qualification run spends one model call
+   per forge.
+5. Run the harness.
 
    ```bash
    make self-hosted-qualification
@@ -104,7 +126,10 @@ The job reads the model credential from the repository secret
 `SELF_HOSTED_AI_API_KEY`. The job reads the GitHub App material from the
 repository secrets `SELF_HOSTED_GITHUB_APP_ID` and
 `SELF_HOSTED_GITHUB_APP_PRIVATE_KEY`. The job fails when the model
-credential is empty.
+credential is empty. The job reads the GitHub test repository and the
+App installation id from the repository variables
+`SELF_HOSTED_GITHUB_REPOSITORY` and
+`SELF_HOSTED_GITHUB_APP_INSTALLATION_ID`.
 
 ## Settings the harness reads
 
@@ -116,11 +141,21 @@ credential is empty.
 | `AI_API_KEY` | Credential for the model endpoint. | Yes |
 | `PR_REVIEWER_GITHUB_APP_ID` | Numeric id of the GitHub App that the controller uses. | Only for the GitHub scenarios |
 | `PR_REVIEWER_GITHUB_APP_PRIVATE_KEY` | PEM private key of that GitHub App. | Only for the GitHub scenarios |
+| `PR_REVIEWER_GITHUB_APP_INSTALLATION_ID` | Installation id of that App on the test repository's owner. The controller mints the installation token itself. | Only for the GitHub scenarios |
+| `SELF_HOSTED_GITHUB_REPOSITORY` | `owner/name` of the GitHub test repository. It must hold exactly one open pull request. | Yes |
 | `GITHUB_API_URL` | Base URL of the GitHub API. The default is `https://api.github.com`. Set the repository variable `SELF_HOSTED_GITHUB_API_URL` when the GitHub side is not `https://api.github.com`. | No |
-| `FORGEJO_TOKEN` | Credential for an existing Forgejo. | Only when the harness drives an existing Forgejo |
+| `FORGEJO_TOKEN` | Credential for the Forgejo side. The harness mints its own token when it provisions the disposable instance, as it does today; the controller reads this name for that token. | Only when the harness drives an existing Forgejo |
 
 These names match the self-hosted runtime. A harness that reads other names
 must update this table and the CI workflow in the same change.
+
+The harness also reads tunables with safe defaults, each validated before
+any container starts: `SELF_HOSTED_FORGEJO_IMAGE` (default
+`codeberg.org/forgejo/forgejo:9`), `SELF_HOSTED_POSTGRES_IMAGE` (default
+`postgres:16`), the ports `SELF_HOSTED_FORGEJO_PORT`,
+`SELF_HOSTED_POSTGRES_PORT`, `SELF_HOSTED_FORGEJO_WEBHOOK_PORT`,
+`SELF_HOSTED_FORGEJO_ADMIN_PORT`, `SELF_HOSTED_GITHUB_ADMIN_PORT`, and the
+per-scenario budget `SELF_HOSTED_REVIEW_TIMEOUT_SEC` (default `900`).
 
 The GitHub App credential needs no separate personal access token. The
 controller owns the credential lifecycle of the App, and it mints the
@@ -137,3 +172,28 @@ installation token for each repository. See
   profile without one refuses the review at composition.
 - The scenarios land one at a time. A run reports only the scenarios that
   exist on the day of the run.
+- The GitHub scenario cannot receive a webhook on a disposable host, so
+  it is driven by the reconciler discovering the open test pull request
+  through the GitHub App capability. The webhook intake itself is
+  qualified by the Forgejo scenario, whose delivery the controller's own
+  HMAC verification accepts.
+- The worker-timeout scenario is not drivable in this composition and the
+  harness skips it with a printed reason instead of fabricating coverage:
+  webhook-minted jobs carry no execution deadline (`buildReviewJob`
+  leaves `deadlineAtMs` 0) and the controller composition exposes no
+  queue-timing settings, so neither the worker's whole-process deadline
+  backstop nor the queue's lease-expiry path (a 30-minute lease by
+  default) can be driven inside the scenario budget. The deadline and
+  lease-expiry semantics are qualified at the composition level by
+  `tests-v3/controller-daemon.test.ts` and
+  `tests-v3/queue-recovery-settle.test.ts`.
+- The model-fallback leg of the primary-failure scenario is not drivable
+  in this composition and is likewise skipped with a printed reason: the
+  execution envelope carries ONE model selection (the endpoint, wire
+  model id, and wire format of the operator's default model profile —
+  #1496), and the worker's engine inputs map no `ai-fallback-*`
+  coordinates, so an availability fallback to a second model cannot be
+  exercised end-to-end. The scenario drives the primary-failure leg (a
+  closed model endpoint exhausts the bounded attempts with no counted
+  spend and nothing published) and labels the fallback leg per #739's
+  "clearly label externally untestable behavior" rule.

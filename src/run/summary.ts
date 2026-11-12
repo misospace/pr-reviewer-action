@@ -23,6 +23,10 @@ export interface SummaryInput {
   reviewRecord: Record<string, unknown>;
   primaryHarness: Record<string, unknown> | null;
   smartHarness: Record<string, unknown> | null;
+  /** #1598: the fallback tier's evidence-failover harness record — supplied
+   * only when `tool-harness.fallback.json` exists, so an untriggered
+   * fallback gains no summary row. */
+  fallbackHarness?: Record<string, unknown> | null;
   coverage: Record<string, unknown> | null;
   budgets: ReturnType<typeof resolveTierBudgets>;
   route: string;
@@ -38,6 +42,7 @@ export interface SummaryInput {
 export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
   if (stepSummaryPath === "") return;
   const { env, ws, reviewRecord, primaryHarness, smartHarness } = input;
+  const fallbackHarness = input.fallbackHarness ?? null;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
   const findings = Array.isArray(reviewRecord.findings) ? reviewRecord.findings as unknown[] : [];
   const toolCalls = Array.isArray(primaryHarness?.tool_calls) ? primaryHarness?.tool_calls as unknown[] : [];
@@ -123,11 +128,32 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
     ...(smartHarness !== null && toolMode === "native_loop"
       ? {
         smartTools: {
-          issuedToolCalls: Array.isArray(smartHarness.tool_calls) ? (smartHarness.tool_calls as unknown[]).length : 0,
+          // #1597: the same distinct counts the primary row (and the marker)
+          // carries: executed = attempted executions, successful = the ok
+          // subset, issued = everything the model asked for.
+          executedRequestCount: typeof smartHarness.executed_request_count === "number" ? smartHarness.executed_request_count : 0,
+          successfulToolCalls: Array.isArray(smartHarness.tool_calls)
+            ? (smartHarness.tool_calls as unknown[]).filter((call) => (call as { status?: string }).status === "ok").length
+            : 0,
+          issuedToolCalls: typeof smartHarness.planned_request_count === "number" ? smartHarness.planned_request_count : 0,
           rounds: typeof smartHarness.rounds === "number" ? smartHarness.rounds : 0,
           requests: numberAt(smartHarness.usage, "requests") ?? numberAt(smartHarness.native_loop_usage, "requests") ?? 0,
           stopReason: String(smartHarness.stop_reason ?? smartHarness.native_loop_degraded ?? smartHarness.skip_reason ?? smartHarness.error ?? "unknown"),
           verdictStatus: String(smartHarness.native_loop_verdict_status ?? "corpus"),
+        },
+      }
+      : {}),
+    // #1598: present only when the fallback evidence harness wrote its
+    // artifact (the evidence failover ran); an untriggered fallback gains no
+    // row. Same shape and discipline as the smart row.
+    ...(fallbackHarness !== null && toolMode === "native_loop"
+      ? {
+        fallbackTools: {
+          issuedToolCalls: Array.isArray(fallbackHarness.tool_calls) ? (fallbackHarness.tool_calls as unknown[]).length : 0,
+          rounds: typeof fallbackHarness.rounds === "number" ? fallbackHarness.rounds : 0,
+          requests: numberAt(fallbackHarness.usage, "requests") ?? numberAt(fallbackHarness.native_loop_usage, "requests") ?? 0,
+          stopReason: String(fallbackHarness.stop_reason ?? fallbackHarness.native_loop_degraded ?? fallbackHarness.skip_reason ?? fallbackHarness.error ?? "unknown"),
+          verdictStatus: String(fallbackHarness.native_loop_verdict_status ?? "corpus"),
         },
       }
       : {}),

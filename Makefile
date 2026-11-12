@@ -15,9 +15,10 @@ secret-scan:
 # the forge credentials from the environment; see
 # docs/self-hosted-qualification.md for the full list.
 #
-# The harness script lands with #1482. Until it exists, this target reports
-# that the harness is absent and does nothing else. The target never fails
-# for an absent harness.
+# The harness landed with #1482. The absent-harness branch below only
+# covers checkouts that predate it: the target reports the absence and
+# does nothing else rather than failing on a file that is simply not in
+# the tree yet.
 .PHONY: self-hosted-qualification
 
 self-hosted-qualification:

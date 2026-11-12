@@ -259,14 +259,15 @@ function validateRequiredChecks(value: unknown): string | undefined {
   return typeof value === "string" && REQUIRED_CHECKS_VALUES.has(value) ? value : undefined;
 }
 
-/** The only two harness filenames `review.ts` ever records as
- * `enforcement_harness` (see its write site). An allowlist, not a
+/** The only harness filenames `review.ts` ever records as
+ * `enforcement_harness` (see its write site) — #1598 adds the fallback
+ * tier's evidence-failover artifact. An allowlist, not a
  * traversal check: `readJsonObject` is only ever called with one of these
- * two literal strings joined to the run dir, so a forged value like
+ * literal strings joined to the run dir, so a forged value like
  * `"../x.json"` is simply never a member and is never read at all — it
  * fails the resolution below exactly like `null` or any other stray
  * string would. */
-const ENFORCEMENT_HARNESS_NAMES: ReadonlySet<string> = new Set(["tool-harness.json", "tool-harness.smart.json"]);
+const ENFORCEMENT_HARNESS_NAMES: ReadonlySet<string> = new Set(["tool-harness.json", "tool-harness.smart.json", "tool-harness.fallback.json"]);
 
 /** #873 maintainer follow-up: the `publish` CLI subcommand is a separate
  * process from `run`, so it cannot hold `toolMode`/`enforcementHarness`/
@@ -293,7 +294,8 @@ const ENFORCEMENT_HARNESS_NAMES: ReadonlySet<string> = new Set(["tool-harness.js
  *   no need to also read the harness. Otherwise (no confirmed gap
  *   recorded), the ONLY way to confirm the run was actually complete is to
  *   read the exact harness `enforcement_harness` names: that name must be
- *   exactly `tool-harness.json` or `tool-harness.smart.json` (anything
+ *   exactly `tool-harness.json`, `tool-harness.smart.json`, or — since
+ *   #1598 — `tool-harness.fallback.json` (anything
  *   else, including `null`, is never read and resolves UNKNOWN), and the
  *   named file must exist and parse (missing/unparseable also resolves
  *   UNKNOWN, never "must have been clean"). Only a harness that reads
@@ -1102,6 +1104,11 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
     ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
     ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
+    // #1597: the remaining execution partitions ride the same handoff.
+    ...(review.toolCallsIssued !== undefined ? { toolCallsIssued: review.toolCallsIssued } : {}),
+    ...(review.toolCallsSuccessful !== undefined ? { toolCallsSuccessful: review.toolCallsSuccessful } : {}),
+    ...(review.toolCallsRefused !== undefined ? { toolCallsRefused: review.toolCallsRefused } : {}),
+    ...(review.toolCallsDeduplicated !== undefined ? { toolCallsDeduplicated: review.toolCallsDeduplicated } : {}),
     ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
     ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
     ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),

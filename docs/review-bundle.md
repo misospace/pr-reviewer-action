@@ -747,11 +747,12 @@ A consumer MUST:
 - The row count has a publication bound of 64
   (`REVIEW_OBLIGATIONS_MAX_ROWS`), which never binds for a real run: the
   run's blocking rows come from two deterministic sources — the classifier's
-  `must_check` checklist (at most 37 distinct static items: `KIND_CHECKS`,
-  `FLAG_CHECKS` and the shared `*_EVIDENCE_CHECKS` tables in
+  `must_check` checklist (at most 38 distinct static items: `KIND_CHECKS`,
+  `FLAG_CHECKS`, the shared `*_EVIDENCE_CHECKS` tables and the #1595 scoped
+  `LOCKFILE_REFRESH_LOW_RISK_CHECKS` table in
   `src/classification/classify.ts`) and the trusted base's guidance asks (at
   most 5, `MAX_APPROVAL_PREREQUISITES` in
-  `src/enforcement/review-obligations.ts`) — so a run holds at most 42
+  `src/enforcement/review-obligations.ts`) — so a run holds at most 43
   qualifying rows. When the bound does bind, the total and the truncation
   flag say so.
 - The container is RESERVED ahead of the model-authored review prose. It

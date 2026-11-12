@@ -62,7 +62,9 @@ import {
   normalizeReasoningEffort,
   resolveTierProfiles,
   tierReasoningEffort,
+  tierRequestShape,
   tierResponseFormat,
+  type ResolvedTier,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
@@ -85,12 +87,21 @@ STOP_REQUEST_ERROR,
   sanitizeFinishReasonToken,
   sanitizedFinishReason,
   summarizeTransportProbes,
+  type DependencyEvidenceObligation,
   type AcceptedAttemptTiming,
   type LoopOutcome,
   type NativeLoopRoundTelemetry,
   type RequiredEvidenceRow,
   type ToolTurnSignal,
 } from "./loop.js";
+import {
+  classifyThrownStreamedAttempt,
+  classifyUnusableStreamedBody,
+  formatStreamedAttemptFailure,
+  TERMINAL_STREAMED_FAILURE_REASONS,
+  type StreamedAttemptClassification,
+  type StreamedAttemptFailureRecord,
+} from "./stream-attempt.js";
 import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import { readTransportTiming, type TransportTiming } from "../transport/timing.js";
@@ -106,7 +117,7 @@ import {
   type PartialCoverage,
 } from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
-import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
 
 import { runProcess } from "../runtime/subprocess.js";
@@ -267,15 +278,32 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
  * escalation smart tier) follows that tier's window and loop limits, as
  * toolBudgetRoute already does for the request budget. #1253: the tier is the
  * only signal — the unreachable REVIEW_CONTEXT_PROFILE=smart ambient override
- * has been removed. */
+ * has been removed. #1598: the fallback tier (#1585 evidence failover) maps
+ * its LOOP LIMITS to the primary profile — same TOOL_MAX_ROUNDS /
+ * TOOL_LOOP_WALL_CLOCK_SEC / TOOL_* keys, no fallback-specific loop env.
+ * The context window is NOT part of that mapping: a loop-limit key names a
+ * policy knob, while the window is a property of the model the tier's lane
+ * dials, so `loopContextLimits` reads the tier's own key below. */
 export function loopLimitsProfile(tier: string): "primary" | "smart" {
-  return tier === "smart" ? "smart" : "primary";
+  if (tier === "smart") return "smart";
+  if (tier === "fallback") return "primary";
+  return "primary";
 }
 
 /** #922: the tier's declared context window in tokens (the tier input, which
- * already inherits model-context-tokens), or null when none is declared. */
+ * already inherits model-context-tokens), or null when none is declared.
+ * #1598 (review): the fallback tier reads its OWN lane's window
+ * (FALLBACK_MODEL_CONTEXT_TOKENS — the same key `resolveTierBudgets` applies
+ * to the fallback corpus budget). The fallback loop dials the fallback model,
+ * so a smaller fallback window must be enforced on the loop's conversation
+ * compaction and byte budgets, never the primary model's window. */
 export function declaredWindowTokens(env: EnvLike, tier: string): number | null {
-  const raw = ((tier === "smart" ? env.SMART_MODEL_CONTEXT_TOKENS : env.PRIMARY_MODEL_CONTEXT_TOKENS) || env.MODEL_CONTEXT_TOKENS || "").trim();
+  const tierKey = tier === "smart"
+    ? "SMART_MODEL_CONTEXT_TOKENS"
+    : tier === "fallback"
+      ? "FALLBACK_MODEL_CONTEXT_TOKENS"
+      : "PRIMARY_MODEL_CONTEXT_TOKENS";
+  const raw = ((env[tierKey]) || env.MODEL_CONTEXT_TOKENS || "").trim();
   return /^[0-9]+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
 }
 
@@ -341,6 +369,11 @@ export function resolveLoopLimits(env: EnvLike, tier: string): [number, number, 
     roundsExplicit = roundsExplicit || envIntIsSet(env, "SMART_TOOL_MAX_ROUNDS");
     maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
     wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);
+  }
+  // #1598: the fallback tier has no loop-limit keys of its own — it uses the
+  // exact primary keys above (explicit branch, not an implicit fall-through).
+  if (tier === "fallback") {
+    return [maxRounds, wallClock, roundsExplicit];
   }
   return [maxRounds, wallClock, roundsExplicit];
 }
@@ -2150,6 +2183,18 @@ export type HarnessResult = Record<string, unknown> & {
   planning_error?: string;
   error?: string;
   stop_reason?: string;
+  /** #1597: the distinct execution partitions written by every loop path
+   * (issued / attempted-executed / ok-subset / refused / deduplicated),
+   * under issued = executed + refused + deduplicated and
+   * successful <= executed. The #1598 fallback-evidence failover trigger
+   * gates spend on `executed_request_count` — the settled attempted-executor
+   * population (successful OR failed), never the ok-only
+   * `successful_request_count`. */
+  planned_request_count?: number;
+  executed_request_count?: number;
+  successful_request_count?: number;
+  refused_request_count?: number;
+  deduplicated_request_count?: number;
   tool_budget_tier?: string;
   tool_request_budget?: number;
   tool_budget_source?: string;
@@ -2275,10 +2320,21 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.required_evidence_attempts !== undefined ? { required_evidence_attempts: meta.required_evidence_attempts } : {}),
         ...(meta.required_evidence_credits !== undefined ? { required_evidence_credits: meta.required_evidence_credits } : {}),
         ...(meta.required_evidence_released !== undefined ? { required_evidence_released: meta.required_evidence_released } : {}),
+        // #1595 (review): the scoped plan's first claim, mirrored from the raw
+        // meta when it carries it (absent for every tail-only/full-set run).
+        ...(meta.required_evidence_lead_claim !== undefined ? { required_evidence_lead_claim: meta.required_evidence_lead_claim } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
+        // #1597: `tool_calls_executed` counts ATTEMPTED executions (the
+        // trace population, executor status irrelevant). The ok-status
+        // subset is its own field; refused/deduplicated complete the
+        // partition, so `issued = executed + refused + deduplicated` is
+        // checkable from the artifact alone.
         tool_calls_executed: toolCalls.length,
+        tool_calls_successful: result.successful_request_count ?? 0,
+        tool_calls_refused: result.refused_request_count ?? 0,
+        tool_calls_deduplicated: result.deduplicated_request_count ?? 0,
         rounds_used: result.rounds ?? 0,
         requests_remaining_at_stop: meta.requests_remaining ?? 0,
         elapsed_sec: Number((Number(meta.elapsed_sec ?? 0.0)).toFixed(3)),
@@ -2360,6 +2416,10 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     usage: {
       tool_calls_issued: 0,
       tool_calls_executed: 0,
+      // #1597: the full partition on every shape — nothing was consumed.
+      tool_calls_successful: 0,
+      tool_calls_refused: 0,
+      tool_calls_deduplicated: 0,
       rounds_used: 0,
       // Nothing was consumed: the full effective budget remains.
       requests_remaining_at_stop: effective,
@@ -2537,7 +2597,17 @@ export function nativeLoopRoundLogLines(
     ` tool_elapsed=${fmtLatencySec(rec.tool_elapsed_sec)}` +
     ` remaining req=${rec.requests_remaining} rounds=${rec.rounds_remaining} wall=${fmtWholeSec(rec.wall_clock_remaining_sec)}` +
     (rec.streamed_fallback ? " (streamed→non-streamed)" : "");
-  return [modelLine, toolsLine];
+  // #1628: the discarded streamed attempt gets its OWN concise line — the
+  // reason it was discarded, its own elapsed, how far the wire got, and the
+  // recovery's elapsed. Content-free: numbers and this loop's own tokens.
+  const lines = [modelLine, toolsLine];
+  if (rec.stream_failure !== null && rec.stream_failure !== undefined) {
+    lines.push(
+      `  native_loop ${label} ${rec.round}: streamed attempt discarded` +
+      ` ${formatStreamedAttemptFailure(rec.stream_failure)}`,
+    );
+  }
+  return lines;
 }
 
 /** #1199: the one-line heartbeat for the closing in-conversation verdict turn,
@@ -2627,8 +2697,22 @@ export interface HarnessDeps {
   /** #1210: the run's configured forge read capability, threaded to the
    * native loop's gh_api/repo_contents executors (mirrors
    * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
-   * "platform transport not configured" behavior byte for byte. */
+   * "platform transport not configured" behavior byte-for-byte. */
   ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
+  /** #1598 (review): remaining wall-clock seconds the native loop may spend
+   * (the evidence-failover caller's remaining share of the loop wall-clock
+   * envelope). Unset keeps the configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
+  /** #1598 (review): the ALREADY-RESOLVED fallback lane the engine's verdict
+   * path dials (`profiles.fallback`, resolved before any route rebind). The
+   * fallback tier must dial the same lane its verdict came from: re-resolving
+   * from `env` here is unsafe because the auto route rebinds the base
+   * `AI_BASE_URL`/`AI_API_KEY`/`AI_API_FORMAT` keys to the primary override
+   * (src/engine/review.ts), and an inherited fallback lane would then read
+   * the primary-override endpoint/key/format — and, through the same rebind,
+   * the primary lane's reasoning effort. The production caller always binds
+   * this; direct callers (tests) without it keep the env resolution. */
+  fallbackLane?: Pick<ResolvedTier, "baseUrl" | "model" | "apiFormat" | "apiKey" | "reasoningEffort">;
 }
 
 /**
@@ -2724,42 +2808,122 @@ export type TraceGapProbe = (
 ) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
 
 /**
+ * #1595: the DISTINCT dependency-evidence obligations the classification
+ * artifact's `must_check` rows still name, projected into canonical
+ * DEPENDENCY_EVIDENCE_OBLIGATIONS order — or null when the artifact carries
+ * no usable must_check array (the #1379 hand-written minimal artifacts
+ * (`{ pr_kind, version }`) keep the full-set default that way). A usable
+ * array with no mapping row (an exotic artifact) also fails closed to the
+ * full set, preserving the pre-#1595 behavior. Lexical, total, never
+ * throws; artifact content is data.
+ */
+function distinctObligationsFromMustCheck(value: unknown): DependencyEvidenceObligation[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen: DependencyEvidenceObligation[] = [];
+  for (const row of value) {
+    if (typeof row !== "string") return null;
+    const obligation = dependencyObligationForCheckText(row);
+    if (obligation !== null && !seen.includes(obligation)) seen.push(obligation);
+  }
+  if (seen.length === 0) return null;
+  return DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => seen.includes(obligation));
+}
+
+/** The resolved #1379/#1595 dependency-evidence reservation: the reserved
+ * request tail and the obligations it tracks. */
+export interface DependencyEvidencePlan {
+  reserve: number;
+  /** The DISTINCT obligations the artifact's must_check rows still name, in
+   * canonical order — or the full set for full-set and unusable-must_check
+   * artifacts. The caller applies the #1379 prefix discipline
+   * (`slice(0, min(length, reserve))`) so a budget-clamped tail still
+   * tracks only what it can pay for. */
+  obligations: readonly DependencyEvidenceObligation[];
+}
+
+const FULL_DEPENDENCY_EVIDENCE_PLAN = (maxRequests: number): DependencyEvidencePlan => ({
+  reserve: Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1)),
+  obligations: DEPENDENCY_EVIDENCE_OBLIGATIONS,
+});
+
+/**
  * #1379: the dependency-evidence budget reserve the native loop should run
  * with, resolved from the workspace's classification artifact. When the PR
- * classified into a dependency-evidence family the loop reserves
- * DEPENDENCY_EVIDENCE_RESERVE of its request budget for the required
- * upstream evidence (deterministic driver notes prioritize it and enforce
- * the window in driveToolLoop). Budgets of two or more keep one unreserved
- * head request; the minimum valid budget of one reserves its SOLE request —
- * the unattempted-evidence exhaustion this reserve exists to prevent must be
+ * classified into a dependency-evidence family the loop reserves part of its
+ * request budget for the required upstream evidence (deterministic driver
+ * notes prioritize it and enforce the window in driveToolLoop). The
+ * minimum valid budget of one reserves its SOLE request — the
+ * unattempted-evidence exhaustion this reserve exists to prevent must be
  * unreachable for every supported budget, and a one-request run's only
  * request is exactly the tail to protect. Anything else — absent/unparsable
  * artifact, a non-dependency kind, or a degenerate non-positive budget
  * (nothing to reserve) — resolves to 0 so non-dependency PRs keep the exact
  * legacy loop behavior. Tolerant by construction: classification is advisory
  * context here, never a gate.
+ *
+ * #1595: the reservation is scoped to the obligations the artifact's
+ * `must_check` rows actually name (counted DISTINCT via
+ * dependencyObligationForCheckText): a #1595 lockfile-only low-risk
+ * dependency refresh carries one aggregate advisory row, so it tracks
+ * exactly security_advisory and reserves the tracked set plus one spare
+ * no-lockout attempt (clamped to the budget tail) — never a zero-slack
+ * tail that a single failed evidence attempt could void. An artifact whose
+ * must_check names the full set (or is absent/unusable — hand-written
+ * artifacts keep the kind-only default) keeps the pre-#1595 full-set
+ * reservation byte-identically.
+ */
+export function dependencyEvidencePlanFromClassification(
+  readClassification: () => string | null,
+  maxRequests: number,
+): DependencyEvidencePlan {
+  const body = readClassification();
+  if (body === null) return { reserve: 0, obligations: [] };
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { reserve: 0, obligations: [] };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { reserve: 0, obligations: [] };
+  }
+  const kind = (parsed as Record<string, unknown>).pr_kind;
+  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return { reserve: 0, obligations: [] };
+  if (maxRequests < 1) return { reserve: 0, obligations: [] };
+  // Floor of 1 (via FULL_DEPENDENCY_EVIDENCE_PLAN's Math.max): a
+  // one-request budget reserves its sole request (the whole budget is the
+  // tail), so no supported budget ever resolves the reserve to 0 while the
+  // PR carries the dependency-evidence obligation.
+  const obligations = distinctObligationsFromMustCheck((parsed as Record<string, unknown>).must_check);
+  if (obligations === null || obligations.length === DEPENDENCY_EVIDENCE_OBLIGATIONS.length) {
+    return FULL_DEPENDENCY_EVIDENCE_PLAN(maxRequests);
+  }
+  // Scoped artifact: reserve the owed obligations, still clamped to the
+  // budget tail — but with ONE SPARE ATTEMPT beyond the tracked set
+  // (`obligations.length + 1`). With reserve == tracked == 1 the loop's
+  // no-lockout attempts cap (== reserve) would deactivate the shape row
+  // after a single non-crediting evidence attempt (a refused host, a failed
+  // fetch), permanently voiding the advisory credit path. The full-set plan
+  // already has that spare (4 reserved vs 3 tracked), so it stays exactly
+  // as today; the scoped plan gets the same slack.
+  return {
+    reserve: Math.min(
+      DEPENDENCY_EVIDENCE_RESERVE,
+      Math.max(1, maxRequests - 1),
+      obligations.length + 1,
+    ),
+    obligations,
+  };
+}
+
+/**
+ * #1379: the reserve alone (the #1595 plan's request tail).
  */
 export function dependencyEvidenceReserveFromClassification(
   readClassification: () => string | null,
   maxRequests: number,
 ): number {
-  const body = readClassification();
-  if (body === null) return 0;
-  let kind: unknown = null;
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      kind = (parsed as Record<string, unknown>).pr_kind;
-    }
-  } catch {
-    return 0;
-  }
-  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return 0;
-  if (maxRequests < 1) return 0;
-  // Floor of 1: a one-request budget reserves its sole request (the whole
-  // budget is the tail), so no supported budget ever resolves the reserve
-  // to 0 while the PR carries the dependency-evidence obligation.
-  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1));
+  return dependencyEvidencePlanFromClassification(readClassification, maxRequests).reserve;
 }
 
 export interface RunNativeLoopInput {
@@ -2782,6 +2946,10 @@ export interface RunNativeLoopInput {
    * call must overlap; dependency-evidence rows carry their obligation id
    * and gate on the call's own URL/query shape. */
   requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
+  /** #1595 (review): the scoped plan's first claim — the obligation window is
+   * enforced from the loop's first request, not only the reserved tail; see
+   * `DriveToolLoopOptions.requiredEvidenceLeadClaim`. */
+  requiredEvidenceLeadClaim?: boolean;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
   workspaceRoot: string;
@@ -2793,9 +2961,16 @@ export interface RunNativeLoopInput {
   result: HarnessResult;
   tier: string;
   deps: HarnessDeps;
-  /** #1145: bounded evidence-repair continuation probe over the verdict the
-   * in-conversation verdict turn produced. Optional; unset preserves the
-   * pre-#1145 flow byte-for-byte. */
+  /** #1598 (review): remaining wall-clock seconds this loop may spend, passed
+   * by the evidence-failover caller so the second investigation draws from
+   * the same loop wall-clock envelope as the primary exchange instead of
+   * starting a second full budget. A cap NARROWS the configured
+   * `tool-loop-wall-clock-sec` (never extends it); unset keeps the
+   * configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
+  /** #1145: bounded evidence-repair continuation probe over the verdict
+   * the in-conversation verdict turn produced. Optional; unset preserves
+   * the pre-#1145 flow byte-for-byte. */
   traceGapProbe?: TraceGapProbe;
 }
 
@@ -2824,9 +2999,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   const limitsProfile = loopLimitsProfile(input.tier);
   const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, limitsProfile);
+  // #1598 (review): the failover loop draws from the same loop wall-clock
+  // envelope the primary exchange was configured with — the caller may pass
+  // the REMAINING share as a cap (never an extension). The verdict reserve
+  // derives from the effective wall clock, so the reserved closing-verdict
+  // slice survives the cap too.
+  const wallClockSecCap = input.wallClockSecCap;
+  const effectiveWallClock =
+    typeof wallClockSecCap === "number" && Number.isFinite(wallClockSecCap)
+      ? Math.max(0, Math.min(wallClock, wallClockSecCap))
+      : wallClock;
   const budgets = {
-    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
-    maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
+    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, effectiveWallClock, roundsExplicit),
+    // The context window follows the TIER (the model the lane dials), not
+    // the loop-limit profile — #1598 (review): the fallback tier enforces
+    // its own FALLBACK_MODEL_CONTEXT_TOKENS window.
+    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
   };
   const traceRepairExtraRequests =
     input.tier === "primary" && input.traceGapProbe !== undefined
@@ -2838,12 +3026,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // `tool-loop-wall-clock-sec` ceiling. The deadline is a guaranteed number
   // (resolveLoopLimits clamps the wall-clock bounds), and every downstream
   // consumer (per-turn clamps, refusal results, verdict/acceptance/repair
-  // gating) treats it as one.
-  const deadline = timeFn() + wallClock;
+  // gating) treats it as one. #1598 (review): the ceiling is the EFFECTIVE
+  // wall clock — the configured budget narrowed by the failover caller's
+  // remaining-share cap.
+  const deadline = timeFn() + effectiveWallClock;
   // #1464: hold a deterministic slice of the wall clock for the closing
   // in-conversation verdict turn so the exploratory rounds cannot spend the
   // whole budget and leave the verdict to fail the pre-request deadline check.
-  const verdictReserveSec = verdictWallClockReserveSec(wallClock);
+  const verdictReserveSec = verdictWallClockReserveSec(effectiveWallClock);
   // #1464 (review): the reserve must actually be RESERVED, not only gated
   // between rounds. A round allowed to start with remaining just above the
   // reserve would otherwise clamp its model wait and tool execution against
@@ -2854,7 +3044,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // closing verdict turn keeps the whole-run deadline.
   const explorationDeadline = deadline - verdictReserveSec;
   log(
-    `  native_loop: verdict reserve ${verdictReserveSec}s of ${wallClock}s wall clock (#1464); ` +
+    `  native_loop: verdict reserve ${verdictReserveSec}s of ${effectiveWallClock}s wall clock (#1464); ` +
       "exploratory model waits and tool execution clamp to the reserve boundary",
   );
   // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
@@ -2930,7 +3120,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   // Stream loop turns by default (mirrors AI_STREAM for the review call) so
   // long thinking-model turns don't 524 behind a short-idle proxy (#204).
-  const stream = (env.AI_STREAM ?? "true").trim().toLowerCase() === "true";
+  // #1598: the fallback tier streams on the FALLBACK lane's own setting —
+  // the same inheritance resolveTierProfiles applies (an unset/empty
+  // ai-fallback-stream inherits the base, including its unset-means-"true"
+  // default), never the raw AI_STREAM the primary reads.
+  const fallbackStreamRaw = env.AI_FALLBACK_STREAM ?? "";
+  const baseStreamRaw = env.AI_STREAM === undefined ? "true" : env.AI_STREAM;
+  const streamRaw = input.tier === "fallback"
+    ? (fallbackStreamRaw === "" ? baseStreamRaw : fallbackStreamRaw)
+    : (env.AI_STREAM ?? "true");
+  const stream = streamRaw.trim().toLowerCase() === "true";
 
   // Mirror the bash review path's token-field choice (AI_TOKENS_PARAM).
   const tokensParam =
@@ -2943,17 +3142,35 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // that (re-validated here, so no bound value can skip the shape check);
   // otherwise resolve the tier's own lane input (ai-primary-/
   // ai-smart-reasoning-effort) with the base as fallback. "" keeps every
-  // request byte-identical to a build without the feature.
+  // request byte-identical to a build without the feature. #1598: the
+  // fallback tier resolves the fallback lane's effort
+  // (ai-fallback-reasoning-effort, base-inherited) — no SMART_REASONING_EFFORT
+  // binding exists for it. #1598 (review): a BOUND fallback lane carries its
+  // own resolved effort and it wins — the auto route rebinds the base
+  // AI_REASONING_EFFORT key to the primary lane's effort (src/engine/
+  // review.ts), so a late env resolution would put the primary lane's effort
+  // on the fallback loop's wire while the fallback verdict came from the
+  // original lane, exactly the divergence the bound endpoint/key/format fix
+  // removes.
+  const effortTier = input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary";
+  // A BOUND fallback lane is authoritative including "" — its resolved effort
+  // is already normalized, and an effort-less fallback lane must omit the
+  // field, never inherit the route-rebound base key's value.
+  const boundLaneEffort = input.tier === "fallback" && input.deps.fallbackLane !== undefined
+    ? input.deps.fallbackLane.reasoningEffort
+    : null;
   const boundEffort = input.tier === "smart" ? (env.SMART_REASONING_EFFORT ?? "").trim() : "";
-  const tierEffort = () => tierReasoningEffort(input.tier === "smart" ? "smart" : "primary", env);
-  const reasoningEffort = boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
+  const tierEffort = () => tierReasoningEffort(effortTier, env);
+  const reasoningEffort = boundLaneEffort !== null
+    ? boundLaneEffort
+    : boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
   // #998 (#1049 review): the opt-in is per-lane, because a smart route may
   // target a different Anthropic-compatible backend than the primary one.
   // An effort held back by the missing assertion is announced once here, not
   // silently dropped on every loop round.
-  const anthropicEffort = laneAnthropicEffortSupported(input.tier === "smart" ? "smart" : "primary", env);
+  const anthropicEffort = laneAnthropicEffortSupported(effortTier, env);
   if (input.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicEffort) {
-    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort, " (native tool loop)")}`);
+    log(`WARNING: ${anthropicEffortInactiveWarning(effortTier, reasoningEffort, " (native tool loop)")}`);
   }
 
   // Token/cost telemetry across the whole loop.
@@ -3036,26 +3253,69 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       ? (): number => effectiveDeadline - timeFn()
       : undefined;
     let timeout = remainingCheck(effectiveDeadline, explorationClamped);
-    // Per-turn fallback: a streamed turn that can't be reassembled — a
+    // Per-turn fallback (#637): a streamed turn that can't be reassembled — a
     // truncated/garbled SSE body (transport raise) or a 200 error object
     // (error key) — is retried once non-streamed before the loop gives up.
+    // #1628: every streamed attempt classifies ITSELF before the recovery can
+    // erase it — a bounded, content-free record (reason, status, this
+    // attempt's own elapsed, how far the wire got) reported through the turn
+    // signal once the recovery completes or fails, so the round's telemetry,
+    // the artifact, and the logs can tell two ~125s 524-shaped discards apart
+    // from two 4s error-object ones. A cancelled attempt is never retried:
+    // the answer could not be read anymore, so only its record is reported.
+    const streamed = payload.stream === true;
     let response: unknown = null;
-    let usable = false;
+    let streamClassification: StreamedAttemptClassification | null = null;
+    let streamFailureElapsedSec: number | null = null;
+    let cancelledExc: unknown = null;
+    let transportFailed = false;
+    const attemptStartMs = performance.now();
     try {
       response = await deps.transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout, wireRetryCap, attemptBudgetSec);
-      usable = !(payload.stream === true && (response as Record<string, unknown>)?.error);
       turn?.reportTiming?.(readTransportTiming(response));
     } catch (exc) {
       turn?.reportTiming?.(null);
-      if (payload.stream !== true) throw exc;
-      usable = false;
+      if (!streamed) throw exc;
+      transportFailed = true;
+      streamClassification = classifyThrownStreamedAttempt(exc);
+      streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
+      if (streamClassification.reason === "cancelled") cancelledExc = exc;
     }
-    if (!usable) {
+    // #1628: the body-side classification runs OUTSIDE the wire try/catch — a
+    // classifier defect must surface as what it is, never be swallowed into a
+    // misattributed "unknown" wire failure that then spends the recovery.
+    if (!transportFailed && streamed) {
+      streamClassification = classifyUnusableStreamedBody(response, input.apiFormat);
+      if (streamClassification !== null) streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
+    }
+    if (streamClassification !== null) {
+      const classification = streamClassification;
+      const failureElapsed = streamFailureElapsedSec ?? 0;
+      const routeToken = /^[a-z][a-z0-9_-]{0,31}$/.test(input.tier) ? input.tier : "unknown";
+      const recordFor = (retryElapsedSec: number | null): StreamedAttemptFailureRecord => ({
+        reason: classification.reason,
+        status: classification.status,
+        elapsed_sec: roundSeconds(failureElapsed),
+        first_byte_sec: classification.first_byte_sec === null ? null : roundSeconds(classification.first_byte_sec),
+        first_sse_event_sec: classification.first_sse_event_sec === null ? null : roundSeconds(classification.first_sse_event_sec),
+        first_content_sec: classification.first_content_sec === null ? null : roundSeconds(classification.first_content_sec),
+        retry_elapsed_sec: retryElapsedSec === null ? null : roundSeconds(retryElapsedSec),
+        route: routeToken,
+      });
+      if (cancelledExc !== null) {
+        // #1628: the run's own cancellation — a non-streamed retry would
+        // produce an answer nobody reads. Report the discarded attempt (with
+        // a null retry elapsed: none was fired) and propagate the
+        // cancellation unchanged.
+        turn?.reportStreamFailure?.(recordFor(null));
+        log(`  native loop: streamed turn cancelled (${formatStreamedAttemptFailure(recordFor(null))}); not retried`);
+        throw cancelledExc;
+      }
       // #1199: tell the driver this turn fell back to a non-streamed call so
       // the round's telemetry records it (the summarizer request passes no
       // turn signal, so its fallbacks are never attributed to a round).
       turn?.reportFallback?.();
-      log("  native loop: streamed turn unusable; retrying non-streamed");
+      log(`  native loop: streamed turn unusable (${formatStreamedAttemptFailure(recordFor(null))}); retrying non-streamed`);
       const fallback: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(payload)) {
         if (k !== "stream_options") fallback[k] = v;
@@ -3063,18 +3323,54 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       fallback.stream = false;
       // #1464: fail closed — a fallback payload that lost its `messages` must
       // never be sent. Throwing here surfaces as a request error in the loop
-      // (fail closed), never as a conversation-less model call.
+      // (fail closed), never as a conversation-less model call. The discarded
+      // attempt still gets its record (no retry was fired).
       if (!Array.isArray(fallback.messages) || fallback.messages.length === 0) {
+        turn?.reportStreamFailure?.(recordFor(null));
         throw new Error("non-streamed fallback payload carries no messages");
       }
-      const retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      let retryTimeout: number;
+      try {
+        retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      } catch (exc) {
+        // The run boundary expired between the discard and the recovery: no
+        // retry is fired, and the discarded attempt still gets its record (a
+        // null retry time) — the round must not collapse back to the bare
+        // fallback boolean this issue exists to eliminate.
+        turn?.reportStreamFailure?.(recordFor(null));
+        throw exc;
+      }
+      // #1628: for a PROVEN terminal failure (an error status, a closed SSE
+      // connection, a malformed/truncated terminal body) the recovery is
+      // capped to the turn's REMAINING budget, floored at one second — it may
+      // not restart a full turn wait when the wire already told us the
+      // attempt ended, and the run/exploration deadline above continues to
+      // clamp both attempts. The floor means an attempt that overspent the
+      // whole turn budget still gets a one-second recovery, so the pair is
+      // bounded by one turn timeout plus that guaranteed second.
+      // Ambiguous cases (a timeout with nothing observed, an empty or
+      // unclassifiable body) keep the configured deadline as their authority.
+      if (TERMINAL_STREAMED_FAILURE_REASONS.has(classification.reason)) {
+        retryTimeout = Math.min(retryTimeout, Math.max(1, Math.trunc(input.turnTimeout - failureElapsed)));
+      }
+      const retryStartMs = performance.now();
       try {
         response = await deps.transport(input.baseUrl, input.apiFormat, fallback, input.apiKey, retryTimeout, wireRetryCap, attemptBudgetSec);
         turn?.reportTiming?.(readTransportTiming(response));
       } catch (exc) {
         turn?.reportTiming?.(null);
+        const retryElapsed = (performance.now() - retryStartMs) / 1000;
+        turn?.reportStreamFailure?.(recordFor(retryElapsed));
+        const retryClassification = classifyThrownStreamedAttempt(exc);
+        log(
+          `  native loop: streamed turn fallback non-streamed FAILED (${formatStreamedAttemptFailure(recordFor(retryElapsed))})` +
+          ` retry_reason=${retryClassification.reason}${retryClassification.status !== null ? ` status=${retryClassification.status}` : ""}`,
+        );
         throw exc;
       }
+      const retryElapsed = (performance.now() - retryStartMs) / 1000;
+      turn?.reportStreamFailure?.(recordFor(retryElapsed));
+      log(`  native loop: streamed turn fallback non-streamed recovered (${formatStreamedAttemptFailure(recordFor(retryElapsed))})`);
     }
     accumulateUsage(usageAcc, response, input.apiFormat);
     if (sidecar !== undefined) accumulateUsage(sidecar, response, input.apiFormat);
@@ -3274,6 +3570,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       budgets,
       ...(input.reserveForRequiredEvidence !== undefined ? { reserveForRequiredEvidence: input.reserveForRequiredEvidence } : {}),
       ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+      // #1595 (review): the scoped plan's first claim — see
+      // DriveToolLoopOptions.requiredEvidenceLeadClaim.
+      ...(input.requiredEvidenceLeadClaim === true ? { requiredEvidenceLeadClaim: true } : {}),
       maxTokens: input.maxTokensPerTurn,
       temperature: planningTemp,
       stream,
@@ -3307,9 +3606,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // coverage accounting, and the synthesized-fallback metadata all reflect the
   // deadline rather than a generic provider error. The underlying error text
   // stays on `loop_error`.
-  if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= deadline) {
+  // #1598: the per-attempt timeout is trunc(remaining) (remainingCheck), so a
+  // deadline-derived abort can land up to just-under-1s BEFORE the absolute
+  // deadline; attribute it to the wall clock anyway. The misattribution it
+  // avoids is fail-closed: a wall-clock stop suppresses the #1598 evidence
+  // failover (never restart spend on an expired budget), a wrongly-suppressed
+  // genuine failure 0.9s before the deadline only costs the failover, never
+  // spend.
+  if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= deadline - 1) {
     outcome.stopReason = STOP_WALL_CLOCK;
-  } else if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= explorationDeadline) {
+  } else if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= explorationDeadline - 1) {
     // #1464 (review): an exploration slice exhausted through the transport
     // seam is the reserve stop semantics — exploration ended at the
     // boundary, and the closing verdict runs in-conversation with the
@@ -3359,6 +3665,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     required_evidence_attempts: outcome.requiredEvidenceAttempts,
     required_evidence_credits: outcome.requiredEvidenceCredits,
     required_evidence_released: outcome.requiredEvidenceReleased,
+    // #1595 (review): the scoped plan's first claim — the obligation window
+    // was enforced from the loop's first request, not only the reserved tail.
+    ...(input.requiredEvidenceLeadClaim === true ? { required_evidence_lead_claim: true } : {}),
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
@@ -3394,7 +3703,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     const changedFiles = loadChangedFilePaths(deps.readText);
     const removedFiles = loadRemovedFilePaths(deps.readText);
     const diffSectionName =
-      input.tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT;
+      input.tier === "smart"
+        ? CORPUS_DIFF_SECTION_SMART_ARTIFACT
+        : input.tier === "fallback"
+          ? CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT
+          : CORPUS_DIFF_SECTION_ARTIFACT;
     const corpusCovered = corpusDiffCoveredFiles(
       deps.readText(diffSectionName) ?? "",
       deps.readText("pr.diff"),
@@ -3446,7 +3759,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     status: (call.result.status as string) ?? "error",
   }));
   input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
-  input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  // #1597: this path used to publish the ok-only count as
+  // `executed_request_count` (the marker's `tool_calls`). Same distinct
+  // counts and the same invariant as summarizeLoopOutcome — a fallback exit
+  // must never advertise a different counter than the loop's own log line.
+  input.result.executed_request_count = outcome.executed.length;
+  input.result.successful_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  input.result.refused_request_count = outcome.toolCallsRefused;
+  input.result.deduplicated_request_count = outcome.toolCallsDeduplicated;
   input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
   input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   input.result.native_loop_error = outcome.error
@@ -3463,6 +3783,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
+    // #1598: a degraded run dispatched no call at all (the model issued
+    // none), so the spend counter is zero — recorded explicitly so the
+    // fallback-evidence failover trigger can read ONE counter instead of
+    // inferring the count from the degraded flag. #1597 settled
+    // `executed_request_count` to the attempted-executor population
+    // (successful OR failed), which is exactly the spend signal; a future
+    // degraded path that ran calls would report them here.
+    input.result.executed_request_count = outcome.executed.length;
     if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
     input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
@@ -3506,13 +3834,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // verdict was produced.
     const runVerdictTurn = async (): Promise<unknown> => {
       try {
-        const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+        const corpusName = input.tier === "smart"
+          ? "review-corpus.smart.truncated.md"
+          : input.tier === "fallback"
+            ? "review-corpus.fallback.truncated.md"
+            : "review-corpus.truncated.md";
         let verdictCorpus = deps.readText(corpusName) ?? "";
         if (!verdictCorpus) return null;
         // #965: the initial pass is always the primary profile; the smart
         // profile belongs to the escalation tier. #1253: the tier decides —
         // the unreachable REVIEW_CONTEXT_PROFILE=smart override is gone.
-        const shape = (input.tier === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
+        // #1598: the fallback tier's request shape is fixed to "default"
+        // (tierRequestShape has no fallback override).
+        const shape = tierRequestShape(input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary", env);
         verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
         // #372/#398: drop the byte-duplicate sections the planning context
         // already carries (section-exact and conservative).
@@ -3542,20 +3876,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // the wire ONLY as `json_schema` under the lane's own structured-
         // output opt-in — every other combination stays prompt-only and is
         // announced here, never silently held back.
-        const resolvedFormat = tierResponseFormat(
-          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
-          env,
-        );
+        const resolvedFormat = tierResponseFormat(effortTier, env);
         const responseFormat = resolvedFormat === "off" ? null : resolvedFormat;
-        const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(
-          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
-          env,
-        );
+        const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(effortTier, env);
         if (input.apiFormat === "anthropic" && responseFormat !== null) {
           if (responseFormat === "json_schema" && !anthropicStructuredOutput) {
-            log(`WARNING: ${anthropicStructuredOutputInactiveWarning(input.tier === "smart" ? "smart" : "primary", " (native tool loop)")}`);
+            log(`WARNING: ${anthropicStructuredOutputInactiveWarning(effortTier, " (native tool loop)")}`);
           } else if (responseFormat === "json_object") {
-            log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(input.tier === "smart" ? "smart" : "primary", "json_object", " (native tool loop)")}`);
+            log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(effortTier, "json_object", " (native tool loop)")}`);
           }
         }
         const verdictPayload = conversation.toRequestPayload(input.apiFormat, input.model, {
@@ -3964,6 +4292,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 ? 0
                 : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
               ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+              // #1595 (review): the lead claim rides the seam while the
+              // window is still up — once released, the reserve is 0 and the
+              // flag is inert, so it stays off for clean telemetry.
+              ...(input.requiredEvidenceLeadClaim === true && !outcome.requiredEvidenceReleased
+                ? { requiredEvidenceLeadClaim: true }
+                : {}),
               requiredEvidenceCredits: outcome.requiredEvidenceCredits,
               // #1396 (review): the RUN-WIDE evidence-attempt count threads
               // across the seam so the continuation's telemetry reports the
@@ -4053,9 +4387,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             }
             input.result.tool_calls = traceCalls;
             input.result.tool_results = traceResults;
+            // #1597: fold the continuation's distinct counts under the same
+            // invariant as the original loop (issued = executed + refused +
+            // deduplicated), so the post-repair artifact, marker and summary
+            // all describe one consistent execution snapshot.
             input.result.executed_request_count =
-              Number(input.result.executed_request_count ?? 0) +
+              Number(input.result.executed_request_count ?? 0) + repair.executed.length;
+            input.result.successful_request_count =
+              Number(input.result.successful_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
+            input.result.refused_request_count =
+              Number(input.result.refused_request_count ?? 0) + repair.toolCallsRefused;
+            input.result.deduplicated_request_count =
+              Number(input.result.deduplicated_request_count ?? 0) + repair.toolCallsDeduplicated;
             input.result.planned_request_count =
               Number(input.result.planned_request_count ?? 0) + repair.toolCallsIssued;
 
@@ -4289,15 +4633,32 @@ export function summarizeLoopOutcome(
   }
   mdLines.push("");
 
+  // #1597: distinct machine counts from ONE settled execution snapshot.
+  // `executed_request_count` is every call the loop ATTEMPTED on the
+  // executor (status irrelevant) — the same population as the `tool_calls`
+  // trace and the outcome log line. The historical value of this field was
+  // the ok-status-only count; that counter now lives, truthfully named, on
+  // `successful_request_count`. `refused_request_count` and
+  // `deduplicated_request_count` are the non-executed dispositions.
+  // Invariant (see LoopOutcome in src/tools/loop.ts):
+  //   planned_request_count = executed_request_count
+  //                         + refused_request_count
+  //                         + deduplicated_request_count
+  // and successful_request_count <= executed_request_count.
   let executedCount = Number(result.executed_request_count ?? 0);
+  let successfulCount = Number(result.successful_request_count ?? 0);
   const toolResults: unknown[] = Array.isArray(result.tool_results) ? [...(result.tool_results as unknown[])] : [];
   for (let i = 0; i < outcome.executed.length; i++) {
     const executed = outcome.executed[i]!;
-    if (executed.result.status === "ok") executedCount++;
+    executedCount++;
+    if (executed.result.status === "ok") successfulCount++;
     toolResults.push(maskedResults[i]);
     mdLines.push(...toolResultMdLines(i + 1, executed.tool, maskedArgs[i]!, maskedResults[i]! as Record<string, unknown>));
   }
   result.executed_request_count = executedCount;
+  result.successful_request_count = successfulCount;
+  result.refused_request_count = Number(result.refused_request_count ?? 0) + outcome.toolCallsRefused;
+  result.deduplicated_request_count = Number(result.deduplicated_request_count ?? 0) + outcome.toolCallsDeduplicated;
   result.tool_results = toolResults;
 
   if (outcome.finalText) {
@@ -4365,7 +4726,7 @@ export function writeOutputs(summary: HarnessResult, markdown: string, deps: Har
   const telemetry = buildToolLoopTelemetry(summary);
   if (telemetry !== null) summary.tool_loop_telemetry = telemetry;
   const tier = deps.env.TOOL_HARNESS_TIER || "primary";
-  const stem = tier === "smart" ? "tool-harness.smart" : "tool-harness";
+  const stem = tier === "smart" ? "tool-harness.smart" : tier === "fallback" ? "tool-harness.fallback" : "tool-harness";
   deps.writeArtifact(`${stem}.json`, redactedJson(summary) + "\n");
   deps.writeArtifact(`${stem}.md`, redactText(markdown));
 }
@@ -4408,14 +4769,20 @@ export interface RunToolHarnessOutcome {
 export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessOutcome> {
   const env = deps.env;
   const tier = env.TOOL_HARNESS_TIER || "primary";
-  if (tier !== "primary" && tier !== "smart") {
+  // #1598: "fallback" is the evidence-failover tier (#1585) — it runs the
+  // same native loop on the resolved fallback lane before a fallback verdict
+  // is accepted. An unknown tier still fails closed.
+  if (tier !== "primary" && tier !== "smart" && tier !== "fallback") {
     throw new Error("invalid tool harness tier");
   }
   // #1255: the legacy TOOL_PLANNING_* env aliases (kept as a #540 fallback)
   // are gone — the v3 contract declares those inputs removed, so the runtime
   // no longer honors them behind the contract's back.
   // #922: corpus and per-result bytes follow the declared window when set.
-  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(tier));
+  // #1598 (review): the window follows the TIER — the fallback tier enforces
+  // its own FALLBACK_MODEL_CONTEXT_TOKENS-derived byte budgets (the loop
+  // LIMITS below still resolve on the primary profile's keys).
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, tier);
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +
@@ -4435,6 +4802,11 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     mode: "off",
     planned_request_count: 0,
     executed_request_count: 0,
+    // #1597: the distinct counters, initialized so every artifact path that
+    // reports a call count reports the whole set (see summarizeLoopOutcome).
+    successful_request_count: 0,
+    refused_request_count: 0,
+    deduplicated_request_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
     tool_request_budget:
@@ -4451,11 +4823,15 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     };
   }
 
-  const corpusName = tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
-  if (tier === "smart") result.tier = tier;
+  const corpusName = tier === "smart"
+    ? "review-corpus.smart.truncated.md"
+    : tier === "fallback"
+      ? "review-corpus.fallback.truncated.md"
+      : "review-corpus.truncated.md";
+  if (tier !== "primary") result.tier = tier;
   if (!deps.exists(corpusName)) {
     result.planning_error = `Missing ${corpusName}`;
-    if (tier === "smart") result.stop_reason = "request-error";
+    if (tier !== "primary") result.stop_reason = "request-error";
     writeOutputs(result, "Tool harness skipped: no review corpus.", deps);
     return { result, exitCode: 0 };
   }
@@ -4475,12 +4851,25 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // the shared resolver is idempotent on the engine's route-bound AI_* copies
   // (the lane keys still win), so every routing mode resolves the same lane
   // here. The smart tier keeps reading the SMART_* keys, which the escalation
-  // binds from profiles.smart (src/engine/review.ts). An unusable api-format
-  // value fails closed here exactly like the engine's #1493 resolution — a run
-  // that reaches this harness has already resolved the same profiles
-  // successfully, so the refusal can only name what the engine would have
-  // refused first.
-  const lane = tier === "smart" ? null : resolveTierProfiles(env).primary;
+  // binds from profiles.smart (src/engine/review.ts). #1598: the fallback tier
+  // mirrors the #1507 primary behavior — it dials the RESOLVED fallback lane
+  // (resolveTierProfiles().fallback), never the primary transport and never
+  // raw AI_* keys. #1598 (review): the resolved lane is BOUND by the caller
+  // (deps.fallbackLane = profiles.fallback, resolved before any route rebind)
+  // instead of re-resolved from env here — the auto route rebinds the base
+  // AI_BASE_URL/AI_API_KEY/AI_API_FORMAT keys to the primary override
+  // (src/engine/review.ts), so a late env re-resolution would hand an
+  // inherited fallback lane the primary-override endpoint/key/format while
+  // the fallback verdict still came from the original lane. An unusable
+  // api-format value fails closed here exactly
+  // like the engine's #1493 resolution — a run that reaches this harness has
+  // already resolved the same profiles successfully, so the refusal can only
+  // name what the engine would have refused first.
+  const lane = tier === "smart"
+    ? null
+    : tier === "fallback"
+      ? (deps.fallbackLane ?? resolveTierProfiles(env).fallback)
+      : resolveTierProfiles(env).primary;
   const prefix = tier === "smart" ? "SMART" : "AI";
   const baseUrl = ((lane ? lane.baseUrl : env[`${prefix}_BASE_URL`]) ?? "").trim();
   const apiFormat = lane ? lane.apiFormat : normalizeApiFormat(env[`${prefix}_API_FORMAT`]);
@@ -4488,9 +4877,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   const apiKey = ((lane ? lane.apiKey : env[`${prefix}_API_KEY`]) ?? "").trim();
 
   if (!repo || !baseUrl || !model) {
-    result.error = "Missing REPO, AI_BASE_URL, or AI_MODEL";
-    if (tier === "smart") result.stop_reason = "request-error";
-    writeOutputs(result, "Tool harness could not run: missing REPO, AI_BASE_URL, or AI_MODEL.", deps);
+    // The message names the tier's own lane: a fallback-tier refusal is about
+    // the resolved fallback profile, not the base AI_* keys.
+    const missingLane = tier === "fallback" ? "fallback model base URL, or fallback model" : "AI_BASE_URL, or AI_MODEL";
+    result.error = `Missing REPO, ${missingLane}`;
+    if (tier !== "primary") result.stop_reason = "request-error";
+    writeOutputs(result, `Tool harness could not run: missing REPO, ${missingLane}.`, deps);
     return { result, exitCode: 0 };
   }
 
@@ -4513,17 +4905,29 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // reserved tail, no refusals), exactly like it removes the must_check rows
   // the shape rows can stand in for; the opt-out cannot half-enable the
   // unified window.
-  const dependencyReserve = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
-    ? dependencyEvidenceReserveFromClassification(
+  // #1595: the reserve AND the tracked obligations both derive from the
+  // classification artifact's must_check rows — a scoped artifact (the
+  // #1595 lockfile-only refresh) reserves and tracks exactly the one
+  // obligation it still names.
+  const dependencyPlan = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
+    ? dependencyEvidencePlanFromClassification(
         () => deps.readText("classification.json"),
         maxRequests.budget,
       )
-    : 0;
-  // The canonical prefix the reserved dependency tail can pay for
-  // (#1379): reserve 1 requires provenance, 2 adds the release delta, 3+
-  // all three. Obligations beyond the prefix gate nothing.
+    : { reserve: 0, obligations: [] as readonly DependencyEvidenceObligation[] };
+  const dependencyReserve = dependencyPlan.reserve;
+  // #1595 (review): a SCOPED plan (tracked obligations a strict subset of the
+  // canonical trio) claims its obligation FIRST — the window is enforced from
+  // the loop's first request, not only the reserved tail.
+  const dependencyLeadClaim =
+    dependencyReserve > 0 &&
+    dependencyPlan.obligations.length < DEPENDENCY_EVIDENCE_OBLIGATIONS.length;
+  // The obligations the reserved dependency tail can pay for: the plan's
+  // distinct set under the #1379 prefix discipline (reserve 1 tracks only
+  // the first, 2+ up to the set's size). Obligations beyond the tracked
+  // set gate nothing.
   const trackedDependencyObligations = dependencyReserve > 0
-    ? DEPENDENCY_EVIDENCE_OBLIGATIONS.slice(0, Math.min(DEPENDENCY_EVIDENCE_OBLIGATIONS.length, dependencyReserve))
+    ? dependencyPlan.obligations.slice(0, Math.min(dependencyPlan.obligations.length, dependencyReserve))
     : [];
   const requiredEvidence: RequiredEvidenceRow[] = [];
   try {
@@ -4638,11 +5042,13 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
 maxRequests: maxRequests.budget,
 reserveForRequiredEvidence,
 requiredEvidence,
+...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
     maxTokensPerTurn: pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN"),
     result,
     tier,
     deps,
+    ...(deps.wallClockSecCap !== undefined ? { wallClockSecCap: deps.wallClockSecCap } : {}),
     ...(deps.traceGapProbe !== undefined ? { traceGapProbe: deps.traceGapProbe } : {}),
   });
   if (!handled) {

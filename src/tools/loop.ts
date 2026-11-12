@@ -35,6 +35,9 @@ import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import { type TransportTiming } from "../transport/timing.js";
+// #1628: type-only import — `stream-attempt.ts` imports this module's
+// `extractToolCalls` as a value, so the back edge must stay erased at runtime.
+import type { StreamedAttemptFailureRecord } from "./stream-attempt.js";
 import { MAX_GROUP_NAME_CHARS, MAX_GROUPS_PER_RULE } from "../enforcement/requirement-trace.js";
 import {
   traceSeamSlotForTarget,
@@ -209,6 +212,32 @@ export const DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE =
   "security advisories (or record the check as not performed) BEFORE spending " +
   "tool calls on optional archaeology, claim falsification, history greps, or " +
   "redundant local-diff confirmation.";
+
+/** #1595: the priority note names exactly the obligations the classification
+ * still tracks. When that set is the FULL canonical trio the emitted text is
+ * the existing static note byte-for-byte (tests pin it); a STRICT SUBSET —
+ * the #1595 lockfile-only advisory reservation — gets a note naming only
+ * what is owed: steering that run at the full provenance → release-delta →
+ * advisories trio would burn the reserved tail on obligations the scoped
+ * must_check scoped away, leaving the one tracked obligation ungathered and
+ * the review partial (#1579's symptom). Trusted driver text, deterministic
+ * from the tracked set, never model-chosen. */
+export function dependencyEvidencePriorityTurnNote(tracked: readonly DependencyEvidenceObligation[]): string {
+  const distinct = DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => tracked.includes(obligation));
+  // Full trio → the pinned static note. An EMPTY tracked set is unreachable
+  // at the call site (the note only fires when a shape row is active, so at
+  // least one obligation is outstanding) and conservatively keeps the
+  // full-set note — the stronger steering, never a weaker one.
+  if (distinct.length === 0) return DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE;
+  if (distinct.length === DEPENDENCY_EVIDENCE_OBLIGATIONS.length) return DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE;
+  return (
+    "[loop budget] Required dependency evidence comes first: check " +
+    formatOutstandingObligations(distinct) +
+    " (or record the check as not performed) BEFORE spending tool calls on " +
+    "optional archaeology, claim falsification, history greps, or redundant " +
+    "local-diff confirmation."
+  );
+}
 // #1379 review blocker 5728634290: the window note names the obligations
 // still OUTSTANDING ({outstanding}), not the full fixed trio — a model that
 // already covered provenance is redirected at what it still owes.
@@ -244,6 +273,29 @@ const MIXED_WINDOW_CLAUSE = " The reservation also covers the unresolved rows of
 const RESERVE_REFUSAL_NOTE =
   "Reserved dependency-evidence budget: this call was not executed and spent " +
   "none of the remaining requests. The reserved tail still owes " +
+  "{outstanding}, reached with web_fetch (plus web_search when that tool is " +
+  "offered to you). Make one of those calls, or finish now and report the " +
+  "missing evidence as unknown / needs verification.";
+
+/**
+ * #1595 (review): the lead-claim variants of the two reserve notes above.
+ * When the dependency-evidence plan is SCOPED (tracked obligations a strict
+ * subset of the canonical trio), the obligation window is enforced from the
+ * loop's FIRST request — not only the reserved tail — so the mandatory
+ * evidence gets its bounded first claim on the existing budget ahead of
+ * optional archaeology. These variants speak mid-budget (the tail is not yet
+ * scarce), so the tail-worded "Only N requests remain" / "reserved tail"
+ * texts would be false: the turn note names what is still owed, and the
+ * refusal says the budget's first claim owes it. The mixed-window clause is
+ * appended by the selection pass exactly as for the tail-scarce notes. */
+const RESERVE_LEAD_CLAIM_TURN_NOTE =
+  "[loop budget] Required dependency evidence comes first: {outstanding} is still owed, " +
+  "reached through web_fetch (plus web_search when that tool is offered to you). " +
+  "Until it is claimed, optional and local-diff calls are refused, not executed.";
+
+const RESERVE_LEAD_CLAIM_REFUSAL_NOTE =
+  "Reserved dependency-evidence budget: this call was not executed and spent " +
+  "none of the remaining requests. The budget's first claim still owes " +
   "{outstanding}, reached with web_fetch (plus web_search when that tool is " +
   "offered to you). Make one of those calls, or finish now and report the " +
   "missing evidence as unknown / needs verification.";
@@ -905,6 +957,17 @@ export interface NativeLoopRoundTelemetry extends AcceptedAttemptTiming {
   wall_clock_remaining_sec: number;
   /** True when this turn's streamed transport fell back to a non-streamed call. */
   streamed_fallback: boolean;
+  /**
+   * #1628: the turn's DISCARDED streamed attempt, with its own reason,
+   * status, elapsed time, and wire-observation — the record that makes two
+   * fallback rounds explain themselves ("one was a 524 after 133s, the other
+   * a provider error object after 4s") instead of collapsing into two
+   * `streamed_fallback: true` booleans and one round total. Null whenever no
+   * streamed attempt was discarded, so a fallback turn and a clean turn stay
+   * distinguishable at a glance. Content-free by construction (see
+   * `StreamedAttemptFailureRecord` in stream-attempt.ts).
+   */
+  stream_failure: StreamedAttemptFailureRecord | null;
 }
 
 /**
@@ -934,6 +997,17 @@ export interface ToolTurnSignal {
    * previous attempt's measurement still applies".
    */
   reportTiming?(timing: TransportTiming | null): void;
+  /**
+   * #1628: report the turn's DISCARDED streamed attempt once, with its own
+   * bounded reason and times, AFTER the seam's single non-streamed recovery
+   * attempt has completed (success or failure alike) — the seam is the only
+   * site that knows both attempts' elapsed times. Reported instead of thrown:
+   * a retry that fails still has to say why its streamed predecessor was
+   * discarded before the loop stops on the request error. A cancellation is
+   * reported too (with a null `retry_elapsed_sec`: no recovery was fired), so
+   * "the run was cancelled mid-turn" is visible without being a fallback.
+   */
+  reportStreamFailure?(failure: StreamedAttemptFailureRecord): void;
 }
 
 /**
@@ -1034,6 +1108,17 @@ export interface LoopOutcome {
   rounds: number;
   /** Everything the model asked for, incl. refused calls. */
   toolCallsIssued: number;
+  /** #1597: calls refused WITHOUT executing (invalid arguments, over-budget,
+   * reserve-window refusal) — the tri-partition invariant is
+   * `toolCallsIssued === executed.length + toolCallsRefused + toolCallsDeduplicated`
+   * (per-round: `requested === executed + refused + deduplicated`, #1199). */
+  toolCallsRefused: number;
+  /** #1597: calls deduplicated (same request key already seen) without
+   * executing. The successful count (executed calls whose executor status is
+   * "ok") is derived by the caller over `executed`, never stored on the
+   * outcome, so a success-only count can never be confused for the executed
+   * count here (#1597). */
+  toolCallsDeduplicated: number;
   stopReason: string;
   finalText: string;
   /** True when the model never issued a single tool call: the caller degrades
@@ -1276,6 +1361,19 @@ export interface DriveToolLoopOptions {
    * keeps the reserve as the threshold (the main-loop and unit-test shape).
    */
   requiredEvidenceAttemptsCap?: number;
+  /**
+   * #1595 (review) first claim: when the dependency-evidence plan is SCOPED
+   * (the tracked obligations a strict subset of the canonical trio), the
+   * obligation window is enforced from the loop's FIRST request — not only
+   * the reserved tail — so the mandatory evidence gets its bounded first
+   * claim on the existing budget ahead of nice-to-have upstream archaeology.
+   * The gating stays bounded by the existing no-lockout attempts cap
+   * (reserve = tracked + 1 spare) and the model's ability to end with a
+   * text-only verdict. Full-set plans never set it and keep the tail-only
+   * behavior byte-for-byte; unset (every non-lead-claim caller) is
+   * byte-identical to the pre-#1595-review loop.
+   */
+  requiredEvidenceLeadClaim?: boolean;
 }
 
 /**
@@ -1326,6 +1424,8 @@ export async function driveToolLoop(
     executed: [],
     rounds: 0,
     toolCallsIssued: 0,
+    toolCallsRefused: 0,
+    toolCallsDeduplicated: 0,
     stopReason: STOP_NO_TOOL_CALLS,
     finalText: "",
     degraded: false,
@@ -1477,6 +1577,8 @@ export async function driveToolLoop(
     /** #1466: the provider's stop reason for the accepted attempt, already
      * reduced to a bounded enum token. */
     finishReason: string;
+    /** #1628: the turn's discarded streamed attempt (null when none). */
+    streamFailure: StreamedAttemptFailureRecord | null;
   }): void => {
     if (options.onRound === undefined) return;
     // #1466: the accepted attempt's probe and the turn's call counts. The
@@ -1499,6 +1601,10 @@ export async function driveToolLoop(
       rounds_remaining: Math.max(0, budgets.maxRounds - outcome.rounds),
       wall_clock_remaining_sec: roundSec(Math.max(0, budgets.wallClockSec - (nowFn() - telemetryStart))),
       streamed_fallback: record.fellBack,
+      // #1628: the discarded streamed attempt's OWN record (reason, status,
+      // elapsed, observation) when this turn made a fallback. Null otherwise
+      // — never a zero-filled stand-in.
+      stream_failure: record.streamFailure,
       // #1466: the transport measurements of the accepted attempt. Null
       // timings mean "not measured" — never a zero standing in for a
       // measurement the transport never made.
@@ -1601,10 +1707,14 @@ export async function driveToolLoop(
       // Same OR condition as the enforced window below: scarce ROUNDS open
       // the reservation too, so the note fires the moment either half of
       // the reservation is what is left.
+      // #1595 (review): lead-claim gating — a SCOPED dependency-evidence plan
+      // (flag set by the harness) keeps the window open from the FIRST
+      // request until the rows discharge or the attempts cap releases them.
+      const leadClaimGating = reserve > 0 && options.requiredEvidenceLeadClaim === true && hasActiveRow();
       const inObligationWindow =
         reserve > 0
         && hasActiveRow()
-        && (requestsLeft <= reserve || roundsLeft <= reserve);
+        && (options.requiredEvidenceLeadClaim === true || requestsLeft <= reserve || roundsLeft <= reserve);
       if (outcome.rounds === 0) {
         if (reserve > 0 && hasActiveRow()) {
           // #1506: the priority note names the section the outstanding rows
@@ -1613,7 +1723,9 @@ export async function driveToolLoop(
           // not by the Required Review Evidence section, so the note must
           // point at the right one.
           const priorityNote = anyActiveShapeRow()
-            ? DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE
+            ? // #1595: names exactly the tracked obligations (byte-for-byte
+              // the static note when that set is the full trio).
+              dependencyEvidencePriorityTurnNote(outstandingShapeObligations())
             : anyActiveTraceRow()
               ? TRACE_EVIDENCE_PRIORITY_TURN_NOTE
               : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;
@@ -1638,11 +1750,19 @@ export async function driveToolLoop(
             : "";
         const note = inObligationWindow
           ? shapeNoteActive
-            ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
-                requestsLeft,
-                roundsLeft,
-                outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-              }) + mixedClause
+            ? // #1595 (review): with the lead claim active but the tail NOT
+              // yet scarce, the "Only {requestsLeft} tool request(s) remain"
+              // wording would be false mid-budget — emit the lead-claim note
+              // instead; the tail-scarce selection stays byte-identical.
+              (leadClaimGating && requestsLeft > reserve && roundsLeft > reserve
+                ? formatNote(RESERVE_LEAD_CLAIM_TURN_NOTE, {
+                    outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+                  })
+                : formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
+                    requestsLeft,
+                    roundsLeft,
+                    outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+                  })) + mixedClause
             : traceNoteActive
               ? formatNote(requestsLeft <= reserve ? TRACE_RESERVE_WINDOW_TURN_NOTE : TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
                   requestsLeft,
@@ -1687,9 +1807,14 @@ export async function driveToolLoop(
     // last entry is the accepted attempt's. The list is per turn, so a turn
     // never inherits the previous turn's measurements.
     const turnProbes: Array<TransportTiming | null> = [];
+    // #1628: the discarded streamed attempt this turn's seam reported (set by
+    // `reportStreamFailure` after the recovery attempt). Per turn, so a turn
+    // never inherits the previous turn's failure.
+    let turnStreamFailure: StreamedAttemptFailureRecord | null = null;
     const turnSignal: ToolTurnSignal = {
       reportFallback: () => { roundFellBack = true; },
       reportTiming: (timing) => { turnProbes.push(timing); },
+      reportStreamFailure: (failure) => { turnStreamFailure = failure; },
     };
     const modelStart = nowFn();
     try {
@@ -1712,6 +1837,7 @@ export async function driveToolLoop(
         modelElapsedSec: Math.max(0, nowFn() - modelStart),
         usage: normalizeUsageTelemetry(null, options.apiFormat),
         fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason: "",
       });
@@ -1743,6 +1869,7 @@ export async function driveToolLoop(
         modelElapsedSec,
         usage: turnUsage,
         fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason,
       });
@@ -1857,8 +1984,23 @@ export async function driveToolLoop(
             targets.push({ row, slot: null });
           }
         }
-        const inWindow = budgets.maxToolCalls - callsExecuted <= reserve
+        // #1595 (review): the lead claim opens the window from the loop's
+        // FIRST request for SCOPED dependency-evidence plans — mandatory
+        // evidence is claimed before optional calls can spend the budget.
+        // `countsTowardAttemptsCap` semantics then count every executed
+        // evidence call of a lead-claim run (intended: the cap — reserve =
+        // tracked + 1 spare — still bounds the gating's patience and
+        // releases it, and the model can always end with a text-only
+        // verdict).
+        const inWindow = options.requiredEvidenceLeadClaim === true
+          || budgets.maxToolCalls - callsExecuted <= reserve
           || budgets.maxRounds - (outcome.rounds - 1) <= reserve;
+        // #1595 (review): lead-claim gating while the tail is NOT yet scarce
+        // — the refusal must not speak of "the reserved tail" it has not
+        // reached; compute once for the note selection below.
+        const leadClaimTailNotScarce = options.requiredEvidenceLeadClaim === true
+          && budgets.maxToolCalls - callsExecuted > reserve
+          && budgets.maxRounds - (outcome.rounds - 1) > reserve;
         // #1396 (review blocker): an evidence call ADMITTED while the window
         // is actually gating (in-window) is what spends the reserved tail's
         // no-lockout patience; a call executed before the window opened
@@ -1874,7 +2016,9 @@ export async function driveToolLoop(
               // Trace Plan section, the review-owned prose rows in the
               // Required Review Evidence section.
               error: anyActiveShapeRow()
-                ? formatNote(RESERVE_REFUSAL_NOTE, {
+                ? // #1595 (review): mid-budget lead-claim refusals name the
+                  // budget's first claim, never the reserved tail.
+                  formatNote(leadClaimTailNotScarce ? RESERVE_LEAD_CLAIM_REFUSAL_NOTE : RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   }) + (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
                 : anyActiveTraceRow()
@@ -1981,6 +2125,12 @@ export async function driveToolLoop(
 
     // #1199: the turn's telemetry, emitted once per model turn. A round that
     // ends on budget exhaustion still records its turn before the stop below.
+    // #1597: the run-wide disposition counters are aggregated here from the
+    // same per-round tri-partition the record carries, so the harness
+    // artifact's issued/executed/refused/deduplicated fields come from this
+    // one settled snapshot.
+    outcome.toolCallsRefused += roundRefused;
+    outcome.toolCallsDeduplicated += roundDedup;
     emitRound({
       roundIndex: outcome.rounds,
       requested: calls.length,
@@ -1991,6 +2141,7 @@ export async function driveToolLoop(
       modelElapsedSec,
       usage: turnUsage,
       fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
       probes: turnProbes,
       finishReason,
     });

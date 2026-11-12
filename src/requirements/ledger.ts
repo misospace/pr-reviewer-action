@@ -25,6 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { escapeControlChars } from "../context/fence.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { HARNESS_SOURCE, obligationText } from "./obligations.js";
 
@@ -168,7 +169,6 @@ const LIST_ITEM_RE = /^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/;
 // The same shapes, used to strip the marker from the normalized text.
 const MARKER_STRIP_RE = /^\s*(?:[-*+]\s+\[[ xX]\]\s*|[-*+]\s+|\d+[.)]\s+)/;
 const WS_RE = /\s+/g;
-const CONTROL_RE = /[\x00-\x1f\x7f]/g;
 const BACKTICK_RUN_RE = /`+/g;
 const ID_RE = /^req-[0-9a-f]{12}$/;
 
@@ -576,16 +576,6 @@ export function loadLedgerFromValue(data: unknown): RequirementLedger {
 // ---------------------------------------------------------------------------
 // Fence-safe markdown rendering
 // ---------------------------------------------------------------------------
-
-function escapeControlChars(text: string): string {
-  return text.replace(CONTROL_RE, (char) => {
-    const code = char.codePointAt(0) ?? 0;
-    if (code === 0x0a) return "\\n";
-    if (code === 0x09) return "\\t";
-    if (code === 0x0d) return "\\r";
-    return `\\u${code.toString(16).padStart(4, "0")}`;
-  });
-}
 
 /** Wrap text in a code span whose delimiter is strictly longer than any
  * backtick run in it, so hostile text cannot terminate the span. */

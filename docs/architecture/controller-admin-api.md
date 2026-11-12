@@ -45,6 +45,11 @@ and stay on their **own public listener**. `createAdminHost`
   route.
 - `GET /metrics` — Prometheus text exposition (below).
 - `GET /admin/*` — the authenticated admin namespace.
+- Optionally (`AdminHostOptions.dashboard`), `GET /dashboard` and
+  `GET /dashboard/app.js` — the #742 static operations shell, served from
+  compile-time constants OUTSIDE the `/admin/` namespace; the shell carries
+  no dynamic data and every data route stays bearer-protected
+  ([operations-dashboard.md](operations-dashboard.md)).
 
 A deployment must not mount the webhook handler behind this router and
 must not expose admin routes on the public webhook listener. Process
@@ -90,6 +95,12 @@ Mutations require `Content-Type: application/json` and accept at most
 `maxBodyBytes` (default 8 KiB); oversized bodies get a fixed `413`.
 Unknown paths/methods get fixed `404`s. Error bodies are fixed JSON that
 never echo request content.
+
+When configured (`AdminHostOptions.dashboard`), the optional #742
+dashboard shell mounts at `/dashboard` on the same listener, stays
+outside the `/admin/` namespace, and serves a static shell only — every
+data route stays bearer-protected (see
+[operations-dashboard.md](operations-dashboard.md)).
 
 ### Force rereview and cancel semantics
 

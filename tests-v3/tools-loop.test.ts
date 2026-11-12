@@ -1103,7 +1103,7 @@ test("#1466: the round record carries the accepted attempt's transport measureme
         cache_creation_input_tokens: 25,
       },
     },
-    { firstEventSec: 0.2, firstContentSec: 1.4, totalSec: 2.71, wireCalls: 1 },
+    { firstEventSec: 0.2, firstSseEventSec: 0.3, firstContentSec: 1.4, totalSec: 2.71, wireCalls: 1 },
   );
   const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
     // The seam reports the probe of the call it made.
@@ -1183,7 +1183,7 @@ test("#1466: a streamed→non-streamed fallback reports the ACCEPTED attempt's m
   // the non-streamed fallback produced the response the turn returned.
   const streamed = timedBody(
     { choices: [{ message: { content: null }, finish_reason: "stop" }], error: { message: "unusable" } },
-    { firstEventSec: 0.1, firstContentSec: 0.2, totalSec: 0.3, wireCalls: 1 },
+    { firstEventSec: 0.1, firstSseEventSec: 0.12, firstContentSec: 0.2, totalSec: 0.3, wireCalls: 1 },
   );
   const fallback = timedBody(
     {
@@ -1191,7 +1191,7 @@ test("#1466: a streamed→non-streamed fallback reports the ACCEPTED attempt's m
       usage: { prompt_tokens: 12, completion_tokens: 5 },
     },
     // A non-streamed answer has no content event on the wire.
-    { firstEventSec: 0.5, firstContentSec: null, totalSec: 1.5, wireCalls: 2 },
+    { firstEventSec: 0.5, firstSseEventSec: null, firstContentSec: null, totalSec: 1.5, wireCalls: 2 },
   );
   let calls = 0;
   const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
@@ -1915,6 +1915,145 @@ test("#1379: a failed evidence call still credits its obligation (no lockout)", 
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome.requiredEvidenceReleased, true);
   assert.deepEqual(executedStatuses, ["web_fetch", "read_file", "web_fetch", "git_log"]);
+});
+
+test("#1595: the scoped lockfile-only advisory row is claimed by one executed fetch; optional calls stay refused until then", async () => {
+  // A #1595 lockfile-only low-risk dependency refresh tracks exactly ONE
+  // obligation (security_advisory — the aggregate advisory must_check row)
+  // and reserves the tracked set plus one SPARE attempt (reserve 2: a
+  // zero-slack tail would deactivate the row after a single non-crediting
+  // evidence attempt and permanently void the credit path). Inside the
+  // window an optional read is REFUSED without consuming budget; the FIRST
+  // in-window evidence call is provenance-shaped — it does not credit the
+  // tracked row, and the row must SURVIVE it (the spare) — and the following
+  // advisory-shaped fetch credits and discharges the obligation.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 6, reserve 2: rounds 1-4 run optional reads outside the window
+  // (the window opens when the last two requests are reached); round 5's
+  // optional read is refused and spends nothing; round 6's provenance-shaped
+  // fetch executes as the spare attempt; round 7's advisory fetch credits
+  // and discharges the row, after which the budget ends the loop.
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"a.md"}'),
+    openAiCall("c2", "read_file", '{"path":"b.md"}'),
+    openAiCall("c3", "read_file", '{"path":"c.md"}'),
+    openAiCall("c4", "read_file", '{"path":"d.md"}'),
+    openAiCall("c5", "read_file", '{"path":"nope.md"}'),
+    openAiCall("c6", "web_fetch", '{"url":"https://blocked.test/provenance"}'),
+    openAiCall("c7", "web_fetch", '{"url":"https://blocked.test/security"}'),
+  ];
+  const exec = [
+    { tool: "read_file", status: "ok", result: { content: "a" } },
+    { tool: "read_file", status: "ok", result: { content: "b" } },
+    { tool: "read_file", status: "ok", result: { content: "c" } },
+    { tool: "read_file", status: "ok", result: { content: "d" } },
+    { tool: "web_fetch", status: "ok", result: { content: "provenance" } },
+    { tool: "web_fetch", status: "ok", result: { content: "advisories" } },
+  ];
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 6, 120),
+    timeFn,
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [{ id: "security_advisory", tokens: [], obligation: "security_advisory" }],
+  });
+  assert.equal(outcome.stopReason, STOP_BUDGET);
+  assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
+    "a.md",
+    "b.md",
+    "c.md",
+    "d.md",
+    "https://blocked.test/provenance",
+    "https://blocked.test/security",
+  ]);
+  // The refusal consumed nothing: 6 budget − 6 executed = 0 left.
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requiredEvidenceRequired, 1);
+  // Both in-window evidence attempts count; the provenance-shaped FIRST one
+  // did not void the row — the advisory fetch still credited it.
+  assert.equal(outcome.requiredEvidenceAttempts, 2);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["security_advisory"]);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.requestsRemaining, 0);
+  // The in-window refusal names the still-outstanding obligation (the
+  // aggregate advisory row's own label) and nothing else.
+  const refusals = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>)
+    .filter((m) => m.role === "tool" && m.content.includes("Reserved dependency-evidence budget"));
+  assert.equal(refusals.length, 1);
+  assert.ok(refusals[0]!.content.includes("still owes upstream security advisories,"));
+  assert.ok(!refusals[0]!.content.includes("publisher/source provenance"));
+  assert.ok(!refusals[0]!.content.includes("release delta"));
+});
+
+test("#1595 (review): lead claim — the scoped plan's obligation window opens from the loop's FIRST request", async () => {
+  // The scoped plan (one tracked advisory obligation, reserve 2 = tracked +
+  // 1 spare) with requiredEvidenceLeadClaim set enforces the window from the
+  // loop's first request: the opening optional read is REFUSED without
+  // spending (AC1 — the mandatory obligation gets its disposition before
+  // optional requests consume the budget; only 2 of the 6 requests are spent
+  // when the row discharges, not just the reserved tail). The spare
+  // provenance-shaped fetch executes without crediting; the advisory-shaped
+  // fetch credits and discharges; the window then releases and optional
+  // calls run freely again.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"a.md"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://blocked.test/provenance"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://blocked.test/security"}'),
+    openAiCall("c4", "read_file", '{"path":"a.md"}'),
+    openAiText("done"),
+  ];
+  const exec = [
+    { tool: "web_fetch", status: "ok", result: { content: "provenance" } },
+    { tool: "web_fetch", status: "ok", result: { content: "advisories" } },
+    { tool: "read_file", status: "ok", result: { content: "a" } },
+  ];
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 6, 120),
+    timeFn,
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [{ id: "security_advisory", tokens: [], obligation: "security_advisory" }],
+    requiredEvidenceLeadClaim: true,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
+    "https://blocked.test/provenance",
+    "https://blocked.test/security",
+    "a.md",
+  ]);
+  // The refusal consumed nothing: 6 budget − 3 executed = 3 left, i.e. the
+  // disposition happened while 4 of 6 requests were still unspent.
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requiredEvidenceRequired, 1);
+  // Both lead-claim evidence attempts count toward the attempts cap; the
+  // provenance-shaped FIRST one did not void the row — the advisory fetch
+  // still credited and discharged it, releasing the gate.
+  assert.equal(outcome.requiredEvidenceAttempts, 2);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["security_advisory"]);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.requestsRemaining, 3);
+  // The mid-budget lead-claim refusal names the budget's FIRST claim (and
+  // the outstanding obligation) — never the reserved tail it has not reached.
+  const refusals = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>)
+    .filter((m) => m.role === "tool" && m.content.includes("Reserved dependency-evidence budget"));
+  assert.equal(refusals.length, 1);
+  assert.ok(refusals[0]!.content.includes("first claim still owes upstream security advisories,"));
+  assert.ok(!refusals[0]!.content.includes("reserved tail"));
+  // The mid-budget turn note names the outstanding obligation too — not the
+  // tail-worded "Only N tool request(s) remain" (false mid-budget).
+  const notes = conversation.events.filter((e) => e.kind === "turn_note") as Array<{ content: string }>;
+  assert.ok(
+    notes.some((n) => n.content.includes("Required dependency evidence comes first: upstream security advisories is still owed")),
+  );
+  assert.ok(!notes.some((n) => n.content.includes("Only 5 tool request(s)")));
+  assert.ok(!notes.some((n) => n.content.includes("Only 4 tool request(s)")));
 });
 
 test("#1379: within one round, an evidence call that RELEASES releases later optional calls; the reverse order still refuses", async () => {

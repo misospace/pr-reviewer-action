@@ -8,12 +8,14 @@ import {
   buildBoundedRepoMap,
   buildReviewCorpus,
   CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT,
   CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   prepareStandardsContext,
   prepareToolHarness,
   type CorpusBuildResult,
   type CorpusWorkspace,
 } from "../corpus/assemble.js";
+import { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES } from "../corpus/budgets.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
 import {
@@ -54,8 +56,9 @@ import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapProbe } from "../tools/harness.js";
 import { GOVERNOR_PRIORITY_AUTHORITATIVE, GOVERNOR_PRIORITY_RECOVERY, GovernorCancelledError, inferenceEndpointKey, sharedRunInferenceGovernor } from "../model/governor.js";
 import { runChatRequest } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import { describedTransportFailure, TransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
+import { attachSseReassemblyQuality, readSseReassemblyQuality } from "../transport/sse.js";
 import { attachTransportTiming, type TransportTiming } from "../transport/timing.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
@@ -568,9 +571,9 @@ export async function authoritativeBodyRevision(adapter: PlatformReadAdapter): P
 export function assembleCorpus(
   ws: RunWorkspace,
   env: StageEnv,
-  budgets: { primary: TierBudgets; smart: TierBudgets },
-  tier: "primary" | "smart",
-  slot: "primary" | "smart",
+  budgets: { primary: TierBudgets; smart: TierBudgets; fallback?: TierBudgets | null },
+  tier: "primary" | "smart" | "fallback",
+  slot: "primary" | "smart" | "fallback",
   generatedPaths: ReadonlySet<string>,
   standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean },
 ): CorpusBuildResult {
@@ -590,7 +593,27 @@ export function assembleCorpus(
       ciChecksContent = null;
     }
   }
-  const tierBudgets = budgets[tier];
+  const tierBudgets = tier === "fallback"
+    ? // #1598/#1256: the fallback corpus budget is the #1256 cap — the
+      // historical re-truncation bound — narrowed by a declared fallback
+      // window, never widened past it. Diff/files keep the primary budgets:
+      // the fallback rides the primary-truncated sources (its own corpus
+      // budget caps the body).
+      {
+        maxCorpus: budgets.fallback != null
+          ? Math.min(FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, budgets.fallback.maxCorpus)
+          : FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES,
+        maxDiff: budgets.primary.maxDiff,
+        maxFiles: budgets.primary.maxFiles,
+      }
+    : budgets[tier];
+  // #1598: the #1256 fallback cap is unconditional policy, not a
+  // declared-window-only guard, so the fallback slot's over-budget check is
+  // always armed — a fallback corpus never silently exceeds the historical
+  // bound the way an undeclared primary window's named-mode budget may.
+  const budgetGuard = tier === "fallback"
+    ? true
+    : tier === "smart" || !!(env.PRIMARY_MODEL_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS);
   const result = buildReviewCorpus(
     {
       manifestContextMd: ws.read("manifest-context.md"),
@@ -608,6 +631,7 @@ export function assembleCorpus(
       toolHarnessMd: ws.read("tool-harness.md"),
       repositorySkillAddendumMd: ws.read("repository-skill-addendum.md"),
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
+      toolHarnessFallbackMd: ws.read("tool-harness.fallback.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
       dependencyCoverageMd: ws.read("dependency-coverage.md"),
@@ -638,7 +662,7 @@ export function assembleCorpus(
       repoMapMaxBytes: Number(env.REPO_MAP_MAX_BYTES ?? "12000") || 12000,
       standardsFile: standards.resolved ?? "",
       ciChecksFile,
-      budgetGuard: tier === "smart" || !!(env.PRIMARY_MODEL_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS),
+      budgetGuard,
       generatedPaths,
     },
   );
@@ -649,8 +673,16 @@ export function assembleCorpus(
   // by model tier would leave the primary-named sidecar absent on fresh
   // runs. The harness's tier-keyed read follows the same primary/smart corpus
   // split: slot=primary builds the review-corpus.truncated.md corpus,
-  // slot=smart the review-corpus.smart.truncated.md one.
-  ws.write(slot === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
+  // slot=smart the review-corpus.smart.truncated.md one, and #1598's
+  // slot=fallback the review-corpus.fallback.truncated.md one.
+  ws.write(
+    slot === "smart"
+      ? CORPUS_DIFF_SECTION_SMART_ARTIFACT
+      : slot === "fallback"
+        ? CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT
+        : CORPUS_DIFF_SECTION_ARTIFACT,
+    result.corpusDiffPayload,
+  );
   return result;
 }
 
@@ -695,6 +727,10 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     const harnessModel = typeof (payload as Record<string, unknown> | undefined)?.model === "string"
       ? (payload as Record<string, unknown>).model as string
       : "";
+    // #1598: the fallback tier's evidence loop is recovery class, like the
+    // smart loop (#1515) — it only ever runs after the primary already lost
+    // its investigation to a transport failure.
+    const recoveryTier = harnessTier === "smart" || harnessTier === "fallback";
     // #1466: count the request's ACTUAL wire calls. The #1200 hook fires once
     // per wire call — including the ones a 429/5xx backoff, a #824 clamp or a
     // #1047 strip discarded — so the count is the HTTP attempts the request
@@ -702,7 +738,7 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     let wireCalls = 0;
     const outcome = await sharedRunInferenceGovernor().admit(
       {
-        priority: harnessTier === "smart" ? GOVERNOR_PRIORITY_RECOVERY : GOVERNOR_PRIORITY_AUTHORITATIVE,
+        priority: recoveryTier ? GOVERNOR_PRIORITY_RECOVERY : GOVERNOR_PRIORITY_AUTHORITATIVE,
         endpointKey: inferenceEndpointKey({ baseUrl, apiFormat: wireFormat, model: harnessModel }),
         ...(signal !== undefined ? { signal } : {}),
       },
@@ -730,7 +766,9 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     ).catch((cause: unknown) => {
       // #1515: the harness transport contract throws plain Errors (the loop
       // degrades on them, never crashes); a queued cancel becomes one too.
-      if (cause instanceof GovernorCancelledError) throw new Error(cause.message);
+      // #1628: a queued cancel carries the typed `cancelled` kind so the
+      // loop's per-attempt classifier says "cancelled" instead of "unknown".
+      if (cause instanceof GovernorCancelledError) throw new TransportFailure("cancelled", cause.message);
       throw cause;
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
@@ -739,12 +777,22 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // unconditionally, on top of `redactText`'s heuristics. #1037: the
     // configured extra-header VALUES join that list — a provider error body
     // can quote them back, and they routinely carry proxy tokens.
-    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] }));
+    // #1628: `describedTransportFailure` keeps the same message AND carries
+    // the structured kind/status/wire-observation, so the native loop's
+    // per-attempt classifier can say what the discarded attempt was (524?
+    // timeout? closed connection?) without any body ever leaving the seam.
+    if (outcome.status === "failure") throw describedTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] });
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project
     // it; a non-streamed turn's raw provider JSON passes through untouched.
-    const body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    let body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    // #1628: the reassembly-quality probe rides the body too, on the same
+    // reasoning as the timing probe below — the streamed projection is a NEW
+    // object, and a malformed-vs-empty verdict made upstream without the
+    // probe would be a guess.
+    const quality = readSseReassemblyQuality(outcome.response);
+    if (quality !== null) body = attachSseReassemblyQuality(body, quality);
     // #1466: the transport probe rides the body the caller receives, on BOTH
     // paths. The streamed projection is a NEW object, so the probe the
     // transport attached to the reassembled response would be lost here —
@@ -795,7 +843,7 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
  * keeps the loop byte-for-byte pre-#1145. #1210: likewise `ghApi` — the
  * run's configured forge read capability, bound to the native loop's
  * gh_api/repo_contents executors. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"]): Promise<void> {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number, fallbackLane?: HarnessDeps["fallbackLane"]): Promise<void> {
   const deps: HarnessDeps & { signal?: AbortSignal, traceGapProbe?: TraceGapProbe } = {
     env,
     cwd: runDir,
@@ -810,6 +858,16 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     log,
     ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
     ...(ghApi !== undefined ? { ghApi } : {}),
+    // #1598 (review): the evidence-failover phase passes the remaining share
+    // of the loop wall-clock envelope, so the second investigation can never
+    // start a second full budget. Unset keeps the configured ceiling.
+    ...(wallClockSecCap !== undefined ? { wallClockSecCap } : {}),
+    // #1598 (review): the evidence-failover phase binds the engine's
+    // already-resolved fallback lane, so the loop dials the same endpoint,
+    // credential, and format its fallback verdict came from — never a lane
+    // re-resolved from the route-rebound base keys. Unset keeps env
+    // resolution (direct callers without a resolved profile).
+    ...(fallbackLane !== undefined ? { fallbackLane } : {}),
   };
   await runToolHarness(deps);
 }

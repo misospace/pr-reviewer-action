@@ -257,7 +257,7 @@ interface StartupConfig {
   readonly runsRoot: string;
   readonly workspaceCacheRoot: string;
   readonly webhook: { readonly port: number; readonly secret: string } | null;
-  readonly admin: { readonly port: number; readonly token: string; readonly bind: string } | null;
+  readonly admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean } | null;
   readonly reconcile: { readonly intervalMs: number; readonly repos: readonly string[] } | null;
   readonly githubAppId: string;
   readonly githubAppPrivateKeyPem: string;
@@ -401,12 +401,29 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     }
     webhook = { port: webhookPort, secret };
   }
-  let admin: { readonly port: number; readonly token: string; readonly bind: string } | null = null;
+  let admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean } | null = null;
   const adminPort = portFromEnv(env, "PR_REVIEWER_ADMIN_PORT");
   if (adminPort !== null) {
     if (adminPort === -1) {
       throw new StartupRefusal("PR_REVIEWER_ADMIN_PORT must be a TCP port number", 2);
     }
+    // ── the optional #742 operations dashboard on the admin listener. The
+    //    flag means nothing without the listener, so the lexical check runs
+    //    only here: OFF = unset, `0`, `false`, `off`, `no`, `disabled`;
+    //    ON = `1`, `true`, `enabled`, `on`, `yes` (case-insensitive,
+    //    trimmed). ANY other non-empty value is a refusal — a typo like
+    //    `ture` must never silently disable the flag on a deployment that
+    //    DOES serve the admin listener.
+    const DASHBOARD_OFF = ["0", "false", "off", "no", "disabled"] as const;
+    const DASHBOARD_ON = ["1", "true", "enabled", "on", "yes"] as const;
+    const dashboardRaw = (env.PR_REVIEWER_ADMIN_DASHBOARD ?? "").trim().toLowerCase();
+    if (dashboardRaw !== "" && !DASHBOARD_OFF.includes(dashboardRaw as typeof DASHBOARD_OFF[number]) && !DASHBOARD_ON.includes(dashboardRaw as typeof DASHBOARD_ON[number])) {
+      throw new StartupRefusal(
+        "PR_REVIEWER_ADMIN_DASHBOARD must be unset or one of 0/false/off/no/disabled (off) or 1/true/enabled/on/yes (on) — any other value is refused, not silently disabled",
+        2,
+      );
+    }
+    const dashboardEnabled = DASHBOARD_ON.includes(dashboardRaw as typeof DASHBOARD_ON[number]);
     // FAIL CLOSED: an admin listener without its bearer token is never
     // served — the composition refuses instead of starting unauthenticated.
     const token = env.PR_REVIEWER_ADMIN_TOKEN ?? "";
@@ -426,7 +443,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
         2,
       );
     }
-    admin = { port: adminPort, token, bind };
+    admin = { port: adminPort, token, bind, dashboard: dashboardEnabled };
   }
 
   // ── reconciliation schedule.
@@ -1163,6 +1180,7 @@ export async function controllerMain(
           auditPath,
         }),
         token: startup.admin.token,
+        ...(startup.admin.dashboard ? { dashboard: {} } : {}),
         nowMs: now,
       });
       adminServer = createServer(adminHost.handler);
@@ -1192,6 +1210,7 @@ export async function controllerMain(
       ` models=${startup.instance.modelProfiles.length}` +
       ` webhook=${startup.webhook === null ? "off" : String(startup.webhook.port)}` +
       ` admin=${startup.admin === null ? "off" : String(startup.admin.port)}` +
+      ` dashboard=${startup.admin !== null && startup.admin.dashboard ? "on" : "off"}` +
       ` reconcile=${startup.reconcile === null ? "off" : String(startup.reconcile.intervalMs)}\n`,
   );
 

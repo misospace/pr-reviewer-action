@@ -2467,6 +2467,389 @@ test("#1396: every dependency-family evidence check text maps to its obligation 
   }
 });
 
+// ── #1595: lockfile-only dependency-refresh triage ────────────────────────
+
+/** One npm package-lock v3 bump block as a unified-diff fragment: paired
+ * removed/added `"version"` lines inside the `"node_modules/<name>"` block. */
+const lockfileBump = (name: string, oldVersion: string, newVersion: string): string =>
+  `    "node_modules/${name}": {\n-      "version": "${oldVersion}",\n+      "version": "${newVersion}",\n      "license": "MIT"\n    },\n`;
+
+/** The #1595 scoped must_check: the two local checks (byte-identical to the
+ * dependency_upgrade texts) plus ONE bounded aggregate advisory row (exact
+ * text, shaped like the DEPENDENCY_EVIDENCE_CHECKS advisory row). */
+const LOCKFILE_REFRESH_LOW_RISK_CHECKS = [
+  "check for breaking API changes in updated dependencies",
+  "run full test suite after upgrade",
+  "check upstream security advisories for the packages changed in this lockfile-only refresh, " +
+    "or report the advisory check as not performed",
+];
+
+test("#1595 AC1: a lockfile-only transitive-churn PR scopes must_check to the bounded aggregate advisory row", () => {
+  // The #1579 baseline shape: a lockfile-only Renovate PR (one
+  // package-lock.json, transitive patch/minor bumps) classifies
+  // dependency_upgrade (hasVersionBump defeats renovate_digest_only) and —
+  // before #1595 — carried the full five-item must_check, whose three
+  // per-package upstream-evidence rows burned the whole tool budget.
+  const result = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText:
+      "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "2.1.2", "2.1.3") +
+      lockfileBump("picomatch", "2.3.1", "2.3.2") +
+      lockfileBump("semver", "6.3.0", "6.3.1"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  assert.deepEqual(result.riskFlags, []);
+  // The full #1579 baseline (what this PR must no longer carry).
+  const baseline = [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ];
+  assert.equal(baseline.length, 5);
+  assert.notDeepEqual(result.mustCheck, baseline);
+  // With the fix: the two local checks stay; the three per-dependency
+  // upstream rows are replaced by ONE bounded aggregate advisory row.
+  assert.deepEqual(result.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+  // Provenance: every parsed bump is ordinary transitive churn.
+  assert.deepEqual(result.lockfileOnlyRefresh, { material: 0, lowRisk: 3, parseable: true });
+  // The aggregate row still maps onto the security_advisory obligation
+  // (and onto nothing else) so the tool-loop reserve tracks it.
+  assert.deepEqual(
+    result.mustCheck.map((text) => dependencyObligationForCheckText(text)),
+    [null, null, "security_advisory"],
+  );
+  // The triage persists additively, snake_case, last key, counts only.
+  const artifact = classificationToArtifact(result);
+  assert.deepEqual(artifact["lockfile_only_refresh"], { material: 0, low_risk: 3, parseable: true });
+  assert.deepEqual(Object.keys(artifact["lockfile_only_refresh"]), ["material", "low_risk", "parseable"]);
+  assert.equal(Object.keys(artifact).at(-1), "lockfile_only_refresh");
+  // A non-lockfile PR never carries the triage or its artifact key.
+  const plain = classifyPr({ prFiles: files("src/a.py") });
+  assert.equal(plain.lockfileOnlyRefresh, null);
+  assert.ok(!("lockfile_only_refresh" in classificationToArtifact(plain)));
+});
+
+test("#1595 AC2: any material bump or an unparseable lockfile diff keeps the FULL must_check", () => {
+  const fullSet = [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ];
+  const bump = (diffText: string, provenance: { material: number; lowRisk: number; parseable: boolean }): void => {
+    const result = classifyPr({
+      prFiles: files("site/package-lock.json"),
+      diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + diffText,
+    });
+    assert.equal(result.prKind, "dependency_upgrade");
+    assert.deepEqual(result.mustCheck, fullSet);
+    assert.deepEqual(result.lockfileOnlyRefresh, provenance);
+  };
+  // Semver-major jump.
+  bump(lockfileBump("chalk", "4.1.2", "5.3.0") + lockfileBump("ms", "2.1.2", "2.1.3"), { material: 1, lowRisk: 1, parseable: true });
+  // Prerelease on either side.
+  bump(lockfileBump("left-pad", "1.3.0", "2.0.0-beta.1"), { material: 1, lowRisk: 0, parseable: true });
+  // Unstable 0. version.
+  bump(lockfileBump("isarray", "0.0.1", "0.0.2"), { material: 1, lowRisk: 0, parseable: true });
+  // A package added by the diff (no old side).
+  bump(`+    "node_modules/newpkg": {\n+      "version": "1.0.0",\n`, { material: 1, lowRisk: 0, parseable: true });
+  // Unparseable lockfile diff — a version bump with NO parseable
+  // `node_modules` block around it: fail closed to the full material
+  // review. #1595 review regression: the parser used to silently DROP a
+  // changed version line outside any package block, so a minimal-context
+  // diff could hide a MAJOR bump and pass the scoped review — the
+  // major-jump version pair below proves the drop became a fail-closed.
+  bump(`-      "version": "4.1.0",\n+      "version": "5.0.0",\n`, { material: 0, lowRisk: 0, parseable: false });
+  // (For contrast: an integrity-churn-only lockfile diff is not even a
+  // version bump — it classifies renovate_digest_only, whose benign
+  // zero-selection gates #1595 deliberately never touches.)
+  assert.equal(
+    classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "integrity": "sha512-aaa"\n+      "integrity": "sha512-bbb"\n` }).prKind,
+    "renovate_digest_only",
+  );
+});
+
+test("#1595 review: range-like/malformed version values fail closed; changed runtime constraints are material", () => {
+  const fullSet = [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ];
+  const bump = (diffText: string, provenance: { material: number; lowRisk: number; parseable: boolean }): void => {
+    const result = classifyPr({
+      prFiles: files("site/package-lock.json"),
+      diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + diffText,
+    });
+    assert.equal(result.prKind, "dependency_upgrade");
+    assert.deepEqual(result.mustCheck, fullSet);
+    assert.deepEqual(result.lockfileOnlyRefresh, provenance);
+  };
+  // A range-like value whose PREFIX parses as pinned semver: the old parser
+  // accepted it as ordinary churn — a range could allow a major jump.
+  bump(lockfileBump("semver", "6.3.1", "6.3.1 || >=7.0.0"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "2.1.2", "^2.1.3"), { material: 1, lowRisk: 0, parseable: true });
+  // Malformed / non-pinned values (trailing junk, a tag, truncated core).
+  bump(lockfileBump("ms", "2.1.2", "2.1.3.4"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "latest", "2.1.2"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "2.1", "2.1.2"), { material: 1, lowRisk: 0, parseable: true });
+  // Build-metadata-only difference stays ordinary churn — and therefore the
+  // SCOPED must_check (low risk), not the full set.
+  const buildMeta = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "2.1.2+build.1", "2.1.2+build.5"),
+  });
+  assert.equal(buildMeta.prKind, "dependency_upgrade");
+  assert.deepEqual(buildMeta.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(buildMeta.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // A changed engines floor inside a package block is material even with a
+  // same-major, strictly pinned version pair (#1595 acceptance: a
+  // runtime-floor change still creates relevant obligations).
+  const constraintBump = (name: string, field: string, oldValue: string, newValue: string): string =>
+    `    "node_modules/${name}": {\n` +
+    `      "version": "1.2.3",\n` +
+    `      "engines": {\n` +
+    `-        "${field}": "${oldValue}"\n` +
+    `+        "${field}": "${newValue}"\n` +
+    `      },\n` +
+    `      "license": "MIT"\n` +
+    `    },\n`;
+  bump(constraintBump("ms", "node", ">=14", ">=20"), { material: 1, lowRisk: 0, parseable: true });
+  // A changed platform variant (os/cpu/libc) is material the same way.
+  bump(constraintBump("@esbuild/linux-x64", "cpu", "x64", "arm64"), { material: 1, lowRisk: 0, parseable: true });
+  // Hash/URL churn riding along with a bump stays ordinary churn (SCOPED):
+  // every real npm bump rewrites "integrity" and sometimes "resolved".
+  const hashChurn = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      `    "node_modules/ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `-      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.2.tgz",\n` +
+      `+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",\n` +
+      `-      "integrity": "sha512-aaa",\n` +
+      `+      "integrity": "sha512-bbb",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+  });
+  assert.equal(hashChurn.prKind, "dependency_upgrade");
+  assert.deepEqual(hashChurn.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(hashChurn.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // A changed DIRECT dependency range in the root `packages[""]` block is
+  // material — the app's own dependency graph moved even though every
+  // parsed version pair is same-major (maintainer review on #1618).
+  const directRange =
+    `    "": {\n` +
+    `      "name": "site",\n` +
+    `-      "dependencies": {\n` +
+    `+      "dependencies": {\n` +
+    `-        "typescript": "^5.4.0"\n` +
+    `+        "typescript": "^5.9.0"\n` +
+    `      },\n` +
+    lockfileBump("ms", "2.1.2", "2.1.3");
+  const direct = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + directRange,
+  });
+  assert.equal(direct.prKind, "dependency_upgrade");
+  assert.deepEqual(direct.lockfileOnlyRefresh, { material: 1, lowRisk: 1, parseable: true });
+  assert.deepEqual(direct.mustCheck, fullSet);
+
+  // A changed peerDependencies/dependencies relation entry inside a
+  // package block is material the same way — a relation change must not
+  // ride along under the scoped review.
+  bump(
+    `    "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.5",\n` +
+      `       "license": "MIT",\n` +
+      `-      "peerDependencies": {\n` +
+      `+      "peerDependencies": {\n` +
+      `-        "pg-int8": "1.0.1"\n` +
+      `+        "pg-int8": "1.0.2"\n` +
+      `      },\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // A changed dev/optional placement flag inside a package block is a
+  // dependency-graph change — material, not churn.
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `-      "dev": true,\n` +
+      `+      "dev": false,\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // A relation map being emptied or removed changes its opener line —
+  // ordinary churn never rewrites map openers, so this is material.
+  bump(
+    `    "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.4",\n` +
+      `       "license": "MIT",\n` +
+      `-      "peerDependencies": {\n` +
+      `-        "pg-int8": "1.0.1"\n` +
+      `-      },\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // The v2 legacy mirror ("dependencies" top-level section) is not a
+  // package block: its changed version lines fail the parse closed —
+  // lockfileVersion 2 keeps the FULL review (documented in the PR body).
+  bump(
+    lockfileBump("ms", "2.1.2", "2.1.3") +
+      `  "dependencies": {\n` +
+      `-    "ms": {\n` +
+      `+    "ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `    },\n`,
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+
+  // A changed field outside any package block (root lockfile metadata, e.g.
+  // a lockfileVersion regeneration) fails the parse closed even when a
+  // benign bump also parsed.
+  bump(
+    `-  "lockfileVersion": 2,\n+  "lockfileVersion": 3,\n` + lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+
+  // npm's REAL field order: `dependencies` (and `bin`) precede `engines`
+  // inside the block, and the engines change lands in a later hunk whose
+  // opening line is context. The block must NOT close on the nested
+  // `"dependencies": {` key — the floor change is material, never dropped.
+  bump(
+    `      "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.5",\n` +
+      `       "license": "MIT",\n` +
+      `       "dependencies": {\n` +
+      `         "pg-types": "^2.1.0"\n` +
+      `       },\n` +
+      `@@\n` +
+      `       "engines": {\n` +
+      `-        "node": ">=8.0.0"\n` +
+      `+        "node": ">=16.0.0"\n` +
+      `       },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // The SAME package header in two lockfiles of one PR must NOT merge
+  // buckets: the first file's MAJOR jump survives the second file's churn.
+  bump(
+    `diff --git a/a/package-lock.json b/a/package-lock.json\n` +
+      lockfileBump("ms", "2.1.2", "3.0.0") +
+      `diff --git a/b/package-lock.json b/b/package-lock.json\n` +
+      lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // Build metadata containing a dash is NOT a prerelease — build metadata
+  // is semver-insignificant, so this stays ordinary churn (and SCOPED).
+  const buildMetaDash = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "1.0.0+2023-01-01", "1.0.0+2024-01-01"),
+  });
+  assert.equal(buildMetaDash.prKind, "dependency_upgrade");
+  assert.deepEqual(buildMetaDash.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(buildMetaDash.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // An inline single-line engines object closes itself: the constraint is
+  // material AND the following version lines still pair (no region leak).
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "engines": { "node": ">=14" },\n` +
+      `+      "engines": { "node": ">=20" },\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // A changed scalar constraint value (`"os": "linux"`) is material too.
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "os": "linux",\n` +
+      `+      "os": "darwin",\n` +
+      `      "version": "1.2.3",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 0, parseable: true },
+  );
+
+  // A changed constraint line BEFORE any package block header (the lockfile
+  // root `""` block, whose header matches no package-block pattern) fails
+  // the parse closed — a minimal-context diff can hide whose engines floor
+  // moved. This holds even when the opening line is only context and the
+  // interior VALUE line is what changed. A constraint change with NO
+  // version bump at all is not even a version bump: it classifies
+  // renovate_digest_only and never triages.
+  bump(
+    `      "engines": {\n` +
+      `-        "node": ">=14"\n` +
+      `+        "node": ">=20"\n` +
+      lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+  // A changed constraint line with NO attributable block (here: after the
+  // last block closed — e.g. a minimal-context diff whose header is out of
+  // range) fails the parse closed, exactly like a version line.
+  bump(
+    lockfileBump("ms", "2.1.2", "2.1.3") + `-      "engines": {\n+      "engines": {\n`,
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+  assert.equal(
+    classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "engines": {\n+      "engines": {\n` }).prKind,
+    "renovate_digest_only",
+  );
+
+  // Context-only (unchanged) constraint lines do NOT materialize a bump.
+  const contextEngines =
+    `    "node_modules/ms": {\n` +
+    `      "engines": {\n` +
+    `        "node": ">=14"\n` +
+    `      },\n` +
+    `-      "version": "1.2.3",\n` +
+    `+      "version": "1.2.4",\n` +
+    `      "license": "MIT"\n` +
+    `    },\n`;
+  const scoped = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + contextEngines,
+  });
+  assert.equal(scoped.prKind, "dependency_upgrade");
+  assert.deepEqual(scoped.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(scoped.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+});
+
+test("#1595: the triage is null unless the PR is a dependency_upgrade of lockfiles only", () => {
+  // Mixed PR (code + a lockfile): dependency_upgrade kind, but the triage
+  // never runs — the full must_check stays.
+  const mixed = classifyPr({ prFiles: files("package-lock.json", "src/app.py"), diffText: lockfileBump("ms", "2.1.2", "2.1.3") });
+  assert.equal(mixed.prKind, "dependency_upgrade");
+  assert.equal(mixed.lockfileOnlyRefresh, null);
+  assert.deepEqual(mixed.mustCheck, [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ]);
+  // A non-dependency kind never triages, even on a lockfile-only diff.
+  const digestOnly = classifyPr({ prFiles: files("site/package-lock.json"), diffText: "- #68f3a9\n+ #9b384d\n" });
+  assert.equal(digestOnly.prKind, "renovate_digest_only");
+  assert.equal(digestOnly.lockfileOnlyRefresh, null);
+});
+
 test("#1336: the home-ops #11591 fixture classifies as renovate_image_update, not app_code", () => {
   // A Renovate container-image patch bumping a tag in a manifest whose
   // filename matches none of the k8s patterns — the exact shape that used to

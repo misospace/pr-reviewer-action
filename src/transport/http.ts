@@ -6,7 +6,7 @@ import type { ApiFormat } from "../model/types.js";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { applyExtraHeaders, basicAuthorizationHeaderValue } from "./headers.js";
 import { isContentBearingSseFrame } from "./sse.js";
-import type { TransportTiming } from "./timing.js";
+import { attachTransportTiming, readTransportTiming, type TransportTiming } from "./timing.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -158,6 +158,29 @@ export function describeTransportFailure(failure: TransportFailure, options: Des
   return maskKnownSecrets(`HTTP ${failure.status}${body ? `: ${body}` : ""}${hint}`, secrets);
 }
 
+/**
+ * #1628: the failure a caller throws when it must describe the transport
+ * failure for humans (the redacted, capped `describeTransportFailure`
+ * message) but the structured facts upstream consumers classify from must
+ * survive the throw: the failure `kind`, the HTTP `status`, and the wire
+ * observation of how far the attempt got (the #1628 timing probe). The
+ * response BODY is deliberately NOT carried onto the new instance — the
+ * described message already holds the bounded redacted excerpt, and a
+ * classifier that needed bodies would be a classifier that logs them.
+ */
+export function describedTransportFailure(failure: TransportFailure, options: DescribeTransportFailureOptions | number = {}): TransportFailure {
+  const described = new TransportFailure(
+    failure.kind,
+    describeTransportFailure(failure, options),
+    {
+      ...(failure.status !== undefined ? { status: failure.status } : {}),
+      ...(failure.retryAfterSec !== undefined ? { retryAfterSec: failure.retryAfterSec } : {}),
+    },
+  );
+  const timing = readTransportTiming(failure);
+  return timing === null ? described : attachTransportTiming(described, timing);
+}
+
 function oversizeFailure(
   status: number,
   observed: number,
@@ -241,8 +264,9 @@ export interface HttpCallResult {
   status: number;
   body: string;
   /** #1466: when this wire call was answered — the dispatch-to-first-byte,
-   * dispatch-to-first-content, and dispatch-to-end measurements. Numbers
-   * only; never prompt, response, or tool-argument content. */
+   * dispatch-to-first-SSE-event (#1628), dispatch-to-first-content, and
+   * dispatch-to-end measurements. Numbers only; never prompt, response, or
+   * tool-argument content. */
   timing: TransportTiming;
 }
 
@@ -270,6 +294,12 @@ interface SseScanState {
    * size): the frame is no longer joined (a partial join could parse as a
    * payload the provider never sent). */
   frameOverflow: boolean;
+  /** #1628: the monotonic timestamp of the first SSE data event — any
+   * non-empty `data:` payload, including a non-content one — or null when
+   * the stream carried no data event at all. Distinct from `firstContentAt`
+   * so a body that answered bytes without producing an event is
+   * distinguishable from one that produced a non-content event first. */
+  firstEventAt: number | null;
   /** The monotonic timestamp of the first content-bearing event, or null
    * when the stream carried none. */
   firstContentAt: number | null;
@@ -314,6 +344,11 @@ const MAX_SSE_FRAME_DATA_BYTES = 64 * 1024;
  * the reassembler agree on what "content" means.
  */
 function noteSseDataPayload(state: SseScanState, payload: string, apiFormat: string): void {
+  // #1628: the first data EVENT of any shape is a distinct wire milestone
+  // from the first byte (the bytes may arrive long before the first event)
+  // and from the first content event (a role-only delta or `[DONE]` is an
+  // event but carries no content).
+  if (state.firstEventAt === null) state.firstEventAt = performance.now();
   if (state.firstContentAt !== null) return;
   if (payload === "" || payload === "[DONE]") return;
   if (!isContentBearingSseFrame(payload, apiFormat)) return;
@@ -620,6 +655,38 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     // monotonic clock, so a wall-clock adjustment mid-call cannot make a
     // duration negative or absurd.
     let dispatchedAt = 0;
+    // #1628: the wire-observation state is hoisted out of the response
+    // callback so EVERY failure path — the non-2xx reject, a response error,
+    // a socket error, and the deadline destroy — can report what had ACTUALLY
+    // arrived before the attempt died: no byte at all, bytes without a
+    // content event, or a content event with no termination. A null field is
+    // "never happened on the wire", never a zero standing in for a
+    // measurement.
+    let firstByteAt: number | null = null;
+    const scanState: SseScanState = { pending: "", disabled: false, frameData: [], frameBytes: 0, frameOverflow: false, firstEventAt: null, firstContentAt: null };
+    // #1466: the multi-byte-safe decoder for the observation scan — a chunk
+    // boundary must never split a character.
+    const decoder = new StringDecoder("utf8");
+    /** The observation as a `TransportTiming`, or null before dispatch (an
+     * attempt that never went to the wire has no timing to report). */
+    const observedTiming = (): TransportTiming | null => {
+      if (dispatchedAt === 0) return null;
+      const now = performance.now();
+      return {
+        firstEventSec: firstByteAt === null ? null : (firstByteAt - dispatchedAt) / 1000,
+        firstSseEventSec: scanState.firstEventAt === null ? null : (scanState.firstEventAt - dispatchedAt) / 1000,
+        firstContentSec: scanState.firstContentAt === null ? null : (scanState.firstContentAt - dispatchedAt) / 1000,
+        totalSec: (now - dispatchedAt) / 1000,
+      };
+    };
+    /** Attach the observation to a failure when there is one (#1628): the
+     * caller classifies the discarded attempt from kind + status + how far
+     * the wire got, so a failed attempt must be able to answer "did any byte
+     * arrive?" honestly instead of silently losing the answer at the reject. */
+    const withObservation = <T extends object>(failure: T): T => {
+      const timing = observedTiming();
+      return timing === null ? failure : attachTransportTiming(failure, timing);
+    };
 
     const settle = (fn: () => void): void => {
       if (settled) return;
@@ -655,15 +722,9 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         let prefixBytes = 0;
         let received = 0;
         let abandoned = false;
-        // #1466: the timing probe's own state. `firstByteAt` is the first
-        // response body byte; the scan state carries the first
-        // content-bearing event's instant. Both are null until they
-        // happen — a null never stands in for a zero.
-        let firstByteAt: number | null = null;
-        const scanState: SseScanState = { pending: "", disabled: false, frameData: [], frameBytes: 0, frameOverflow: false, firstContentAt: null };
-        // #1466: the multi-byte-safe decoder for the observation scan — a
-        // chunk boundary must never split a character.
-        const decoder = new StringDecoder("utf8");
+        // #1628: `firstByteAt`, the SSE scan state, and the decoder are the
+        // HOISTED promise-level observation state (see above), shared by the
+        // success path and every failure path.
 
         response.on("data", (chunk: Buffer) => {
           if (abandoned) return;
@@ -692,7 +753,8 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
             abandoned = true;
             chunks.length = 0;
             const observed = received + chunk.length;
-            settle(() => reject(oversizeFailure(status, observed, maxResponseBytes, prefixChunks)));
+            // #1628: the oversize abort carried a real observation too.
+            settle(() => reject(withObservation(oversizeFailure(status, observed, maxResponseBytes, prefixChunks))));
             request.destroy();
             return;
           }
@@ -710,24 +772,29 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
           const endedAt = performance.now();
           // #1466: the timing of THIS wire call, measured from the
           // dispatch. A non-streamed call has no content event on the
-          // wire, so its `firstContentSec` stays null.
+          // wire, so its `firstContentSec` — and its `firstSseEventSec`
+          // (#1628) — stay null.
           const timing: TransportTiming = {
             firstEventSec: firstByteAt === null ? null : (firstByteAt - dispatchedAt) / 1000,
+            firstSseEventSec: scanState.firstEventAt === null ? null : (scanState.firstEventAt - dispatchedAt) / 1000,
             firstContentSec: scanState.firstContentAt === null ? null : (scanState.firstContentAt - dispatchedAt) / 1000,
             totalSec: (endedAt - dispatchedAt) / 1000,
           };
           if (status < 200 || status >= 300) {
             const retryAfterSec = parseRetryAfter(response.headers["retry-after"]);
-            settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, {
+            // #1628: an error STATUS is still a wire turn that arrived (and,
+            // for a 524, arrived LATE) — the caller's per-attempt classifier
+            // gets the observation with it.
+            settle(() => reject(withObservation(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, {
               status,
               body,
               ...(retryAfterSec !== undefined ? { retryAfterSec } : {}),
-            })));
+            }))));
             return;
           }
           settle(() => resolve({ status, body, timing }));
         });
-        response.on("error", (error: unknown) => settle(() => reject(classifySocketError(error))));
+        response.on("error", (error: unknown) => settle(() => reject(withObservation(classifySocketError(error)))));
       },
     );
 
@@ -739,7 +806,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     // the entry check and here.
     if (input.signal) {
       cancelListener = (): void => {
-        settle(() => reject(cancelledFailure()));
+        settle(() => reject(withObservation(cancelledFailure())));
         request.destroy();
       };
       input.signal.addEventListener("abort", cancelListener, { once: true });
@@ -764,15 +831,19 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     });
 
     request.on("error", (error: unknown) => {
+      // #1628: every wire-phase failure carries the observation of how far
+      // the response got — no byte, bytes without a content event, or content
+      // without termination — so a discarded streamed attempt is classifiable
+      // with its own first-event/first-content answer, not just "it failed".
       if (connectTimedOut) {
-        settle(() => reject(new TransportFailure("connect_timeout", "model endpoint connect timed out", { cause: error })));
+        settle(() => reject(withObservation(new TransportFailure("connect_timeout", "model endpoint connect timed out", { cause: error }))));
         return;
       }
       if (timedOut) {
-        settle(() => reject(new TransportFailure("request_timeout", "model request timed out", { cause: error })));
+        settle(() => reject(withObservation(new TransportFailure("request_timeout", "model request timed out", { cause: error }))));
         return;
       }
-      settle(() => reject(classifySocketError(error)));
+      settle(() => reject(withObservation(classifySocketError(error))));
     });
 
     // Whole-request deadline (curl --max-time), absolute rather than idle.
