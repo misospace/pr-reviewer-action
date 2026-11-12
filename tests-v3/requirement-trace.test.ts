@@ -29,6 +29,7 @@ ledgerRequirementsById,
   linePredicateSignal,
   mergeTraceRepairClaims,
   missingTraceRequirementIds,
+  parseChangedFileLines,
   renderRequirementTraceMarkdown,
   changedSubjectText,
   requirementSubjectSignals,
@@ -42,6 +43,7 @@ PENDING_DISPOSITION,
   validateRequirementTrace,
   finalTraceFailureLog,
   MAX_TRACE_FINAL_DIAGNOSTIC_ROWS,
+  type ChangedFileLines,
   type RequirementOwnership,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
@@ -2109,7 +2111,7 @@ test("#957: the #956 linked-issue change does not scope unrelated AGENTS standar
  * metadata, not an inferred lexical signal. */
 const OWNERSHIP = [
   { match: ["fork", "privilege", "separation"], owners: [".github/workflows/ai-pr-review-fork.yaml", "scripts/fork_review_gate.py"] },
-  { match: ["untrusted", "content", "data"], owners: ["src/context/pr-thread.ts", "src/context/review-threads.ts", "src/specialists/render.ts", "src/claims/render.ts", "src/requirements/ledger.ts", "src/publish/publish.ts"] },
+  { match: ["untrusted", "content", "data"], owners: ["src/context/fence.ts", "src/context/pr-thread.ts", "src/context/review-threads.ts", "src/specialists/render.ts", "src/claims/render.ts", "src/requirements/ledger.ts", "src/publish/publish.ts"] },
   { match: ["model", "api", "credentials"], owners: ["src/transport/http.ts", "src/transport/sse.ts", "src/transport/transport.ts"] },
 ];
 
@@ -2614,6 +2616,520 @@ test("#1346: distinctive prose next to generic connectives still scopes in", () 
   assert.deepEqual(scoped("+  // the legacy switch may not appear here, only through the old path\n"), []);
 });
 
+// ── #1600: standards scope needs a connection to an affected boundary ───
+
+/** One file's git diff section: the shape {@link parseChangedFileLines}
+ * attributes, so a test that means "this file changed these lines" states it
+ * the way production's `pr.diff` does. */
+function diffSection(path: string, lines: readonly string[]): string {
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    "@@ -1,1 +1,1 @@",
+    ...lines,
+  ].join("\n");
+}
+
+/** The change evidence the production scope call receives: the raw diff, its
+ * changed paths, and the SAME diff attributed per file. Content-based
+ * corroboration reads only the attributed lines, so a test that wants a class
+ * to be assessed has to hand both halves over. */
+interface ChangeEvidence {
+  changed: string;
+  paths: string[];
+  fileLines: ChangedFileLines[];
+}
+
+function changeEvidence(sections: readonly string[], paths?: readonly string[]): ChangeEvidence {
+  const diff = sections.join("\n");
+  const fileLines = parseChangedFileLines(diff);
+  assert.ok(fileLines !== null, "fixture diff must be file-attributable");
+  const derived = paths === undefined ? fileLines.map((file) => file.path) : paths;
+  return { changed: changedSubjectText(diff, derived), paths: derived.map((path) => path.toLowerCase()), fileLines };
+}
+
+/** The #1573 shape: a docs-only prose-dedup change (code-map bullets) whose
+ * added paragraphs quote each boundary standard's OWN subject vocabulary —
+ * `fence-safe`/`untrusted-data`/`hostile content`, `model API credentials`
+ * /`auth headers`/`x-api-key`, `fork trust`/`trust boundary` — so under the
+ * pre-#1600 rule every phrase match alone made each standard trace-required.
+ * The changed paths are a prose document and a test file; nothing here can
+ * reach a security boundary. The test asserts the overlap is real, so a
+ * future fixture edit cannot silently turn this into a no-overlap pass. */
+function pr1573Sections(): string[] {
+  return [
+    diffSection("docs/architecture/code-map.md", [
+      "+- **`src/context/fence.ts`** — fence-safe renderers: untrusted-data delimiters keep hostile content from forging headings.",
+      "+- **`src/transport/http.ts`** — model API credentials travel only through the HTTP auth headers over the typed Node transport (`x-api-key`).",
+      "+- **`.github/workflows/ai-pr-review-fork.yaml`** — the fork trust boundary must not be weakened.",
+      "+  (code-map bullets deduplicated; one row per module)",
+    ]),
+    diffSection("tests-v3/docs-lint.test.ts", [
+      "+  // one code-map row per module",
+    ]),
+  ];
+}
+
+function pr1573Evidence(): ChangeEvidence {
+  return changeEvidence(pr1573Sections(), ["docs/architecture/code-map.md", "tests-v3/docs-lint.test.ts"]);
+}
+
+function pr1573Ledger(): unknown {
+  return { requirements: [
+    { id: "req-untrusted", text: STANDARDS_UNTRUSTED, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] },
+    { id: "req-fork", text: STANDARDS_FORK, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 2 }] },
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+}
+
+function credentialLedger(): unknown {
+  return { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+}
+
+test("#1600: quoted boundary vocabulary in a #1573-shaped docs/test change leaves the standards out of scope", () => {
+  const evidence = pr1573Evidence();
+  // The quoted vocabulary really is the standards' own subject overlap: with
+  // boundary evidence absent (no paths), the pre-#1600 lexical rule still
+  // scopes all three in — proving the narrowing below, not missing overlap.
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), evidence.changed).inScope.map((e) => e.id).sort(),
+    ["req-credential", "req-fork", "req-untrusted"],
+  );
+  // The #1573 change itself: prose document + test file only, no declared
+  // owner, no standards-source edit, no requirement-named path — quoted
+  // vocabulary alone no longer pulls the standards into the trace.
+  const scope = requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines });
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id).sort(), ["req-credential", "req-fork", "req-untrusted"]);
+  // The out-of-scope reason is explainable from the artifact alone: it names
+  // the quoted-vocabulary class and every boundary signal the change missed.
+  for (const row of scope.outOfScope) {
+    assert.match(row.reason, /^out of scope: from standards; its subject terms appear only as quoted vocabulary/);
+    assert.match(row.reason, /no standards-source or trusted-policy edit/);
+    assert.match(row.reason, /no requirement-named path/);
+    assert.match(row.reason, /no requirement-relevant security runbook or executable example/);
+  }
+});
+
+test("#1600: the same quoted vocabulary end-to-end grounds not_applicable rows, not trace demands", () => {
+  const ws = makeWorkspace();
+  try {
+    const evidence = pr1573Evidence();
+    const trace = validateRequirementTrace([], pr1573Ledger(), ws, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines });
+    assert.equal(trace.incomplete, false);
+    assert.deepEqual(trace.rows.map((r) => [r.requirement_id, r.disposition]).sort(), [
+      ["req-credential", "not_applicable"], ["req-fork", "not_applicable"], ["req-untrusted", "not_applicable"],
+    ]);
+    for (const row of trace.rows) {
+      assert.ok(row.notes.includes("out-of-scope"), JSON.stringify(row));
+      assert.match(row.reason, /quoted vocabulary/);
+    }
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("#1600: a trusted security-policy edit keeps its standards in scope regardless of the .md extension", () => {
+  // Editing AGENTS.md — the standards' own source — is the trusted
+  // security-policy change class: every requirement extracted from it stays
+  // in scope through the standards-source signal, though AGENTS.md is itself
+  // a prose-document path and the diff carries no implementation file.
+  const evidence = changeEvidence([diffSection("AGENTS.md", pr1573Sections()[0]!.split("\n").slice(4))]);
+  assert.deepEqual(evidence.paths, ["agents.md"]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id).sort(),
+    ["req-credential", "req-fork", "req-untrusted"],
+  );
+  // The signal is per-requirement: a standard extracted from a DIFFERENT
+  // source document is not rescued by an AGENTS.md edit.
+  const other = { requirements: [
+    { id: "req-other", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "docs/team-standards.md", line: 1 }] },
+  ] };
+  assert.deepEqual(
+    requirementTraceScope(other, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope, [],
+  );
+  // A basename match counts (the ledger records the standards file's
+  // basename), and the match is case-insensitive on both sides.
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: [".github/agents.md"], fileLines: evidence.fileLines }).inScope.length,
+    3,
+  );
+  // The source-edit signal is independent of lexical overlap: a formatting
+  // edit to the standards file still leaves every requirement extracted from
+  // it in scope. Markdown is never blanket-exempted.
+  const formatting = changeEvidence([diffSection("AGENTS.md", ["+  (formatting only)"])]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), formatting.changed, { paths: formatting.paths, fileLines: formatting.fileLines }).inScope.length,
+    3,
+  );
+});
+
+test("#1600: a trusted owner-policy edit scopes standards in without repeating their prose", () => {
+  // The owner map is base-ref-trusted security configuration. Editing it is a
+  // policy change even when the diff carries none of a standard's vocabulary,
+  // and it is never classed out merely because it is YAML.
+  for (const path of [".github/pr-reviewer-owners.yml", ".pr-reviewer-owners.yml"]) {
+    const evidence = changeEvidence([diffSection(path, ["+  # boundary map maintenance"])]);
+    assert.deepEqual(
+      requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id).sort(),
+      ["req-credential", "req-fork", "req-untrusted"],
+      path,
+    );
+  }
+  // The policy file is repository-wide trusted configuration, so every
+  // standards row stays in scope regardless of which source document it came
+  // from — fail closed on a boundary map edit.
+  const other = { requirements: [
+    { id: "req-other", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "docs/team-standards.md", line: 1 }] },
+  ] };
+  const evidence = changeEvidence([diffSection(".github/pr-reviewer-owners.yml", ["+  # boundary map maintenance"])]);
+  assert.deepEqual(
+    requirementTraceScope(other, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id),
+    ["req-other"],
+  );
+});
+
+test("#1600: a requirement-named runbook and a requirement-relevant executable example stay in scope", () => {
+  const forkLedger = { requirements: [
+    { id: "req-fork", text: STANDARDS_FORK, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 2 }] },
+  ] };
+  // docs/fork-review.md is named by the fork standard itself. No subject
+  // vocabulary is needed in the changed lines: editing the runbook is a
+  // boundary-relevant policy change even though it is Markdown and is not the
+  // exact standards source or a declared owner.
+  const runbook = changeEvidence([diffSection("docs/fork-review.md", ["+  (clarify the privileged-run step)"])]);
+  assert.deepEqual(
+    requirementTraceScope(forkLedger, runbook.changed, { paths: runbook.paths, fileLines: runbook.fileLines }).inScope.map((e) => e.id),
+    ["req-fork"],
+  );
+
+  // POSITIVE (same file): a generic security/operational document need not be
+  // named or owned — an instruction about this requirement carried by THAT
+  // document's own changed lines is boundary evidence (fail closed on
+  // ambiguous security instructions).
+  const security = changeEvidence([
+    diffSection("docs/security/transport.md", [
+      "+  Never log model API credentials; send them only through the HTTP auth headers.",
+    ]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), security.changed, { paths: security.paths, fileLines: security.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+
+  // POSITIVE (same file): an executable example whose own lines repeat the
+  // standard's subject is a reachable demonstration, not prose commentary.
+  const example = changeEvidence([
+    diffSection("examples/secure-transport.sh", ["+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1"]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), example.changed, { paths: example.paths, fileLines: example.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+});
+
+test("#1600: a security document's formatting change is no connection for another file's matching text", () => {
+  // NEGATIVE: the security document changed (formatting only), while an
+  // UNRELATED source file carries a line that matches the credential
+  // standard's subject in instruction shape. The two files share no boundary:
+  // corroboration must come from the security document's own lines, so
+  // combining a security-document path with another file's text cannot scope
+  // the standard in.
+  const security = changeEvidence([
+    diffSection("docs/security/transport.md", ["+  (re-wrapped the paragraph; no wording change)"]),
+    diffSection("src/unrelated/notes.ts", ["+  // model API credentials must travel only through the HTTP auth headers"]),
+  ], ["docs/security/transport.md", "src/unrelated/notes.ts"]);
+  // The unrelated line does carry the lexical overlap the bug used to borrow:
+  // the flattened change text names the standard's subject.
+  assert.match(security.changed, /model api credentials must travel only through the http auth headers/);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), security.changed, { paths: security.paths, fileLines: security.fileLines }).inScope, [],
+  );
+});
+
+test("#1600: an executable example's unrelated change is no connection for another file's matching text", () => {
+  // NEGATIVE: the executable example changed, but only its own comment
+  // wording; the standard's vocabulary appears in a DIFFERENT file. The
+  // example class supplies attribution only for the example's own lines.
+  const combined = changeEvidence([
+    diffSection("examples/other-thing.sh", ["+  # reworded the usage comment"]),
+    diffSection("src/foo/call.ts", ["+  headers.set(\"x-api-key\", key); // send credentials only through auth headers"]),
+  ], ["examples/other-thing.sh", "src/foo/call.ts"]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), combined.changed, { paths: combined.paths, fileLines: combined.fileLines }).inScope, [],
+  );
+  // Same example, same standard: the moment the example itself demonstrates
+  // the subject, it is a reachable boundary and the standard is in scope.
+  const same = changeEvidence([
+    diffSection("examples/other-thing.sh", ["+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1"]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), same.changed, { paths: same.paths, fileLines: same.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+});
+
+// ── #1600: the executable-script class (the issue's "examples or scripts") ──
+
+test("#1600: a changed operational script with requirement-relevant content keeps its standard in scope", () => {
+  // scripts/rotate-credentials.sh is exactly the material-change class #1600
+  // names ("executable examples or scripts"): the script IS the boundary
+  // demonstration. No declared owner, no standards-source edit, no named
+  // path — the same-file instruction line alone keeps it in scope.
+  const script = changeEvidence([
+    diffSection("scripts/rotate-credentials.sh", [
+      "+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1/rotate",
+    ]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), script.changed, { paths: script.paths, fileLines: script.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+  // The class is path-directory-scoped, not extension-based: the same
+  // instruction in an ordinary source tree is not script corroboration.
+  const src = changeEvidence([
+    diffSection("src/ops/rotate-credentials.ts", [
+      "+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1/rotate",
+    ]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), src.changed, { paths: src.paths, fileLines: src.fileLines }).inScope, [],
+  );
+});
+
+test("#1600: an unrelated script is no connection for another file's matching text", () => {
+  // NEGATIVE: the script class must not restore any generic implementation
+  // signal — scripts/unrelated.sh changing while a DIFFERENT file carries the
+  // credential standard's instruction shapes no boundary connection.
+  const combined = changeEvidence([
+    diffSection("scripts/unrelated.sh", ["+  echo done # reworded"]),
+    diffSection("src/foo/notes.ts", ["+  // model API credentials must never appear in process argv"]),
+  ], ["scripts/unrelated.sh", "src/foo/notes.ts"]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), combined.changed, { paths: combined.paths, fileLines: combined.fileLines }).inScope, [],
+  );
+  // Same script, same standard: the moment the script itself carries the
+  // instruction, it is in scope — the difference is attribution, not class.
+  const same = changeEvidence([
+    diffSection("scripts/unrelated.sh", ["+  # model API credentials must never appear in process argv"]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), same.changed, { paths: same.paths, fileLines: same.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+});
+
+test("#1600: an owner-path code change without matching prose still scopes its standard in", () => {
+  // Positive control: the owner signal needs no vocabulary at all, and the
+  // narrowing never applies when it fires (#958 behavior preserved).
+  const ownership = [{ match: ["model", "api", "credentials"], owners: ["src/transport/http.ts"] }];
+  const ledger = credentialLedger();
+  const owned = changeEvidence([diffSection("src/transport/http.ts", ["+  const header = \"x\";"])]);
+  assert.deepEqual(
+    requirementTraceScope(ledger, owned.changed, { ownership, paths: owned.paths, fileLines: owned.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+  // An unrelated source file that merely quotes the standard is NOT an owner
+  // and is not implementation-surface corroboration: the affected-boundary
+  // connection is per requirement, never "some source file changed".
+  const unrelated = changeEvidence([diffSection("src/transport/extra.ts", ["+  // model api credentials travel only through the http auth headers"])]);
+  assert.deepEqual(
+    requirementTraceScope(ledger, unrelated.changed, { ownership, paths: unrelated.paths, fileLines: unrelated.fileLines }).inScope, [],
+  );
+  // The same owner path does corroborate a lexical match.
+  const prose = changeEvidence([diffSection("src/transport/http.ts", ["+  // credentials travel only through the http auth headers"])]);
+  assert.deepEqual(
+    requirementTraceScope(ledger, prose.changed, { ownership, paths: prose.paths, fileLines: prose.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+});
+
+test("#1600: linked-issue, unknown-provenance, and mixed-provenance requirements are never narrowed", () => {
+  const evidence = pr1573Evidence();
+  // A linked-issue requirement stays in scope regardless of file extension.
+  assert.deepEqual(
+    requirementTraceScope({ requirements: [
+      { id: "req-issue", text: STANDARDS_CREDENTIAL, kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#1600", line: 1 }] },
+    ] }, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id),
+    ["req-issue"],
+  );
+  // Unknown provenance fails closed.
+  assert.deepEqual(
+    requirementTraceScope({ requirements: [
+      { id: "req-noprov", text: STANDARDS_CREDENTIAL, kind: "normative" },
+    ] }, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id),
+    ["req-noprov"],
+  );
+  // A mixed-provenance requirement (any non-standards source) keeps the old rule.
+  assert.deepEqual(
+    requirementTraceScope({ requirements: [
+      { id: "req-mixed", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }, { source: "pr_body", ref: "pr", line: 9 }] },
+    ] }, evidence.changed, { paths: evidence.paths, fileLines: evidence.fileLines }).inScope.map((e) => e.id),
+    ["req-mixed"],
+  );
+});
+
+test("#1600: missing or empty changed-path evidence keeps the lexical rule (fail closed)", () => {
+  const evidence = pr1573Evidence();
+  // No paths at all: the boundary connection cannot be assessed, so nothing
+  // is narrowed — mirroring the production rule that missing diff evidence
+  // keeps every requirement in scope.
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), evidence.changed).inScope.length, 3);
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), evidence.changed, { ownership: [] }).inScope.length, 3);
+  // An empty path list is missing evidence too, not an evidence-free change.
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: [] }).inScope.length, 3);
+  // Paths without per-file attribution: the content classes cannot prove the
+  // ABSENCE of a same-file connection, so the narrowing does not run either —
+  // attribution is never inferred from the flattened text.
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: evidence.paths }).inScope.length, 3);
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), evidence.changed, { paths: evidence.paths, fileLines: undefined }).inScope.length, 3);
+});
+
+test("#1600: boundary-owning source and workflow changes keep only their own standard in scope", () => {
+  // The declared owner map is what makes an implementation path boundary
+  // evidence. The same quoted vocabulary in a NON-owner source is not
+  // corroboration — the per-requirement association comes from ownership, not
+  // from the file extension or directory.
+  const owner = changeEvidence([diffSection("src/context/fence.ts", ["+  // the untrusted-data delimiters are the boundary"])]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), owner.changed, { ownership: OWNERSHIP, paths: owner.paths, fileLines: owner.fileLines }).inScope.map((e) => e.id),
+    ["req-untrusted"],
+  );
+  const unrelated = changeEvidence([diffSection("src/context/unrelated.ts", ["+  // the untrusted-data delimiters are the boundary"])]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), unrelated.changed, { paths: unrelated.paths, fileLines: unrelated.fileLines }).inScope, [],
+  );
+
+  // A YAML workflow is never blanket-exempted, but it is boundary evidence
+  // only when it is declared as this requirement's owner (or named by the
+  // requirement / trusted policy).
+  const workflow = changeEvidence([diffSection(".github/workflows/ai-pr-review-fork.yaml", ["+  fork_code_checkout: denied # the fork trust boundary holds"])]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), workflow.changed, { ownership: OWNERSHIP, paths: workflow.paths, fileLines: workflow.fileLines }).inScope.map((e) => e.id),
+    ["req-fork"],
+  );
+  const otherWorkflow = changeEvidence([diffSection(".github/workflows/unrelated.yaml", ["+  fork_code_checkout: denied # the fork trust boundary holds"])]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), otherWorkflow.changed, { paths: otherWorkflow.paths, fileLines: otherWorkflow.fileLines }).inScope, [],
+  );
+});
+
+// ── #1600: per-file attribution of the changed diff ──────────────────────
+
+test("#1600: parseChangedFileLines attributes each hunk line to its own file", () => {
+  const parsed = parseChangedFileLines([
+    diffSection("docs/security/runbook.md", ["+  added instruction", "-  removed instruction"]),
+    " ",
+    diffSection("src/a.ts", ["+  const value = 1;"]),
+  ].join("\n"));
+  assert.deepEqual(parsed, [
+    { path: "docs/security/runbook.md", lines: ["  added instruction", "  removed instruction"] },
+    { path: "src/a.ts", lines: ["  const value = 1;"] },
+  ]);
+  // A file listed as changed with no attributable line still appears (its
+  // path is evidence; only its text is absent).
+  assert.deepEqual(parseChangedFileLines(""), []);
+});
+
+test("#1600: parseChangedFileLines fails closed when an unattributable section carries changed lines", () => {
+  // A `diff --git` header whose C-quoted path carries an escape this parser
+  // does not reconstruct names no provable file. Those changed lines must
+  // neither leak onto the neighbouring file nor vanish into a partial view
+  // that reads as proven absence: the whole attribution becomes unavailable.
+  const parsed = parseChangedFileLines([
+    diffSection("src/kept.ts", ["+  const kept = true;"]),
+    'diff --git "a/we\\tird.ts" "b/we\\tird.ts"',
+    "@@ -0,0 +1 @@",
+    "+  const leaked = true;",
+  ].join("\n"));
+  assert.equal(parsed, null);
+  // Git octal-quotes non-ASCII names by default; such a security-doc section
+  // alongside a normal one yields NO partial map (the runbook's real
+  // instruction lines must never be silently read as absent).
+  assert.equal(parseChangedFileLines([
+    'diff --git "a/\\346\\226\\207/docs/security/runbook.md" "b/\\346\\226\\207/docs/security/runbook.md"',
+    '--- "a/\\346\\226\\207/docs/security/runbook.md"',
+    '+++ "b/\\346\\226\\207/docs/security/runbook.md"',
+    "@@ -1 +1 @@",
+    "+  Never log model API credentials through the auth headers.",
+    diffSection("src/other.ts", ["+  const x = 1;"]),
+  ].join("\n")), null);
+  // An unattributable section WITHOUT changed lines (pure mode change) stays
+  // harmless: the rest of the diff remains attributed.
+  assert.deepEqual(parseChangedFileLines([
+    'diff --git "a/we\\303\\251ird.ts" "b/we\\303\\251ird.ts"',
+    "old mode 100644",
+    "new mode 100755",
+    diffSection("src/kept.ts", ["+  const kept = true;"]),
+  ].join("\n")), [{ path: "src/kept.ts", lines: ["  const kept = true;"] }]);
+});
+
+// #252: feed the fence's own boundary tokens through the hunk body — a
+// mock (or fixture) that omits the attack encodes the same blind spot as the
+// code. Header-shaped text inside a body must never re-attribute lines.
+test("#1600 #252: header-shaped tokens in a hunk body cannot re-attribute lines", () => {
+  // A deleted line whose content is `-- a/docs/security/other.md` renders in
+  // the diff as `--- a/docs/security/other.md`. If that reads as a header the
+  // following lines would move to another path; the parser cannot prove which
+  // it is, so the whole attribution fails closed instead of guessing.
+  assert.equal(parseChangedFileLines([
+    diffSection("src/unrelated.ts", ["--- a/docs/security/other.md", "+  const after = true;"]),
+  ].join("\n")), null);
+  // The same rendering naming the CURRENT section's own path is unambiguous
+  // (either reading attributes it to the same file) and stays content.
+  assert.deepEqual(parseChangedFileLines([
+    diffSection("src/unrelated.ts", ["--- a/src/unrelated.ts", "+  const after = true;"]),
+  ].join("\n")), [{ path: "src/unrelated.ts", lines: ["-- a/src/unrelated.ts", "  const after = true;"] }]);
+  // An added line whose content is `++ b/docs/security/evil.md` renders as
+  // `+++ b/docs/security/evil.md` — same boundary ambiguity, same fail closed.
+  assert.equal(parseChangedFileLines([
+    diffSection("src/a.ts", ["+++ b/docs/security/evil.md", "+  more"]),
+  ].join("\n")), null);
+  // A combined-diff (`diff --cc`) section opened after a normal one must not
+  // absorb its body lines onto the previous file: it opens an unattributable
+  // section, and its changed lines fail the attribution closed.
+  assert.equal(parseChangedFileLines([
+    diffSection("src/kept.ts", ["+  const kept = true;"]),
+    "diff --cc src/merged.ts",
+    "@@@ -1,1 -1,1 +1,1 @@@",
+    "-  dropped on both sides",
+  ].join("\n")), null);
+  // Real git framing never produces a bare header line inside a body (every
+  // body line carries a +/-/space prefix), so a context line resembling a
+  // header is content by prefix and changes nothing.
+  assert.deepEqual(parseChangedFileLines([
+    diffSection("docs/security/runbook.md", [" --- a/inside.md", " +++ b/inside.md", "+  the only real change"]),
+  ].join("\n")), [{ path: "docs/security/runbook.md", lines: ["  the only real change"] }]);
+});
+
+test("#1600: parseChangedFileLines reads plain unified diffs, deletions, and quoted paths", () => {
+  // No `diff --git` header at all: the `---`/`+++` pair alone attributes.
+  assert.deepEqual(parseChangedFileLines(["--- a/src/plain.ts", "+++ b/src/plain.ts", "@@ -1 +1 @@", "+  plain"].join("\n")), [
+    { path: "src/plain.ts", lines: ["  plain"] },
+  ]);
+  // A deletion has a `/dev/null` new side; the old side attributes the lines.
+  assert.deepEqual(parseChangedFileLines(["diff --git a/gone.md b/gone.md", "--- a/gone.md", "+++ /dev/null", "@@ -1 +0,0 @@", "-  gone"].join("\n")), [
+    { path: "gone.md", lines: ["  gone"] },
+  ]);
+  // Git C-quoting with a decoded escape works; an escape this parser does not
+  // reconstruct makes the section unattributable.
+  assert.deepEqual(parseChangedFileLines(['--- "a/spaced file.md"', '+++ "b/spaced file.md"', "@@ -1 +1 @@", "+  spaced"].join("\n")), [
+    { path: "spaced file.md", lines: ["  spaced"] },
+  ]);
+  // A `\t` escape this parser does not reconstruct, an escaping `..` path and
+  // an absolute path are all unattributable: nothing is returned rather than
+  // a guess.
+  assert.equal(parseChangedFileLines(['--- "a/tab\\tfile.md"', '+++ "b/tab\\tfile.md"', "@@ -1 +1 @@", "+  nope"].join("\n")), null);
+  assert.equal(parseChangedFileLines(["--- a/../escape.md", "+++ b/../escape.md", "@@ -1 +1 @@", "+  nope"].join("\n")), null);
+  // A NUL byte in a header path (a hostile or corrupt diff) names no usable
+  // path: with changed lines present the attribution fails closed.
+  assert.equal(parseChangedFileLines(["--- a/be\0tween.md", "+++ b/be\0tween.md", "@@ -1 +1 @@", "+  nope"].join("\n")), null);
+  // Text that is not a diff at all yields no attribution (callers fail closed).
+  assert.equal(parseChangedFileLines("just prose, no headers"), null);
+});
 // ── #959: a verdict with zero trace claims ──────────────────────────────
 
 test("#959: a missing-claim row renders its own reason, not 'no valid enforcement location'", () => {
