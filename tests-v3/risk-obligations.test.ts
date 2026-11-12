@@ -38,6 +38,9 @@ import { riskObligationId } from "../src/risk/types.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { runReviewEngine } from "../src/engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
+import { validateContract } from "../src/config/contract.js";
+import { applyRepositoryConfig } from "../src/config/repository-config.js";
+import { parse } from "yaml";
 import { startMockServer } from "./helpers.js";
 
 // ── diff fixtures ──────────────────────────────────────────────────────
@@ -126,6 +129,35 @@ test("#1577: style/validation vocabulary does not fake a risk category", () => {
   assert.deepEqual(scanRiskObligations(fileDiff("src/db/store.ts", ["  return schema.load(db);"])).obligations.map((row) => row.category), ["persisted_state"]);
 });
 
+// The mode digits are ordinary constants on their own: 120000 is also a
+// plausible timeout in milliseconds or a byte budget, and 100644/100755 are
+// plausible counts. A bare literal must not raise a file-identity
+// obligation; the literal fires only next to mode vocabulary on the same
+// line, the same discipline "overflow" and "schema" use.
+test("#1577: a bare mode literal without mode vocabulary never fires", () => {
+  const timeout = scanRiskObligations(fileDiff("src/http/client.ts", ["  const REQUEST_TIMEOUT_MS = 120000;"]));
+  assert.deepEqual(timeout.obligations, [], "a timeout constant is not file identity");
+  const budget = scanRiskObligations(fileDiff("src/corpus/budgets.ts", ["  return { maxCorpus: 120000, maxDiff: 80000 };"]));
+  assert.deepEqual(budget.obligations, [], "a byte budget is not file identity");
+  const count = scanRiskObligations(fileDiff("src/queue/worker.ts", ["  if (finished === 100644) release();"]));
+  assert.deepEqual(count.obligations, [], "a count is not file identity");
+  // And the real thing still fires, in every spelling of the context.
+  for (const line of [
+    "  if (entry.mode === \"120000\") continue;",
+    "  if (mode !== \"100644\") continue;",
+    "  const file_mode = \"100755\";",
+    "  if (FILE_MODE === \"120000\") continue;",
+  ]) {
+    assert.deepEqual(
+      scanRiskObligations(fileDiff("src/context/treeentries.ts", [line])).obligations.map((row) => row.category),
+      ["file_identity_mode"],
+      line,
+    );
+  }
+  // A word that merely starts with "mode" is not mode vocabulary.
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const model = \"gpt-4\"; const limit = 120000;"])).obligations, []);
+});
+
 test("#1577: ordinary code and lockfiles never fire", () => {
   const refactor = fileDiff("src/util/format.ts", [
     "  const label = `${name.trim()} (${count})`;",
@@ -140,8 +172,33 @@ test("#1577: ordinary code and lockfiles never fire", () => {
   assert.equal(empty.method, "none");
 });
 
+// ── the operator-only contract boundary ────────────────────────────────
+
+// A risk obligation CAN withhold a trusted approve, so it must never be
+// switchable from repository-controlled config, and it must never gain a
+// fork-grant sibling: it grants no tool, repository or access capability,
+// so there is nothing for a fork gate to hold back.
+test("#1577: risk-obligations is operator-only and has no fork-grant sibling", () => {
+  const contract = validateContract(parse(readFileSync("contracts/action-v3.yml", "utf8")));
+  const byId = new Map(contract.inputs.map((input) => [input.id, input]));
+  const entry = byId.get("risk-obligations");
+  assert.ok(entry, "risk-obligations is a contract input");
+  assert.equal(entry["repo-configurable"], undefined, "repository config must never switch the scan on");
+  assert.equal(entry.v2_id, undefined, "the input is v3-only");
+  assert.equal(entry.default, "false");
+  // No fork-grant sibling: the scan grants no capability to hold back.
+  assert.equal(byId.has("risk-obligations-enable-for-forks"), false);
+  // And the boundary is enforced, not only declared: a repository config
+  // file that sets the key is ignored with a warning.
+  const operatorRaw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "operator-value" : String(input.default)]));
+  const resolution = applyRepositoryConfig(contract, operatorRaw, { path: ".github/pr-reviewer.yml", text: "risk-obligations: true\n" });
+  assert.deepEqual(resolution.appliedKeys, []);
+  assert.match(resolution.warnings[0]!, /risk-obligations.*not repo-configurable/);
+  assert.equal(resolution.raw["risk-obligations"], "false");
+});
+
 test("#1577: anchors are bounded and the scan is deterministic", () => {
-  const diff = Array.from({ length: 12 }, (_v, i) => fileDiff(`src/mode/file${i}.ts`, ["  if (m === 120000) skip();"])).join("\n");
+  const diff = Array.from({ length: 12 }, (_v, i) => fileDiff(`src/mode/file${i}.ts`, ["  if (mode === 120000) skip();"])).join("\n");
   const artifact = scanRiskObligations(diff);
   assert.equal(artifact.obligations.length, 1);
   assert.equal(artifact.obligations[0]!.paths.length, 8);

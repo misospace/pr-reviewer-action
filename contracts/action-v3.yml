@@ -624,7 +624,9 @@ inputs:
   # is deterministic, and its rows reach the reviewer through the corpus
   # section and the steering block only - unlike derived rows (#1449) they
   # are not wired into the tool harness (src/tools/harness.ts reads only
-  # derived-obligations.json).
+  # derived-obligations.json). No `*-enable-for-forks` sibling either: the
+  # scan grants no tool, repository or access capability, so there is
+  # nothing for a fork gate to hold back.
   - id: risk-obligations
     required: false
     default: "false"

@@ -23,7 +23,13 @@
  * marker can cut a line early (missing a fire) and a mid-block-comment line
  * that starts with code still scans (firing), because a false obligation
  * costs one disposition while a false silence costs trust. The scan is
- * pure, deterministic, and never throws. */
+ * pure, deterministic, and never throws.
+ *
+ * The mode digits are the one vocabulary where the bare token would be
+ * noise: `120000` is also a plausible timeout in milliseconds or a byte
+ * budget. A mode literal therefore needs mode vocabulary on the SAME line
+ * (see FILE_MODE_CONTEXT), the same context discipline the other categories
+ * use for "overflow" and "schema". */
 
 import {
   MAX_PATH_CHARS,
@@ -66,11 +72,24 @@ const LINE_COMMENT_MARKERS: Readonly<Record<string, string[]>> = Object.freeze({
   sql: ["--"], rb: ["#"],
 });
 
+/** The git file-mode literals (symlink 120000, regular file 100644/100755).
+ *  The digits on their own are ordinary constants: `120000` is also a
+ *  plausible timeout in milliseconds or a byte budget, and such a constant
+ *  says nothing about file identity. A literal therefore fires only next to
+ *  mode vocabulary on the SAME line, the way the bounded-state and
+ *  persisted-state categories require a counter context for "overflow" and a
+ *  storage context for "schema". The context is the word "mode" (or
+ *  "modes") in any spelling (`mode`, `entry.mode`, `file_mode`,
+ *  `FILE_MODE`, `symlinkMode`); a letter after it disqualifies the word, so
+ *  "model" and "models" are not contexts. */
+const FILE_MODE_LITERAL = /\b(?:120000|100644|100755)\b/;
+const FILE_MODE_CONTEXT = /modes?(?![a-z])/i;
+
 const FILE_IDENTITY_MODE_PATTERNS: readonly RegExp[] = [
   /\bls-tree\b/i,
-  /\b120000\b/,
-  /\b100644\b/,
-  /\b100755\b/,
+  // The literal next to mode vocabulary, in either order.
+  new RegExp(`${FILE_MODE_LITERAL.source}[^\\n]{0,40}${FILE_MODE_CONTEXT.source}`, "i"),
+  new RegExp(`${FILE_MODE_CONTEXT.source}[^\\n]{0,40}${FILE_MODE_LITERAL.source}`, "i"),
   /\btypechange\b/i,
   /\bsymlinks?\b/i,
   /\bis[_-]?symlink\b/i,
