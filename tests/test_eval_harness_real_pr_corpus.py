@@ -46,6 +46,7 @@ from eval_harness import (
     run_real_pr_corpus,
     run_review_for_pr,
     score_clean_run,
+    score_model_verdict,
     score_vulnerable_run,
     validate_real_pr_corpus,
 )
@@ -671,6 +672,61 @@ class TestContextOnly:
         assert (s["vulnerable_built"], s["defect_file_in_diff"], s["with_line_range"]) == (2, 1, 2)
         assert (s["defect_lines_all_in_context"], s["defect_lines_none_in_context"]) == (1, 1)
         assert (s["corpus_bytes_median"], s["defect_position_pct_median"]) == (300, 40)
+
+    def test_the_context_only_environment_stays_offline_safe(self):
+        """The context-only mode must never reach a live model endpoint.
+
+        The mode's whole proof rests on the transport's connect attempt
+        being refused at a closed loopback port with every lane's retries
+        at 0, so a drifting base URL or a live retry count would turn an
+        offline replay into a real (paid) model call. The fallback and
+        smart base URLs must stay empty so no second lane can dial out.
+        """
+        base_url = CONTEXT_ONLY_ENV["AI_BASE_URL"]
+        assert base_url.startswith("http://127.0.0.1:"), (
+            f"the context-only base URL must be a closed loopback address: {base_url}"
+        )
+        for lane in ("primary", "fallback", "smart"):
+            retries = CONTEXT_ONLY_ENV[f"AI_{lane.upper()}_RETRIES"]
+            assert retries == "0", (
+                f"the {lane} lane must not retry in context-only mode: {retries}"
+            )
+        assert CONTEXT_ONLY_ENV["AI_FALLBACK_BASE_URL"] == "", (
+            "the fallback lane must not have a base URL in context-only mode"
+        )
+        assert CONTEXT_ONLY_ENV["AI_SMART_BASE_URL"] == "", (
+            "the smart lane must not have a base URL in context-only mode"
+        )
+        # The refused connect must fail the run, not turn into the
+        # runtime's default "model unavailable" notice: that notice is
+        # written to ai-output.json, and the verdict artifact's absence is
+        # the row's proof that no model answered.
+        assert CONTEXT_ONLY_ENV["ON_MODEL_FAILURE"] == "fail", (
+            "the context-only mode must fail on the refused connect, or the "
+            "runtime writes a notice verdict and the artifact proves nothing"
+        )
+
+    def test_the_model_verdict_field_follows_the_verdict_artifact(self, tmp_path):
+        """The row's model_verdict field is the proof that no model answered.
+
+        The runtime writes ai-output.json only when it parsed a model
+        verdict (the context-only mode pins on-model-failure=fail, so a
+        refused connect writes no artifact), so the artifact's presence is
+        the verdict and its absence is the evidence that none was
+        produced. A transport failure still leaves a redacted error record
+        in ai-response.primary.json, so that artifact is never the proof.
+        """
+        run_dir = tmp_path / "artifacts"
+        run_dir.mkdir()
+        assert score_model_verdict(run_dir) is False
+        (run_dir / "ai-response.primary.json").write_text(
+            json.dumps({"error": "connection refused"}), encoding="utf-8"
+        )
+        assert score_model_verdict(run_dir) is False
+        (run_dir / "ai-output.json").write_text(
+            json.dumps({"verdict": "approve"}), encoding="utf-8"
+        )
+        assert score_model_verdict(run_dir) is True
 
     def test_shipped_human_findings_corpus_is_valid(self):
         corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
@@ -1534,3 +1590,8 @@ class TestContextOnlyFixtureEntryEndToEnd:
         assert row["defect_file_in_diff"] is True
         assert row["defect_lines"] == 1
         assert row["defect_lines_in_context"] == 1
+        # The context-only mode does not skip the model call: it drives the
+        # engine at a closed loopback port, so the connect attempt is
+        # refused and no verdict artifact is ever written. The row says so
+        # instead of the runbook asserting it.
+        assert row["model_verdict"] is False

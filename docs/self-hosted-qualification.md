@@ -139,6 +139,15 @@ envelope and result-collection path runs end to end over the same worker
 image and the same head, and produces the same artifact as the other
 three routes.
 
+The driver itself is exercised outside the harness too:
+`tests/harness/kubernetes-route.test.ts` runs the compiled driver against a
+fake container runtime (a temporary `docker` on the child's `PATH`, the
+only thing the fake replaces) and asserts the settled route, the launcher's
+argv and environment, and the driver's refusal paths — an execution the
+executor cannot launch, a credential the harness resolver does not know,
+and a container that exits non-zero. The authoritative suite runs it, so a
+driver that rots fails at review time instead of at qualification time.
+
 What route D does not prove: there is no scheduler, no admission
 control, no network policy, no kubelet and no real secret store behind
 it, and the harness's loopback endpoints (the stub model server and the
@@ -223,8 +232,15 @@ a different build.
   signatures.
 - The **eval corpus** replay drives the built bundle over the retained
   real-PR fixtures: the review context must be assembled from the
-  fixture, with the defect file still in the diff, and the model call
-  never happens.
+  fixture, with the defect file still in the diff, and no model verdict
+  produced. The replay does not skip the model call: it drives the engine
+  at a closed loopback port with every lane's retries at 0, so the
+  transport's connect attempt is refused before any request is
+  transmitted — no inference runs, no token is spent, and no live endpoint
+  is contacted. The report's per-row `model_verdict` field (true only when
+  the runtime wrote its `ai-output.json` verdict artifact) is the
+  machine-checked proof, and scenario 25 requires it to be false for every
+  row.
 
 The repository gate `tests/test_self_hosted_qualification.py` keeps the
 declared suite lists honest: a renamed suite file, or a new
@@ -444,8 +460,13 @@ installation token for each repository. See
   (#1609): an eval entry without a retained fixture needs a live clone of
   its forge repository, which this harness never does, so the scenario
   covers the fixture-pinned entries and says so. The corpora that need a
-  model call are not replayed either: the context-only mode stops before
-  the model call.
+  model call are not replayed either: the context-only mode stops at the
+  model call: the endpoint is a closed loopback port and the retries are off,
+  so the transport's connect attempt is refused before any request is
+  transmitted — no inference runs, no token is spent, and no live endpoint
+  is contacted. The replay report proves it per row: `model_verdict` is
+  true only when the runtime wrote its `ai-output.json` verdict artifact,
+  and the scenario requires it to be false for every row.
 - The GitHub review scenario's worker leg (#1484) needs the forge
   integration's credential material in the environment
   (`PR_REVIEWER_CREDENTIAL_GITHUB`): the review run's worker projects its

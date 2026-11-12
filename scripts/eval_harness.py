@@ -2937,8 +2937,17 @@ REPLAY_ENV = {
 }
 
 # --context-only: build the review context and stop at the model call, with
-# no inference. The endpoint is a closed local port and retries are off, so
-# the call fails immediately after the corpus is assembled.
+# no inference. The endpoint is a closed local port and every lane's retries
+# are 0, so the transport's connect attempt is refused before any request is
+# transmitted: no inference runs, no token is spent, and no live endpoint is
+# contacted. The mode does not skip the call itself, so every row proves what
+# happened through `score_model_verdict` instead of asserting it in prose.
+# ON_MODEL_FAILURE=fail closes the last gap in that proof: the runtime's
+# default (notice) turns the refused connect into a locally written "model
+# unavailable" notice verdict, so ai-output.json would exist on every row and
+# its absence would prove nothing. Failing instead leaves no verdict artifact
+# at all, which makes the artifact's presence exactly the evidence that a
+# model answered.
 CONTEXT_ONLY_ENV = {
     "AI_BASE_URL": "http://127.0.0.1:9/v1",
     "AI_MODEL": "context-only",
@@ -2950,6 +2959,7 @@ CONTEXT_ONLY_ENV = {
     "AI_CONNECT_TIMEOUT_SEC": "2",
     "AI_FALLBACK_BASE_URL": "",
     "AI_SMART_BASE_URL": "",
+    "ON_MODEL_FAILURE": "fail",
     "TOOL_MODE": "off",
     "DEEP_REVIEW": "false",
     "CI_STATUS_CHECK": "false",
@@ -2990,6 +3000,19 @@ def score_context(repo_path: Path, run_dir: Path, scenario: RealPRScenario) -> d
         if found:
             out["defect_position_pct"] = round(100 * min(found) / max(1, len(corpus)))
     return out
+
+
+def score_model_verdict(run_dir: Path) -> bool:
+    """Whether the run produced a model verdict.
+
+    Under --context-only the runtime writes ``ai-output.json`` only when it
+    parsed a model verdict — the mode pins on-model-failure=fail, so a
+    refused connect writes no artifact at all — so the artifact's absence
+    is the evidence that no model answered. A transport failure still leaves
+    a redacted error record in ``ai-response.primary.json``, so that
+    artifact is never the proof.
+    """
+    return (run_dir / "ai-output.json").is_file()
 
 
 def run_real_pr_corpus(
@@ -3075,6 +3098,7 @@ def run_real_pr_corpus(
                         "kind": kind,
                         **({"fixture": True} if scenario.semantic_fixture is not None else {}),
                         **score_context(repo_path, run_artifact_dir, scenario),
+                        "model_verdict": score_model_verdict(run_artifact_dir),
                     }
                     context_rows.append(row)
                     print(f"    [context] {json.dumps(row)}", file=sys.stderr)
@@ -3362,8 +3386,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Real-PR corpora only: build each scenario's review context and stop "
-            "before the model call (no inference); report whether each defect "
-            "reached the context."
+            "at the model call (the endpoint is a closed local port and every "
+            "lane's retries are 0, so the connect attempt is refused before any "
+            "request is transmitted: no inference runs and no token is spent); "
+            "report whether each defect reached the context, and per row whether "
+            "a model verdict was produced (model_verdict)."
         ),
     )
     parser.add_argument(

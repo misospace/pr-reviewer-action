@@ -30,12 +30,16 @@ The harness script (tests/self_hosted_e2e_qualification.sh) landed with
 - every disposable instance config adopts its allowlist
   (`discovered-default: adopt`), so the scenarios can actually enqueue a
   review;
+- the route-D driver is EXERCISED, not only gated: its own test exists
+  and the authoritative suite runs it, so a driver that rots cannot take
+  the parity route with it;
 - the v3 qualification suites the harness re-runs against the engine
   build stay declared, keep their files, and cover every
   adversarial-boundary suite the vocabulary names.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -898,6 +902,12 @@ PARITY_ROUTE_ARTIFACTS = {
 KUBERNETES_ROUTE_DRIVER = "tests/harness/kubernetes-route.ts"
 KUBERNETES_ROUTE_COMPILED = ".test-build/tests/harness/kubernetes-route.js"
 
+# The driver's own test, the compiled file it lands as, and the glob the
+# authoritative suite runs it under.
+KUBERNETES_ROUTE_TEST = "tests/harness/kubernetes-route.test.ts"
+KUBERNETES_ROUTE_TEST_COMPILED = ".test-build/tests/harness/kubernetes-route.test.js"
+HARNESS_TEST_GLOB = ".test-build/tests/harness/*.test.js"
+
 # The scenario bodies the gate reads, by name. The harness's functions
 # are top level and close with a brace in column zero.
 _SCENARIO_BODY_RE = r"(?ms)^{name}\(\) \{{\n(.*?)\n\}}"
@@ -912,6 +922,28 @@ def _scenario_body(script: str, name: str) -> str:
     match = re.search(_SCENARIO_BODY_RE.format(name=name), script)
     assert match, f"the harness declares no {name} scenario"
     return match.group(1)
+
+
+def _scenario_section(script: str, name: str) -> str:
+    """One scenario function's whole text, declaration to the next function.
+
+    ``_scenario_body`` stops at the first brace in column zero. For the
+    eval-corpus replay that brace belongs to the embedded node program,
+    so the body ends long before the report check the gate reads. This
+    slices the function out whole instead.
+    """
+    lines = script.splitlines(keepends=True)
+    start = next(
+        (index for index, line in enumerate(lines) if line.startswith(f"{name}() {{")),
+        None,
+    )
+    assert start is not None, f"the harness declares no {name} scenario"
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^[a-z_][a-z0-9_]*\(\) \{$", lines[index]):
+            end = index
+            break
+    return "".join(lines[start:end])
 
 
 def test_the_kubernetes_parity_route_drives_the_real_executor() -> None:
@@ -932,6 +964,31 @@ def test_the_kubernetes_parity_route_drives_the_real_executor() -> None:
     assert "SKIP" not in body, (
         "the Kubernetes parity route must not be a skip: the real executor "
         "runs over the harness's cluster double"
+    )
+
+
+def test_the_kubernetes_route_driver_runs_under_the_authoritative_suite() -> None:
+    """The route-D driver must be EXERCISED, not only gated.
+
+    The driver shipped with a structural gate, but nothing ran it: the
+    corpus held the code and the gate, never an execution. A driver that
+    rots would take the parity route with it and the qualification would
+    fail at run time instead of at review time, so the driver's own test
+    must exist AND the authoritative suite must run it — a committed test
+    that nothing invokes is the same as no test at all.
+    """
+    assert (ROOT / KUBERNETES_ROUTE_TEST).is_file(), (
+        f"the route-D driver test is gone: {KUBERNETES_ROUTE_TEST}"
+    )
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    script = str(package["scripts"]["test"])
+    assert HARNESS_TEST_GLOB in script, (
+        f"the npm test script must run the harness test glob {HARNESS_TEST_GLOB}, "
+        f"or the driver test never runs: {script}"
+    )
+    assert fnmatch.fnmatch(KUBERNETES_ROUTE_TEST_COMPILED, HARNESS_TEST_GLOB), (
+        f"the driver test compiles to {KUBERNETES_ROUTE_TEST_COMPILED}, which the "
+        f"glob {HARNESS_TEST_GLOB} must match"
     )
 
 
@@ -1123,6 +1180,74 @@ def test_the_harness_replays_the_shipped_eval_corpora() -> None:
             f"{corpus} carries no retained real-PR fixture: the harness replays "
             "the fixture-pinned entries offline, so the corpus must keep one"
         )
+
+
+def test_the_eval_corpus_replay_checks_that_no_model_answered() -> None:
+    # The replay does not skip the model call: it drives the engine at a
+    # closed loopback port, so the transport's connect attempt is refused
+    # and no verdict artifact is ever written. Only the report's per-row
+    # model_verdict field proves that, so the scenario must check it:
+    # without the check the runbook's claim is prose again, and a change
+    # that let a model answer would pass the scenario silently.
+    section = _scenario_section(
+        _harness_script(), "scenario_eval_corpus_replay_against_engine_build"
+    )
+    assert "model_verdict" in section, (
+        "the eval-corpus scenario must read the replay report's model_verdict "
+        "field: the replay's model-free property is machine-checked, not asserted"
+    )
+    assert "model_verdict !== false" in section, (
+        "the eval-corpus scenario must fail on a row that carries a model "
+        "verdict: the replay drives a closed loopback port, so every row "
+        "must report model_verdict false"
+    )
+
+
+# The runbook's eval-corpus passages: the bullet that declares what the
+# replay proves, and the known-limits bullet that scopes the scenario.
+_EVAL_CORPUS_BULLET = "- The **eval corpus** replay"
+_EVAL_CORPUS_KNOWN_LIMIT = "- The eval-corpus scenario re-runs"
+
+
+def _runbook_bullet(text: str, marker: str) -> str:
+    """One runbook bullet, from its marker to the next blank line."""
+    index = text.index(marker)
+    end = text.find("\n\n", index)
+    return text[index:] if end == -1 else text[index:end]
+
+
+def test_the_runbook_states_the_offline_replay_mechanism() -> None:
+    # The runbook used to claim the model call never happened, which the
+    # implementation never promised: the context-only mode drives the
+    # engine at a closed loopback port with every lane's retries at 0, and
+    # the transport's connect attempt is refused before any request is
+    # transmitted. The runbook must state that mechanism — and the
+    # machine-checked proof the scenario reads — instead of a claim the
+    # runtime never makes.
+    text = RUNBOOK.read_text(encoding="utf-8")
+    for marker in (_EVAL_CORPUS_BULLET, _EVAL_CORPUS_KNOWN_LIMIT):
+        bullet = re.sub(r"\s+", " ", _runbook_bullet(text, marker))
+        for claim in (
+            "model call never happens",
+            "stops before the model call",
+            "no model call",
+        ):
+            assert claim not in bullet, (
+                f"the runbook must not claim {claim!r} about the eval-corpus "
+                "replay: the replay drives a closed loopback port, so the "
+                "transport's connect attempt is refused instead of the call "
+                "never happening"
+            )
+        for phrase in (
+            "closed loopback port",
+            "connect attempt is refused",
+            "no token is spent",
+            "model_verdict",
+        ):
+            assert phrase in bullet, (
+                f"the runbook must state the eval-corpus replay's {phrase}: the "
+                "replay's model-free property is a mechanism, not a promise"
+            )
 
 
 def test_the_runbook_documents_every_declared_qualification_suite() -> None:

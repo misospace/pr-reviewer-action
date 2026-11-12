@@ -99,7 +99,10 @@ set -euo pipefail
 #      the ingress signature.
 #  25. The broader eval corpus re-runs against the engine build: the
 #      retained real-PR fixtures replay offline through the built
-#      bundle (review context only, no model call).
+#      bundle (review context only; the engine drives a closed loopback
+#      port with every lane's retries at 0, so the transport's connect
+#      attempt is refused before any request is transmitted and no
+#      inference runs).
 #
 # Rules (docs/self-hosted-qualification.md): every forge read and write
 # the review pipeline performs travels through the configured forge
@@ -2776,10 +2779,16 @@ scenario_v3_security_suites_rerun_against_engine_build() {
 # ── scenario 25: the broader eval corpus against the engine build ──
 # The shipped eval corpora carry a retained real-PR fixture each
 # (#1609): the fixture replays offline through the built bundle, with
-# the review context assembled and the model call stopped before it
-# happens. An entry WITHOUT a retained fixture needs a live forge
-# clone, which this harness never does, so the scenario covers the
-# retained-fixture entries and says so.
+# the review context assembled. The replay does not skip the model
+# call: it drives the engine at a closed loopback port with every
+# lane's retries at 0, so the transport's connect attempt is refused
+# before any request is transmitted — no inference runs, no token is
+# spent, and no live endpoint is contacted. The report's per-row
+# model_verdict field (true only when the runtime wrote its
+# ai-output.json verdict artifact) is what proves it, so the check
+# below requires it to be false for every row. An entry WITHOUT a
+# retained fixture needs a live forge clone, which this harness never
+# does, so the scenario covers the retained-fixture entries and says so.
 scenario_eval_corpus_replay_against_engine_build() {
   local label="eval corpus replay against the engine build"
   if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
@@ -2869,7 +2878,9 @@ if (!kept) {
       return 1
     fi
     # The replay must have assembled the review context from the
-    # retained fixture, with the defect file still in the diff.
+    # retained fixture, with the defect file still in the diff, and no
+    # model verdict: the engine ran at a closed loopback port, so the
+    # report must carry model_verdict false for every row.
     if ! (
       cd "$ROOT_DIR"
       EVAL_REPORT="$report" "$NODE_BIN" -e '
@@ -2891,10 +2902,16 @@ for (const row of rows) {
     console.error("the retained fixture lost its defect file: " + JSON.stringify(row));
     process.exit(1);
   }
+  if (row.model_verdict !== false) {
+    console.error(
+      "the replay produced a model verdict, so it was not model-free: " + JSON.stringify(row)
+    );
+    process.exit(1);
+  }
 }
 '
     ) >"${corpus%.json}-check.log" 2>&1; then
-      echo "$label scenario: the eval corpus replay did not assemble the review context; last log lines:" >&2
+      echo "$label scenario: the eval corpus replay did not assemble the review context, or a model answered; last log lines:" >&2
       tail -n 30 "${corpus%.json}-check.log" >&2 || true
       return 1
     fi
@@ -2904,7 +2921,7 @@ for (const row of rows) {
     echo "$label scenario: ${#EVAL_CORPUS_FILES[@]} corpora were declared, but $replayed replayed" >&2
     return 1
   fi
-  echo "PASS: the broader eval corpus re-ran against the self-hosted engine build (${replayed} retained-fixture corpora replayed offline through the built bundle)"
+  echo "PASS: the broader eval corpus re-ran against the self-hosted engine build (${replayed} retained-fixture corpora replayed offline through the built bundle, no model verdict produced)"
 }
 # ── engine parity runner (#1484) ──
 # The stub's loopback port must not collide with any other loopback

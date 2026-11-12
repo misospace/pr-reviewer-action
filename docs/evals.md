@@ -903,7 +903,10 @@ path instead: the harness materializes the fixture offline, admission sees a
 provably open PR, and the row builds full context with zero inference. The
 per-row report carries `"fixture": true` for those entries (the key is absent
 for live rows, which are refused by the gate for merged PRs), so a mixed
-report states which rows ran offline and which were refused.
+report states which rows ran offline and which were refused. Every row also
+carries `model_verdict`: it is true only when the run produced the runtime's
+verdict artifact (`ai-output.json`), so a row with `model_verdict: false` is
+the machine-checked proof that no model answered.
 
 ```bash
 export GITHUB_TOKEN=...   # only consulted for entries without a fixture
