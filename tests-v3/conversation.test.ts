@@ -483,13 +483,19 @@ test("#1635: digestMaxBytes caps the stored digest at the byte budget", async ()
   assert.match(head.content, /^Condensed digest of earlier tool results:\nd+$/);
   assert.ok(Buffer.byteLength(head.content, "utf8") <= 500);
   // A cap that leaves no room for the digest body preserves nothing: the fold
-  // reports 0 (the caller falls back to truncation) and mutates nothing.
+  // reports 0 (the caller falls back to truncation) without paying for the
+  // summarizer call and mutates nothing.
   const tiny = new Conversation();
   for (let i = 0; i < 3; i++) {
     tiny.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
     tiny.addToolResult(`c${i}`, `result ${i}`);
   }
-  assert.equal(await tiny.summarizeOldestToolResults(() => "digest body", { digestMaxBytes: 10 }), 0);
+  let tinyDigestCalls = 0;
+  assert.equal(await tiny.summarizeOldestToolResults(() => {
+    tinyDigestCalls++;
+    return "digest body";
+  }, { digestMaxBytes: 10 }), 0);
+  assert.equal(tinyDigestCalls, 0, "a degenerate cap must not pay for the summarizer call");
   assert.deepEqual(
     (tiny.events as Array<{ kind: string; content: string }>).filter((e) => e.kind === "tool_result").map((e) => e.content),
     ["result 0", "result 1", "result 2"],

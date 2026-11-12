@@ -1109,16 +1109,18 @@ export class Conversation {
         return `[earlier result ${n + 1}${e.is_error ? " (error)" : ""}]\n${e.content}`;
       })
       .join("\n\n");
+    const header = "Condensed digest of earlier tool results:\n";
+    const bodyCap = options.digestMaxBytes === undefined
+      ? Infinity
+      : Math.floor(options.digestMaxBytes) - Buffer.byteLength(header, "utf8");
+    // A cap smaller than the header would store a header-only digest that
+    // preserves nothing — fold nothing (without paying for the summarizer
+    // call) and let truncation backstop.
+    if (bodyCap <= 0) return 0;
     const digest = ((await summarizeFn(block)) || "").trim();
     if (!digest) return 0;
-    const header = "Condensed digest of earlier tool results:\n";
-    let body = digest;
-    if (options.digestMaxBytes !== undefined) {
-      body = truncateText(body, Math.max(0, Math.floor(options.digestMaxBytes) - Buffer.byteLength(header, "utf8"))).text;
-      // A cap smaller than the header would store a header-only digest that
-      // preserves nothing — fold nothing instead and let truncation backstop.
-      if (!body) return 0;
-    }
+    const body = truncateText(digest, bodyCap).text;
+    if (!body) return 0;
     const head = foldable[0]!;
     const headEvent = this.events[head] as ToolResultEvent;
     headEvent.content = header + body;
