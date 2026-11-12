@@ -29,6 +29,10 @@ export const GITHUB_CONVERSATION_COMMENTS_QUERY =
 export const GITHUB_REVIEW_THREADS_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }";
 
+/** The thread window `GITHUB_REVIEW_THREADS_QUERY` enumerates (#1645):
+ * a returned listing SHORTER than this is provably complete. */
+export const REVIEW_THREADS_QUERY_WINDOW = 100;
+
 /** #812: body and `lastEditedAt` in ONE document — the atomic snapshot the
  * whole metadata pass consumes. `lastEditedAt` is the body's own edit
  * timestamp: it moves only when the description is edited (never on pushes,

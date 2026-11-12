@@ -5,6 +5,7 @@ import {
   GITHUB_CONVERSATION_COMMENTS_QUERY,
   GITHUB_PR_BODY_REVISION_QUERY,
   GITHUB_REVIEW_THREADS_QUERY,
+  REVIEW_THREADS_QUERY_WINDOW,
   normalizeExternalChecks,
   normalizeGithubConversationComments,
   normalizeGithubReviewThreads,
@@ -18,6 +19,7 @@ import type {
   ManagedComment,
   ManagedReview,
   PlatformReadAdapter,
+  ThreadListingReadResult,
   ReadResult,
 } from "./types.js";
 
@@ -414,6 +416,18 @@ export class GitHubAdapter implements PlatformReadAdapter {
     } catch (error) {
       return { ok: false, error: errorText(error) };
     }
+  }
+
+  /** #1645: the same `reviewThreads(last: 100)` read with a completeness
+   * verdict for live reconciliation. The GraphQL window holds at most 100
+   * threads, so fewer than 100 nodes PROVES the listing is the full set;
+   * exactly 100 cannot distinguish "full" from "capped" and honestly reports
+   * `complete: false` (reconciliation then treats carried threads as
+   * unknown — never absent — on the rare 100+-thread PR). */
+  async listReviewThreadsLiveListing(): Promise<ThreadListingReadResult> {
+    const fetched = await this.listReviewThreads();
+    if (!fetched.ok) return { ok: false, error: fetched.error };
+    return { ok: true, data: fetched.data, complete: fetched.data.length < REVIEW_THREADS_QUERY_WINDOW };
   }
 
   /** `gh api repos/R/pulls/N/reviews --paginate`: gh requests

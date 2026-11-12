@@ -10,7 +10,8 @@
  */
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { applyReviewObligationEnforcement, isForcingObligation, type ReviewObligation } from "./review-obligations.js";
-import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
+import { applyReviewThreadEnforcement, type EnforcementThread, type ThreadReconciliationProvenance } from "./threads.js";
+import type { ThreadLiveReconciliation } from "./thread-reconcile.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
 import { harnessExecutionCounts, harnessFailuresAllDeadlineClamps } from "../tools/execution-counts.js";
 
@@ -251,6 +252,13 @@ export interface EnforcementInputs {
   evidence: EvidenceProviderArtifact | null;
   toolHarness: ToolHarnessArtifact | null;
   threads: readonly EnforcementThread[] | null;
+  /** #1645: enforcement-time reconciliation of the carried threads against
+   * the forge's CURRENT authoritative review-thread listing (null = no
+   * reconciliation attempted; a listing that cannot prove completeness
+   * arrives as `listingComplete: false`). */
+  threadReconciliation?: ThreadLiveReconciliation | null;
+  /** #1645: current head SHA recorded in the reconciliation provenance. */
+  reviewedHeadSha?: string;
   humanReviews: readonly EnforcementHumanReview[] | null;
   verdictPolicy: string;
   /** #1381: the folded review-owned obligation rows; null when none were
@@ -357,7 +365,16 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
   }
 
   const verdictBeforeThreads = artifact.verdict;
-  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy);
+  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy, {
+    reconciliation: inputs.threadReconciliation ?? null,
+    headSha: inputs.reviewedHeadSha ?? "",
+  });
+  // #1645: persist the bounded reconciliation provenance on the artifact
+  // itself (ai-output.json), so the next investigation can tell whether a
+  // blocker came from current analysis or historical thread reconciliation.
+  if (threads.reconciliation) {
+    artifact.thread_reconciliation = threads.reconciliation satisfies ThreadReconciliationProvenance;
+  }
   if (threads.applied) {
     applied += 1;
     // Settlement is bookkeeping, except under findings_severity_gated where a

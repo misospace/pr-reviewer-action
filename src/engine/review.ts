@@ -102,6 +102,7 @@ import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { applyNegativeEvidenceToRecord, negativeEvidenceRulesFromArtifact } from "../enforcement/negative-evidence.js";
+import { readLiveReviewThreadListing } from "../enforcement/thread-reconcile.js";
 import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
@@ -2667,6 +2668,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     expectedRevision,
   );
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
+  // #1645: read the forge's CURRENT authoritative review-thread listing once,
+  // at disposition time, so carried threads reconcile against live state
+  // before any of them can enter the final finding set. One extra read only
+  // when the context stage actually listed unresolved threads.
+  const enforcementThreadRows = safeJsonArray(ws.read("review-threads.json")) as readonly unknown[] | null;
+  const liveThreadListing = enforcementThreadRows !== null && enforcementThreadRows.length > 0
+    ? await readLiveReviewThreadListing(adapter)
+    : null;
+  if (liveThreadListing?.state === "unknown") {
+    log(`#1645 review-thread reconciliation incomplete: ${liveThreadListing.reason ?? "unknown"}`);
+  }
   // Captured before any layer mutates it: the strict mapping (#811) takes the
   // model verdict as an input, not as the final answer.
   const modelVerdict = String(reviewRecord.verdict ?? "");
@@ -2688,7 +2700,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     toolHarness: safeJson(ws.read(enforcementHarness)) as never,
     // #812: the settlement views are JSON arrays — the object-only safeJson
     // nulled them, so review-thread and human-review settlement never ran.
-    threads: safeJsonArray(ws.read("review-threads.json")) as never,
+    threads: enforcementThreadRows as never,
+    // #1645: reconcile the carried threads against the forge's CURRENT
+    // authoritative review-thread listing read NOW (at disposition time,
+    // after the model turn), so a thread resolved or deleted since the
+    // context-stage fetch can never force REQUEST_CHANGES on this head.
+    threadReconciliation: liveThreadListing?.reconciliation ?? null,
+    reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };

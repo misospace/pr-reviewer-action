@@ -36,6 +36,12 @@ export interface ArtifactFinding {
   thread_id?: string;
   /** #775: original severity when the non-blocking category cap reduced it. */
   capped_from?: string;
+  /** #1645: set on a carried review-thread re-emission whose live state could
+   * not be established at decision time (reconciliation `unknown`): the
+   * original severity is kept in `capped_from` and the row is held at minor,
+   * so unverifiable historical state stays visible but never blocks. Never
+   * set when the live listing confirms the thread. */
+  thread_state_unverified?: boolean;
   /** #976: this finding was capped because it relied only on a CI conclusion. */
   ci_capped?: boolean;
   /** v3-only, no v2 counterpart: set by the deterministic outside-diff pass

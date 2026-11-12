@@ -29,6 +29,7 @@ import type {
   ManagedReview,
   PlatformReadAdapter,
   ReadResult,
+  ThreadListingReadResult,
 } from "./types.js";
 
 /** Forgejo has no check-runs API: the v2 seam substitutes this empty
@@ -654,6 +655,33 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       }
       return groupForgejoReviewThreads(commentLists);
     });
+  }
+
+  /** #1645: the same grouping as `listReviewThreads` plus an explicit
+   * completeness verdict for carried-thread reconciliation. Unlike the
+   * parity-shaped read above, ANY failed page fails the whole read: a
+   * partial thread list cannot prove a thread ABSENT, and reporting it
+   * complete would let a live carried blocker be dropped as historical. A
+   * fully-read enumeration reports `complete: true`. */
+  async listReviewThreadsLiveListing(): Promise<ThreadListingReadResult> {
+    const read = await this.read(async (at) => {
+      const reviews = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
+      if (reviews.status !== 200) throw new Error(`forgejo reviews read failed with status ${reviews.status}`);
+      const reviewList = pyJsonDecode(reviews.text);
+      if (!Array.isArray(reviewList)) throw new Error("forgejo reviews read returned a non-list body");
+      const commentLists: unknown[][] = [];
+      for (const review of reviewList) {
+        const reviewId = forgejoReviewCommentId(review);
+        if (reviewId === null) continue;
+        const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
+        if (response.status !== 200) throw new Error(`forgejo review ${reviewId} comments read failed with status ${response.status}`);
+        const comments = pyJsonDecode(response.text);
+        if (!Array.isArray(comments)) throw new Error(`forgejo review ${reviewId} comments read returned a non-list body`);
+        commentLists.push(comments);
+      }
+      return groupForgejoReviewThreads(commentLists);
+    });
+    return read.ok ? { ok: true, data: read.data, complete: true } : { ok: false, error: read.error };
   }
 
   /** `list_pr_reviews` (Forgejo serves every review in one response; the v2

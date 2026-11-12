@@ -105,6 +105,12 @@ export interface PlatformAdapter {
  * shell function's exit status, `data` its (parsed) stdout. */
 export type ReadResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/** #1645: a review-thread listing read with an explicit completeness verdict
+ * for absence reasoning (see `PlatformReadAdapter.listReviewThreadsLiveListing`). */
+export type ThreadListingReadResult =
+  | { ok: true; data: unknown[]; complete: boolean }
+  | { ok: false; error: string };
+
 /** CI-polling bounds for `externalChecks` (#663), taken from config/env by
  * the caller: `CI_API_TIMEOUT_SEC`, `CI_TIMEOUT_SEC`, `CI_DEADLINE_EPOCH`. */
 export interface CiBoundOptions {
@@ -189,6 +195,14 @@ export interface PlatformReadAdapter extends PlatformAdapter {
   /** `platform_review_threads`: up to 100 inline review threads in the
    * review_threads.py shape. */
   listReviewThreads(): Promise<ReadResult<unknown[]>>;
+  /** #1645: the same thread listing PLUS an explicit completeness signal,
+   * for the live reconciliation that decides whether a carried thread may
+   * block. Optional exactly like the other absence-reasoning reads
+   * (`listIssueCommentsResult`): an adapter without it CANNOT prove its
+   * listing holds every thread. `complete: true` means the read enumerated
+   * the full set; a capped or failed read reports `complete: false` or
+   * `ok: false` — never a silent partial list. */
+  listReviewThreadsLiveListing?(): Promise<ThreadListingReadResult>;
   /** #812: the PR body and the instant of its latest edit as ONE atomic
    * snapshot — on GitHub both fields come from the same GraphQL document
    * (`body`, `lastEditedAt`; the latter never moves on pushes, comments or
