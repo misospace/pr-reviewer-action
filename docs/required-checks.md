@@ -211,13 +211,22 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 - **discharge**: a check whose name is a delimited `test`/`tests` word —
   and no disqualifier token (coverage/report/upload/publish/deploy/image/
   scan/analysis/lint/docs/formatting names do not *run* tests) — concluded
-  `success` **on the exact reviewed head**, with **failure-first precedence**:
-  a matching test-named check that went red on the exact head refutes
-  discharge even when a sibling matrix leg is green. A `skipped`/`neutral`
-  conclusion never discharges (the platform fold collapses those to state
-  `success`, so the explicit conclusion is required). The row records the CI
-  provenance (`reason: ci-evidence` / obligation `resolvedBy`),
-  deterministically — no model re-invocation.
+  `success` **on the exact reviewed head**, and whose name **proves the
+  requested test scope**. A narrow scope (`unit`, `integration`, `e2e`,
+  `smoke`, `acceptance`, `contract`, `regression`, `performance`, `load`,
+  `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) must match the
+  ask: `Unit Tests` cannot discharge `run integration tests`, and a generic
+  `test` name cannot prove an integration-only ask. A full-suite ask
+  (`full`/`all`/`entire`/`complete`) needs a generic/unscoped test run, so
+  one narrow matrix leg cannot discharge it; a generic ask accepts any test
+  execution. **Failure-first precedence** is scoped the same way: an
+  in-scope test-named check that went red on the exact head refutes
+  discharge even when a sibling matrix leg is green, while a red unrelated
+  scope neither refutes nor discharges. A `skipped`/`neutral` conclusion
+  never discharges (the platform fold collapses those to state `success`, so
+  the explicit conclusion is required). The row records the CI provenance
+  (`reason: ci-evidence` / obligation `resolvedBy`), deterministically — no
+  model re-invocation.
 - **contradiction**: the reviewer narrative completed the row (`satisfied`,
   or a grounded `not_applicable` — the obligation fold #1381 folds both into
   a satisfied row, so the coverage fold downgrades both together to keep the
@@ -229,14 +238,20 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   `ci-evidence-test-check-contradicted`.
 - **everything else stays unresolved** with a bounded reason code
   (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
-  `-no-matching-test-check`, `-test-check-not-success`): capability,
-  missing-source, transport, budget and timeout shaped failures are
-  coverage, never satisfaction.
+  `-no-matching-test-check` — including a check whose scope does not prove
+  the ask, `-test-check-not-success`): capability, missing-source, transport,
+  budget and timeout shaped failures are coverage, never satisfaction.
 - **derived rows and `unmet` (forcing) rows are never reconciled** by CI
   evidence (#1449/#1505/#1381 semantics unchanged — discharge only from
   validated evidence, contradiction only strengthens the approval fence).
 - **no evidence, no change**: with no evidence artifact (or an unusable one,
   refused by the strict parser) every output is byte-identical to pre-#1594.
+- **producer obeys the consumer**: the gate emits at most 50 rows and a
+  16,384-character (UTF-16 code unit) JSON value, truncates names/conclusions
+  to the parser's 200-unit field bound (never splitting a surrogate pair), keeps
+  failed rows first when truncating, and drops invalid states. A final
+  strict-parser round-trip means an oversized or malformed artifact is never
+  emitted at all.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and

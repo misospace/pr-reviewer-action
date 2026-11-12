@@ -100,6 +100,47 @@ test("#1594 matcher: check names denote test execution only as a delimited word 
   for (const name of no) assert.equal(isTestExecutionCheckName(name), false, name);
 });
 
+test("#1594 discharge: the check must prove the requested test scope", () => {
+  const green = (name: string) => evidence("success", [{ name, state: "success", conclusion: "success" }]);
+
+  // same narrow scope: proved
+  assert.equal(ciDischargeForCheckText("run integration tests", green("integration-tests"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run unit tests", green("Unit Tests"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run e2e tests", green("e2e: tests"), HEAD).outcome, "satisfied");
+  // a generic ask accepts a narrowly scoped run
+  assert.equal(ciDischargeForCheckText("run the tests", green("Unit Tests"), HEAD).outcome, "satisfied");
+
+  // wrong scope: never discharges
+  const wrongScope = ciDischargeForCheckText("run integration tests", green("Unit Tests"), HEAD);
+  assert.equal(wrongScope.outcome, "unresolved");
+  assert.equal(wrongScope.reason, "no-matching-test-check");
+  // a generic check name cannot PROVE a narrow integration scope
+  assert.equal(ciDischargeForCheckText("run integration tests", green("test (24)"), HEAD).reason, "no-matching-test-check");
+
+  // full-suite asks need a generic/full run, not one narrow matrix leg
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Unit Tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run all tests", green("Unit Tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).outcome, "satisfied");
+  // a narrow ask stays narrow even when the prose also says "all"
+  assert.equal(ciDischargeForCheckText("run all unit tests", green("Unit Tests"), HEAD).outcome, "satisfied");
+
+  // failure-first is scoped too: an unrelated red leg neither refutes nor
+  // discharges an integration ask, an in-scope red leg refutes a green sibling
+  const unrelatedRed = evidence("success", [
+    { name: "Unit Tests", state: "failure", conclusion: "failure" },
+    { name: "integration-tests", state: "success", conclusion: "success" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run integration tests", unrelatedRed, HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run integration tests", evidence("success", [
+    { name: "Unit Tests", state: "failure", conclusion: "failure" },
+  ]), HEAD).outcome, "unresolved");
+  const inScopeRed = evidence("success", [
+    { name: "integration-tests", state: "failure", conclusion: "failure" },
+    { name: "integration-tests (retry)", state: "success", conclusion: "success" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run integration tests", inScopeRed, HEAD).outcome, "contradicted");
+});
+
 test("#1594 discharge: exact-head green test check discharges; stale head does not", () => {
   const ask = "run full test suite after upgrade";
   const green = evidence("success", [

@@ -13,7 +13,11 @@
  *   gate, never model output and never an extra forge call;
  * - discharge is deterministic-policy-owned: a validated head-bound green
  *   test-execution check closes the ask WITHOUT a model re-invocation; but
- *   precedence is failure-first — a matching test-named check that went red
+ *   the check must prove the ask's test SCOPE too — `Unit Tests` cannot
+ *   discharge `run integration tests`, and a narrowly scoped leg cannot
+ *   discharge a full-suite ask (a wrong-scope green says nothing about the
+ *   requested tests);
+ * - precedence is failure-first — a matching test-named check that went red
  *   on the exact head refutes discharge even when a sibling matrix leg is
  *   green (one red leg means the suite did not pass);
  * - a validated NEGATIVE head-bound test-execution check contradicts a
@@ -49,9 +53,12 @@ export interface HeadBoundCiEvidence {
 }
 
 const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
-const MAX_EVIDENCE_CHECKS = 50;
-const MAX_EVIDENCE_NAME_LENGTH = 200;
-const MAX_EVIDENCE_RAW_JSON_CHARS = 16384;
+/** Producer/consumer limits. The CI gate imports these so it can never emit
+ * an artifact this parser refuses (#1594 review). Lengths are UTF-16 code
+ * units, which is what `String#length` and this parser measure. */
+export const MAX_EVIDENCE_CHECKS = 50;
+export const MAX_EVIDENCE_FIELD_LENGTH = 200;
+export const MAX_EVIDENCE_RAW_JSON_CHARS = 16384;
 const EVIDENCE_STATES: ReadonlySet<string> = new Set(["pending", "success", "failure"]);
 const EVIDENCE_FINAL_STATES: ReadonlySet<string> = new Set(["success", "failure", "none"]);
 
@@ -61,10 +68,10 @@ function validatedEvidenceRow(row: unknown): CiEvidenceCheck | null {
   for (const key of Object.keys(entry)) {
     if (key !== "name" && key !== "state" && key !== "conclusion") return null;
   }
-  if (typeof entry.name !== "string" || entry.name === "" || entry.name.length > MAX_EVIDENCE_NAME_LENGTH) return null;
+  if (typeof entry.name !== "string" || entry.name === "" || entry.name.length > MAX_EVIDENCE_FIELD_LENGTH) return null;
   if (typeof entry.state !== "string" || !EVIDENCE_STATES.has(entry.state)) return null;
   if (entry.conclusion !== undefined
-    && !(entry.conclusion === null || (typeof entry.conclusion === "string" && entry.conclusion.length <= MAX_EVIDENCE_NAME_LENGTH))) {
+    && !(entry.conclusion === null || (typeof entry.conclusion === "string" && entry.conclusion.length <= MAX_EVIDENCE_FIELD_LENGTH))) {
     return null;
   }
   return {
@@ -142,6 +149,77 @@ export function isTestExecutionCheckName(name: string): boolean {
   return !TEST_NAME_DISQUALIFIERS.some((token) => lower.includes(token));
 }
 
+/**
+ * Narrow test scopes a name can denote. A check carrying one of these runs
+ * PART of the suite: it can prove an ask for that same scope, but it cannot
+ * prove a full-suite ask, and a different scope says nothing about the
+ * requested tests. Unrecognized scopes stay unresolved by construction
+ * (conservative).
+ */
+const TEST_SCOPE_ALIASES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["unit", ["unit"]],
+  ["integration", ["integration"]],
+  ["e2e", ["e2e", "end to end", "end2end"]],
+  ["smoke", ["smoke"]],
+  ["acceptance", ["acceptance"]],
+  ["contract", ["contract"]],
+  ["regression", ["regression"]],
+  ["performance", ["performance", "perf"]],
+  ["load", ["load"]],
+  ["browser", ["browser"]],
+  ["ui", ["ui"]],
+  ["api", ["api"]],
+  ["functional", ["functional"]],
+  ["mutation", ["mutation"]],
+  ["fuzz", ["fuzz"]],
+];
+
+/** Lowercase, collapse every non-alphanumeric run to one space, and pad so
+ * aliases can be matched as whole words (so `latest`/`download` never read
+ * as `test`/`load`). `end-to-end` and `end to end` normalize identically. */
+function normalizedTestScopeText(text: string): string {
+  return ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+}
+
+function testScopesIn(text: string): string[] {
+  const normalized = normalizedTestScopeText(text);
+  return TEST_SCOPE_ALIASES
+    .filter(([, aliases]) => aliases.some((alias) => normalized.includes(` ${alias} `)))
+    .map(([scope]) => scope);
+}
+
+/** `full`/`all`/`entire`/`complete` marks a whole-suite ask; a narrow leg is
+ * not proof of it. `all unit tests` remains a unit-scoped ask because the
+ * scope check runs first. */
+const FULL_TEST_SUITE_RE = / (?:full|all|entire|complete) /;
+
+function asksForFullTestSuite(text: string): boolean {
+  return FULL_TEST_SUITE_RE.test(normalizedTestScopeText(text));
+}
+
+type ScopeMatchMode = "discharge" | "contradiction";
+
+/** `discharge` needs PROOF of every requested scope; `contradiction` only
+ * needs the red leg to belong to the requested scope (a red unit leg cannot
+ * refute an integration-only ask). A full-suite ask accepts a generic test
+ * run as proof but rejects a narrowly scoped leg; a generic ask accepts any
+ * test execution. */
+function checkCoversRequestedScope(
+  name: string,
+  requestedScopes: readonly string[],
+  fullSuite: boolean,
+  mode: ScopeMatchMode,
+): boolean {
+  const provided = testScopesIn(name);
+  if (requestedScopes.length > 0) {
+    return mode === "contradiction"
+      ? requestedScopes.some((scope) => provided.includes(scope))
+      : requestedScopes.every((scope) => provided.includes(scope));
+  }
+  if (mode === "contradiction") return true;
+  return !fullSuite || provided.length === 0;
+}
+
 export type CiDischargeReason =
   | "no-ci-evidence"
   | "head-mismatch"
@@ -162,10 +240,11 @@ const NOT_APPLICABLE: CiDischarge = { applies: false, outcome: "none", reason: n
 /**
  * The single disposition for one check text against head-bound evidence.
  * `applies: false` means the text does not ask for a test run at all — the
- * row is left alone. A succeeded head-bound test-execution check DISCHARGES;
- * a failed one CONTRADICTS; everything else keeps the row unresolved with a
- * bounded reason code. GitHub `skipped`/`neutral` conclusions arrive with
- * collapsed state `success`, so discharge requires the explicit
+ * row is left alone. A succeeded head-bound test-execution check that also
+ * covers the requested test scope DISCHARGES; a failed in-scope one
+ * CONTRADICTS; everything else keeps the row unresolved with a bounded
+ * reason code. GitHub `skipped`/`neutral` conclusions arrive with collapsed
+ * state `success`, so discharge requires the explicit
  * `conclusion === "success"` (or a state-only row with no conclusion).
  */
 export function ciDischargeForCheckText(
@@ -178,14 +257,19 @@ export function ciDischargeForCheckText(
   if (reviewedHeadSha === "" || evidence.headSha.toLowerCase() !== reviewedHeadSha.toLowerCase()) {
     return { applies: true, outcome: "unresolved", reason: "head-mismatch", check: null };
   }
+  const requestedScopes = testScopesIn(checkText);
+  const fullSuite = asksForFullTestSuite(checkText);
   const matching = evidence.checks.filter((check) => isTestExecutionCheckName(check.name));
   if (matching.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
-  // Precedence is failure-first: a matching test-named check that went RED
+  // Precedence is failure-first: an in-scope test-named check that went RED
   // on the exact head refutes discharge even when a sibling matrix leg is
   // green — one red leg of a test matrix means the suite did not pass.
-  const failed = matching.find((check) => check.state === "failure");
+  const failed = matching.find((check) => check.state === "failure"
+    && checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction"));
   if (failed !== undefined) return { applies: true, outcome: "contradicted", reason: "test-check-contradicted", check: failed };
-  const succeeded = matching.find((check) => check.state === "success"
+  const dischargeable = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "discharge"));
+  if (dischargeable.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
+  const succeeded = dischargeable.find((check) => check.state === "success"
     && (check.conclusion === null || check.conclusion === "success"));
   if (succeeded !== undefined) return { applies: true, outcome: "satisfied", reason: "test-check-succeeded", check: succeeded };
   return { applies: true, outcome: "unresolved", reason: "test-check-not-success", check: null };

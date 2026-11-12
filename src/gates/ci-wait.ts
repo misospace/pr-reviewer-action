@@ -1,4 +1,10 @@
 import { appendFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  MAX_EVIDENCE_CHECKS,
+  MAX_EVIDENCE_FIELD_LENGTH,
+  MAX_EVIDENCE_RAW_JSON_CHARS,
+  parseHeadBoundCiEvidence,
+} from "../enforcement/required-check-ci.js";
 import { ciAttemptTimeoutMs } from "../platform/bounded.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
@@ -139,30 +145,47 @@ function renderRows(checks: readonly ExternalCheck[]): string {
   return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.conclusion ?? check.state)} |`).join("\n");
 }
 
+/** Collapse control runs and truncate to the parser's UTF-16 field bound
+ * without splitting a surrogate pair (`Array.from` truncates by code point,
+ * the parser counts UTF-16 units — an emoji-heavy name must still fit). */
+function boundedEvidenceField(value: string): string {
+  const collapsed = value.replace(CELL_BREAK_RE, " ").trim();
+  let bounded = "";
+  for (const codePoint of collapsed) {
+    if (bounded.length + codePoint.length > MAX_EVIDENCE_FIELD_LENGTH) break;
+    bounded += codePoint;
+  }
+  return bounded;
+}
+
 /** #1594: the head-bound check-evidence gate output — the compact-JSON
  * artifact the enforcement pass reconciles required-check completion against
  * (src/enforcement/required-check-ci.ts). Written ONLY on a finalized wait
  * (never on timeout or skip), so a mid-wait or skipped gate produces no
  * evidence. Check names and conclusions remain untrusted DATA: control runs
- * collapse, both are bounded to 200 code points, empty values are dropped,
- * and a malformed SHA yields no line at all. The row list is capped at 50
- * (matching the strict parser); when truncating, rows with state `failure`
- * are kept first (in original relative order) so a red test check can never
- * be the one dropped, then the remaining slots fill in original order. The
- * line is NOT in the `ciGateOutputs` action-output whitelist, so it never
- * reaches published action outputs. */
+ * collapse, both are bounded to the parser's 200-UTF-16-unit field limit,
+ * invalid states and empty values are dropped, and a malformed SHA yields no
+ * line at all.
+ *
+ * The producer obeys the consumer's limits by construction: unknown states
+ * are filtered, strays are capped at 50 rows, and the serialized JSON is
+ * capped at the parser's 16,384-character budget. When truncation is needed
+ * (rows or bytes), failed rows are kept first in original relative order so
+ * a red test check can never be the one dropped. The final strict parser
+ * round-trip is a self-check: if it ever refuses the line, emit nothing
+ * rather than an unusable artifact. The line is NOT in the `ciGateOutputs`
+ * action-output whitelist, so it never reaches published action outputs. */
 export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
   try {
     if (!/^[0-9a-f]{7,64}$/i.test(sha)) return "";
     if (finalState !== "success" && finalState !== "failure" && finalState !== "none") return "";
     const rows: Array<{ name: string; state: string; conclusion?: string }> = [];
     for (const check of checks) {
-      if (typeof check.name !== "string" || typeof check.state !== "string") continue;
-      const name = Array.from(check.name.replace(CELL_BREAK_RE, " ").trim()).slice(0, 200).join("");
+      if (typeof check.name !== "string") continue;
+      if (check.state !== "pending" && check.state !== "success" && check.state !== "failure") continue;
+      const name = boundedEvidenceField(check.name);
       if (name === "") continue;
-      const conclusion = typeof check.conclusion === "string"
-        ? Array.from(check.conclusion.replace(CELL_BREAK_RE, " ").trim()).slice(0, 200).join("")
-        : "";
+      const conclusion = typeof check.conclusion === "string" ? boundedEvidenceField(check.conclusion) : "";
       rows.push({
         name,
         state: check.state,
@@ -170,10 +193,27 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       });
     }
     if (rows.length === 0) return "";
-    const capped = rows.length > 50
-      ? [...rows.filter((row) => row.state === "failure"), ...rows.filter((row) => row.state !== "failure")].slice(0, 50)
-      : rows;
-    return `ci_checks_evidence=${jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: capped })}`;
+    const serialize = (candidate: readonly { name: string; state: string; conclusion?: string }[]): string =>
+      jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: candidate });
+    // Failure-first ordering is the truncation order: whether the 50-row cap
+    // or the serialized JSON budget drops rows, red rows survive longest.
+    const prioritized = (): Array<{ name: string; state: string; conclusion?: string }> => [
+      ...rows.filter((row) => row.state === "failure"),
+      ...rows.filter((row) => row.state !== "failure"),
+    ];
+    let capped = rows.length > MAX_EVIDENCE_CHECKS ? prioritized().slice(0, MAX_EVIDENCE_CHECKS) : rows;
+    let json = serialize(capped);
+    if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) {
+      capped = prioritized().slice(0, MAX_EVIDENCE_CHECKS);
+      while (capped.length > 0 && json.length > MAX_EVIDENCE_RAW_JSON_CHARS) {
+        capped = capped.slice(0, -1);
+        json = serialize(capped);
+      }
+    }
+    if (capped.length === 0 || json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
+    // Same parser the enforcement pass uses; a refused line is no evidence.
+    if (parseHeadBoundCiEvidence(json) === null) return "";
+    return `ci_checks_evidence=${json}`;
   } catch {
     return "";
   }

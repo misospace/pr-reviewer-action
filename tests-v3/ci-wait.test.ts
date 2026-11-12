@@ -849,6 +849,44 @@ test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artif
   assert.equal(parsedOverflow!.checks[0]!.name, "Unit Tests", "red rows lead the truncated list");
 });
 
+test("renderCiEvidenceOutput: UTF-16 field bound and serialized budget always parse strictly", () => {
+  // The parser counts UTF-16 units (an emoji is 2); truncation by code point
+  // alone could emit a 200-code-point/400-unit field and invalidate the
+  // whole artifact. 100 emoji = exactly 200 units, not 150.
+  const emoji = renderCiEvidenceOutput(SHA, "success", [
+    { name: "😀".repeat(150), state: "success", conclusion: "😀".repeat(150) },
+  ]);
+  const parsedEmoji = parseHeadBoundCiEvidence(emoji.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedEmoji, null);
+  assert.equal(parsedEmoji!.checks[0]!.name, "😀".repeat(100));
+  assert.equal(parsedEmoji!.checks[0]!.name.length, 200);
+  assert.equal(parsedEmoji!.checks[0]!.conclusion, "😀".repeat(100));
+
+  // 50 maximum-length rows exceed the parser's 16-Ki-character JSON budget:
+  // the producer must drop rows, keep the red one, and still round-trip.
+  const maxRows = Array.from({ length: 50 }, (_, i) => ({
+    name: `test-${i}-${"x".repeat(180)}`,
+    state: i === 49 ? "failure" as const : "success" as const,
+    conclusion: "y".repeat(200),
+  }));
+  const maxLine = renderCiEvidenceOutput(SHA, "failure", maxRows);
+  assert.notEqual(maxLine, "");
+  const maxJson = maxLine.replace(/^ci_checks_evidence=/, "");
+  assert.equal(maxJson.length <= 16384, true, "the serialized value obeys the parser's raw budget");
+  const parsedMax = parseHeadBoundCiEvidence(maxJson);
+  assert.notEqual(parsedMax, null, "the size-capped artifact still parses strictly");
+  assert.equal(parsedMax!.checks.length < 50, true);
+  assert.equal(parsedMax!.checks[0]!.state, "failure", "the red row leads and survives the size cap");
+
+  // rows the parser would reject are never emitted
+  assert.equal(renderCiEvidenceOutput(SHA, "success", [{ name: "test", state: "queued" }]), "");
+  const mixed = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test", state: "queued" },
+    { name: "test", state: "success", conclusion: "success" },
+  ]);
+  assert.deepEqual(parseHeadBoundCiEvidence(mixed.replace(/^ci_checks_evidence=/, ""))!.checks.map((check) => check.name), ["test"]);
+});
+
 test("runCiWait: a finalized wait writes the head-bound ci_checks_evidence line", async () => {
   const adapter = fakeAdapter([[{ name: "Unit Tests", state: "success", conclusion: "success" }, { name: "build", state: "success", conclusion: "success" }]]);
   const h = harness(adapter);
