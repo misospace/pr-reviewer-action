@@ -15,6 +15,7 @@ import {
   harnessExecutionCounts,
   harnessFailuresAllDeadlineClamps,
   harnessGatheredNoEvidence,
+  isToolLoopDeadlineError,
 } from "../src/tools/execution-counts.js";
 import { applyToolHarnessFailureEnforcement, type ToolHarnessArtifact } from "../src/enforcement/enforce.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -244,6 +245,26 @@ test("#1464/#1606 review: a deadline-clamped failure is not a tool failure — t
     }).applied,
     true,
   );
+});
+
+test("#1464 review: the shared deadline predicate names BOTH deadline stops and nothing else", () => {
+  // The predicate the smart-tier tool-error fallback trigger AND the #1606
+  // all-failed overlay read (src/tools/harness.ts, src/enforcement/enforce.ts).
+  // #1464 excluded only the exploration-boundary text from the fallback
+  // trigger; sharing this predicate widened it to the whole-run deadline text
+  // too — a deadline stop is not a tool failure at EITHER site. This test
+  // pins the shared meaning directly.
+  assert.equal(isToolLoopDeadlineError(TOOL_LOOP_EXPLORATION_DEADLINE_ERROR), true);
+  assert.equal(isToolLoopDeadlineError(TOOL_LOOP_DEADLINE_ERROR), true);
+  // A real executor failure stays a failure.
+  assert.equal(isToolLoopDeadlineError("read failed: EACCES"), false);
+  // Exact match only — text that merely carries the marker is not the stop.
+  assert.equal(isToolLoopDeadlineError(`${TOOL_LOOP_DEADLINE_ERROR} (attempt 2)`), false);
+  assert.equal(isToolLoopDeadlineError("tool-loop deadline"), false);
+  // A missing or non-string error field is not a deadline stop.
+  assert.equal(isToolLoopDeadlineError(undefined), false);
+  assert.equal(isToolLoopDeadlineError(""), false);
+  assert.equal(isToolLoopDeadlineError({ message: TOOL_LOOP_DEADLINE_ERROR }), false);
 });
 
 test("#1464/#1606 review: the overlay stays silent for the REAL artifact of a deadline-clamped run", async () => {
