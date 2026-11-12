@@ -222,9 +222,11 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   execution. **Failure-first precedence** is scoped the same way: an
   in-scope test-named check that went red on the exact head refutes
   discharge even when a sibling matrix leg is green, while a red unrelated
-  scope neither refutes nor discharges. A `skipped`/`neutral` conclusion
-  never discharges (the platform fold collapses those to state `success`, so
-  the explicit conclusion is required). The row records the CI provenance
+  scope neither refutes nor discharges. A full-suite ask also needs every
+  in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
+  leg collapsed to state `success`, keeps it unresolved beside a green
+  sibling (the explicit conclusion is required, and one leg that did not run
+  means the suite did not run). The row records the CI provenance
   (`reason: ci-evidence` / obligation `resolvedBy`), deterministically — no
   model re-invocation.
 - **contradiction**: the reviewer narrative completed the row (`satisfied`,

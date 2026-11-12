@@ -264,9 +264,16 @@ export function ciDischargeForCheckText(
   // Precedence is failure-first: an in-scope test-named check that went RED
   // on the exact head refutes discharge even when a sibling matrix leg is
   // green — one red leg of a test matrix means the suite did not pass.
-  const failed = matching.find((check) => check.state === "failure"
-    && checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction"));
+  const inScope = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction"));
+  const failed = inScope.find((check) => check.state === "failure");
   if (failed !== undefined) return { applies: true, outcome: "contradicted", reason: "test-check-contradicted", check: failed };
+  // A full-suite ask needs every in-scope test check settled green: a
+  // pending leg, or a `skipped`/`neutral` leg collapsed to state success,
+  // means the suite did not (fully) run. A narrow ask only waits on its own
+  // scope, so an unrelated pending/red leg neither blocks nor refutes it.
+  const unsettled = inScope.find((check) => check.state !== "success"
+    || (check.conclusion !== null && check.conclusion !== "success"));
+  if (unsettled !== undefined) return { applies: true, outcome: "unresolved", reason: "test-check-not-success", check: null };
   const dischargeable = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "discharge"));
   if (dischargeable.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
   const succeeded = dischargeable.find((check) => check.state === "success"

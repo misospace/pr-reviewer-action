@@ -139,6 +139,26 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
     { name: "integration-tests (retry)", state: "success", conclusion: "success" },
   ]);
   assert.equal(ciDischargeForCheckText("run integration tests", inScopeRed, HEAD).outcome, "contradicted");
+
+  // full-suite asks need every in-scope leg settled green: a skipped leg (the
+  // GitHub trap: state success) or a pending leg blocks a green sibling
+  const skippedSibling = evidence("success", [
+    { name: "test", state: "success", conclusion: "success" },
+    { name: "Unit Tests", state: "success", conclusion: "skipped" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", skippedSibling, HEAD).reason, "test-check-not-success");
+  const pendingSibling = evidence("failure", [
+    { name: "test", state: "success", conclusion: "success" },
+    { name: "Unit Tests", state: "pending" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", pendingSibling, HEAD).reason, "test-check-not-success");
+  // ...but a narrow ask ignores the unrelated skipped/pending leg
+  assert.equal(ciDischargeForCheckText("run integration tests", skippedSibling, HEAD).outcome, "unresolved", "no integration check is present");
+  const integrationAndSkippedUnit = evidence("success", [
+    { name: "integration-tests", state: "success", conclusion: "success" },
+    { name: "Unit Tests", state: "success", conclusion: "skipped" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run integration tests", integrationAndSkippedUnit, HEAD).outcome, "satisfied");
 });
 
 test("#1594 discharge: exact-head green test check discharges; stale head does not", () => {
