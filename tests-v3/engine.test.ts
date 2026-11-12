@@ -10,7 +10,7 @@ import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.j
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
 import { actionStageEnv } from "../src/run/action.js";
-import { collectConfigLines } from "../src/precheck/fingerprint.js";
+import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 import { validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { engineMain } from "../src/engine/cli.js";
@@ -1376,6 +1376,56 @@ test("admission stage env keeps the Action fingerprint config byte-identical", (
   const admissionLines = collectConfigLines(admissionStageEnv(contract, request, workspace));
   const actionLines = collectConfigLines(actionStageEnv(env) as Record<string, string>);
   assert.deepEqual(admissionLines, actionLines, "the fingerprint config hash inputs are byte-identical");
+});
+
+// #1635 (PR #1638 review): the compaction watermark reaches the precheck
+// fingerprint through the WORKFLOW INPUT — the admission env is what
+// `collectConfigLines` hashes, and the input is projected into it. A changed
+// watermark therefore invalidates a cached review instead of skipping it.
+// The repository-config file cannot set the input at all (it is not
+// repo-configurable), so there is no second source that could miss the
+// fingerprint — see tests-v3/repository-config.test.ts.
+test("a configured compaction watermark reaches the admission fingerprint", () => {
+  const contract = validateContract(V3_CONTRACT);
+  const workspace = "/checkouts/pr";
+  const env: NodeJS.ProcessEnv = {
+    "INPUT_GITHUB-TOKEN": "tok",
+    "INPUT_REPO": "o/r",
+    "INPUT_PR-NUMBER": "7",
+    "INPUT_AI-BASE-URL": "https://model.invalid",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_AI-API-KEY": "k",
+    "INPUT_TOOL-MAX-CONVERSATION-TOKENS": "60000",
+    GITHUB_REPOSITORY: "o/r",
+    GITHUB_WORKSPACE: workspace,
+  };
+  const request: ReviewRequest = {
+    repository: env.GITHUB_REPOSITORY ?? "",
+    prNumber: env.PR_NUMBER ?? "",
+    headSha: "",
+    baseRef: "",
+    isForkPr: "",
+    platform: "github",
+    forgejoApiUrl: "",
+    ciChecksFile: "",
+    inputs: rawInputsFromEnv(contract, env),
+    ambient: env,
+    triggerReason: "push",
+    forceRereview: false,
+  };
+  const lines = collectConfigLines(admissionStageEnv(contract, request, workspace));
+  assert.ok(lines.includes("TOOL_MAX_CONVERSATION_TOKENS=60000"), "the watermark is part of the admission config hash");
+  // The property the line exists for: a DIFFERENT watermark must produce a
+  // different config hash, so a cached review is invalidated instead of
+  // skipped.
+  const hashOf = (value: string) => computeConfigHash(collectConfigLines(admissionStageEnv(contract, {
+    ...request,
+    inputs: rawInputsFromEnv(contract, { ...env, "INPUT_TOOL-MAX-CONVERSATION-TOKENS": value }),
+  }, workspace)));
+  assert.notEqual(hashOf("60000"), hashOf("40000"));
+  // The unset shape (the contract default) contributes nothing — an existing
+  // installation's cached reviews stay valid across the upgrade.
+  assert.notEqual(hashOf(""), hashOf("60000"));
 });
 
 test("review-request.json records the folded admission identity on an Action-path request", async () => {
