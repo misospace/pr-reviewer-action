@@ -667,3 +667,29 @@ test("#1577: a disabled run leaves no risk artifacts at all", async () => {
     f.cleanup();
   }
 });
+
+// #1043 defense: run dirs can be shared across runs (explicit runDir or
+// PR_REVIEWER_RUN_DIR), and the workspace read falls back to the on-disk
+// mirror. A disabled scan must clear what an earlier run left behind, so a
+// stale section cannot reach the next corpus build.
+test("#1577: a disabled run clears the risk artifacts of an earlier run in the same run dir", async () => {
+  const server = await reviewServer(plainReview());
+  const f = fixtureDir();
+  try {
+    const first = engineRequest(server.url, f.runDir);
+    first.inputs = { ...first.inputs, "risk-obligations": "true" };
+    await runReviewEngine(first, engineDeps(f.root, f.runDir, riskyDiff));
+    assert.equal(existsSync(join(f.runDir, "risk-obligations.md")), true, "the first run wrote the section");
+    assert.equal(existsSync(join(f.runDir, "risk-obligations.json")), true, "the first run wrote the record");
+
+    const second = engineRequest(server.url, f.runDir);
+    await runReviewEngine(second, engineDeps(f.root, f.runDir, riskyDiff));
+    assert.equal(existsSync(join(f.runDir, "risk-obligations.md")), false, "the disabled run clears the stale section");
+    assert.equal(existsSync(join(f.runDir, "risk-obligations.json")), false, "the disabled run clears the stale record");
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.equal(corpus.includes("# Risk Evidence Obligations"), false, "the stale section must not reach the corpus");
+  } finally {
+    server.close();
+    f.cleanup();
+  }
+});

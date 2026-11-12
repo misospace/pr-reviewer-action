@@ -1533,10 +1533,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // run (no rebuild trigger needed). Fail-soft: a scan failure writes an
   // explicit error record the enforcement half reads as INCOMPLETE coverage
   // — a scan that never completed must never read as "no risk obligations".
-  // A DISABLED scan writes no risk artifact at all: neither the JSON record
-  // nor the corpus section file. The section is read back with a null-safe
-  // read (a missing file is the same "no section" signal an empty one is),
-  // so a disabled run stays byte-identical to a pre-#1577 build.
+  // A DISABLED scan writes no risk artifact of its own: neither the JSON
+  // record nor the corpus section file. It also clears both artifacts,
+  // because run dirs can be shared across runs (explicit runDir or
+  // PR_REVIEWER_RUN_DIR) and the workspace read falls back to the on-disk
+  // mirror — a stale section left by an earlier run would otherwise be
+  // ingested by this corpus build (#1043 stale-artifact defense).
   const riskObligationsEnabled = (env.RISK_OBLIGATIONS ?? "false").trim().toLowerCase() === "true";
   if (riskObligationsEnabled) {
     const riskDiffFull = ws.readText("pr.diff");
@@ -1592,6 +1594,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       };
     }
     ws.write("risk-obligations.json", Buffer.from(`${pyJsonDumps(riskRecord)}\n`, "utf8"));
+  } else {
+    // #1043 (review): run dirs can be shared across runs (explicit runDir /
+    // PR_REVIEWER_RUN_DIR), so a disabled scan must clear what an earlier
+    // run left behind — a stale section on disk would be read back into the
+    // next corpus build while the run claims no risk obligations exist.
+    ws.remove("risk-obligations.md");
+    ws.remove("risk-obligations.json");
   }
 
   // Corpus build #1 (initial review owns the primary artifact slot).

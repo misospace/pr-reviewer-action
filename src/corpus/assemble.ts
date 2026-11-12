@@ -612,11 +612,12 @@ export function buildReviewCorpus(
   }
 
   // ── Risk Evidence Obligations (#1577) — reserved, after derived ─────────
-  // risk-obligations.md carries no bytes unless risk_obligations is on and
-  // the deterministic scan raised at least one obligation, so a disabled run
-  // (no artifact written at all) is byte-identical to a pre-#1577 build.
-  // Same fits-sanity: dropped rather than truncated when it cannot fit a
-  // sane reservation.
+  // risk-obligations.md carries no bytes unless risk_obligations is on: the
+  // section is empty when the scan raised no row, and it carries the visible
+  // unavailable note when the scan did not complete over the full diff. A
+  // disabled run writes no artifact at all and clears a stale one, so it
+  // stays byte-identical to a pre-#1577 build. Same fits-sanity: dropped
+  // rather than truncated when it cannot fit a sane reservation.
   let riskBytes = 0;
   if (nonEmpty(ws.riskObligationsMd)) {
     const candidate = bytes(ws.riskObligationsMd).length;
