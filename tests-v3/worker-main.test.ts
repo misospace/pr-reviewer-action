@@ -331,7 +331,11 @@ test("the projected forge-publish material rides the engine ambient under the pl
     readonly expected: Record<string, string>;
   }[] = [
     { platform: "github", expected: { GH_TOKEN: secret, GITHUB_TOKEN: secret } },
-    { platform: "forgejo", expected: { FORGEJO_TOKEN: secret } },
+    // The forgejo branch binds the unified GH_TOKEN ABI too: the engine's
+    // stage-env validation (`validateStageEnv`) requires GH_TOKEN for every
+    // non-tangled platform, and the Action adapter binds GH_TOKEN and
+    // FORGEJO_TOKEN from the same forge token.
+    { platform: "forgejo", expected: { FORGEJO_TOKEN: secret, GH_TOKEN: secret } },
   ];
   for (const testCase of cases) {
     const fixture = makeRequest({ platform: testCase.platform });
@@ -377,6 +381,97 @@ test("absent forge-publish material leaves the engine ambient empty (#735/#1484)
         cleanup(fixture);
       }
     }
+  }
+});
+
+// ── the worker's usage attestation (#736/#1484) ─────────────────────────
+
+test("a completed run attests the primary lane's provider-reported usage in the publication artifact", async () => {
+  const fixture = makeRequest();
+  try {
+    const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+    writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-response.primary.json"),
+      JSON.stringify({ id: "r1", usage: { promptTokens: 11, completionTokens: 7, totalTokens: 18 } }),
+      "utf8",
+    );
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    const artifact = JSON.parse(
+      readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const usage = artifact["usage"] as Array<Record<string, unknown>>;
+    assert.equal(Array.isArray(usage), true);
+    assert.equal(usage.length, 1);
+    assert.deepEqual(
+      { ...usage[0] },
+      {
+        route: "fast",
+        role: "primary",
+        requestCount: 1,
+        inputTokens: 11,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 7,
+        costMicros: 0,
+        costProvenance: "unknown",
+      },
+    );
+    // The controller derives its own durable usage ids (`runId:index`), so
+    // the attestation carries none: it can never collide or over-count on
+    // a publication replay.
+    assert.equal("usageId" in (usage[0] ?? {}), false);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("no provider usage block leaves the artifact without a usage attestation (never fabricated)", async () => {
+  for (const envelope of [
+    "{}",
+    JSON.stringify({ usage: null }),
+    JSON.stringify({ usage: { promptTokens: "many" } }),
+    "not json",
+  ]) {
+    const fixture = makeRequest();
+    try {
+      const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      writeFileSync(path.join(fixture.request.runDir, "ai-response.primary.json"), envelope, "utf8");
+      assert.equal(await workerMain([fixture.request.requestPath], {}, deps), 0);
+      const artifact = JSON.parse(
+        readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+      ) as Record<string, unknown>;
+      assert.equal("usage" in artifact, false);
+    } finally {
+      cleanup(fixture);
+    }
+  }
+});
+
+test("an engine-written usage key is never overwritten by the attestation", async () => {
+  const fixture = makeRequest();
+  try {
+    const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+    const engineUsage = [{ route: "engine", role: "judge", requestCount: 3, inputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 2, costMicros: 0, costProvenance: "unknown" }];
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-output.json"),
+      JSON.stringify({ usage: engineUsage }),
+      "utf8",
+    );
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-response.primary.json"),
+      JSON.stringify({ usage: { prompt_tokens: 11, completion_tokens: 7 } }),
+      "utf8",
+    );
+    assert.equal(await workerMain([fixture.request.requestPath], {}, deps), 0);
+    const artifact = JSON.parse(
+      readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(artifact["usage"], engineUsage);
+  } finally {
+    cleanup(fixture);
   }
 });
 

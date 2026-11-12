@@ -3159,6 +3159,13 @@ scenario_engine_parity_route_b_action_adapter() {
     # review and no artifact to compare. The gate overrides only that
     # skip — it is outside the fingerprint config sweep, so the reviewed
     # diff and therefore the artifact are unchanged.
+    #
+    # github-token rides the INPUT_* channel too: action.yml defaults it
+    # to `${{ github.token }}`, which on a Forgejo runner resolves to the
+    # forge job token — the engine's unified GH_TOKEN ABI. The runner
+    # resolves that default before the process starts, so the route binds
+    # the resolved value, and the ambient FORGEJO_TOKEN stays (the
+    # adapter reads it for the forgejo publish boundary).
     env -u AI_API_KEY -u AI_BASE_URL -u PR_REVIEWER_CREDENTIAL_MODEL \
       -u PR_REVIEWER_CREDENTIAL_GITHUB -u PR_REVIEWER_CREDENTIAL_FORGEJO \
       -u PR_REVIEWER_GITHUB_APP_ID -u PR_REVIEWER_GITHUB_APP_PRIVATE_KEY \
@@ -3176,6 +3183,7 @@ scenario_engine_parity_route_b_action_adapter() {
       "PLATFORM=forgejo" \
       "FORGEJO_API_URL=${FORGEJO_API_URL}" \
       "FORGEJO_TOKEN=${FORGEJO_TOKEN}" \
+      "INPUT_GITHUB-TOKEN=${FORGEJO_TOKEN}" \
       "COMMENT_MARKER=<!-- ai-pr-reviewer -->" \
       "INPUT_FORCE-REVIEW=true" \
       "$NODE_BIN" "$ROOT_DIR/dist/index.js"
