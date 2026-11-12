@@ -360,8 +360,9 @@ const LOOP_CONVERSATION_WATERMARK_CEILING = 250000;
  * (#1635; 24k..250k, never above what's left), the
  * first-turn corpus ~60% of that budget and each result ~8%, at ~3 bytes/
  * token. Explicit byte inputs win. A window too small for the per-turn
- * completion and a minimal conversation is refused, like a too-small corpus
- * window. #1635: tool-max-conversation-tokens is the explicit watermark
+ * completion plus the framing and tool-schema reserves and a minimal
+ * conversation is refused, like a too-small corpus window. #1635:
+ * tool-max-conversation-tokens is the explicit watermark
  * override — it must be positive and must fit the remaining window, or the
  * run is refused rather than silently capped. */
 export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits {

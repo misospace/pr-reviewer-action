@@ -188,7 +188,11 @@ under 10 KB (~2.3k approximate tokens), and 2,300 tokens come out of the
 window before the conversation budget is derived. A regression test pins
 that the advertised set still fits the reserve. Read-only MCP tools add
 their own schemas beyond it — an operator opt-in for which a small window
-needs a lower `tool-max-conversation-tokens`.
+needs a lower `tool-max-conversation-tokens`. Their size is not enforced;
+the budget does not count them, so an over-budget set shows up only at run
+time — `overflow_protected` under `tool_loop_telemetry.compaction` (see
+**Protected overflow** below) or a provider context-window error. Check
+one organic run after enabling a large MCP server.
 `tool-max-conversation-tokens` overrides the derived watermark directly; it
 must be positive and must fit the declared window after those reserves, or
 the run is refused rather than silently capped.
