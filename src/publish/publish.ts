@@ -22,6 +22,7 @@ import {
 import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
 import { buildReviewHandoff, renderReviewHandoffBlock } from "./handoff.js";
+import { computeReviewDisposition, normalizePublishedRecommendation } from "./disposition.js";
 import { buildReviewObligations, renderReviewObligationsBlock, REVIEW_OBLIGATIONS_MAX_BYTES, type ReviewObligationsInput } from "./obligations.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
@@ -32,7 +33,7 @@ import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/r
 import { aggregateOutcomeEvents } from "../outcomes/report.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, hideSupersededManagedReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
-import { strictReviewResult } from "../enforcement/verdict-policy.js";
+import { strictReviewResult, hasBlockingOpenFinding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
@@ -246,17 +247,6 @@ export interface PublishResult {
   native?: { event: NativeReviewEvent; submitted: boolean; fellBack?: true };
 }
 
-const VERDICT_PREFIXES: Record<"approve" | "request_changes", string> = {
-  request_changes: "⚠️ **Automated recommendation: REQUEST CHANGES**",
-  approve: "✅ **Automated recommendation: APPROVE**",
-};
-
-/** (#1161) The header for a run that produced no valid verdict: neither
- * `approve` nor `request_changes`. It must never read as an approval
- * recommendation — a missing or invalid verdict is a failed run, not a
- * clean review. */
-const NO_VERDICT_PREFIX = "🟡 **Automated recommendation: NO VERDICT**";
-
 /** (#1161) The only two verdicts that can carry a native review event. A
  * missing or invalid verdict is neither an approval nor a blocking
  * request. */
@@ -275,13 +265,6 @@ export function isNativeVerdictMode(mode: string): boolean {
   const value = (mode ?? "").toLowerCase();
   return value === "review_verdict" || value === "review_blockers";
 }
-
-/** (#873) The `comment`-mode header for an approve whose coverage is
- * incomplete: never "APPROVE", since the coverage notice right below it
- * says the review did not finish. */
-const INCOMPLETE_COVERAGE_PREFIX = "🟡 **Automated recommendation: INCOMPLETE — not an approval**";
-const TRACE_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**";
-const BOTH_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**";
 
 /**
  * Sanitize model output: strip reserved metadata markers (the model can
@@ -739,6 +722,12 @@ export function buildPublishedBody(options: {
    * review prose; the aggregate ceiling trims only the prose. */
   obligations?: ReviewObligationsInput | undefined;
   header?: string;
+  /** #1596: the action-owned recommendation line (the disposition's
+   * wording). Rendered immediately AFTER the header and BEFORE the note, so
+   * it sits above every model-authored surface in the native modes — where
+   * the header alone carries no recommendation and the model prose would
+   * otherwise be the only statement of what the action decided. */
+  recommendation?: string;
   note?: string;
   analysisEngine: string;
   sanitizedMarkdown: string;
@@ -777,6 +766,9 @@ export function buildPublishedBody(options: {
   }
   if (options.header) {
     lines.push(options.header, "");
+  }
+  if (options.recommendation) {
+    lines.push(options.recommendation, "");
   }
   if (options.note) {
     lines.push(options.note, "");
@@ -2003,12 +1995,6 @@ export async function publishReview(
     }
   }
 
-  // Sanitize model output first — the same pipeline for every mode. Any
-  // outside-diff findings are appended as their own section: unlike inline
-  // comments (which can only anchor in-diff findings), every publish mode
-  // renders review_markdown, so this is the one place that never drops them.
-  const sanitized = sanitizeForPublication(input.reviewMarkdown, input.upstreamLinkMode, input.conditionalPresence)
-    + renderOutsideDiffSection(input.findings, input.upstreamLinkMode);
   // The marker's review_result. Under verdict_policy=strict (#811) it
   // distinguishes the non-blocking states (clean / findings / partial) from
   // issues, from the same still-open findings and coverage the strict
@@ -2019,6 +2005,67 @@ export async function publishReview(
   const strict = input.verdictPolicy === "strict";
   const incompleteReason = resolveIncompleteReason(input);
   const reviewResult = markerReviewResult(input);
+  // #1596: the authoritative disposition of this review, computed ONCE from
+  // the deterministic signals — the final verdict, the marker's
+  // `review_result`, the coverage state and the approval certification. It
+  // is the ONE statement of what the action decided: the published
+  // recommendation line, the native review event and the prose reconciliation
+  // all read from it, so they cannot contradict each other.
+  //
+  // `completeCoverage` and the approval guardrails moved up here because the
+  // disposition needs them; both are pure functions of the run's own inputs
+  // (`completeCoverage` of the coverage fields plus `reviewResult` /
+  // `incompleteReason`, the guardrails of the verdict and the fork/derived/
+  // evidence states), so moving them changes no decision — only the order in
+  // which the same values become available.
+  const completeCoverage = !input.partialCoverage && !input.coverageUnknown
+    && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+  const guardrails = evaluateApprovalGuardrails({
+    verdict: input.verdict,
+    approveForks: input.approveForks,
+    isForkPr: input.isForkPr,
+    ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
+    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
+  });
+  // #1447: a native APPROVE is a trusted-approval certificate, not merely a
+  // rendering of the model's approve verdict. It therefore requires
+  // complete, known review-owned coverage in addition to the existing
+  // scope/derived guardrails. The verdict output itself remains `approve`:
+  // an incomplete approve candidate is an abstention and publishes as a
+  // non-blocking COMMENT, never a manufactured REQUEST_CHANGES.
+  // #1161: `review_blockers` publishes blocking findings only — it never
+  // approves, under any verdict, input, or pull-request scope.
+  const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage && input.degradedGateBypass !== true;
+  const validVerdict = isValidPublishVerdict(input.verdict);
+  const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
+  const disposition = computeReviewDisposition({
+    verdict: input.verdict,
+    validVerdict,
+    reviewResult,
+    coverageIncomplete,
+    approvalCertified: canApprove,
+    // #1596: the recommendation must agree with the native event on a
+    // verdict-bearing surface, and the coverage reason must survive into the
+    // published wording (a non-strict policy renders no coverage notice).
+    verdictBearing: isNativeVerdictMode(input.mode),
+    incompleteReason,
+    blockingFindingOpen: hasBlockingOpenFinding(input.findings),
+  });
+  // Sanitize model output first — the same pipeline for every mode. Any
+  // outside-diff findings are appended as their own section: unlike inline
+  // comments (which can only anchor in-diff findings), every publish mode
+  // renders review_markdown, so this is the one place that never drops them.
+  //
+  // #1596: the sanitized prose is then reconciled with the disposition: a
+  // model-authored actionable recommendation that contradicts the
+  // authoritative disposition is rewritten into a non-actionable sentence
+  // BEFORE it reaches any published body. The reconciliation runs on the
+  // sanitized text (so it can never be used to smuggle a directive past the
+  // sanitizer) and before the outside-diff section is appended (that section
+  // is action-rendered findings, never a recommendation).
+  const sanitizedProse = sanitizeForPublication(input.reviewMarkdown, input.upstreamLinkMode, input.conditionalPresence);
+  const sanitized = normalizePublishedRecommendation(sanitizedProse, disposition)
+    + renderOutsideDiffSection(input.findings, input.upstreamLinkMode);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
   // #588: the platform's degradation reason, flattened to ONE bounded line:
   // it is rendered inside a blockquote notice and inside a step message, so
@@ -2366,8 +2413,6 @@ export async function publishReview(
     try { previousReviews = await api.listReviews(); }
     catch { messages.push("WARN: Could not snapshot previous reviews; cleanup skipped"); }
   }
-  const completeCoverage = !input.partialCoverage && !input.coverageUnknown
-    && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
   let fallbackSubmission = false;
 
   try {
@@ -2375,16 +2420,12 @@ export async function publishReview(
       // #752: counts where the verdict is stated, under the strict policy.
       const counts = strict ? severityCountsLabel(input.findings) : "";
       const suffix = counts ? ` · ${counts}` : "";
-      // #873: an approve recommendation can never sit above a coverage
-      // notice saying the review isn't finished — the header would
-      // contradict the body directly below it.
-      const prefix = (
-        input.verdict === "approve" && reviewCoverageIncomplete(reviewResult)
-          ? incompleteReason === "requirement_trace" ? TRACE_INCOMPLETE_PREFIX
-            : incompleteReason === "both" ? BOTH_INCOMPLETE_PREFIX
-            : INCOMPLETE_COVERAGE_PREFIX
-          : (isValidPublishVerdict(input.verdict) ? VERDICT_PREFIXES[input.verdict]! : NO_VERDICT_PREFIX)
-      ) + suffix;
+      // #1596: the recommendation line IS the disposition's, never the
+      // model's: the deterministic disposition owns what the action
+      // recommends, and the coverage reason detail stays in the coverage-gap
+      // notice below the header (the state block), not in the recommendation
+      // itself — one wording, one meaning, in every mode.
+      const prefix = disposition.recommendation + suffix;
       const body = buildPublishedBody({
         markers,
         handoffBlock,
@@ -2416,6 +2457,11 @@ export async function publishReview(
         handoffBlock,
         obligations: obligationsInput,
         header: "# AI Automated Review",
+        // #1596: the native modes have no recommendation in their header, so
+        // the action-owned recommendation line rides here — above every
+        // model-authored surface, where the model prose would otherwise be
+        // the only statement of what the action decided.
+        recommendation: disposition.recommendation,
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
         coverageNotice,
@@ -2494,6 +2540,10 @@ export async function publishReview(
               handoffBlock: handoffBlockSansSuggestions,
               obligations: obligationsInput,
               header: "# AI Automated Review",
+              // #1596: the recovery body carries the same action-owned
+              // recommendation line as the primary body — a recovered
+              // publication must state the same disposition.
+              recommendation: disposition.recommendation,
               analysisEngine: input.analysisEngine,
               sanitizedMarkdown: sanitized,
               coverageNotice,
@@ -2539,7 +2589,6 @@ export async function publishReview(
     } else {
       // #1161: `review_verdict` and `review_blockers` both publish a native
       // review; only `review_verdict` can ever approve.
-      const validVerdict = isValidPublishVerdict(input.verdict);
       if (input.mode === "review_verdict" && !validVerdict) {
         // #1145: verdict mode must publish a verdict. A run that reaches this
         // point without a valid final verdict is an explicit action failure —
@@ -2552,24 +2601,6 @@ export async function publishReview(
           error: `review_verdict mode requires a final verdict of approve or request_changes, got "${input.verdict}" — refusing to publish a COMMENT substitute (#1145)`,
         };
       }
-      const guardrails = evaluateApprovalGuardrails({
-        verdict: input.verdict,
-        approveForks: input.approveForks,
-        isForkPr: input.isForkPr,
-        ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
-    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
-      });
-      // #1447: a native APPROVE is a trusted-approval certificate, not merely
-      // a rendering of the model's approve verdict. It therefore requires
-      // complete, known review-owned coverage in addition to the existing
-      // scope/derived guardrails. The verdict output itself remains
-      // `approve`: an incomplete approve candidate is an abstention and
-      // publishes as a non-blocking COMMENT, never a manufactured
-      // REQUEST_CHANGES.
-      // #1161: `review_blockers` publishes blocking findings only — it never
-      // approves, under any verdict, input, or pull-request scope.
-      const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
-      const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage && input.degradedGateBypass !== true;
       // #588: on a platform without a native review surface there is no
       // native event to carry the recommendation, so the body states it —
       // BEFORE the untrusted review text, so no model content can swallow it
@@ -2697,6 +2728,9 @@ export async function publishReview(
         handoffBlock,
         obligations: obligationsInput,
         header: "# AI Automated Review",
+        // #1596: the action-owned recommendation line — the disposition's
+        // own wording, above every model-authored surface.
+        recommendation: disposition.recommendation,
         note: "_Full PR review._",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
@@ -2734,9 +2768,10 @@ export async function publishReview(
         // is emitted only when trusted-approval eligibility is complete;
         // COMMENT is the explicit abstention for incomplete/unknown coverage,
         // scope/derived withholding, or blockers-only advisory output.
-        const event: NativeReviewEvent = input.verdict === "request_changes"
-          ? "REQUEST_CHANGES"
-          : canApprove ? "APPROVE" : "COMMENT";
+        // #1596: the event is the disposition's — one derived statement, so
+        // the native event can never contradict the published recommendation
+        // line or the prose.
+        const event: NativeReviewEvent = disposition.nativeEvent;
         // #1249: the body-only fallback must not lose the findings the inline
         // comments carried. Under the strict policy the findings table is
         // already part of the body, so the fallback body is unchanged (no
@@ -2763,6 +2798,9 @@ export async function publishReview(
           handoffBlock: handoffBlockSansSuggestions,
           obligations: obligationsInput,
           header: "# AI Automated Review",
+          // #1596: the fallback body carries the same action-owned
+          // recommendation line as the primary body.
+          recommendation: disposition.recommendation,
           note: "_Full PR review._",
           analysisEngine: input.analysisEngine,
           sanitizedMarkdown: sanitized,

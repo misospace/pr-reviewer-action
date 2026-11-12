@@ -1086,7 +1086,11 @@ for (const state of INCOMPLETE_STATES) {
       }), api, { diffText: "" });
       const body = api.sticky[0]!.body;
       assert.ok(!body.includes("Automated recommendation: APPROVE"));
-      assert.match(body, /INCOMPLETE — not an approval/);
+      // #1596: one incomplete wording for every incomplete reason — the
+      // recommendation states that no blocking code defect was proven and
+      // that the approval was withheld; the reason detail stays in the
+      // coverage-gap notice below.
+      assert.match(body, /INCOMPLETE — no blocking code defect proven; approval withheld/);
     });
 
     test(`review_comment: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never submits a native APPROVE`, async () => {
