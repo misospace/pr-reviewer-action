@@ -147,6 +147,8 @@ test("#1577: a bare mode literal without mode vocabulary never fires", () => {
     "  if (mode !== \"100644\") continue;",
     "  const file_mode = \"100755\";",
     "  if (FILE_MODE === \"120000\") continue;",
+    "  const symlinkMode = \"120000\";",
+    "  const modeBits = 120000;",
   ]) {
     assert.deepEqual(
       scanRiskObligations(fileDiff("src/context/treeentries.ts", [line])).obligations.map((row) => row.category),
@@ -156,6 +158,7 @@ test("#1577: a bare mode literal without mode vocabulary never fires", () => {
   }
   // A word that merely starts with "mode" is not mode vocabulary.
   assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const model = \"gpt-4\"; const limit = 120000;"])).obligations, []);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const models = 120000;"])).obligations, []);
 });
 
 test("#1577: ordinary code and lockfiles never fire", () => {
