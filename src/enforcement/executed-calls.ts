@@ -296,9 +296,12 @@ const HEAD_SHA_TOKEN_SHAPE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Characters that EXTEND a version token flush against it: digits and
  * letters (`1.2.3` → `1.2.30`, the re-review's named collision) and the
- * pre-release/build markers `-`/`+` (`1.2.3` → `1.2.3-beta`). A `.` does
- * NOT extend a version — the forge compare separator (`1.2.3...4.5.6`) and
- * the extractor's own word-boundary semantics keep it outside the token. */
+ * pre-release/build markers `-`/`+` (`1.2.3` → `1.2.3-beta`). A `.` is
+ * judged in `versionBoundaryHolds`: it extends the token into a
+ * four-segment version exactly when a digit follows the dot (`1.2.3.4` —
+ * the round-4 re-review's named truncation), while a dot followed by
+ * another dot is the forge compare RANGE separator (`1.2.3...4.5.6`), not
+ * a segment continuation. */
 const VERSION_EXTEND_RE = /[0-9a-z_+-]/;
 
 /** Word characters that extend a hex identity: a 40-hex head flush against
@@ -331,13 +334,28 @@ function shaBoundaryHolds(text: string, start: number, end: number): boolean {
 }
 
 /** Version boundary. The follow side refuses every version-extending char
- * (`1.2.3` never carries from a `1.2.30` or `1.2.3-beta` target). The lead
- * side additionally admits the forge tag convention `v1.2.3`: a bare `v`
- * flush against the token is a version marker, but only when the `v` is
- * itself boundary-delimited (`releases/tag/v1.2.3` yes; `dev1.2.3` no). */
+ * (`1.2.3` never carries from a `1.2.30` or `1.2.3-beta` target), and —
+ * round-4 re-review — a `.` that continues another numeric version segment
+ * (`1.2.3.4` → the token's trailing `3` is flush against `.4`): bare
+ * `1.2.3` there is a TRUNCATION of a different identity, never the
+ * identity the check names. A `.` whose next char is NOT a digit is not a
+ * segment continuation — in particular the forge compare range
+ * `1.2.3...4.5.6`, where the separator's first dot is followed by the
+ * range's second dot — so compare-URL exact positives still carry. The
+ * lead side additionally admits the forge tag convention `v1.2.3`: a bare
+ * `v` flush against the token is a version marker, but only when the `v`
+ * is itself boundary-delimited (`releases/tag/v1.2.3` yes; `dev1.2.3` no). */
 function versionBoundaryHolds(text: string, start: number, end: number): boolean {
   const after = end === text.length ? "" : text[end]!;
   if (VERSION_EXTEND_RE.test(after)) return false;
+  // #1634 (re-review, round 4): a following `.` is a version-segment
+  // continuation exactly when the next char after the dot is a digit —
+  // `1.2.3.4` puts `.4` flush against the token, the git range
+  // `1.2.3...4.5.6` puts `..` (dot followed by dot, not digit). The
+  // extraction-side counterpart (EXACT_VERSION_RE truncating a check's
+  // `1.2.3.4` to token `1.2.3` at that same dot's word boundary) is
+  // deliberately left pinned as residual, not widened here.
+  if (after === "." && end + 1 < text.length && /\d/.test(text[end + 1]!)) return false;
   const before = start === 0 ? "" : text[start - 1]!;
   if (before === "" || !SHA_EXTEND_RE.test(before)) return true;
   return before === "v" && (start - 1 === 0 || !SHA_EXTEND_RE.test(text[start - 2]!));

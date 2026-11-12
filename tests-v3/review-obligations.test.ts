@@ -1282,6 +1282,118 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
   }
 });
 
+test("#1634 (re-review, round 4): a following '.' that continues a numeric segment is a version EXTENSION — exact 1.2.3 never carries from a 1.2.3.4 target in BOTH folds, while the forge compare RANGE separator (1.2.3...4.5.6, dot followed by dot) stays admissible; the extraction half is pinned as documented residual", () => {
+  const versionCheck = "verify lodash/lodash 1.2.3 provenance";
+  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
+
+  // NEGATIVE (the round-4 blocker): the check names exact 1.2.3; the target
+  // carries it only as a TRUNCATION of the four-segment version 1.2.3.4 —
+  // the occurrence is flush against ".4", a dot continuing another numeric
+  // version segment, so it is not the identity the check names and every
+  // cited row fails closed as unrelated-executed-call in BOTH folds
+  // (releases/1.2.3.4 and tags/v1.2.3.4 shapes). Pre-fix (9211985e) the dot
+  // was not in VERSION_EXTEND_RE, so these discharged — the red proof.
+  const truncated: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3.4" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/tags/v1.2.3.4" },
+    ],
+  };
+  const truncatedCases: Array<[string, string]> = [
+    [versionCheck, "the release fetch at call-1 confirms 1.2.3"],
+    [versionCheck, "the tag fetch at call-2 confirms 1.2.3"],
+  ];
+  for (const [check, rationale] of truncatedCases) {
+    const folded = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, rationale),
+      truncated,
+    );
+    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
+    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, truncated);
+    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
+  }
+
+  // POSITIVE (the range case): a following '.' whose NEXT char is another
+  // dot is the forge compare RANGE separator, not a segment continuation —
+  // 1.2.3 inside /compare/1.2.3...4.5.6 is boundary-delimited and still
+  // carries in BOTH folds, preserving the compare-URL exact positive.
+  const range: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
+    ],
+  };
+  const rangeRationale = "the compare fetch at call-1 pins the 1.2.3 range";
+  const foldedRange = foldObligationDispositions(
+    candidateRowsToObligations([], [versionCheck]),
+    dispositionsFor(versionCheck, rangeRationale),
+    range,
+  );
+  assert.deepEqual(foldedRange.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  const coverageRange = evaluateRequiredCheckCoverage([versionCheck], dispositionsFor(versionCheck, rangeRationale) as never, range);
+  assert.deepEqual(coverageRange.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+
+  // HONEST RESIDUAL (extraction half — deliberately NOT widened): the
+  // prescribed boundary fix makes a 1.2.3.4 TARGET stop certifying token
+  // 1.2.3 (the negatives above), but EXACT_VERSION_RE still reduces a
+  // check text that literally names 1.2.3.4 to the token 1.2.3 (its \b
+  // word boundary sits at the inter-segment dot), so a target carrying
+  // EXACTLY 1.2.3 still certifies a check asking for 1.2.3.4. This pin
+  // documents today's behavior — which token discharges the four-segment
+  // check — for the operator to decide whether to widen EXACT_VERSION_RE
+  // in a follow-up; widening it would change token semantics for every
+  // identity class, so this round does not do it unilaterally.
+  const fourSegmentCheck = "verify lodash/lodash 1.2.3.4 provenance";
+  const exactShorter: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
+    ],
+  };
+  const residualRationale = "the release fetch at call-1 confirms 1.2.3.4";
+  const foldedResidual = foldObligationDispositions(
+    candidateRowsToObligations([], [fourSegmentCheck]),
+    dispositionsFor(fourSegmentCheck, residualRationale),
+    exactShorter,
+  );
+  assert.deepEqual(
+    foldedResidual.map((row) => [row.status, row.reason]),
+    [["satisfied", "ok"]],
+    "residual: a 1.2.3.4 check text is reduced to token 1.2.3 and discharged by exactly-1.2.3 evidence",
+  );
+  const coverageResidual = evaluateRequiredCheckCoverage(
+    [fourSegmentCheck],
+    dispositionsFor(fourSegmentCheck, residualRationale) as never,
+    exactShorter,
+  );
+  assert.deepEqual(
+    coverageResidual.checks.map((row) => [row.status, row.reason]),
+    [["satisfied", "ok"]],
+    "residual in the required-checks fold: identical truncation semantics",
+  );
+  // And the mirror half of the residual: the four-segment check is NOT
+  // discharged by a target carrying only the four-segment version any more
+  // (the boundary rejects the token's occurrence inside it), so the ONLY
+  // thing that discharges it is evidence for the truncated token — the
+  // residual above — which is exactly the wrong-release bind the re-review
+  // flags for the extraction half.
+  const foldedFourTarget = foldObligationDispositions(
+    candidateRowsToObligations([], [fourSegmentCheck]),
+    dispositionsFor(fourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4"),
+    truncated,
+  );
+  assert.deepEqual(
+    foldedFourTarget.map((row) => [row.status, row.reason]),
+    [["unresolved", "unrelated-executed-call"]],
+    "the four-segment check is not discharged by the 1.2.3.4 target either — token 1.2.3 never carries from it post-fix",
+  );
+});
+
 test("#1634 (human review): negative-advisory, unrelated/test-only CI, and non-repository tools never discharge — and the suite/CI ask reconciles only through the #1612 head-bound CI matcher", () => {
   // Advisory absence: the check asks for an advisory SEARCH; even a
   // successful forge call naming the exact package+version proves only that
