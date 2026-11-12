@@ -983,9 +983,11 @@ export class Conversation {
    * them is exactly the evidence destruction this method's name always
    * promised against. Returns the number of results actually shortened and the
    * UTF-8 bytes freed (content-free accounting for compaction telemetry). The
-   * cut is UTF-8/newline-safe (see truncateText). Any mutation of an older
-   * result changes the cacheable request prefix — the driver records that on
-   * its compaction event. */
+   * cut is UTF-8/newline-safe (see truncateText). Results a fold pass already
+   * compacted (`summarized`) are never rewritten — their content is the
+   * digest the fold preserved, and the fold caps it at write time
+   * (`digestMaxBytes`). Any mutation of an older result changes the cacheable
+   * request prefix — the driver records that on its compaction event. */
   truncateOldestToolResults(
     maxBytesPerResult: number,
     options: { keepNewest?: number } = {},
@@ -999,6 +1001,13 @@ export class Conversation {
     let bytesFreed = 0;
     for (const index of targets) {
       const e = this.events[index] as ToolResultEvent;
+      // #1638 review: a driver-folded result IS the preserved evidence. The
+      // loop caps the digest at write time (`digestMaxBytes`), so it never
+      // exceeds the first-pass cap; cutting it to the hard floor instead
+      // would silently discard exactly what the fold pass saved. When even
+      // the preserved digests leave the conversation over the watermark the
+      // driver records the overflow and the request proceeds.
+      if (e.summarized === true) continue;
       const body = e.content;
       const size = Buffer.byteLength(body, "utf8");
       if (size <= maxBytesPerResult) continue;
@@ -1045,10 +1054,17 @@ export class Conversation {
    * actually changed (0 when there aren't enough old results, all are already
    * folded, or the summary came back empty — the caller should fall back to
    * truncation in that case). A skill result whose content already carried
-   * the discard marker frees no bytes and is therefore not counted. */
+   * the discard marker frees no bytes and is therefore not counted.
+   *
+   * #1638 review: `digestMaxBytes` (the loop passes its truncation cap)
+   * bounds the digest at write time. Without it a verbose summarizer could
+   * fold ten results into one oversized block that blunt truncation would
+   * then cut mid-digest — silently discarding the evidence the fold was
+   * meant to preserve. The cap keeps the digest inside the same per-result
+   * budget every other old result obeys. */
   async summarizeOldestToolResults(
     summarizeFn: (block: string) => string | Promise<string>,
-    options: { keepNewest?: number } = {},
+    options: { keepNewest?: number; digestMaxBytes?: number } = {},
   ): Promise<number> {
     const keepNewest = options.keepNewest ?? DEFAULT_PROTECTED_NEWEST_RESULTS;
     const indices = this.events
@@ -1095,9 +1111,17 @@ export class Conversation {
       .join("\n\n");
     const digest = ((await summarizeFn(block)) || "").trim();
     if (!digest) return 0;
+    const header = "Condensed digest of earlier tool results:\n";
+    let body = digest;
+    if (options.digestMaxBytes !== undefined) {
+      body = truncateText(body, Math.max(0, Math.floor(options.digestMaxBytes) - Buffer.byteLength(header, "utf8"))).text;
+      // A cap smaller than the header would store a header-only digest that
+      // preserves nothing — fold nothing instead and let truncation backstop.
+      if (!body) return 0;
+    }
     const head = foldable[0]!;
     const headEvent = this.events[head] as ToolResultEvent;
-    headEvent.content = "Condensed digest of earlier tool results:\n" + digest;
+    headEvent.content = header + body;
     headEvent.summarized = true;
     for (const i of foldable.slice(1)) {
       const e = this.events[i] as ToolResultEvent;

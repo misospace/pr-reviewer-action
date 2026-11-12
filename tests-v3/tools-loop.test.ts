@@ -723,6 +723,38 @@ test("compaction: the model-generated digest folds old results, newest stay verb
   assert.equal(events.at(-1)!.content, "result 2");
 });
 
+test("#1638 review: the folded digest survives both truncation passes intact", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("x".repeat(500));
+  // A ~900-byte digest: inside the 2000-byte digest cap but ABOVE the
+  // 256-byte second-pass floor. Before the write-time cap + fold skip, the
+  // floor pass silently cut the preserved evidence down to 256 bytes.
+  const digest = `digest of old results\n${"d".repeat(900)}`;
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const budgets = {
+    ...adaptiveLoopBudgets(1, 8, 120),
+    maxConversationTokens: 10,
+    truncatedResultBytes: 2000,
+    summarizeKeepNewest: 1,
+  };
+  for (let i = 0; i < 3; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
+    conversation.addToolResult(`c${i}`, `result ${i}`);
+  }
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets,
+    summarizeFn: () => digest,
+    timeFn,
+  });
+  assert.ok(outcome.compactionSummarize >= 1);
+  assert.ok(outcome.compactionTruncate >= 1);
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
+  assert.equal(events[0]!.content, "Condensed digest of earlier tool results:\n" + digest);
+  assert.equal(events.at(-1)!.content, "result 2");
+});
+
 test("#1635: no compaction below the watermark", async () => {
   const conversation = new Conversation();
   conversation.system = "s";

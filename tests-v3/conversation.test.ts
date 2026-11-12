@@ -467,6 +467,57 @@ test("#1635: both compaction paths protect the same default number of newest res
   );
 });
 
+// #1638 review: a digest longer than the driver's truncation cap was silently
+// cut by the later passes, discarding the evidence the fold preserved. The
+// fold caps it at write time and the truncation passes never rewrite it.
+test("#1635: digestMaxBytes caps the stored digest at the byte budget", async () => {
+  const c = new Conversation();
+  for (let i = 0; i < 3; i++) {
+    c.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
+    c.addToolResult(`c${i}`, `result ${i}`);
+  }
+  const folded = await c.summarizeOldestToolResults(() => `${"d".repeat(5000)}\n`, { digestMaxBytes: 500 });
+  assert.equal(folded, 1); // keepNewest defaults to 2 → the oldest result only
+  const events = c.events as Array<{ kind: string; call_id?: string; content: string }>;
+  const head = events.find((e) => e.kind === "tool_result" && e.call_id === "c0")!;
+  assert.match(head.content, /^Condensed digest of earlier tool results:\nd+$/);
+  assert.ok(Buffer.byteLength(head.content, "utf8") <= 500);
+  // A cap that leaves no room for the digest body preserves nothing: the fold
+  // reports 0 (the caller falls back to truncation) and mutates nothing.
+  const tiny = new Conversation();
+  for (let i = 0; i < 3; i++) {
+    tiny.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
+    tiny.addToolResult(`c${i}`, `result ${i}`);
+  }
+  assert.equal(await tiny.summarizeOldestToolResults(() => "digest body", { digestMaxBytes: 10 }), 0);
+  assert.deepEqual(
+    (tiny.events as Array<{ kind: string; content: string }>).filter((e) => e.kind === "tool_result").map((e) => e.content),
+    ["result 0", "result 1", "result 2"],
+  );
+});
+
+test("#1635: truncation never rewrites a folded digest or placeholder", async () => {
+  const c = new Conversation();
+  for (let i = 0; i < 4; i++) {
+    c.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
+    c.addToolResult(`c${i}`, `result ${i}`);
+  }
+  await c.summarizeOldestToolResults(() => "digest body", { keepNewest: 1 });
+  const events = c.events as Array<{ kind: string; call_id?: string; content: string }>;
+  const digest = events.find((e) => e.kind === "tool_result" && e.call_id === "c0")!.content;
+  const placeholder = events.find((e) => e.kind === "tool_result" && e.call_id === "c1")!.content;
+  assert.match(digest, /Condensed digest/);
+  assert.match(placeholder, /folded into the condensed digest/);
+  // Even the hard 1-byte floor leaves the driver-folded results alone; the
+  // one unfolded old result (c3) is still a normal truncation target.
+  const pass = c.truncateOldestToolResults(1, { keepNewest: 0 });
+  assert.equal(pass.shortened, 1); // c3 only — never the digest or placeholders
+  assert.equal(events.find((e) => e.kind === "tool_result" && e.call_id === "c0")!.content, digest);
+  assert.equal(events.find((e) => e.kind === "tool_result" && e.call_id === "c1")!.content, placeholder);
+  assert.equal(events.find((e) => e.kind === "tool_result" && e.call_id === "c2")!.content, placeholder);
+  assert.ok(Buffer.byteLength(events.find((e) => e.kind === "tool_result" && e.call_id === "c3")!.content, "utf8") <= 1);
+});
+
 test("the strict verdict schema literal stays contractually identical", () => {
   const schema = (OPENAI_VERDICT_JSON_SCHEMA as { json_schema: { schema: Record<string, unknown> } }).json_schema.schema;
   assert.deepEqual(schema.required, [

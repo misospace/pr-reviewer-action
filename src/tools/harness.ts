@@ -4444,25 +4444,25 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             // outstanding obligations the continuation already covered.
             // `required` describes the rows the run committed to and stays
             // unchanged; `attempts` rides the seeded run-wide counter.
-              const evidenceMeta = input.result.tool_loop_meta;
-              if (evidenceMeta !== null && evidenceMeta !== undefined) {
-                // #1635: the continuation shares the conversation and can
-                // compact it too — its passes are run-wide compaction facts,
-                // tagged so the artifact keeps them distinguishable from the
-                // investigation loop's own passes.
-                if (repair.compactionEvents.length > 0) {
-                  const prior = Array.isArray(evidenceMeta.compaction_events) ? evidenceMeta.compaction_events : [];
-                  evidenceMeta.compaction_events = [
-                    ...prior,
-                    ...repair.compactionEvents.map((event) => ({ ...event, phase: "repair" })),
-                  ];
-                  evidenceMeta.compaction_summarize = Number(evidenceMeta.compaction_summarize ?? 0)
-                    + repair.compactionEvents.filter((event) => event.kind === "summarize").length;
-                  evidenceMeta.compaction_truncate = Number(evidenceMeta.compaction_truncate ?? 0)
-                    + repair.compactionEvents.filter((event) => event.kind === "truncate").length;
-                }
-                if (repair.compactionOverflowProtected) evidenceMeta.compaction_overflow_protected = true;
-                evidenceMeta.required_evidence_refusals =
+            const evidenceMeta = input.result.tool_loop_meta;
+            if (evidenceMeta !== null && evidenceMeta !== undefined) {
+              // #1635: the continuation shares the conversation and can
+              // compact it too — its passes are run-wide compaction facts,
+              // tagged so the artifact keeps them distinguishable from the
+              // investigation loop's own passes.
+              if (repair.compactionEvents.length > 0) {
+                const prior = Array.isArray(evidenceMeta.compaction_events) ? evidenceMeta.compaction_events : [];
+                evidenceMeta.compaction_events = [
+                  ...prior,
+                  ...repair.compactionEvents.map((event) => ({ ...event, phase: "repair" })),
+                ];
+                evidenceMeta.compaction_summarize = Number(evidenceMeta.compaction_summarize ?? 0)
+                  + repair.compactionEvents.filter((event) => event.kind === "summarize").length;
+                evidenceMeta.compaction_truncate = Number(evidenceMeta.compaction_truncate ?? 0)
+                  + repair.compactionEvents.filter((event) => event.kind === "truncate").length;
+              }
+              if (repair.compactionOverflowProtected) evidenceMeta.compaction_overflow_protected = true;
+              evidenceMeta.required_evidence_refusals =
                 Number(evidenceMeta.required_evidence_refusals ?? 0) + repair.requiredEvidenceRefusals;
               // #1396 (review): the continuation's attempts counter is seeded
               // with the main loop's (the cap is run-wide), so its outcome

@@ -1713,7 +1713,11 @@ export async function driveToolLoop(
     // first truncation pass leaves the conversation over the watermark, a
     // second deterministic pass compacts the same OLD-only results to a hard
     // floor; results already at or below the cap are untouched, so repeated
-    // rounds are stable. If even that leaves the conversation over the
+    // rounds are stable. #1638 review: the digest is capped at write time at
+    // `truncatedResultBytes`, and both truncation passes leave folded results
+    // alone — after a fold they ARE the preserved evidence, and cutting them
+    // (especially to the floor) would silently discard what the digest saved.
+    // If even that leaves the conversation over the
     // watermark, the protected tail itself does not fit: nothing more is
     // dropped, the overflow is recorded, and the request proceeds — an
     // attributable provider error beats silently discarded evidence.
@@ -1743,7 +1747,13 @@ export async function driveToolLoop(
         try {
           summarized = await conversation.summarizeOldestToolResults(
             async (block) => await summarizeFn!(block),
-            { keepNewest: budgets.summarizeKeepNewest },
+            {
+              keepNewest: budgets.summarizeKeepNewest,
+              // #1638 review: cap the digest at the truncation cap at write
+              // time, so neither truncation pass has a reason to rewrite it —
+              // blunt cuts would silently discard the preserved evidence.
+              digestMaxBytes: budgets.truncatedResultBytes,
+            },
           );
         } catch {
           summarized = 0; // summarization is best-effort

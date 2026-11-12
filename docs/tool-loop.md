@@ -212,6 +212,12 @@ under the watermark, with the newest results verbatim (the exception is
   (`tool-loop-summarize-max-tokens` bounds that call, default 512). If
   summarization frees nothing or fails, the loop falls back to truncation —
   truncation is always the backstop.
+- The digest is capped at write time to the same per-result byte budget the
+  truncation passes use (#1638). After a fold, the digest and the short
+  "folded into the digest" placeholders are what the compaction preserved,
+  so neither truncation pass rewrites them — not even the hard floor below.
+  If the kept digests still leave the run over the watermark, the overflow
+  is recorded like any other protected overflow.
 
 Both paths leave the two newest tool results verbatim (#1635) — they are
 what the model is acting on, and rewriting fresh evidence is exactly what
