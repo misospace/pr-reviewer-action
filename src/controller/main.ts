@@ -1007,11 +1007,17 @@ export function createModelCredentialVault(options: {
  * state, not in the envelope), and a fork run — whose plan carries no
  * `forge-publish` entry at all — never reaches this code.
  *
- * Selection is deliberately narrow, and fail-closed at every step:
- * - the vault keeps priority: env-defined material (an operator's static
- *   token) is served unchanged; the mint is ONLY the `unknown_reference`
- *   fallback, so an expired, revoked, or scope-refused entry is never
- *   papered over;
+   * Selection is deliberately narrow, and fail-closed at every step:
+   * - the vault keeps priority: env-defined material (an operator's static
+   *   token) is served unchanged; the mint fires ONLY on the refusals that
+   *   prove the vault holds NO forge material for the request —
+   *   `unknown_reference`, and `scope_mismatch` on a declared forge
+   *   reference (the operator shared it with a model profile, so the entry
+   *   serves the model purpose and there is no forge material to paper
+   *   over: a vault forge entry binds only the instance platform and
+   *   declares installation/repository/profile unscoped, so it always
+   *   satisfies a request this broker would mint for). An expired or
+   *   revoked entry is never papered over;
  * - only the `github` platform's `forge_publish` purpose and only a
  *   reference the instance config actually declares for a forge
  *   integration are ever minted — every other refusal passes through
@@ -1040,8 +1046,16 @@ export function createGitHubPublishMintingBroker(
     async resolve(reference, request) {
       const result = await base.resolve(reference, request);
       if (result.ok) return result;
+      // `unknown_reference`: nothing is held. `scope_mismatch`: a vault
+      // entry exists but serves a different purpose — reachable only when
+      // the operator shares one reference between a model profile and the
+      // forge integration (createModelCredentialVault keeps it a MODEL
+      // entry, one reference holds exactly one scope), never when a real
+      // forge entry refuses (see the doc comment above).
+      const vaultHoldsNoForgeMaterial =
+        result.code === "unknown_reference" || result.code === "scope_mismatch";
       if (
-        result.code !== "unknown_reference"
+        !vaultHoldsNoForgeMaterial
         || request.platform !== "github"
         || request.purpose !== "forge_publish"
         || !mintable.has(reference)

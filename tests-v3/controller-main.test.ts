@@ -1626,7 +1626,7 @@ test("the minting broker serves exactly github publish-purpose material for decl
 });
 
 test("a vault refusal that is NOT missing material passes through, never minted over (#1624)", async () => {
-  for (const code of ["expired", "revoked", "scope_mismatch", "invalid_request"] as const) {
+  for (const code of ["expired", "revoked", "invalid_request"] as const) {
     const mintCalls: string[] = [];
     const base = {
       async resolve() {
@@ -1654,13 +1654,111 @@ test("a vault refusal that is NOT missing material passes through, never minted 
       repoFullName: "owner/repo",
       profileName: "",
     });
-    // An entry the broker HOLDS but refuses (expired, revoked, mis-bound)
-    // is never papered over with a fresh mint: the closed code passes
-    // through and the mint is not reached.
+    // An entry the broker HOLDS and refuses for a reason that does NOT
+    // prove the absence of forge material (expired, revoked, malformed
+    // request) is never papered over with a fresh mint: the closed code
+    // passes through and the mint is not reached.
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.equal(refused.code, code);
     assert.deepEqual(mintCalls, []);
   }
+});
+
+test("a reference shared between a model profile and the forge still mints forge-publish (#1624 review)", async () => {
+  // The shared shape: one reference serves the model profile AND the forge
+  // integration, so the vault holds it as a MODEL entry and the vault-level
+  // forge entry is never seeded. The forge-publish resolution therefore
+  // refuses `scope_mismatch`, which proves the vault holds no forge
+  // material — the mint is the forge identity for that run.
+  const instance = parseInstanceConfigText(
+    `${MIN_INSTANCE_CONFIG}
+forges:
+  - name: primary
+    kind: github
+    endpoint: https://api.github.com
+    credential: model-cred
+`,
+    validateContract(V3_CONTRACT),
+  );
+  const mintCalls: string[] = [];
+  const broker = createGitHubPublishMintingBroker(
+    createModelCredentialVault({
+      instance,
+      platform: "github",
+      modelCredentialMaterial: new Map([["model-cred", "sk-test-model-material"]]),
+    }),
+    async (installationId, repoFullName) => {
+      mintCalls.push(`${installationId}/${repoFullName}`);
+      return { value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 };
+    },
+    instance.forges.map((entry) => entry.credential),
+  );
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+  await binding.credentialRefs(GITHUB_PLAN_JOB, "run-gh-shared-1");
+  const resolved = await binding.resolver.resolve({ runId: "run-gh-shared-1" } as ExecutionRequest);
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    // The model entry keeps the vault's env material; the forge-publish
+    // entry is served by the per-job mint, scoped to this run.
+    assert.deepEqual(
+      resolved.credentials.map((entry) => [entry.name, entry.value]),
+      [
+        ["forge-publish", "ghs_minted_installation_token_material"],
+        ["model", "sk-test-model-material"],
+      ],
+    );
+  }
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
+  // Revoking the shared reference revokes the vault entry: `revoked` (not
+  // `scope_mismatch`) then passes through — a revoked credential is never
+  // papered over with a fresh mint, and the model entry fails too.
+  assert.equal(broker.revoke("model-cred"), true);
+  await binding.credentialRefs(GITHUB_PLAN_JOB, "run-gh-shared-2");
+  const afterRevoke = await binding.resolver.resolve({ runId: "run-gh-shared-2" } as ExecutionRequest);
+  assert.equal(afterRevoke.ok, false);
+  if (!afterRevoke.ok) assert.equal(afterRevoke.code, "revoked");
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
+});
+
+test("a scope refusal on an undeclared reference or non-mintable request passes through (#1624 review)", async () => {
+  const mintCalls: string[] = [];
+  const base = {
+    async resolve() {
+      return { ok: false as const, code: "scope_mismatch" as const, reason: "credential is bound to a different purpose" };
+    },
+    revoke() {
+      return false;
+    },
+    describe() {
+      return [];
+    },
+  };
+  const broker = createGitHubPublishMintingBroker(
+    base,
+    async (installationId, repoFullName) => {
+      mintCalls.push(`${installationId}/${repoFullName}`);
+      return { value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 };
+    },
+    ["forge-cred"],
+  );
+  for (const request of [
+    { name: "undeclared", reference: "other-cred", purpose: "forge_publish" as const, platform: "github" as const, installationId: "4242", repoFullName: "owner/repo" },
+    { name: "model purpose", reference: "forge-cred", purpose: "model" as const, platform: "github" as const, installationId: "4242", repoFullName: "owner/repo" },
+    { name: "forgejo platform", reference: "forge-cred", purpose: "forge_publish" as const, platform: "forgejo" as const, installationId: "4242", repoFullName: "owner/repo" },
+  ]) {
+    const { name, reference, ...resolution } = request;
+    const refused = await broker.resolve(reference, { ...resolution, profileName: "" });
+    // The closed scope refusal rides out untouched: the mint serves only
+    // declared GitHub forge references under the forge-publish purpose.
+    assert.equal(refused.ok, false, name);
+    if (!refused.ok) assert.equal(refused.code, "scope_mismatch");
+  }
+  assert.deepEqual(mintCalls, []);
 });
 
 test("a mint that yields no usable material fails closed (#1624)", async () => {
