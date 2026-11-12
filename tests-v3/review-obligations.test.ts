@@ -1446,6 +1446,119 @@ test("#1634 (re-review, round 5): a following '.' that continues a numeric segme
   );
 });
 
+test("#1634 (re-review, round 6): the dotted-run extraction boundary is ATOMIC — a version-shaped run the extractor cannot represent exactly (trailing word char, word-glued start, suffix flush against a word char) yields NO shorter version token and refuses the WHOLE row in BOTH folds, so exact-1.2.3 evidence can never discharge it; the exact four-segment, tagged, prerelease, build, and compare-range positives survive the atomization", () => {
+  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
+
+  // NEGATIVE (the round-6 blocker): the round-5 trailing `\b` could not end
+  // after the last segment of `1.2.3.4` when the word char `x` followed, so
+  // the greedy dotted run BACKTRACKED to the boundary-clean prefix `1.2.3` —
+  // a shorter version token from inside a run the extractor cannot
+  // represent. Exact-1.2.3 evidence then certified the requirement (the
+  // wrong-release bind), and — worse — the row discharged even through its
+  // remaining `lodash/lodash` slug token once the version token was dropped.
+  // The atomic extractor yields NO token for the run and the unbound run
+  // refuses the WHOLE row: no shorter prefix, no slug-only discharge, in
+  // BOTH folds (pre-fix: satisfied/ok here).
+  const shorterEvidence: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
+    ],
+  };
+  const unrepresentableCases: Array<[string, string]> = [
+    ["verify lodash/lodash 1.2.3.4x provenance", "check naming 1.2.3.4x is not discharged by exact-1.2.3 evidence"],
+    ["verify lodash/lodash v1.2.3.4x provenance", "tagged v1.2.3.4x check is not discharged by exact-1.2.3 evidence"],
+    ["verify lodash/lodash 1.2.3.4.5x provenance", "five-segment 1.2.3.4.5x is not discharged by exact-1.2.3 evidence"],
+    ["verify lodash/lodash 1.2.3-beta_x provenance", "prerelease flush against a word char is not discharged by exact-1.2.3 evidence"],
+    ["verify dev1.2.3.4 of lodash/lodash", "word-glued dotted run leaves the identity unestablishable"],
+  ];
+  for (const [check, label] of unrepresentableCases) {
+    const folded = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, "the release fetch at call-1 confirms the release"),
+      shorterEvidence,
+    );
+    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], label);
+    const coverage = evaluateRequiredCheckCoverage(
+      [check],
+      dispositionsFor(check, "the release fetch at call-1 confirms the release") as never,
+      shorterEvidence,
+    );
+    assert.deepEqual(
+      coverage.checks.map((row) => [row.status, row.reason]),
+      [["unresolved", "unrelated-executed-call"]],
+      `${label} (required-checks fold)`,
+    );
+  }
+
+  // POSITIVES survive the atomization: the exact four-segment, tagged
+  // four-segment, prerelease, build-metadata, and compare-range identities
+  // still extract as one exact token each and still discharge ONLY from
+  // targets carrying that exact identity — in BOTH folds.
+  const exact: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3.4" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3-beta" },
+      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3+build.7" },
+      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
+    ],
+  };
+  const positiveCases: Array<[string, string, string]> = [
+    ["verify lodash/lodash 1.2.3.4 provenance", "the release fetch at call-1 confirms 1.2.3.4", "exact four-segment positive survives"],
+    ["verify lodash/lodash v1.2.3.4 provenance", "the release fetch at call-1 confirms 1.2.3.4", "tagged four-segment positive survives"],
+    ["verify lodash/lodash 1.2.3-beta provenance", "the release fetch at call-2 confirms 1.2.3-beta", "prerelease positive survives"],
+    ["verify lodash/lodash 1.2.3+build.7 provenance", "the release fetch at call-3 confirms 1.2.3+build.7", "build-metadata positive survives"],
+    ["verify lodash/lodash 1.2.3...4.5.6 provenance", "the compare fetch at call-4 pins the 1.2.3...4.5.6 range", "compare-range positive survives"],
+  ];
+  for (const [check, rationale, label] of positiveCases) {
+    const folded = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, rationale),
+      exact,
+    );
+    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], label);
+    const coverage = evaluateRequiredCheckCoverage(
+      [check],
+      dispositionsFor(check, rationale) as never,
+      exact,
+    );
+    assert.deepEqual(
+      coverage.checks.map((row) => [row.status, row.reason]),
+      [["satisfied", "ok"]],
+      `${label} (required-checks fold)`,
+    );
+  }
+
+  // The compare-range positive is not a license: a WRONG four-segment
+  // version never rides along. The 1.2.3...4.5.6 evidence cannot discharge
+  // a check naming 1.2.3.4 — its target does not carry the exact
+  // four-segment identity — in BOTH folds.
+  const fourSegmentCheck = "verify lodash/lodash 1.2.3.4 provenance";
+  const foldedRangeWrongVersion = foldObligationDispositions(
+    candidateRowsToObligations([], [fourSegmentCheck]),
+    dispositionsFor(fourSegmentCheck, "the compare fetch at call-4 pins the range"),
+    exact,
+  );
+  assert.deepEqual(
+    foldedRangeWrongVersion.map((row) => [row.status, row.reason]),
+    [["unresolved", "unrelated-executed-call"]],
+    "compare-range evidence does not certify the four-segment check",
+  );
+  const coverageRangeWrongVersion = evaluateRequiredCheckCoverage(
+    [fourSegmentCheck],
+    dispositionsFor(fourSegmentCheck, "the compare fetch at call-4 pins the range") as never,
+    exact,
+  );
+  assert.deepEqual(
+    coverageRangeWrongVersion.checks.map((row) => [row.status, row.reason]),
+    [["unresolved", "unrelated-executed-call"]],
+    "compare-range evidence does not certify the four-segment check (required-checks fold)",
+  );
+});
+
 test("#1634 (human review): negative-advisory, unrelated/test-only CI, and non-repository tools never discharge — and the suite/CI ask reconciles only through the #1612 head-bound CI matcher", () => {
   // Advisory absence: the check asks for an advisory SEARCH; even a
   // successful forge call naming the exact package+version proves only that

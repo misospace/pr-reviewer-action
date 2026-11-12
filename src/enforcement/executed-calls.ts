@@ -251,14 +251,43 @@ const SLUG_STOPWORDS: ReadonlySet<string> = new Set([
  * `1.2.3.4`, not the off-by-one `2.3.4` the old leading `\b` produced by
  * being unable to start at the digit after the word-char `v`. The
  * `(?<![0-9]\.)` lookbehind refuses a start INSIDE a longer dotted-numeric
- * run (`dev1.2.3.4` yields NOTHING rather than the mid-run `2.3.4`): a
- * version-looking run the regex cannot take as one exact token is a
- * fail-closed row, never an approximation. The forge compare RANGE
- * `1.2.3...4.5.6` still extracts as the two clean tokens `1.2.3` and
- * `4.5.6`: the greedy run stops naturally at a dot followed by another
- * dot (not digit-dot), and the second number's start follows `..`, which
- * the lookbehind does not read as a run continuation. */
-const EXACT_VERSION_RE = /\bv?(?<![0-9]\.)(\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?)\b/gi;
+ * run (`dev1.2.3.4` yields NOTHING rather than the mid-run `2.3.4`).
+ *
+ * #1634 (re-review, round 6): the boundary is ATOMIC on the entire dotted
+ * run. The round-5 trailing `\b` could not end after the last segment when
+ * word characters followed (`1.2.3.4x`), so the greedy run BACKTRACKED to
+ * the shorter boundary-clean prefix `1.2.3` — producing exactly the
+ * wrong-identity token the `(?<![0-9]\.)` lookbehind refuses to start
+ * mid-run for. The follow boundary is now a negative lookahead mirroring
+ * `versionBoundaryHolds`' follow rules one-for-one: a version-extending
+ * character (`[0-9a-z_+-]`, so `1.2.3` never escapes from `1.2.30`,
+ * `1.2.3-beta…`, or a `1.2.3_x` target) or a `.` that continues another
+ * numeric segment (`\.\d` — `1.2.3.4` again; the compare range's
+ * `1.2.3...4.5.6` first separator dot is followed by another dot, not a
+ * digit, so the range still extracts as the two clean tokens `1.2.3` and
+ * `4.5.6`). That lookahead makes the match ATOMIC: every interior
+ * backtrack point of the run or the suffix ends flush against a digit or
+ * a `.digit` continuation — which the lookahead rejects — so no shorter
+ * prefix can ever satisfy the match; it either takes the whole run (plus
+ * suffix) with a clean follow boundary or nothing. The suffix likewise
+ * ends on an alphanumeric (`[0-9a-z.-]*[0-9a-z]`): sentence punctuation
+ * after build metadata (`1.2.3+build.`) is prose, not identity, so the
+ * token is `1.2.3+build`. A version-shaped run the extractor cannot
+ * represent exactly (a word-glued start like `dev1.2.3.4`, a trailing
+ * word char like `1.2.3.4x`) yields NO token, and rowEvidenceTokens
+ * refuses the whole row when any such run is unbound — fail closed,
+ * never an approximation, and never a discharge through the tokens that
+ * remain. */
+const EXACT_VERSION_RE = /\bv?(?<![0-9]\.)(\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]*[0-9a-z])?)(?![0-9a-z_+-]|\.\d)/gi;
+
+/** #1634 (re-review, round 6): the version-shaped dotted-numeric runs the
+ * extractor is accountable for, enumerated WITHOUT a trailing boundary
+ * constraint — greedy with nothing to backtrack for, so every match is
+ * the FULL run. rowEvidenceTokens cross-checks these runs against the
+ * extracted tokens: a run no token covers is an identity the layer cannot
+ * represent exactly, which refuses the row (never a shorter prefix from
+ * inside it). */
+const VERSION_SHAPED_RUN_RE = /\d+(?:\.\d+){2,}/g;
 
 /** Exact head/commit sha: full 40- or 64-hex, word-bounded. Short shas are
  * deliberately NOT identity (a 7-hex run collides with ordinary words). */
@@ -299,7 +328,24 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
   // #1634 (re-review, round 5): capture group 1 — the version without the
   // tag-convention `v` marker — is the token; group 1 always participates
   // when the regex matched, the `??` only satisfying the matcher's type.
-  for (const match of stripped.matchAll(EXACT_VERSION_RE)) tokens.add((match[1] ?? match[0])!.toLowerCase());
+  const versionMatches = [...stripped.matchAll(EXACT_VERSION_RE)];
+  for (const match of versionMatches) tokens.add((match[1] ?? match[0])!.toLowerCase());
+  // #1634 (re-review, round 6): extraction is atomic per dotted-numeric
+  // run, so an unrepresentable run leaves NO token — never a shorter
+  // prefix from inside it. The row's evidence identity is then partially
+  // unestablishable, and the deterministic layer must not certify what it
+  // cannot represent: refuse the WHOLE row (never citable) instead of
+  // letting the remaining tokens — the repo slug a wrong-version target
+  // still carries — discharge it (the round-6 re-review's named shape:
+  // check `1.2.3.4x` certified by exact-1.2.3 evidence). A run covered by
+  // an extracted token is that token's own identity (its head run or a
+  // run inside its pre-release/build suffix, e.g. `1.2.3` inside
+  // `0.0.0-dev1.2.3`) and stays bound.
+  for (const run of stripped.matchAll(VERSION_SHAPED_RUN_RE)) {
+    const start = run.index!;
+    const end = start + run[0].length;
+    if (!versionMatches.some((m) => m.index! <= start && end <= m.index! + m[0].length)) return [];
+  }
   for (const match of stripped.matchAll(HEAD_SHA_RE)) tokens.add(match[0]!.toLowerCase());
   for (const match of stripped.matchAll(FILE_PATH_RE)) tokens.add(match[0]!.toLowerCase());
   return [...tokens];
