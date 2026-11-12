@@ -109,7 +109,7 @@ import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedRevie
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
 import { MAX_TRACE_REPAIR_CLAIMS, harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -1851,6 +1851,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const traceOwnership = !requirementTraceEnabled || baseRef === "" ? { rules: [], warnings: [] } : resolveRequirementOwners({ baseRef, workspace });
   for (const warning of traceOwnership.warnings) errorLog(`requirement owners: ${warning}`);
   const tracePaths = requirementTraceEnabled ? traceChangedFilePaths(ws) : undefined;
+  // #1600: file-attributed changed lines, so content-based scope evidence can
+  // never combine a security-document path with another file's matching text.
+  const traceFileLines = requirementTraceEnabled ? traceChangedFileLines(ws) : undefined;
   // #1062: the trusted PR title + body at head, passed to the trace validator as
   // the ONLY positive-confirmation source for a `documentation`-domain obligation
   // (e.g. "the PR description records the removed-file inventory"). It is the
@@ -1881,7 +1884,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // pass below, so the prompt, the repair and the validator all see the same
   // scope.
   const traceScopeIds = requirementTraceEnabled
-    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
+    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines }).inScope.map((entry) => entry.id)
     : [];
   // #1145: ledger texts for the in-scope ids, for the confirmed-unmet
   // escalation's bounded finding messages (untrusted text — sanitized there).
@@ -1953,6 +1956,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           changed: traceChanged,
           ownership: traceOwnership.rules,
           paths: tracePaths,
+          fileLines: traceFileLines,
           prBody: tracePrBody,
           ciState: traceCiState,
         })
@@ -2094,6 +2098,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       const currentTrace = validateRequirementTrace(repairTarget.requirement_coverage, ledgerValue, workspace, traceChanged, {
         ownership: traceOwnership.rules,
         paths: tracePaths,
+        fileLines: traceFileLines,
         prBody: tracePrBody,
         ciState: traceCiState,
       });
@@ -2143,6 +2148,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         const trace = validateRequirementTrace(claims, ledgerValue, workspace, traceChanged, {
           ownership: traceOwnership.rules,
           paths: tracePaths,
+          fileLines: traceFileLines,
           prBody: tracePrBody,
           ciState: traceCiState,
         });
@@ -2581,7 +2587,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     // #1145: confirmed-unmet escalation — the one case where a synthesized
     // finding is allowed (#1095's no-synthesis rule covers ledger-only
     // claims, not a row the validator refuted by re-deriving the
@@ -2661,7 +2667,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     // #1145: confirmed-unmet escalation (same rationale as the strict
     // branch above: only a row the validator refuted against the repository
     // state at head — #985's structural proof — is escalated; a
@@ -3767,6 +3773,17 @@ export function traceChangedFilePaths(ws: Pick<RunWorkspace, "readText" | "read"
   const diff = ws.readText("pr.diff");
   if (diff === null || diff === undefined || diff === "") return undefined;
   return changedFilePaths(safeJsonArray(ws.read("pr-files.json"))).map((path) => path.toLowerCase());
+}
+
+/** #1600: the raw diff's added/removed lines attributed to the file each came
+ * from, so content-based boundary corroboration can never combine one path
+ * with another file's text. Undefined when the diff is unavailable or cannot
+ * be attributed (over-budget, unusable headers): the scope rule then keeps the
+ * lexical match's full weight instead of inferring attribution. */
+export function traceChangedFileLines(ws: Pick<RunWorkspace, "readText">): ChangedFileLines[] | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return parseChangedFileLines(diff) ?? undefined;
 }
 
 /** Changed file paths (current and previous names) from `pr-files.json`. */
