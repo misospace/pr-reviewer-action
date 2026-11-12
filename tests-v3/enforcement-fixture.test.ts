@@ -240,7 +240,7 @@ test("#1594 fixture: exact-head green test check discharges the test-run ask (st
       must_check: ["run full test suite after upgrade"],
       ci_evidence: {
         version: 1, head_sha: CI_HEAD, final_state: "success",
-        checks: [{ name: "test", state: "success", conclusion: "success" }],
+        checks: [{ name: "test suite", state: "success", conclusion: "success" }],
       },
       reviewed_head_sha: CI_HEAD,
       config: { verdict_policy: "strict" },
@@ -252,7 +252,7 @@ test("#1594 fixture: exact-head green test check discharges the test-run ask (st
     assert.deepEqual(completeness.missing, []);
     assert.equal(completeness.checks[0].status, "satisfied");
     assert.equal(completeness.checks[0].reason, "ci-evidence");
-    assert.equal(completeness.checks[0].rationale, `trusted CI check "test" succeeded on head ${CI_HEAD}`);
+    assert.equal(completeness.checks[0].rationale, `trusted CI check "test suite" succeeded on head ${CI_HEAD}`);
     const artifact = JSON.parse(result.values!.artifact!);
     assert.equal(artifact.required_checks, "complete");
     assert.equal(artifact.verdict, "approve", "coverage never demotes the strict verdict here, it only completes it");
@@ -268,7 +268,7 @@ test("#1594 fixture: stale-head evidence keeps coverage incomplete with the boun
       must_check: ["run full test suite after upgrade"],
       ci_evidence: {
         version: 1, head_sha: CI_STALE, final_state: "success",
-        checks: [{ name: "test", state: "success", conclusion: "success" }],
+        checks: [{ name: "test suite", state: "success", conclusion: "success" }],
       },
       reviewed_head_sha: CI_HEAD,
       config: { verdict_policy: "strict" },

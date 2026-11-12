@@ -217,9 +217,12 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) must match the
   ask: `Unit Tests` cannot discharge `run integration tests`, and a generic
   `test` name cannot prove an integration-only ask. A full-suite ask
-  (`full`/`all`/`entire`/`complete`) needs a generic/unscoped test run, so
-  one narrow matrix leg cannot discharge it; a generic ask accepts any test
-  execution. **Failure-first precedence** is scoped the same way: an
+  (`full`/`all`/`entire`/`complete`/`exhaustive`/`suite`) needs an explicit
+  exhaustive identity in the check name (`test suite`, `full test suite`,
+  `all tests`) with no narrow scope: a bare generic `test`/`tests`/
+  `test (24)` name does not prove which suite ran, and one narrow matrix leg
+  cannot discharge it. A generic ask accepts any test execution.
+  **Failure-first precedence** is scoped the same way: an
   in-scope test-named check that went red on the exact head refutes
   discharge even when a sibling matrix leg is green, while a red unrelated
   scope neither refutes nor discharges. A full-suite ask also needs every
@@ -248,12 +251,16 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   validated evidence, contradiction only strengthens the approval fence).
 - **no evidence, no change**: with no evidence artifact (or an unusable one,
   refused by the strict parser) every output is byte-identical to pre-#1594.
-- **producer obeys the consumer**: the gate emits at most 50 rows and a
-  16,384-character (UTF-16 code unit) JSON value, truncates names/conclusions
-  to the parser's 200-unit field bound (never splitting a surrogate pair), keeps
-  failed rows first when truncating, and drops invalid states. A final
-  strict-parser round-trip means an oversized or malformed artifact is never
-  emitted at all.
+- **producer obeys the consumer without losing decision evidence**: the gate
+  emits at most 50 rows and a 16,384-character (UTF-16 code unit) JSON value,
+  truncates names/conclusions to the parser's 200-unit field bound (never
+  splitting a surrogate pair), and drops invalid states. Every
+  test-execution row is retained; only non-test context rows may be trimmed
+  (failed rows first). If the complete test-row set cannot fit, the gate
+  emits NO evidence line at all — an artifact missing a skipped, pending, or
+  otherwise incomplete test leg could otherwise look falsely complete and
+  discharge a full-suite ask. A final strict-parser round-trip means an
+  oversized or malformed artifact is never emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and

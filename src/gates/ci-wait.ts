@@ -3,6 +3,7 @@ import {
   MAX_EVIDENCE_CHECKS,
   MAX_EVIDENCE_FIELD_LENGTH,
   MAX_EVIDENCE_RAW_JSON_CHARS,
+  isTestExecutionCheckName,
   parseHeadBoundCiEvidence,
 } from "../enforcement/required-check-ci.js";
 import { ciAttemptTimeoutMs } from "../platform/bounded.js";
@@ -158,6 +159,12 @@ function boundedEvidenceField(value: string): string {
   return bounded;
 }
 
+interface EvidenceRow {
+  name: string;
+  state: string;
+  conclusion?: string;
+}
+
 /** #1594: the head-bound check-evidence gate output — the compact-JSON
  * artifact the enforcement pass reconciles required-check completion against
  * (src/enforcement/required-check-ci.ts). Written ONLY on a finalized wait
@@ -167,19 +174,22 @@ function boundedEvidenceField(value: string): string {
  * invalid states and empty values are dropped, and a malformed SHA yields no
  * line at all.
  *
- * The producer obeys the consumer's limits by construction: unknown states
- * are filtered, strays are capped at 50 rows, and the serialized JSON is
- * capped at the parser's 16,384-character budget. When truncation is needed
- * (rows or bytes), failed rows are kept first in original relative order so
- * a red test check can never be the one dropped. The final strict parser
- * round-trip is a self-check: if it ever refuses the line, emit nothing
- * rather than an unusable artifact. The line is NOT in the `ciGateOutputs`
- * action-output whitelist, so it never reaches published action outputs. */
+ * The producer obeys the consumer's limits without ever dropping decision
+ * evidence. Test-execution rows (the ones the consumer can discharge or
+ * contradict from) are retained in full; non-test rows are context and may
+ * be trimmed to fit 50 rows / 16,384 characters. If the complete test-row
+ * set itself cannot fit, NO evidence line is emitted: an artifact missing a
+ * skipped/pending test leg could otherwise look falsely complete and
+ * discharge a full-suite ask. When trimming non-test rows, failed rows are
+ * kept first. The final strict parser round-trip is a self-check: if it ever
+ * refuses the line, emit nothing rather than an unusable artifact. The line
+ * is NOT in the `ciGateOutputs` action-output whitelist, so it never reaches
+ * published action outputs. */
 export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
   try {
     if (!/^[0-9a-f]{7,64}$/i.test(sha)) return "";
     if (finalState !== "success" && finalState !== "failure" && finalState !== "none") return "";
-    const rows: Array<{ name: string; state: string; conclusion?: string }> = [];
+    const rows: EvidenceRow[] = [];
     for (const check of checks) {
       if (typeof check.name !== "string") continue;
       if (check.state !== "pending" && check.state !== "success" && check.state !== "failure") continue;
@@ -193,27 +203,43 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       });
     }
     if (rows.length === 0) return "";
-    const serialize = (candidate: readonly { name: string; state: string; conclusion?: string }[]): string =>
+    const serialize = (candidate: readonly EvidenceRow[]): string =>
       jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: candidate });
-    // Failure-first ordering is the truncation order: whether the 50-row cap
-    // or the serialized JSON budget drops rows, red rows survive longest.
-    const prioritized = (): Array<{ name: string; state: string; conclusion?: string }> => [
-      ...rows.filter((row) => row.state === "failure"),
-      ...rows.filter((row) => row.state !== "failure"),
-    ];
-    let capped = rows.length > MAX_EVIDENCE_CHECKS ? prioritized().slice(0, MAX_EVIDENCE_CHECKS) : rows;
-    let json = serialize(capped);
-    if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) {
-      capped = prioritized().slice(0, MAX_EVIDENCE_CHECKS);
-      while (capped.length > 0 && json.length > MAX_EVIDENCE_RAW_JSON_CHARS) {
-        capped = capped.slice(0, -1);
-        json = serialize(capped);
-      }
+    const emit = (json: string): string => {
+      if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
+      // Same parser the enforcement pass uses; a refused line is no evidence.
+      if (parseHeadBoundCiEvidence(json) === null) return "";
+      return `ci_checks_evidence=${json}`;
+    };
+    // Fast path: no truncation needed, preserve the original row order.
+    if (rows.length <= MAX_EVIDENCE_CHECKS) {
+      const json = serialize(rows);
+      if (json.length <= MAX_EVIDENCE_RAW_JSON_CHARS) return emit(json);
     }
-    if (capped.length === 0 || json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
-    // Same parser the enforcement pass uses; a refused line is no evidence.
-    if (parseHeadBoundCiEvidence(json) === null) return "";
-    return `ci_checks_evidence=${json}`;
+    // Lossy truncation is allowed ONLY for rows the consumer ignores. Test-
+    // execution rows are the decision evidence: retain every one or emit
+    // nothing at all. A failure-first order keeps red rows visible when
+    // non-test context is trimmed.
+    const byFailureFirst = (list: readonly EvidenceRow[]): EvidenceRow[] => [
+      ...list.filter((row) => row.state === "failure"),
+      ...list.filter((row) => row.state !== "failure"),
+    ];
+    const testRows = byFailureFirst(rows.filter((row) => isTestExecutionCheckName(row.name)));
+    if (testRows.length > MAX_EVIDENCE_CHECKS) return "";
+    const otherRows = byFailureFirst(rows.filter((row) => !isTestExecutionCheckName(row.name)));
+    let retained = [...testRows];
+    let json = serialize(retained);
+    if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
+    for (const row of otherRows) {
+      if (retained.length >= MAX_EVIDENCE_CHECKS) break;
+      const next = [...retained, row];
+      const nextJson = serialize(next);
+      if (nextJson.length > MAX_EVIDENCE_RAW_JSON_CHARS) break;
+      retained = next;
+      json = nextJson;
+    }
+    if (retained.length === 0) return "";
+    return emit(json);
   } catch {
     return "";
   }

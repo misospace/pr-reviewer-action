@@ -117,10 +117,18 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
   // a generic check name cannot PROVE a narrow integration scope
   assert.equal(ciDischargeForCheckText("run integration tests", green("test (24)"), HEAD).reason, "no-matching-test-check");
 
-  // full-suite asks need a generic/full run, not one narrow matrix leg
+  // full-suite asks need an explicit exhaustive identity, not one narrow
+  // matrix leg and not a vague generic test name
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Unit Tests"), HEAD).outcome, "unresolved");
   assert.equal(ciDischargeForCheckText("run all tests", green("Unit Tests"), HEAD).outcome, "unresolved");
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).reason, "no-matching-test-check");
+  // a genuinely exhaustive name is the positive control
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test suite"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("full test suite"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run all tests", green("all tests"), HEAD).outcome, "satisfied");
   // a narrow ask stays narrow even when the prose also says "all"
   assert.equal(ciDischargeForCheckText("run all unit tests", green("Unit Tests"), HEAD).outcome, "satisfied");
 
@@ -143,12 +151,12 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
   // full-suite asks need every in-scope leg settled green: a skipped leg (the
   // GitHub trap: state success) or a pending leg blocks a green sibling
   const skippedSibling = evidence("success", [
-    { name: "test", state: "success", conclusion: "success" },
+    { name: "test suite", state: "success", conclusion: "success" },
     { name: "Unit Tests", state: "success", conclusion: "skipped" },
   ]);
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", skippedSibling, HEAD).reason, "test-check-not-success");
   const pendingSibling = evidence("failure", [
-    { name: "test", state: "success", conclusion: "success" },
+    { name: "test suite", state: "success", conclusion: "success" },
     { name: "Unit Tests", state: "pending" },
   ]);
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", pendingSibling, HEAD).reason, "test-check-not-success");
@@ -179,10 +187,10 @@ test("#1594 discharge: exact-head green test check discharges; stale head does n
   const ask = "run full test suite after upgrade";
   const green = evidence("success", [
     { name: "build", state: "success", conclusion: "success" },
-    { name: "test (24)", state: "success", conclusion: "success" },
+    { name: "test suite", state: "success", conclusion: "success" },
   ]);
   const ok = ciDischargeForCheckText(ask, green, HEAD);
-  assert.deepEqual(ok, { applies: true, outcome: "satisfied", reason: "test-check-succeeded", check: { name: "test (24)", state: "success", conclusion: "success" } });
+  assert.deepEqual(ok, { applies: true, outcome: "satisfied", reason: "test-check-succeeded", check: { name: "test suite", state: "success", conclusion: "success" } });
 
   const stale = ciDischargeForCheckText(ask, green, STALE);
   assert.equal(stale.reason, "head-mismatch");
@@ -191,7 +199,7 @@ test("#1594 discharge: exact-head green test check discharges; stale head does n
   assert.equal(ciDischargeForCheckText(ask, null, HEAD).reason, "no-ci-evidence");
 
   // head match is case-insensitive (the gate and the context may differ in case)
-  assert.equal(ciDischargeForCheckText(ask, evidence("success", [{ name: "test", state: "success", conclusion: "success" }], HEAD.toUpperCase()), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText(ask, evidence("success", [{ name: "test suite", state: "success", conclusion: "success" }], HEAD.toUpperCase()), HEAD).outcome, "satisfied");
 });
 
 test("#1594 discharge: unrelated green checks never discharge; failing test check contradicts", () => {
@@ -240,14 +248,14 @@ test("#1594 discharge: unrelated green checks never discharge; failing test chec
 
 test("#1594 discharge trap: GitHub `skipped`/`neutral` collapse to state success — they do NOT discharge", () => {
   const ask = "run full test suite after upgrade";
-  const skipped = evidence("success", [{ name: "test", state: "success", conclusion: "skipped" }]);
+  const skipped = evidence("success", [{ name: "test suite", state: "success", conclusion: "skipped" }]);
   const discharged = ciDischargeForCheckText(ask, skipped, HEAD);
   assert.equal(discharged.outcome, "unresolved");
   assert.equal(discharged.reason, "test-check-not-success");
-  const neutral = evidence("success", [{ name: "test", state: "success", conclusion: "neutral" }]);
+  const neutral = evidence("success", [{ name: "test suite", state: "success", conclusion: "neutral" }]);
   assert.equal(ciDischargeForCheckText(ask, neutral, HEAD).reason, "test-check-not-success");
   // a state-only row (no recorded conclusion) keeps the state-only rule
-  assert.equal(ciDischargeForCheckText(ask, evidence("success", [{ name: "test", state: "success", conclusion: null }]), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText(ask, evidence("success", [{ name: "test suite", state: "success", conclusion: null }]), HEAD).outcome, "satisfied");
 });
 
 test("#1594 reconcile rows: discharge, reason refinement, contradiction downgrade, coverage recompute", () => {
@@ -257,7 +265,7 @@ test("#1594 reconcile rows: discharge, reason refinement, contradiction downgrad
   );
   assert.equal(coverage.status, "incomplete");
   const inputRows = coverage.checks;
-  const greenOnly = evidence("success", [{ name: "test", state: "success", conclusion: "success" }], HEAD);
+  const greenOnly = evidence("success", [{ name: "test suite", state: "success", conclusion: "success" }], HEAD);
   const result = reconcileRequiredCheckRows(inputRows, greenOnly, HEAD);
   assert.notEqual(result.rows, inputRows, "returns a new array");
   assert.equal(inputRows[0]!.status, "unresolved", "input rows are never mutated");
@@ -267,13 +275,13 @@ test("#1594 reconcile rows: discharge, reason refinement, contradiction downgrad
     result.rows.map((row) => [row.status, row.reason]),
     [["satisfied", "ci-evidence"], ["unresolved", "no-disposition"], ["satisfied", "ok"]],
   );
-  assert.equal(result.rows[0]!.rationale, `trusted CI check "test" succeeded on head ${HEAD}`);
+  assert.equal(result.rows[0]!.rationale, `trusted CI check "test suite" succeeded on head ${HEAD}`);
 
   // a RED sibling refutes discharge: the never-dispositioned test-run row is
   // annotated with the contradicted code (status stays unresolved — coverage,
   // never a manufactured defect) and nothing discharges
   const mixed = evidence("success", [
-    { name: "test", state: "success", conclusion: "success" },
+    { name: "test suite", state: "success", conclusion: "success" },
     { name: "Unit Tests", state: "failure", conclusion: "failure" },
   ], HEAD);
   const annotated = reconcileRequiredCheckRows(inputRows, mixed, HEAD);
@@ -295,7 +303,7 @@ test("#1594 reconcile rows: discharge, reason refinement, contradiction downgrad
     ["run full test suite after upgrade"],
     [d("run full test suite after upgrade", "satisfied")],
   );
-  const failing = evidence("failure", [{ name: "test", state: "failure", conclusion: "failure" }]);
+  const failing = evidence("failure", [{ name: "test suite", state: "failure", conclusion: "failure" }]);
   const contradicted = reconcileRequiredCheckRows(modelFold.checks, failing, HEAD);
   assert.equal(contradicted.contradicted, 1);
   assert.deepEqual(
@@ -334,7 +342,7 @@ test("#1594 reconcile rows: discharge, reason refinement, contradiction downgrad
 
   // a discharge re-presents coverage as complete over the reconciled rows
   const single = evaluateRequiredCheckCoverage(["run full test suite after upgrade"], null);
-  const dischargedOnce = reconcileRequiredCheckRows(single.checks, evidence("success", [{ name: "tests", state: "success", conclusion: "success" }]), HEAD);
+  const dischargedOnce = reconcileRequiredCheckRows(single.checks, evidence("success", [{ name: "test suite", state: "success", conclusion: "success" }]), HEAD);
   assert.equal(dischargedOnce.rows.every((row) => (row.status === "satisfied" || row.status === "not_applicable") && (row.reason === "ok" || row.reason === "ci-evidence")), true);
 });
 
@@ -345,21 +353,21 @@ test("#1594 reconcile obligations: discharge with provenance, contradiction down
     { id: "derived-1", source: "derived", text: "the test runner must load the updated matrix", status: "unresolved", cause: "derivation-incomplete", anchors: ["src/a.ts:run"] },
     { id: "obligation-2", source: "must_check", text: "review docs updated", status: "satisfied", cause: null },
   ];
-  const green = evidence("success", [{ name: "test", state: "success", conclusion: "success" }]);
+  const green = evidence("success", [{ name: "test suite", state: "success", conclusion: "success" }]);
   const discharged = reconcileObligationsWithCiEvidence(obligations, green, HEAD);
   assert.notEqual(discharged, obligations);
   assert.equal(discharged[0]!.status, "satisfied");
   assert.equal(discharged[0]!.cause, null);
-  assert.deepEqual(discharged[0]!.resolvedBy, { kind: "ci-evidence", check: "test", headSha: HEAD });
+  assert.deepEqual(discharged[0]!.resolvedBy, { kind: "ci-evidence", check: "test suite", headSha: HEAD });
   assert.equal(discharged[1]!.status, "satisfied");
-  assert.deepEqual(discharged[1]!.resolvedBy, { kind: "ci-evidence", check: "test", headSha: HEAD });
+  assert.deepEqual(discharged[1]!.resolvedBy, { kind: "ci-evidence", check: "test suite", headSha: HEAD });
   assert.equal(discharged[2]!.status, "unresolved", "derived rows never reconcile");
   assert.equal(discharged[2]!.cause, "derivation-incomplete");
   assert.equal(discharged[3], obligations[3], "unchanged rows keep identity");
 
   // contradiction: model-satisfied required row downgraded; provenance dropped
   const satisfiedRow: ReviewObligation = { id: "obligation-1", source: "must_check", text: "run full test suite after upgrade", status: "satisfied", cause: null, resolvedBy: { kind: "ci-evidence", check: "old", headSha: HEAD } };
-  const failing = evidence("failure", [{ name: "test", state: "failure", conclusion: "failure" }]);
+  const failing = evidence("failure", [{ name: "test suite", state: "failure", conclusion: "failure" }]);
   const downgraded = reconcileObligationsWithCiEvidence([satisfiedRow], failing, HEAD);
   assert.equal(downgraded[0]!.status, "unresolved");
   assert.equal(downgraded[0]!.cause, null);

@@ -14,9 +14,10 @@
  * - discharge is deterministic-policy-owned: a validated head-bound green
  *   test-execution check closes the ask WITHOUT a model re-invocation; but
  *   the check must prove the ask's test SCOPE too — `Unit Tests` cannot
- *   discharge `run integration tests`, and a narrowly scoped leg cannot
- *   discharge a full-suite ask (a wrong-scope green says nothing about the
- *   requested tests);
+ *   discharge `run integration tests`, and a full-suite ask needs an
+ *   explicit exhaustive identity (`test suite`, `full test suite`,
+ *   `all tests`), not a vague generic `test`/`test (24)` name (an
+ *   ambiguous green says nothing provable about the requested tests);
  * - precedence is failure-first — a matching test-named check that went red
  *   on the exact head refutes discharge even when a sibling matrix leg is
  *   green (one red leg means the suite did not pass);
@@ -188,10 +189,10 @@ function testScopesIn(text: string): string[] {
     .map(([scope]) => scope);
 }
 
-/** `full`/`all`/`entire`/`complete` marks a whole-suite ask; a narrow leg is
- * not proof of it. `all unit tests` remains a unit-scoped ask because the
- * scope check runs first. */
-const FULL_TEST_SUITE_RE = / (?:full|all|entire|complete) /;
+/** `full`/`all`/`entire`/`complete`/`exhaustive`/`suite` marks a whole-suite
+ * ask; a narrow leg is not proof of it. `all unit tests` remains a
+ * unit-scoped ask because the scope check runs first. */
+const FULL_TEST_SUITE_RE = / (?:full|all|entire|complete|exhaustive|suite) /;
 
 function asksForFullTestSuite(text: string): boolean {
   return FULL_TEST_SUITE_RE.test(normalizedTestScopeText(text));
@@ -201,9 +202,11 @@ type ScopeMatchMode = "discharge" | "contradiction";
 
 /** `discharge` needs PROOF of every requested scope; `contradiction` only
  * needs the red leg to belong to the requested scope (a red unit leg cannot
- * refute an integration-only ask). A full-suite ask accepts a generic test
- * run as proof but rejects a narrowly scoped leg; a generic ask accepts any
- * test execution. */
+ * refute an integration-only ask). A full-suite ask needs an EXPLICIT
+ * exhaustive identity in the name (`test suite`, `full test suite`,
+ * `all tests`, ...) with no narrow scope; a bare generic `test`/`tests`/
+ * `test (24)` name does not prove which suite ran, so it stays unresolved.
+ * A generic ask accepts any test execution. */
 function checkCoversRequestedScope(
   name: string,
   requestedScopes: readonly string[],
@@ -217,7 +220,8 @@ function checkCoversRequestedScope(
       : requestedScopes.every((scope) => provided.includes(scope));
   }
   if (mode === "contradiction") return true;
-  return !fullSuite || provided.length === 0;
+  if (!fullSuite) return true;
+  return provided.length === 0 && FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name));
 }
 
 export type CiDischargeReason =

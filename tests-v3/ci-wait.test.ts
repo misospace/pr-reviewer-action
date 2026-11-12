@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { ciAdapterFromEnv, escapeTableCell, renderCiEvidenceOutput, runCiWait, type CiWaitDeps } from "../src/gates/ci-wait.js";
-import { parseHeadBoundCiEvidence } from "../src/enforcement/required-check-ci.js";
+import { ciDischargeForCheckText, parseHeadBoundCiEvidence } from "../src/enforcement/required-check-ci.js";
 import { isTransientCiRead } from "../src/platform/bounded.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
@@ -816,12 +816,26 @@ test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artif
   assert.equal(renderCiEvidenceOutput("g".repeat(40), "success", [{ name: "t", state: "success" }]), "");
   assert.equal(renderCiEvidenceOutput(SHA, "success", []), "", "an empty check list carries no evidence");
   assert.equal(renderCiEvidenceOutput(SHA, "timeout (CI did not finish in time)", [{ name: "t", state: "pending" }]), "", "only the final vocabulary is emitted");
-  const many = Array.from({ length: 60 }, (_, i) => ({ name: `test-${i}`, state: "success" as const }));
+  // Non-test context rows may be capped (they are not decision evidence).
+  const many = Array.from({ length: 60 }, (_, i) => ({ name: `check-${i}`, state: "success" as const }));
   const capped = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", many).replace(/^ci_checks_evidence=/, ""));
   assert.notEqual(capped, null, "the emitted list stays inside the parser's 50-row cap");
   assert.equal(capped!.checks.length, 50);
 
-  // conclusions get the same sanitize + 200-code-point bound as names; an
+  // 51 test rows cannot be represented without dropping one. The skipped
+  // tail must not disappear: no evidence line at all, so a full-suite ask
+  // stays unresolved instead of seeing 50 green rows.
+  const skippedTail = [
+    ...Array.from({ length: 50 }, (_, i) => ({ name: `test-${i}`, state: "success" as const, conclusion: "success" })),
+    { name: "Unit Tests", state: "success" as const, conclusion: "skipped" },
+  ];
+  const skippedTailLine = renderCiEvidenceOutput(SHA, "success", skippedTail);
+  assert.equal(skippedTailLine, "", "a lossy test-check list emits no evidence");
+  const skippedTailDischarge = ciDischargeForCheckText("run full test suite after upgrade", parseHeadBoundCiEvidence(skippedTailLine.replace(/^ci_checks_evidence=/, "")), SHA);
+  assert.equal(skippedTailDischarge.outcome, "unresolved");
+  assert.equal(skippedTailDischarge.reason, "no-ci-evidence");
+
+  // conclusions get the same sanitize + 200-UTF-16-unit bound as names; an
   // all-control/empty conclusion drops the key instead of emitting ""
   const hostileConclusion = renderCiEvidenceOutput(SHA, "success", [
     { name: "t1", state: "success", conclusion: `ok\n  more\t\r${"x".repeat(300)}` },
@@ -862,21 +876,36 @@ test("renderCiEvidenceOutput: UTF-16 field bound and serialized budget always pa
   assert.equal(parsedEmoji!.checks[0]!.name.length, 200);
   assert.equal(parsedEmoji!.checks[0]!.conclusion, "😀".repeat(100));
 
-  // 50 maximum-length rows exceed the parser's 16-Ki-character JSON budget:
-  // the producer must drop rows, keep the red one, and still round-trip.
+  // 50 maximum-length TEST rows exceed the parser's 16,384-character JSON
+  // budget. Dropping a test row could hide a skipped leg, so the producer
+  // refuses to emit a lossy artifact.
   const maxRows = Array.from({ length: 50 }, (_, i) => ({
     name: `test-${i}-${"x".repeat(180)}`,
     state: i === 49 ? "failure" as const : "success" as const,
     conclusion: "y".repeat(200),
   }));
-  const maxLine = renderCiEvidenceOutput(SHA, "failure", maxRows);
-  assert.notEqual(maxLine, "");
-  const maxJson = maxLine.replace(/^ci_checks_evidence=/, "");
-  assert.equal(maxJson.length <= 16384, true, "the serialized value obeys the parser's raw budget");
-  const parsedMax = parseHeadBoundCiEvidence(maxJson);
-  assert.notEqual(parsedMax, null, "the size-capped artifact still parses strictly");
-  assert.equal(parsedMax!.checks.length < 50, true);
-  assert.equal(parsedMax!.checks[0]!.state, "failure", "the red row leads and survives the size cap");
+  assert.equal(renderCiEvidenceOutput(SHA, "failure", maxRows), "", "a lossy test-row set emits no evidence");
+
+  // Non-test context rows are the only rows the size budget may trim. The
+  // test row survives, the artifact stays under budget, and a genuinely
+  // exhaustive name still discharges.
+  const maxOtherRows = Array.from({ length: 50 }, (_, i) => ({
+    name: `check-${i}-${"x".repeat(180)}`,
+    state: "success" as const,
+    conclusion: "y".repeat(200),
+  }));
+  const mixedLine = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test suite", state: "success", conclusion: "success" },
+    ...maxOtherRows,
+  ]);
+  assert.notEqual(mixedLine, "");
+  const mixedJson = mixedLine.replace(/^ci_checks_evidence=/, "");
+  assert.equal(mixedJson.length <= 16384, true, "the serialized value obeys the parser's raw budget");
+  const parsedMixed = parseHeadBoundCiEvidence(mixedJson);
+  assert.notEqual(parsedMixed, null, "the size-trimmed artifact still parses strictly");
+  assert.equal(parsedMixed!.checks.length < 50, true);
+  assert.equal(parsedMixed!.checks.some((check) => check.name === "test suite"), true, "the test row is never trimmed");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", parsedMixed, SHA).outcome, "satisfied");
 
   // rows the parser would reject are never emitted
   assert.equal(renderCiEvidenceOutput(SHA, "success", [{ name: "test", state: "queued" }]), "");
