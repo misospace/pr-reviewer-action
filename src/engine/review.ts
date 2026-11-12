@@ -104,6 +104,7 @@ import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.j
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
+import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
@@ -328,6 +329,18 @@ function annotationSafe(text: string): string {
   return text.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/::/g, ": :").trim();
 }
 
+/** #1594: the whitelist filter over the gate-output file's RAW text — the
+ * engine reads the raw file once and derives both the published action
+ * outputs and the `ci_checks_evidence` line from that single read. */
+function ciGateOutputsFromText(text: string): string {
+  const values = new Map<string, string>();
+  for (const line of text.split("\n")) {
+    const match = /^(ci_status_final|ci_status_skipped)=([A-Za-z_-]*)$/.exec(line.trim());
+    if (match) values.set(match[1]!.replaceAll("_", "-"), match[2]!);
+  }
+  return [...values].map(([key, value]) => `${key}=${value}\n`).join("");
+}
+
 /** The CI gate's `ci_status_final` / `ci_status_skipped` step outputs as the
  * contract's kebab-case output assignments. */
 export function ciGateOutputs(path: string): string {
@@ -337,12 +350,7 @@ export function ciGateOutputs(path: string): string {
   } catch {
     return "";
   }
-  const values = new Map<string, string>();
-  for (const line of text.split("\n")) {
-    const match = /^(ci_status_final|ci_status_skipped)=([A-Za-z_-]*)$/.exec(line.trim());
-    if (match) values.set(match[1]!.replaceAll("_", "-"), match[2]!);
-  }
-  return [...values].map(([key, value]) => `${key}=${value}\n`).join("");
+  return ciGateOutputsFromText(text);
 }
 
 /** Set on every gate child; a process carrying it never starts a review. */
@@ -533,6 +541,8 @@ function resolveReviewObligations(
   harnessArtifactName: string,
   validateRequiredChecks: string | undefined,
   derivedEnabled: boolean,
+  ciEvidence: HeadBoundCiEvidence | null,
+  reviewedHeadSha: string,
 ): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
@@ -585,10 +595,18 @@ function resolveReviewObligations(
   // #1449: a row that already carries its own cause (the synthetic derived
   // coverage marker) keeps it — the harness cause never describes a
   // derivation that never ran.
+  // #1594: the CI-evidence reconciliation runs AFTER cause annotation so
+  // every downstream consumer (persistReviewObligations, the required-
+  // evidence state, the enforcement gate, and the strict mapping) reads the
+  // reconciled rows: a head-bound green test-execution check discharges an
+  // unresolved test-run ask with `resolvedBy` provenance; a head-bound
+  // failed one contradicts a model-claimed satisfaction. Derived rows never
+  // reconcile, and an `unmet` (forcing) row is never argued away.
+  const annotated = folded.map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
+  ));
   return {
-    obligations: folded.map((obligation) => (
-      obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
-    )),
+    obligations: reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha),
     derived,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
@@ -1759,6 +1777,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   }
   await claimsPromise;
   await derivedPromise;
+  // #1594: the CI gate-output file's raw text, read once after the join (an
+  // unreadable file is ""), reused by the whitelisted persist, the trace CI
+  // state, and the head-bound evidence parse below.
+  let ciGateRawText = "";
   if (ciFork !== null) {
     const outcome = await ciFork.join();
     // Joined: the second (result-building) join reads the cached outcome and
@@ -1767,7 +1789,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     checkpoint();
     env.CI_GATE_ACTIVE = outcome.ran ? "true" : "false";
     if (!outcome.ok) log("CI status gating exited non-zero; continuing (CI evidence is advisory)");
-    persistOutputs(context.outputFilePath, ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
+    // #1594: ONE raw read of the gate-output file feeds both the whitelisted
+    // action-output persist and the `ci_checks_evidence` line below (the
+    // gate child has exited here — the file cannot change afterwards).
+    try {
+      ciGateRawText = readFileSync(join(runDir, CI_GATE_OUTPUT_FILE), "utf8");
+    } catch {
+      ciGateRawText = "";
+    }
+    persistOutputs(context.outputFilePath, ciGateOutputsFromText(ciGateRawText));
   }
   checkpoint();
 
@@ -1834,8 +1864,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // read was already paid for by the gate itself — no new forge call here.
   let traceCiState: string | null = null;
   if (ciFork !== null) {
-    const gateFinal = /^ci-status-final=([A-Za-z0-9._-]+)$/m.exec(ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
+    const gateFinal = /^ci-status-final=([A-Za-z0-9._-]+)$/m.exec(ciGateOutputsFromText(ciGateRawText));
     if (gateFinal?.[1] !== undefined) traceCiState = gateFinal[1];
+  }
+  // #1594: the CI gate's head-bound check evidence, parsed from the raw
+  // gate-output text read once after the join (the `ciGateOutputs` whitelist
+  // filters this line out of the published action outputs). The gate's read
+  // was already paid for — no new forge call, no new model call. An
+  // unusable line is null: enforcement then behaves exactly pre-#1594.
+  let ciGateEvidence: HeadBoundCiEvidence | null = null;
+  if (ciFork !== null) {
+    ciGateEvidence = parseHeadBoundCiEvidence(/^ci_checks_evidence=([^\r\n]*)$/m.exec(ciGateRawText)?.[1]);
   }
   const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
   // #959: the in-scope ids are computed once here and reused by the repair
@@ -2469,6 +2508,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     enabled: env.VALIDATE_REQUIRED_CHECKS ?? "auto",
     mode: env.REQUIRED_CHECK_VALIDATION_MODE ?? "warn",
     mustCheck: stringList(classificationArtifact.must_check),
+    // #1594: the CI gate's head-bound evidence reconciles test-run asks in
+    // both enforcement layers. Null without a gate run (or without a usable
+    // evidence line) keeps every output byte-identical to pre-#1594.
+    ciEvidence: ciGateEvidence,
+    reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
   const enforcementInputs: EnforcementInputs = {
     evidenceBlockerEnabled: (env.EVIDENCE_BLOCKER_ENFORCEMENT ?? "false").toLowerCase() === "true",
@@ -2497,6 +2541,8 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     enforcementHarness,
     env.VALIDATE_REQUIRED_CHECKS,
     derivedObligationsEnabled,
+    ciGateEvidence,
+    completenessOptions.reviewedHeadSha,
   );
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, log);
@@ -2697,6 +2743,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // and the list is empty — the same shape the documents already carried
   // for that case.
   const unresolvedRequiredChecks = completenessResult === null ? emptyMergeGatingIds() : unresolvedRequiredCheckIds(completenessResult);
+  // #1594: persist the RECONCILED completeness result so the standalone
+  // `publish` process (a separate process from `run`) reads back the same
+  // CI-evidence-reconciled rows instead of re-folding the raw #750 coverage
+  // and disagreeing with the engine's disposition. The result object is the
+  // snake_case v2-shape with the per-row `reason` codes, version-tagged so
+  // the strict reader can tell an artifact this runtime wrote from any
+  // other file. A run whose fold never ran (`none`) writes nothing, so a
+  // pre-#1594-shaped run dir keeps its bytes exactly.
+  if (completenessResult !== null && completenessStatus !== "none") {
+    ws.write("required-check-coverage.json", pyJsonDumps({ version: 1, ...completenessResult.result }));
+  }
   const unresolvedRequirementIds = requirementTraceResult === null ? emptyMergeGatingIds() : unresolvedTraceRequirementIds(requirementTraceResult.trace);
   // #1521: the obligation rows that BLOCKED this review, computed AFTER both
   // enforcement branches for the same reason the two id lists above are:

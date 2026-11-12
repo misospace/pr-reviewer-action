@@ -15,6 +15,7 @@ import { reviewArtifactFromParsed, type ReviewArtifact } from "./artifact.js";
 import { applyVerdictPolicy, applyStrictVerdictPolicy, relaxCiOnlyVerdict, relaxVerificationOnlyVerdict, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
 import { capCiEvidenceFindings } from "./ci-evidence.js";
 import { applyRequiredCheckValidation, type RequiredCheckValidationResult } from "./completeness.js";
+import { parseHeadBoundCiEvidenceValue } from "./required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "./enforce.js";
 import type { EnforcementThread } from "./threads.js";
 import type { EnforcementHumanReview } from "./human-reviews.js";
@@ -32,6 +33,12 @@ interface EnforcementFixture {
   classification?: Record<string, unknown> | null;
   /** Deterministic must_check list from the classifier. */
   must_check?: string[];
+  /** #1594: the head-bound CI evidence artifact VALUE (validated through
+   * `parseHeadBoundCiEvidenceValue`; an invalid value behaves as no
+   * evidence, exactly like the runtime's strict gate-output parser). */
+  ci_evidence?: Record<string, unknown> | null;
+  /** #1594: the exact head this fixture's review is bound to. */
+  reviewed_head_sha?: string;
   /** The requirement ledger artifact (for the coverage fold). */
   ledger?: Record<string, unknown> | null;
   config: {
@@ -75,6 +82,11 @@ export function runEnforcementFixture(fixturePath: string): {
     const policy = config.verdict_policy ?? "model";
     const categories = parseNonBlockingCategories(config.non_blocking_finding_categories);
     const securityFlagged = securityRiskFlagged(fixture.classification ?? null);
+    // #1594: the CI-evidence reconciliation inputs. An absent or invalid
+    // `ci_evidence` value parses to null — the pipeline then behaves
+    // byte-identically to pre-#1594.
+    const ciEvidence = parseHeadBoundCiEvidenceValue(fixture.ci_evidence ?? null);
+    const reviewedHeadSha = fixture.reviewed_head_sha ?? "";
     // The model's own verdict, captured before the pipeline can mutate it —
     // the strict mapping needs it as an input, not as the final answer.
     const modelVerdict = String(fixture.artifact.verdict ?? "");
@@ -91,6 +103,8 @@ export function runEnforcementFixture(fixturePath: string): {
         enabled: config.validate_required_checks ?? "auto",
         mode: config.required_check_validation_mode ?? "warn",
         mustCheck: fixture.must_check ?? [],
+        ciEvidence,
+        reviewedHeadSha,
       });
       const inputs: EnforcementInputs = {
         evidenceBlockerEnabled: config.evidence_blocker_enforcement === true,
@@ -118,6 +132,8 @@ export function runEnforcementFixture(fixturePath: string): {
         enabled: config.validate_required_checks ?? "auto",
         mode: config.required_check_validation_mode ?? "warn",
         mustCheck: fixture.must_check ?? [],
+        ciEvidence,
+        reviewedHeadSha,
       });
       const inputs: EnforcementInputs = {
         evidenceBlockerEnabled: config.evidence_blocker_enforcement === true,

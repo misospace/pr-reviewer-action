@@ -198,6 +198,81 @@ structured-first contract so a grounded N/A is not misreported.
 - any richer rationale validation — the deterministic layer deliberately
   stays at presence/shape.
 
+## CI-evidence discharge and contradiction (#1594)
+
+A `must_check` ask that demands a **test run** may be discharged by existing
+trusted CI evidence instead of a model disposition. The CI gate
+(`src/gates/ci-wait.ts`) already reads the exact reviewed head's check list;
+on a finalized wait it records that list as a head-bound `ci_checks_evidence`
+gate-output artifact (never a published action output, never an extra forge
+call). `src/enforcement/required-check-ci.ts` reconciles it into both the
+#750 coverage rows and the #1381 obligation rows, keyed on identical row text:
+
+- **discharge**: a check whose name is a delimited `test`/`tests` word —
+  and no disqualifier token (coverage/report/upload/publish/deploy/image/
+  scan/analysis/lint/docs/formatting names do not *run* tests) — concluded
+  `success` **on the exact reviewed head**, and whose name **proves the
+  requested test scope**. A narrow scope (`unit`, `integration`, `e2e`,
+  `smoke`, `acceptance`, `contract`, `regression`, `performance`, `load`,
+  `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) must match the
+  ask: `Unit Tests` cannot discharge `run integration tests`, and a generic
+  `test` name cannot prove an integration-only ask. A full-suite ask
+  (`full`/`all`/`entire`/`complete`/`exhaustive`/`suite`) needs an explicit
+  exhaustive identity in the check name (`test suite`, `full test suite`,
+  `all tests`) with no narrow scope: a bare generic `test`/`tests`/
+  `test (24)` name does not prove which suite ran, and one narrow matrix leg
+  cannot discharge it. A generic ask accepts any test execution.
+  **Failure-first precedence** is scoped the same way: an
+  in-scope test-named check that went red on the exact head refutes
+  discharge even when a sibling matrix leg is green, while a red unrelated
+  scope neither refutes nor discharges. A full-suite ask also needs every
+  in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
+  leg collapsed to state `success`, keeps it unresolved beside a green
+  sibling (the explicit conclusion is required, and one leg that did not run
+  means the suite did not run). The row records the CI provenance
+  (`reason: ci-evidence` / obligation `resolvedBy`), deterministically — no
+  model re-invocation.
+- **contradiction**: the reviewer narrative completed the row (`satisfied`,
+  or a grounded `not_applicable` — the obligation fold #1381 folds both into
+  a satisfied row, so the coverage fold downgrades both together to keep the
+  two artifacts in agreement) but a matching head-bound test-execution check
+  concluded negative — the row becomes `unresolved` with reason
+  `ci-evidence-contradiction` and the published review carries the mismatch
+  explicitly, never both claims. A row the model never dispositioned keeps
+  its `unresolved` status with the annotated reason code
+  `ci-evidence-test-check-contradicted`.
+- **everything else stays unresolved** with a bounded reason code
+  (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
+  `-no-matching-test-check` — including a check whose scope does not prove
+  the ask, `-test-check-not-success`): capability, missing-source, transport,
+  budget and timeout shaped failures are coverage, never satisfaction.
+- **derived rows and `unmet` (forcing) rows are never reconciled** by CI
+  evidence (#1449/#1505/#1381 semantics unchanged — discharge only from
+  validated evidence, contradiction only strengthens the approval fence).
+- **no evidence, no change**: with no evidence artifact (or an unusable one,
+  refused by the strict parser) every output is byte-identical to pre-#1594.
+- **producer obeys the consumer without losing decision evidence**: the gate
+  emits at most 50 rows and a 16,384-character (UTF-16 code unit) JSON value,
+  truncates names/conclusions to the parser's 200-unit field bound (never
+  splitting a surrogate pair), and drops invalid states. Classifying and
+  retaining rows uses the COMPLETE source name, never the truncated copy:
+  if bounding would change a check's decision identity (test-execution
+  classification, proved scope, or exhaustive identity), the gate emits NO
+  evidence line rather than let a truncated skipped test row read as
+  disposable context. Every test-execution row is retained; only non-test
+  context rows may be trimmed (failed rows first). If the complete test-row
+  set cannot fit, the gate also emits NO evidence line — an artifact missing
+  a skipped, pending, or otherwise incomplete test leg could otherwise look
+  falsely complete and discharge a full-suite ask. A final strict-parser
+  round-trip means an oversized or malformed artifact is never emitted.
+- **publish re-folds agree with the review**: the engine persists its
+  RECONCILED fold to the run dir (`required-check-coverage.json`,
+  version-tagged); the standalone `publish` CLI reads it back (strictly, and
+  only when its status matches the recorded `required_check_fold_status`)
+  instead of recomputing the raw #750 coverage — which would re-list a
+  CI-discharged row as unresolved and omit a contradicted one. A run dir
+  without the artifact keeps the pre-#1594 recompute exactly.
+
 ## Regression coverage
 
 - PR #748-shaped deterministic case (path checks over a change with no
