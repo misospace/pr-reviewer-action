@@ -21,7 +21,7 @@ import {
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
 } from "../src/tools/loop.js";
-import { buildSummarizerConversation } from "../src/tools/harness.js";
+import { buildSummarizerConversation, loopContextLimits } from "../src/tools/harness.js";
 import { attachTransportTiming, readTransportTiming, type TransportTiming } from "../src/transport/timing.js";
 
 function scriptedLoop(responses: unknown[], execResults: Record<string, unknown>[], clock: number[] = []) {
@@ -826,6 +826,109 @@ test("#1635: protected overflow is recorded, not silently truncated", async () =
   assert.deepEqual(events.map((e) => e.content), originals);
   assert.equal(outcome.compactionEvents.at(-1)!.kind, "truncate");
   assert.equal(outcome.compactionEvents.at(-1)!.results_shortened, 0);
+});
+
+/**
+ * #1635: the deterministic fixture reproducing PR #12090's compaction
+ * signature (home-ops run 43140955629, pinned v3.8.0). The driver's
+ * `approxTokens()` counts system + 16 bytes/event + content bytes, ÷4 rounded
+ * up, so the byte arithmetic below lands on the incident's pair exactly:
+ *
+ * - before: 1 + (16+56,036) + 9×(16+11) + 9×16 + 95,860 = 152,300 bytes
+ *   → ceil(152,300/4) = 38,075 approximate tokens (round 18);
+ * - the v3.8 rail compacted at 25% of the declared window (32,768 for
+ *   131,072), so this exact conversation hit the old blunt pass
+ *   (every result over the cap, none protected); at a 2,000-byte cap with no
+ *   newlines the clip is exact: 1 + 56,052 + 243 + 9×2,016 = 74,440 bytes
+ *   → ceil(74,440/4) = 18,610 approximate tokens (round 19) — the ~51%
+ *   evidence destruction.
+ *
+ * The fixture pins those driver-side numbers only; it claims nothing about
+ * provider-reported tokens or backend latency.
+ */
+function pr12090Fixture(): Conversation {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("c".repeat(56036));
+  for (let i = 1; i <= 9; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "read_file", arguments: "{}" }]);
+    conversation.addToolResult(`c${i}`, "e".repeat(i === 9 ? 10652 : 10651), { maxBytes: 12000 });
+  }
+  return conversation;
+}
+
+test("#1635: the #12090-shaped 38,075→18,610 fixture compacts under the old rail only", () => {
+  // The old 25% watermark: 32,768 approximate tokens for a 131,072 window.
+  const oldWatermark = Math.floor(131072 * 0.25);
+  const control = pr12090Fixture();
+  assert.equal(control.approxTokens(), 38075, "round-18 size of the incident");
+  assert.ok(38075 > oldWatermark, "the fixture straddles the historical trigger");
+  // v3.8 behavior: cap every oversized result, newest included.
+  const crushed = control.truncateOldestToolResults(2000, { keepNewest: 0 });
+  assert.equal(crushed.shortened, 9);
+  assert.equal(control.approxTokens(), 18610, "the round-19 collapse, byte-for-byte");
+});
+
+test("#1635: the #12090 fixture never compacts under the 75% policy and stays byte-stable across rounds", async () => {
+  const limits = loopContextLimits(
+    { PRIMARY_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384" },
+    "primary",
+  );
+  assert.equal(limits.maxConversationTokens, 98304);
+  const conversation = pr12090Fixture();
+  assert.equal(conversation.approxTokens(), 38075);
+  const responses = [
+    openAiCall("c10", "read_file", '{"path":"x.ts"}'),
+    openAiCall("c11", "read_file", '{"path":"y.ts"}'),
+    openAiText("done"),
+  ];
+  const messageBytes: string[] = [];
+  let responseIndex = 0;
+  const outcome = await driveToolLoop(
+    conversation,
+    async (payload) => {
+      messageBytes.push(JSON.stringify((payload as Record<string, unknown>).messages));
+      return responses[responseIndex++];
+    },
+    async (_name, args) => ({ tool: "read_file", status: "ok", result: { content: String(args.path ?? "") } }),
+    {
+      apiFormat: "openai",
+      model: "m",
+      budgets: {
+        ...adaptiveLoopBudgets(3, 8, 120),
+        maxConversationTokens: limits.maxConversationTokens,
+        truncatedResultBytes: 2000,
+        summarizeKeepNewest: 2,
+      },
+      timeFn: () => 0,
+    },
+  );
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  // Multi-round pre-watermark byte/prefix stability: every serialized request
+  // after the first replays its predecessor's message bytes unchanged, with
+  // only new events appended.
+  assert.equal(messageBytes.length, 3);
+  for (let index = 1; index < messageBytes.length; index++) {
+    assert.ok(
+      messageBytes[index]!.length > messageBytes[index - 1]!.length,
+      `round ${index + 1} appended no events — the prefix check below would be vacuous`,
+    );
+    assert.ok(
+      messageBytes[index]!.startsWith(messageBytes[index - 1]!.slice(0, -1)),
+      `round ${index + 1} rewrote the earlier request bytes below the watermark`,
+    );
+  }
+  assert.equal(outcome.compactionEvents.length, 0, "no destructive compaction before the watermark");
+  assert.equal(outcome.compactionTruncate, 0);
+  assert.equal(outcome.compactionSummarize, 0);
+  assert.equal(outcome.compactionOverflowProtected, false);
+  assert.ok(outcome.peakConversationTokens <= limits.maxConversationTokens);
+  const results = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>;
+  assert.deepEqual(
+    results.slice(0, 9).map((e) => Buffer.byteLength(e.content, "utf8")),
+    [...Array.from({ length: 8 }, () => 10651), 10652],
+    "the nine incident-shaped results survive untouched",
+  );
 });
 
 test("anthropic tool_use inputs serialise once at the boundary; text blocks ride along", async () => {
