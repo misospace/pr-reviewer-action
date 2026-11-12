@@ -19,6 +19,7 @@ import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
 import { loopContextLimits, resolveLoopLimits, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
+import { harnessGatheredNoEvidence } from "../tools/execution-counts.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import {
@@ -588,7 +589,13 @@ function resolveReviewObligations(
     // the executed-only name. Read the truthfully-named field; the
     // executed count now includes failed attempts and would mask a
     // all-calls-errored run.
-    degraded: typeof harness?.successful_request_count === "number" && harness.successful_request_count === 0,
+    // #1606: this consumer keeps the EVIDENCE meaning (calls that
+    // succeeded) — a run whose every call failed gathered no evidence and
+    // must read as such. The tool-failure ENFORCEMENT reads the other
+    // count (calls attempted) for its own question; the two consumers read
+    // the counters through ONE shared reader
+    // (`src/tools/execution-counts.ts`), so they cannot drift apart.
+    degraded: harnessGatheredNoEvidence(harness),
   });
   // Only an `unresolved` row carries the evidence-gathering cause; a
   // `satisfied` row was resolved positively and an `unmet` row negatively.

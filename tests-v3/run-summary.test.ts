@@ -123,6 +123,77 @@ test("#1003: the triage row renders only when triage ran", () => {
   }
 });
 
+test("#1606: the primary tools row shows the dispatched and successful counts as two different numbers", () => {
+  const { dir, cleanup } = withDir();
+  try {
+    const failedCall = join(dir, "failed-call.md");
+    // The harness-written artifact shape (#1597 partitions): two calls
+    // reached the executor, one of them failed.
+    writeStepSummary(failedCall, baseInput({
+      primaryHarness: {
+        planned_request_count: 2,
+        executed_request_count: 2,
+        successful_request_count: 1,
+        refused_request_count: 0,
+        deduplicated_request_count: 0,
+        tool_calls: [
+          { tool: "read_file", args: { path: "src/a.ts" }, status: "ok" },
+          { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+        ],
+        tool_results: [
+          { tool: "read_file", status: "ok", result: { content: "code" } },
+          { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+        ],
+      },
+    }));
+    assert.ok(
+      readFileSync(failedCall, "utf8").includes("| Primary tools | 2 executed (1 successful);"),
+      "a failed call shows as a dispatched count above the successful count",
+    );
+
+    const allFailed = join(dir, "all-failed.md");
+    writeStepSummary(allFailed, baseInput({
+      primaryHarness: {
+        planned_request_count: 2,
+        executed_request_count: 2,
+        successful_request_count: 0,
+        refused_request_count: 0,
+        deduplicated_request_count: 0,
+        tool_calls: [
+          { tool: "read_file", args: { path: "missing.md" }, status: "error" },
+          { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+        ],
+        tool_results: [
+          { tool: "read_file", status: "error", result: { error: "no such file" } },
+          { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+        ],
+      },
+    }));
+    assert.ok(
+      readFileSync(allFailed, "utf8").includes("| Primary tools | 2 executed (0 successful);"),
+      "a run whose every call failed reports two different numbers, not one",
+    );
+
+    // An artifact that carries the per-call trace but no counters still
+    // reports two numbers that agree with the trace.
+    const traceOnly = join(dir, "trace-only.md");
+    writeStepSummary(traceOnly, baseInput({
+      primaryHarness: {
+        tool_calls: [
+          { tool: "read_file", args: { path: "src/a.ts" }, status: "ok" },
+          { tool: "list_dir", args: { path: "src/" }, status: "ok" },
+        ],
+      },
+    }));
+    assert.ok(
+      readFileSync(traceOnly, "utf8").includes("| Primary tools | 2 executed (2 successful);"),
+      "a trace without counters reports the trace's own population",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("the smart tools row renders only for a native-loop run with a smart harness", () => {
   const { dir, cleanup } = withDir();
   try {

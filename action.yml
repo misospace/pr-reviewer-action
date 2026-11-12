@@ -622,7 +622,7 @@ inputs:
     required: false
     default: "5"
   tool-failure-enforcement:
-    description: If true, force request_changes when tool harness planning fails
+    description: If true, force request_changes when the tool harness reports a failure, or when every executed tool call failed
     required: false
     default: "false"
   tool-min-successful-requests:

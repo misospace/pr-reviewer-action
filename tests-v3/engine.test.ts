@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
 import { runReviewEngine, createRunCancellation, claimsPrepassGate } from "../src/engine/review.js";
+import { harnessGatheredNoEvidence } from "../src/tools/execution-counts.js";
 import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.js";
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -598,6 +599,41 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     await server.close();
     f.cleanup();
   }
+});
+
+test("#1606: the evidence-cause consumer reads the successful count, so a run whose every tool call failed reads as gathering no evidence", () => {
+  // The harness-written artifact shapes (#1597 partitions): the attempted
+  // count and the successful count carry their own meanings.
+  const allFailed = {
+    planned_request_count: 2,
+    executed_request_count: 2,
+    successful_request_count: 0,
+    tool_calls: [
+      { tool: "read_file", args: { path: "missing.md" }, status: "error" },
+      { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+    ],
+    tool_results: [
+      { tool: "read_file", status: "error", result: { error: "no such file" } },
+      { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+    ],
+  };
+  assert.equal(harnessGatheredNoEvidence(allFailed), true, "a run whose every call failed gathered no evidence");
+  const oneOk = {
+    ...allFailed,
+    successful_request_count: 1,
+    tool_calls: [
+      { tool: "read_file", args: { path: "src/a.ts" }, status: "ok" },
+      { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+    ],
+    tool_results: [
+      { tool: "read_file", status: "ok", result: { content: "code" } },
+      { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+    ],
+  };
+  assert.equal(harnessGatheredNoEvidence(oneOk), false, "one successful call is evidence");
+  // An artifact that reports no successful count at all says nothing.
+  assert.equal(harnessGatheredNoEvidence({}), false);
+  assert.equal(harnessGatheredNoEvidence(null), false);
 });
 
 test("#1380: the claim pre-pass launches only after the evidence phase settles on a dependency update", async () => {
