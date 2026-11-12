@@ -389,6 +389,13 @@ export const WEB_SEARCH_SCHEMA: ToolSchema = {
  * truncated response doesn't grow on every loop round. */
 export const TOOL_RESULT_MAX_BYTES = 8000;
 
+/** #1635: how many of the newest tool results a compaction pass leaves verbatim
+ * when the caller does not state a count. Both overflow paths share this ONE
+ * default (#1638 review) so a future caller that omits the option cannot
+ * silently opt out of the "never touch the newest results" invariant. Matches
+ * the loop driver's configured default (`summarizeKeepNewest`). */
+export const DEFAULT_PROTECTED_NEWEST_RESULTS = 2;
+
 /** Approximate bytes-per-token used by the budget helpers. Deliberately
  * conservative (under-fills) — local models reject over-long prompts harder
  * than they reject slightly under-filled ones. The loop driver owns the
@@ -970,19 +977,20 @@ export class Conversation {
   // ---- overflow handling -------------------------------------------------
 
   /** Shrink the oldest tool results so each fits within
-   * `maxBytesPerResult`. #1635: the newest `keepNewest` results (default 0,
-   * the loop passes its configured count) are left verbatim — they are what
-   * the model is acting on, and mutating them is exactly the evidence
-   * destruction this method's name always promised against. Returns the
-   * number of results actually shortened and the UTF-8 bytes freed (content-
-   * free accounting for compaction telemetry). The cut is UTF-8/newline-safe
-   * (see truncateText). Any mutation of an older result changes the cacheable
-   * request prefix — the driver records that on its compaction event. */
+   * `maxBytesPerResult`. #1635: the newest `keepNewest` results (default
+   * `DEFAULT_PROTECTED_NEWEST_RESULTS`, the loop passes its configured count)
+   * are left verbatim — they are what the model is acting on, and mutating
+   * them is exactly the evidence destruction this method's name always
+   * promised against. Returns the number of results actually shortened and the
+   * UTF-8 bytes freed (content-free accounting for compaction telemetry). The
+   * cut is UTF-8/newline-safe (see truncateText). Any mutation of an older
+   * result changes the cacheable request prefix — the driver records that on
+   * its compaction event. */
   truncateOldestToolResults(
     maxBytesPerResult: number,
     options: { keepNewest?: number } = {},
   ): { shortened: number; bytesFreed: number } {
-    const keep = Math.max(0, Math.floor(options.keepNewest ?? 0));
+    const keep = Math.max(0, Math.floor(options.keepNewest ?? DEFAULT_PROTECTED_NEWEST_RESULTS));
     const indices = this.events
       .map((e, i) => (e.kind === "tool_result" ? i : -1))
       .filter((i) => i >= 0);
@@ -1026,7 +1034,8 @@ export class Conversation {
    * When the conversation outgrows the loop's context budget, blunt
    * truncation drops the tail of each old result — losing whatever evidence
    * sat past the byte cap. This instead compresses the older results (all but
-   * the newest `keepNewest`) into a single dense digest via `summarizeFn`.
+   * the newest `keepNewest`, default `DEFAULT_PROTECTED_NEWEST_RESULTS`) into
+   * a single dense digest via `summarizeFn`.
    * Wire validity is preserved: every tool_result keeps its `call_id` so the
    * assistant_tool_calls ↔ tool_result pairing stays intact. The oldest
    * folded result's content becomes the digest; the rest become a short
@@ -1041,7 +1050,7 @@ export class Conversation {
     summarizeFn: (block: string) => string | Promise<string>,
     options: { keepNewest?: number } = {},
   ): Promise<number> {
-    const keepNewest = options.keepNewest ?? 2;
+    const keepNewest = options.keepNewest ?? DEFAULT_PROTECTED_NEWEST_RESULTS;
     const indices = this.events
       .map((e, i) => (e.kind === "tool_result" ? i : -1))
       .filter((i) => i >= 0);
