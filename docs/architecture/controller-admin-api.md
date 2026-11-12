@@ -3,11 +3,12 @@
 Design of `src/admin/`: the HTTP control-plane surface the self-hosted
 controller daemon needs to be **operable without a UI**. Like the
 event/job (#728), queue (#731), acquisition (#732), executor (#733),
-credential (#735), and durable-state (#736) layers before it, this is
-**a library for the future controller daemon — it is not wired into the
-running action pipeline**. The daemon composition (#1348) supplies every
-piece of state and every effect through the injected
-`ControllerAdminDeps` seam; this library owns none of the state itself.
+credential (#735), and durable-state (#736) layers before it, it is
+consumed live by the controller daemon (#1348): `src/controller/main.ts`
+serves `createAdminHost` on a dedicated admin listener. The daemon
+composition supplies every piece of state and every effect through the
+injected `ControllerAdminDeps` seam; this library owns none of the state
+itself.
 
 ## Listener separation (normative)
 

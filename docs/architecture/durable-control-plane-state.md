@@ -4,8 +4,9 @@ Design of `src/state/`: the durable run state, usage accounting, and
 publication persistence the self-hosted controller needs, behind a
 typed storage interface. Like the event/job (#728), queue (#731),
 acquisition (#732), executor (#733), and credential (#735) layers
-before it, this is **a library for the future self-hosted controller
-daemon — it is not wired into the running action pipeline**.
+before it, it is consumed live by the controller daemon (#1348):
+`src/controller/main.ts` binds `PostgresControlPlaneStore` and runs
+migrations before any work is accepted.
 
 The initial production backend is **PostgreSQL**
 (`src/state/postgres.ts`, driver `pg`). A lightweight
