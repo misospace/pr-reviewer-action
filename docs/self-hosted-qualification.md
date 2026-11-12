@@ -16,8 +16,18 @@ requeue, a controller crash with a running worker and with queued
 settle-window work, a cancelled review, a publication retry with no
 second model call, single-counted usage across those retries and
 restarts, a primary model failure, and a missed webhook found by
-reconciliation. The remaining scenario families land one at a time
-(#1484, #1485).
+reconciliation. The adversarial security-boundary family landed with
+#1485: each scenario is a discrete test function in the harness (a
+hostile repository config, a fork PR against private data, secret
+redaction in operator-mode publication, and a forge credential revoked
+mid-review), and every scenario closes with a credential leakage gate
+over the controller logs, the durable state, and the published
+artifacts. The adversarial family runs last, on a webhook daemon of its
+own, because the revocation scenario destroys the forge credential. That
+daemon also runs on a scoped runner credential — a non-admin bot account
+that is a collaborator on the reviewed repository only — as defense in
+depth behind the deterministic product gates. The remaining scenario
+families land one at a time (#1484).
 
 A dispatched CI run executes the harness and reports its pass/fail.
 The job still fails closed when the script is absent, so a green run
@@ -54,8 +64,17 @@ The harness must prove these paths. Each path is one scenario.
 - Usage and cost accounting that counts one review across retries and
   restarts.
 - A primary model failure that falls back to the fallback model.
+- A malicious repository config on a pull request head that cannot
+  alter the review of itself (#1485).
 - A fork pull request and a private repository, with the secret boundary
-  intact.
+  intact: the deterministic fork gate must refuse the linked-issue
+  reference the fork body provokes before any fetch — the instance's
+  access log shows zero requests for the private repository, and the
+  review records the refusal.
+- Published review artifacts that carry no planted secret and no live
+  operator credential (#1485).
+- A revoked forge credential that fails a mid-review publication safely,
+  with no credential in any log, durable field, or artifact (#1485).
 - A publication that replaces the managed review of the same head.
 
 ## Rules for the harness
@@ -97,8 +116,10 @@ a remote forge. The gate checks the CI job for the same.
    on the repository's owner, and the repository must hold exactly one
    open pull request: the reconciler discovers that pull request through
    the GitHub App capability and the harness reviews it. Keep the test
-   repository clean, because a qualification run spends one model call
-   per forge.
+   repository clean, because the qualification run reviews it once. The
+   disposable Forgejo instance hosts many reviews (the normal path, the
+   failure/restart scenarios, and the adversarial security-boundary
+   scenarios), each of which spends at most one model call.
 5. Run the harness.
 
    ```bash

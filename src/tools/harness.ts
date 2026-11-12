@@ -94,6 +94,14 @@ STOP_REQUEST_ERROR,
   type RequiredEvidenceRow,
   type ToolTurnSignal,
 } from "./loop.js";
+import {
+  classifyThrownStreamedAttempt,
+  classifyUnusableStreamedBody,
+  formatStreamedAttemptFailure,
+  TERMINAL_STREAMED_FAILURE_REASONS,
+  type StreamedAttemptClassification,
+  type StreamedAttemptFailureRecord,
+} from "./stream-attempt.js";
 import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import { readTransportTiming, type TransportTiming } from "../transport/timing.js";
@@ -2589,7 +2597,17 @@ export function nativeLoopRoundLogLines(
     ` tool_elapsed=${fmtLatencySec(rec.tool_elapsed_sec)}` +
     ` remaining req=${rec.requests_remaining} rounds=${rec.rounds_remaining} wall=${fmtWholeSec(rec.wall_clock_remaining_sec)}` +
     (rec.streamed_fallback ? " (streamed→non-streamed)" : "");
-  return [modelLine, toolsLine];
+  // #1628: the discarded streamed attempt gets its OWN concise line — the
+  // reason it was discarded, its own elapsed, how far the wire got, and the
+  // recovery's elapsed. Content-free: numbers and this loop's own tokens.
+  const lines = [modelLine, toolsLine];
+  if (rec.stream_failure !== null && rec.stream_failure !== undefined) {
+    lines.push(
+      `  native_loop ${label} ${rec.round}: streamed attempt discarded` +
+      ` ${formatStreamedAttemptFailure(rec.stream_failure)}`,
+    );
+  }
+  return lines;
 }
 
 /** #1199: the one-line heartbeat for the closing in-conversation verdict turn,
@@ -3235,26 +3253,69 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       ? (): number => effectiveDeadline - timeFn()
       : undefined;
     let timeout = remainingCheck(effectiveDeadline, explorationClamped);
-    // Per-turn fallback: a streamed turn that can't be reassembled — a
+    // Per-turn fallback (#637): a streamed turn that can't be reassembled — a
     // truncated/garbled SSE body (transport raise) or a 200 error object
     // (error key) — is retried once non-streamed before the loop gives up.
+    // #1628: every streamed attempt classifies ITSELF before the recovery can
+    // erase it — a bounded, content-free record (reason, status, this
+    // attempt's own elapsed, how far the wire got) reported through the turn
+    // signal once the recovery completes or fails, so the round's telemetry,
+    // the artifact, and the logs can tell two ~125s 524-shaped discards apart
+    // from two 4s error-object ones. A cancelled attempt is never retried:
+    // the answer could not be read anymore, so only its record is reported.
+    const streamed = payload.stream === true;
     let response: unknown = null;
-    let usable = false;
+    let streamClassification: StreamedAttemptClassification | null = null;
+    let streamFailureElapsedSec: number | null = null;
+    let cancelledExc: unknown = null;
+    let transportFailed = false;
+    const attemptStartMs = performance.now();
     try {
       response = await deps.transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout, wireRetryCap, attemptBudgetSec);
-      usable = !(payload.stream === true && (response as Record<string, unknown>)?.error);
       turn?.reportTiming?.(readTransportTiming(response));
     } catch (exc) {
       turn?.reportTiming?.(null);
-      if (payload.stream !== true) throw exc;
-      usable = false;
+      if (!streamed) throw exc;
+      transportFailed = true;
+      streamClassification = classifyThrownStreamedAttempt(exc);
+      streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
+      if (streamClassification.reason === "cancelled") cancelledExc = exc;
     }
-    if (!usable) {
+    // #1628: the body-side classification runs OUTSIDE the wire try/catch — a
+    // classifier defect must surface as what it is, never be swallowed into a
+    // misattributed "unknown" wire failure that then spends the recovery.
+    if (!transportFailed && streamed) {
+      streamClassification = classifyUnusableStreamedBody(response, input.apiFormat);
+      if (streamClassification !== null) streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
+    }
+    if (streamClassification !== null) {
+      const classification = streamClassification;
+      const failureElapsed = streamFailureElapsedSec ?? 0;
+      const routeToken = /^[a-z][a-z0-9_-]{0,31}$/.test(input.tier) ? input.tier : "unknown";
+      const recordFor = (retryElapsedSec: number | null): StreamedAttemptFailureRecord => ({
+        reason: classification.reason,
+        status: classification.status,
+        elapsed_sec: roundSeconds(failureElapsed),
+        first_byte_sec: classification.first_byte_sec === null ? null : roundSeconds(classification.first_byte_sec),
+        first_sse_event_sec: classification.first_sse_event_sec === null ? null : roundSeconds(classification.first_sse_event_sec),
+        first_content_sec: classification.first_content_sec === null ? null : roundSeconds(classification.first_content_sec),
+        retry_elapsed_sec: retryElapsedSec === null ? null : roundSeconds(retryElapsedSec),
+        route: routeToken,
+      });
+      if (cancelledExc !== null) {
+        // #1628: the run's own cancellation — a non-streamed retry would
+        // produce an answer nobody reads. Report the discarded attempt (with
+        // a null retry elapsed: none was fired) and propagate the
+        // cancellation unchanged.
+        turn?.reportStreamFailure?.(recordFor(null));
+        log(`  native loop: streamed turn cancelled (${formatStreamedAttemptFailure(recordFor(null))}); not retried`);
+        throw cancelledExc;
+      }
       // #1199: tell the driver this turn fell back to a non-streamed call so
       // the round's telemetry records it (the summarizer request passes no
       // turn signal, so its fallbacks are never attributed to a round).
       turn?.reportFallback?.();
-      log("  native loop: streamed turn unusable; retrying non-streamed");
+      log(`  native loop: streamed turn unusable (${formatStreamedAttemptFailure(recordFor(null))}); retrying non-streamed`);
       const fallback: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(payload)) {
         if (k !== "stream_options") fallback[k] = v;
@@ -3262,18 +3323,54 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       fallback.stream = false;
       // #1464: fail closed — a fallback payload that lost its `messages` must
       // never be sent. Throwing here surfaces as a request error in the loop
-      // (fail closed), never as a conversation-less model call.
+      // (fail closed), never as a conversation-less model call. The discarded
+      // attempt still gets its record (no retry was fired).
       if (!Array.isArray(fallback.messages) || fallback.messages.length === 0) {
+        turn?.reportStreamFailure?.(recordFor(null));
         throw new Error("non-streamed fallback payload carries no messages");
       }
-      const retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      let retryTimeout: number;
+      try {
+        retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      } catch (exc) {
+        // The run boundary expired between the discard and the recovery: no
+        // retry is fired, and the discarded attempt still gets its record (a
+        // null retry time) — the round must not collapse back to the bare
+        // fallback boolean this issue exists to eliminate.
+        turn?.reportStreamFailure?.(recordFor(null));
+        throw exc;
+      }
+      // #1628: for a PROVEN terminal failure (an error status, a closed SSE
+      // connection, a malformed/truncated terminal body) the recovery is
+      // capped to the turn's REMAINING budget, floored at one second — it may
+      // not restart a full turn wait when the wire already told us the
+      // attempt ended, and the run/exploration deadline above continues to
+      // clamp both attempts. The floor means an attempt that overspent the
+      // whole turn budget still gets a one-second recovery, so the pair is
+      // bounded by one turn timeout plus that guaranteed second.
+      // Ambiguous cases (a timeout with nothing observed, an empty or
+      // unclassifiable body) keep the configured deadline as their authority.
+      if (TERMINAL_STREAMED_FAILURE_REASONS.has(classification.reason)) {
+        retryTimeout = Math.min(retryTimeout, Math.max(1, Math.trunc(input.turnTimeout - failureElapsed)));
+      }
+      const retryStartMs = performance.now();
       try {
         response = await deps.transport(input.baseUrl, input.apiFormat, fallback, input.apiKey, retryTimeout, wireRetryCap, attemptBudgetSec);
         turn?.reportTiming?.(readTransportTiming(response));
       } catch (exc) {
         turn?.reportTiming?.(null);
+        const retryElapsed = (performance.now() - retryStartMs) / 1000;
+        turn?.reportStreamFailure?.(recordFor(retryElapsed));
+        const retryClassification = classifyThrownStreamedAttempt(exc);
+        log(
+          `  native loop: streamed turn fallback non-streamed FAILED (${formatStreamedAttemptFailure(recordFor(retryElapsed))})` +
+          ` retry_reason=${retryClassification.reason}${retryClassification.status !== null ? ` status=${retryClassification.status}` : ""}`,
+        );
         throw exc;
       }
+      const retryElapsed = (performance.now() - retryStartMs) / 1000;
+      turn?.reportStreamFailure?.(recordFor(retryElapsed));
+      log(`  native loop: streamed turn fallback non-streamed recovered (${formatStreamedAttemptFailure(recordFor(retryElapsed))})`);
     }
     accumulateUsage(usageAcc, response, input.apiFormat);
     if (sidecar !== undefined) accumulateUsage(sidecar, response, input.apiFormat);

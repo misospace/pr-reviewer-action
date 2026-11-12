@@ -148,6 +148,7 @@ private credentials is disabled:
 | Linear context | per config | **off** | Private credentials |
 | Post-review confidence scorer | per config | **off** (`ai-confidence-enable-for-forks: "false"`) | The scorer's prompt is built from privileged review output (final findings, summary, coverage account, `review_result`, required checks) and sent to the scorer endpoint under a privileged credential — on a fork PR that crosses the trust boundary. Skipped with a `WARNING:` line naming the override |
 | Linked-source URL fetching | allowlisted hosts | **off** (`allowed-source-hosts: ""`) | Fork-controlled URLs must not be fetched with review credentials in play |
+| Linked-issue cross-repository fetching | on | **off** (rule-based refusal before any fetch, #1617) | An `owner/repo#N` reference in the fork's body would point the operator's forge credential — in the review corpus and the selection fingerprint alike — at repositories the contributor cannot see. Same-repository refs (bare `#N`, or a spelling of the base repo) keep working; refusals render in `linked-issues.md` and `github_fork_skips` |
 | PR thread context | on | on | Read-only API data |
 | Image digest provenance | on | on | Public registry metadata, budgeted |
 | Deep review specialists | all roles | `auto` (classifier-selected, bounded) | Compute bound |

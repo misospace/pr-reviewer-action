@@ -11,7 +11,9 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
-import { reassembleSse } from "../src/transport/sse.js";
+import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
+import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
+import { TransportFailure } from "../src/transport/http.js";
 import { attachTransportTiming, readTransportTiming } from "../src/transport/timing.js";
 import { harnessTransportAdapter, normalizedToOpenAiChat } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
@@ -4104,6 +4106,7 @@ test("#1466: the #1459 MiniMax/LiteLLM streamed body reports its real prompt and
   // The transport probe rides the body (the production adapter attaches it).
   attachTransportTiming(projection, {
     firstEventSec: 0.3,
+    firstSseEventSec: 0.5,
     firstContentSec: 2.5,
     totalSec: 14.2,
     wireCalls: 1,
@@ -4168,6 +4171,7 @@ test("#1466: the verdict record carries the turn's token counts and the accepted
       // The transport probe rides the body the transport returned.
       return attachTransportTiming(body as Record<string, unknown>, {
         firstEventSec: 0.4,
+        firstSseEventSec: null,
         firstContentSec: 1.1,
         totalSec: 3.6,
         wireCalls: 1,
@@ -4228,8 +4232,8 @@ test("#1466: a verdict turn whose streamed attempt failed reports the accepted (
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -4281,8 +4285,8 @@ test("#1466: a retried verdict turn sums its token counts over BOTH attempts and
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -4409,6 +4413,45 @@ test("#1466: the production transport adapter attaches the probe to BOTH respons
   }
 });
 
+test("#1628: the reassembly-quality probe survives the harness adapter's streamed projection", async () => {
+  // #252 discipline: the seam itself is the boundary — the quality probe is
+  // attached by `reassembleSse`, but the caller receives the NEW projected
+  // object, so only a test through `harnessTransportAdapter` proves the
+  // re-attach. Without it every malformed-empty stream would silently
+  // degrade to `empty_completion`.
+  const malformedBody = 'data: {"id":"x","choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"\n\n';
+  const healthyBody = [
+    'data: {"id":"1","choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{}"}}]}}]}',
+    'data: {"id":"1","choices":[{"finish_reason":"tool_calls"}]}',
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  let reply = malformedBody;
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(reply);
+  });
+  try {
+    const adapter = harnessTransportAdapter({} as StageEnv);
+    const malformed = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const quality = readSseReassemblyQuality(malformed);
+    assert.ok(quality !== null, "the projected streamed body carries the quality probe");
+    assert.ok((quality?.malformedFrames ?? 0) >= 1, "the unparseable frame was counted");
+    assert.equal(quality?.sawTermination, false, "a torn stream never terminated");
+    // End-to-end through the seam's own classifier: malformed, not empty.
+    assert.equal(classifyUnusableStreamedBody(malformed, "openai")?.reason, "sse_malformed");
+    reply = healthyBody;
+    const healthy = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const healthyQuality = readSseReassemblyQuality(healthy);
+    assert.ok(healthyQuality !== null && healthyQuality.sawTermination, "a terminated stream reports termination");
+    assert.equal(healthyQuality?.malformedFrames, 0);
+    assert.equal(classifyUnusableStreamedBody(healthy, "openai"), null, "a tools stream is never discarded");
+  } finally {
+    await server.close();
+  }
+});
+
 // ── #1598: the fallback evidence-failover tier ──────────────────────────────
 
 test("#1598: TOOL_HARNESS_TIER=fallback runs the native loop on the RESOLVED fallback lane", async () => {
@@ -4519,4 +4562,201 @@ test("#1598: an unknown tool harness tier still fails closed", async () => {
     runToolHarness(deps({ env: { TOOL_HARNESS_TIER: "quantum" } })),
     /invalid tool harness tier/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// #1628: streamed native-loop failure recovery is attributable and bounded
+// per attempt.
+// ---------------------------------------------------------------------------
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("#1628: a pair of fallback rounds reports their own reasons and times, not two booleans", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Round 1 discards like the #12074 lead: an HTTP 524 whose bytes arrived
+  // late (the wire observation rides the failure). Round 2 discards a 200
+  // body carrying a provider error object — a different reason, a different
+  // time. Each must say so on its own record.
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(60);
+        throw attachTransportTiming(
+          new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524, body: "gateway timed out" }),
+          { firstEventSec: 0.05, firstSseEventSec: null, firstContentSec: null, totalSec: 0.06 },
+        );
+      }
+      if (turn === 1) { await sleepMs(40); return openAiCall("c1", "read_file", '{"path":"src.ts"}'); }
+      if (turn === 2) return { error: { type: "server_error", message: "the wire broke here" } };
+      if (turn === 3) { await sleepMs(30); return openAiText("evidence gathered"); }
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  const first = rounds[0].stream_failure;
+  const second = rounds[1].stream_failure;
+  assert.equal(rounds[0].streamed_fallback, true);
+  assert.equal(rounds[1].streamed_fallback, true);
+  // Each discarded attempt reports its OWN reason, status, and times.
+  assert.equal(first.reason, "http_status");
+  assert.equal(first.status, 524);
+  assert.ok(first.elapsed_sec >= 0.05 && first.elapsed_sec < 2, `elapsed must be the attempt's own time, got ${first.elapsed_sec}`);
+  assert.equal(first.first_byte_sec, 0.05);
+  assert.equal(first.first_sse_event_sec, null, "a 524 body carries no SSE data event");
+  assert.equal(first.first_content_sec, null);
+  assert.ok(first.retry_elapsed_sec !== null && first.retry_elapsed_sec >= 0.03, "the recovery's own time rides the record");
+  assert.equal(first.route, "primary");
+  assert.equal(second.reason, "provider_error_object");
+  assert.equal(second.status, null);
+  assert.notEqual(second.reason, first.reason, "two fallback rounds are no longer the same boolean");
+  assert.ok(second.elapsed_sec < first.elapsed_sec, "each record keeps its own (distinct) time");
+  assert.ok(second.retry_elapsed_sec !== null);
+  // Content-free: neither the 524 body nor the error object's message can
+  // ride the round telemetry.
+  const roundsJson = JSON.stringify(rounds);
+  assert.ok(!roundsJson.includes("gateway timed out"));
+  assert.ok(!roundsJson.includes("the wire broke here"));
+  // The concise logs carry the same facts.
+  assert.ok(logs.some((l) => l.includes("streamed turn unusable (reason=http_status status=524")), `missing the discarded-attempt line: ${logs.join("\n")}`);
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed recovered")), "the recovery gets its own line");
+  assert.ok(logs.some((l) => l.includes("streamed attempt discarded reason=provider_error_object")), "the round heartbeat names the reason");
+});
+
+test("#1628: a proven terminal failure bounds the non-streamed retry to the turn's remaining budget", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The streamed attempt spent ~1.1s of the 2s turn timeout; the 524 is a
+  // PROVEN terminal class, so the recovery may not restart a full turn wait:
+  // its timeout is the pair budget (2 - 1.1 → floored at 1), not 2.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1628: the terminal-class bound floors at 1s when the discarded attempt overspent the turn", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(2100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The discarded attempt spent MORE than the whole 2s turn budget, so the
+  // pair's remaining figure (2 − ~2.1) is NEGATIVE: the max(1, ...) floor is
+  // the only thing between the recovery and a zero/negative timeout. Without
+  // the guard this asserts against −0, not 1.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1628: an ambiguous timeout keeps the configured deadline for the retry", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("request_timeout", "model request timed out");
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The idle case is NOT assumed guilty: the configured turn timeout stays
+  // the retry's authority (the run deadline still clamps it above).
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 2);
+});
+
+test("#1628: a cancelled streamed attempt reports its record and is never retried", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const streams: unknown[] = [];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      streams.push(payload.stream);
+      const turn = n++;
+      if (turn === 0) throw new TransportFailure("cancelled", "model request cancelled");
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  // No non-streamed recovery was ever dialed for the cancelled loop turn.
+  assert.ok(streams.every((s) => s === true), `cancelled attempt must not retry non-streamed: ${JSON.stringify(streams)}`);
+  assert.ok(logs.some((l) => l.includes("streamed turn cancelled") && l.includes("not retried")));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, false, "no recovery fired, so no fallback is claimed");
+  assert.equal(round.stream_failure.reason, "cancelled");
+  assert.equal(round.stream_failure.retry_elapsed_sec, null);
+});
+
+test("#1628: a streamed empty completion is discarded and the recovery's failure is attributed", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      const turn = n++;
+      if (turn === 0) return { choices: [{ message: { content: "" }, finish_reason: "stop" }] };
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, true);
+  assert.equal(round.stream_failure.reason, "empty_completion");
+  assert.ok(round.stream_failure.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed FAILED") && l.includes("retry_reason=connection_closed")));
+  // Null provider usage on the stopped turn — a discarded turn fabricates
+  // nothing.
+  assert.equal(round.prompt_tokens, null);
+  assert.equal(round.ttft_sec, null);
 });
