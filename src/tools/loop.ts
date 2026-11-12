@@ -35,6 +35,9 @@ import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import { type TransportTiming } from "../transport/timing.js";
+// #1628: type-only import — `stream-attempt.ts` imports this module's
+// `extractToolCalls` as a value, so the back edge must stay erased at runtime.
+import type { StreamedAttemptFailureRecord } from "./stream-attempt.js";
 import { MAX_GROUP_NAME_CHARS, MAX_GROUPS_PER_RULE } from "../enforcement/requirement-trace.js";
 import {
   traceSeamSlotForTarget,
@@ -954,6 +957,17 @@ export interface NativeLoopRoundTelemetry extends AcceptedAttemptTiming {
   wall_clock_remaining_sec: number;
   /** True when this turn's streamed transport fell back to a non-streamed call. */
   streamed_fallback: boolean;
+  /**
+   * #1628: the turn's DISCARDED streamed attempt, with its own reason,
+   * status, elapsed time, and wire-observation — the record that makes two
+   * fallback rounds explain themselves ("one was a 524 after 133s, the other
+   * a provider error object after 4s") instead of collapsing into two
+   * `streamed_fallback: true` booleans and one round total. Null whenever no
+   * streamed attempt was discarded, so a fallback turn and a clean turn stay
+   * distinguishable at a glance. Content-free by construction (see
+   * `StreamedAttemptFailureRecord` in stream-attempt.ts).
+   */
+  stream_failure: StreamedAttemptFailureRecord | null;
 }
 
 /**
@@ -983,6 +997,17 @@ export interface ToolTurnSignal {
    * previous attempt's measurement still applies".
    */
   reportTiming?(timing: TransportTiming | null): void;
+  /**
+   * #1628: report the turn's DISCARDED streamed attempt once, with its own
+   * bounded reason and times, AFTER the seam's single non-streamed recovery
+   * attempt has completed (success or failure alike) — the seam is the only
+   * site that knows both attempts' elapsed times. Reported instead of thrown:
+   * a retry that fails still has to say why its streamed predecessor was
+   * discarded before the loop stops on the request error. A cancellation is
+   * reported too (with a null `retry_elapsed_sec`: no recovery was fired), so
+   * "the run was cancelled mid-turn" is visible without being a fallback.
+   */
+  reportStreamFailure?(failure: StreamedAttemptFailureRecord): void;
 }
 
 /**
@@ -1552,6 +1577,8 @@ export async function driveToolLoop(
     /** #1466: the provider's stop reason for the accepted attempt, already
      * reduced to a bounded enum token. */
     finishReason: string;
+    /** #1628: the turn's discarded streamed attempt (null when none). */
+    streamFailure: StreamedAttemptFailureRecord | null;
   }): void => {
     if (options.onRound === undefined) return;
     // #1466: the accepted attempt's probe and the turn's call counts. The
@@ -1574,6 +1601,10 @@ export async function driveToolLoop(
       rounds_remaining: Math.max(0, budgets.maxRounds - outcome.rounds),
       wall_clock_remaining_sec: roundSec(Math.max(0, budgets.wallClockSec - (nowFn() - telemetryStart))),
       streamed_fallback: record.fellBack,
+      // #1628: the discarded streamed attempt's OWN record (reason, status,
+      // elapsed, observation) when this turn made a fallback. Null otherwise
+      // — never a zero-filled stand-in.
+      stream_failure: record.streamFailure,
       // #1466: the transport measurements of the accepted attempt. Null
       // timings mean "not measured" — never a zero standing in for a
       // measurement the transport never made.
@@ -1776,9 +1807,14 @@ export async function driveToolLoop(
     // last entry is the accepted attempt's. The list is per turn, so a turn
     // never inherits the previous turn's measurements.
     const turnProbes: Array<TransportTiming | null> = [];
+    // #1628: the discarded streamed attempt this turn's seam reported (set by
+    // `reportStreamFailure` after the recovery attempt). Per turn, so a turn
+    // never inherits the previous turn's failure.
+    let turnStreamFailure: StreamedAttemptFailureRecord | null = null;
     const turnSignal: ToolTurnSignal = {
       reportFallback: () => { roundFellBack = true; },
       reportTiming: (timing) => { turnProbes.push(timing); },
+      reportStreamFailure: (failure) => { turnStreamFailure = failure; },
     };
     const modelStart = nowFn();
     try {
@@ -1801,6 +1837,7 @@ export async function driveToolLoop(
         modelElapsedSec: Math.max(0, nowFn() - modelStart),
         usage: normalizeUsageTelemetry(null, options.apiFormat),
         fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason: "",
       });
@@ -1832,6 +1869,7 @@ export async function driveToolLoop(
         modelElapsedSec,
         usage: turnUsage,
         fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason,
       });
@@ -2103,6 +2141,7 @@ export async function driveToolLoop(
       modelElapsedSec,
       usage: turnUsage,
       fellBack: roundFellBack,
+      streamFailure: turnStreamFailure,
       probes: turnProbes,
       finishReason,
     });

@@ -95,7 +95,7 @@ function baseResponse(id: string, model: string, content: string, toolCalls: Nor
   return response;
 }
 
-function reassembleOpenai(text: string): NormalizedModelResponse {
+function reassembleOpenai(text: string, quality: SseReassemblyQuality): NormalizedModelResponse {
   const contentParts: string[] = [];
   const tools = new Map<number, ToolState>();
   const toolCalls: NormalizedToolCall[] = [];
@@ -124,13 +124,21 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
     const line = rawLine.trim();
     if (!line.startsWith("data:")) continue;
     const payload = line.slice(5).trim();
-    if (payload === "" || payload === "[DONE]") continue;
+    if (payload === "[DONE]") {
+      // #1628: the stream's own termination frame.
+      quality.sawTermination = true;
+      continue;
+    }
+    if (payload === "") continue;
     let chunk: unknown;
     try {
       chunk = JSON.parse(payload);
     } catch {
+      // #1628: the frame that did not parse — a count, never its text.
+      quality.malformedFrames = bumpCount(quality.malformedFrames);
       continue;
     }
+    quality.dataFrames = bumpCount(quality.dataFrames);
     if (!isRecord(chunk)) continue;
     if (chunk.error) {
       error = chunk.error;
@@ -170,6 +178,8 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
       const reason = asString(choice.finish_reason);
       if (reason) {
         finishReason = reason;
+        // #1628: a finish reason terminates the turn even without `[DONE]`.
+        quality.sawTermination = true;
         if (reason === "tool_calls") flushAll();
       }
     }
@@ -270,7 +280,7 @@ function readAnthropicUsage(usage: Record<string, unknown>, state: AnthropicUsag
   readUsageField(state.cacheWriteTokens, usage.cache_creation_input_tokens);
 }
 
-function reassembleAnthropic(text: string): NormalizedModelResponse {
+function reassembleAnthropic(text: string, quality: SseReassemblyQuality): NormalizedModelResponse {
   const contentParts: string[] = [];
   const toolCalls: NormalizedToolCall[] = [];
   let id = "";
@@ -308,8 +318,11 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
     try {
       event = JSON.parse(payload);
     } catch {
+      // #1628: the frame that did not parse — a count, never its text.
+      quality.malformedFrames = bumpCount(quality.malformedFrames);
       continue;
     }
+    quality.dataFrames = bumpCount(quality.dataFrames);
     if (!isRecord(event)) continue;
     if (event.type === "error") {
       error = isRecord(event.error) ? event.error : event;
@@ -369,6 +382,8 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
       continue;
     }
     if (event.type === "message_stop") {
+      // #1628: the stream's own termination frame.
+      quality.sawTermination = true;
       flushOpen();
     }
   }
@@ -415,8 +430,84 @@ function adoptPlainErrorBody(text: string, response: NormalizedModelResponse): N
 }
 
 export function reassembleSse(text: string, apiFormat: string): NormalizedModelResponse {
-  const response = apiFormat === "anthropic" ? reassembleAnthropic(text) : reassembleOpenai(text);
-  return adoptPlainErrorBody(text, response);
+  // #1628: the quality probe is filled BY the reassemblers as they parse and
+  // rides the final response object, so the caller can tell a well-formed
+  // empty stream from a malformed/truncated/never-terminated one without
+  // ever seeing a frame.
+  const quality: SseReassemblyQuality = { dataFrames: 0, malformedFrames: 0, sawTermination: false };
+  const response = apiFormat === "anthropic"
+    ? reassembleAnthropic(text, quality)
+    : reassembleOpenai(text, quality);
+  return attachSseReassemblyQuality(adoptPlainErrorBody(text, response), quality);
+}
+
+/**
+ * #1628: the reassembly-quality probe — HOW COMPLETELY an SSE body parsed,
+ * never WHAT it said.
+ *
+ * A streamed loop turn that reassembled to nothing was either a well-formed
+ * stream that genuinely carried no output, or a body whose frames were
+ * malformed/truncated (or never terminated at all). The reassembler is the
+ * only module that saw the framing, so it records the counts here and the
+ * harness classifies the discarded attempt from them. Counts and one boolean
+ * — never frame text — and, like the #1466 timing probe, the value rides the
+ * response under a SYMBOL key (non-enumerable), so it can never leak into a
+ * persisted artifact, a log line, or a JSON body by accident.
+ */
+export interface SseReassemblyQuality {
+  /** `data:` frames that parsed as JSON (capped). */
+  dataFrames: number;
+  /** `data:` frames whose JSON did not parse (capped). */
+  malformedFrames: number;
+  /** A termination frame arrived: `[DONE]` / a finish reason (OpenAI) or
+   * `message_stop` (Anthropic). False means the body ENDED without one. */
+  sawTermination: boolean;
+}
+
+/** #1628: the key the quality probe is attached under. `Symbol.for` for the
+ * same cross-module-instance stability the timing probe uses. */
+export const SSE_REASSEMBLY_QUALITY: unique symbol = Symbol.for("pr-reviewer-action.sse-reassembly-quality");
+
+/** #1628: attach the probe to the reassembled response. Non-enumerable and
+ * observation-only, exactly like the timing probe: a value that cannot carry
+ * an own property is returned unchanged. */
+export function attachSseReassemblyQuality<T>(value: T, quality: SseReassemblyQuality): T {
+  if (value === null || typeof value !== "object") return value;
+  try {
+    Object.defineProperty(value, SSE_REASSEMBLY_QUALITY, {
+      value: quality,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+  } catch {
+    // A sealed/frozen value cannot carry the probe; observation-only.
+  }
+  return value;
+}
+
+function countField(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.trunc(value);
+}
+
+/**
+ * #1628: read the quality probe back off a response object, or null when it
+ * carries none. Defensive like `readTransportTiming`: a value that crossed a
+ * JSON round-trip (or never came from `reassembleSse`) has no probe — it must
+ * read as "unknown", never as a half-valid measurement.
+ */
+export function readSseReassemblyQuality(value: unknown): SseReassemblyQuality | null {
+  if (value === null || typeof value !== "object") return null;
+  const holder = value as { [SSE_REASSEMBLY_QUALITY]?: unknown };
+  const raw = holder[SSE_REASSEMBLY_QUALITY];
+  if (raw === null || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const dataFrames = countField(record.dataFrames);
+  const malformedFrames = countField(record.malformedFrames);
+  if (dataFrames === null || malformedFrames === null) return null;
+  if (typeof record.sawTermination !== "boolean") return null;
+  return { dataFrames, malformedFrames, sawTermination: record.sawTermination };
 }
 
 /**

@@ -23,8 +23,18 @@
  * request body was dispatched. A null field means "this never happened on
  * the wire" — never a zero standing in for an unmeasured value. */
 export interface TransportTiming {
-  /** seconds from request dispatch to the first response body byte */
+  /** seconds from request dispatch to the first response body byte — ANY
+   * byte, including SSE framing whitespace or a keepalive comment, so a
+   * stream that answered bytes without ever producing an event still shows
+   * a figure here (#1628). */
   firstEventSec: number | null;
+  /** #1628: seconds from request dispatch to the first SSE data event — any
+   * complete `data:` payload, including a non-content one (`[DONE]`, a
+   * role-only delta). Distinct from `firstEventSec`: the bytes of a body can
+   * start long before its first event, and a stream that carried no data
+   * event at all reports null here while its bytes still measured. A
+   * non-streamed call carries no SSE event, so it reports null. */
+  firstSseEventSec: number | null;
   /** seconds from request dispatch to the first content-bearing stream event */
   firstContentSec: number | null;
   /** seconds from request dispatch to the response end */
@@ -112,11 +122,17 @@ export function readTransportTiming(value: unknown): TransportTiming | null {
   const totalSec = timingField(record.totalSec);
   if (firstEventSec === undefined || firstContentSec === undefined || totalSec === undefined) return null;
   if (totalSec === null) return null;
+  // #1628: the first-SSE-event instant arrived after the probe was first
+  // shipped, so an ABSENT field reads as null ("unavailable") rather than
+  // rejecting the whole probe — but a PRESENT malformed value still fails
+  // closed, exactly like the other fields.
+  const firstSseEventSec = record.firstSseEventSec === undefined ? null : timingField(record.firstSseEventSec);
+  if (firstSseEventSec === undefined) return null;
   // #1466: the wire-call count rides the probe when its owner counted it.
   // An absent count stays ABSENT (the key is not added) so a probe that
   // carries no count never reads as "exactly one call".
   const wireCalls = wireCallCount(record.wireCalls);
-  return { firstEventSec, firstContentSec, totalSec, ...(wireCalls !== undefined ? { wireCalls } : {}) };
+  return { firstEventSec, firstSseEventSec, firstContentSec, totalSec, ...(wireCalls !== undefined ? { wireCalls } : {}) };
 }
 
 /** #1466: the wire-call count, when the probe carries a usable one. A

@@ -1103,7 +1103,7 @@ test("#1466: the round record carries the accepted attempt's transport measureme
         cache_creation_input_tokens: 25,
       },
     },
-    { firstEventSec: 0.2, firstContentSec: 1.4, totalSec: 2.71, wireCalls: 1 },
+    { firstEventSec: 0.2, firstSseEventSec: 0.3, firstContentSec: 1.4, totalSec: 2.71, wireCalls: 1 },
   );
   const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
     // The seam reports the probe of the call it made.
@@ -1183,7 +1183,7 @@ test("#1466: a streamed→non-streamed fallback reports the ACCEPTED attempt's m
   // the non-streamed fallback produced the response the turn returned.
   const streamed = timedBody(
     { choices: [{ message: { content: null }, finish_reason: "stop" }], error: { message: "unusable" } },
-    { firstEventSec: 0.1, firstContentSec: 0.2, totalSec: 0.3, wireCalls: 1 },
+    { firstEventSec: 0.1, firstSseEventSec: 0.12, firstContentSec: 0.2, totalSec: 0.3, wireCalls: 1 },
   );
   const fallback = timedBody(
     {
@@ -1191,7 +1191,7 @@ test("#1466: a streamed→non-streamed fallback reports the ACCEPTED attempt's m
       usage: { prompt_tokens: 12, completion_tokens: 5 },
     },
     // A non-streamed answer has no content event on the wire.
-    { firstEventSec: 0.5, firstContentSec: null, totalSec: 1.5, wireCalls: 2 },
+    { firstEventSec: 0.5, firstSseEventSec: null, firstContentSec: null, totalSec: 1.5, wireCalls: 2 },
   );
   let calls = 0;
   const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
