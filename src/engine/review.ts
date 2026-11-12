@@ -112,7 +112,7 @@ import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligat
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
-import { renderRiskSection, renderRiskUnavailable } from "../risk/render.js";
+import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -1551,9 +1551,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // unavailable note AND record a non-`ok` status, so the enforcement
       // half reads incomplete coverage and the corpus never reads as "no
       // risk obligations" (#1449 discipline).
+      // A scan over a truncated or absent diff renders the incomplete-input
+      // footer (or the unavailable note when no rows remain), so the corpus
+      // never reads a partial row list as the full risk picture (#1449).
       const section = failed
         ? renderRiskUnavailable(artifact.errors[0] ?? "scan-failed")
-        : renderRiskSection(artifact, Number(env.RISK_OBLIGATIONS_SECTION_MAX_BYTES ?? DEFAULT_RISK_SECTION_MAX_BYTES) || DEFAULT_RISK_SECTION_MAX_BYTES);
+        : riskCorpusSection(artifact, riskDiffSource, Number(env.RISK_OBLIGATIONS_SECTION_MAX_BYTES ?? DEFAULT_RISK_SECTION_MAX_BYTES) || DEFAULT_RISK_SECTION_MAX_BYTES);
       riskRecord = {
         version: 1,
         status: failed ? "error" : artifact.obligations.length > 0 ? "ok" : "empty",

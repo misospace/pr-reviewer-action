@@ -138,14 +138,28 @@ const RISK_EVIDENCE_PREAMBLE =
   + "property holds under it. An obligation you could not verify stays unresolved: it withholds a clean review "
   + "instead of being silently certified. A real counterexample is an ordinary evidence-backed finding.";
 
-function riskEvidenceRows(workspace: PromptWorkspace): string[] {
+/** #1577 review follow-up: when the scan's coverage is incomplete but rows
+ * still rendered, the block says so — a partial row list must never read to
+ * the model as the full risk picture while the publish boundary withholds
+ * the trusted approval on the synthetic `risk-coverage` marker. The reason
+ * comes from the resolver's closed set and is re-checked here as data. */
+function riskCoverageNote(reason: string | null): string {
+  const safe = reason !== null && /^[a-z0-9_-]{1,80}$/.test(reason) ? reason : "unknown";
+  return " Risk-evidence coverage for this run is incomplete (reason: " + safe + "): the "
+    + "deterministic scan could not certify the whole risk picture of this change, so the rows "
+    + "below may be partial, and the synthetic risk-coverage marker keeps the trusted approval "
+    + "withheld regardless of these rows' dispositions — state the unavailable coverage in "
+    + "review_markdown instead of certifying a clean review.";
+}
+
+function riskEvidenceBlock(workspace: PromptWorkspace): { rows: string[]; coverageNote: string | null } {
   const bytes = workspace.readBytes(RISK_EVIDENCE_FILE);
-  if (bytes === null) return [];
+  if (bytes === null) return { rows: [], coverageNote: null };
   let parsed: unknown;
   try {
     parsed = JSON.parse(decodeUtf8(bytes) ?? "");
   } catch {
-    return [];
+    return { rows: [], coverageNote: null };
   }
   const resolution = resolveRiskObligations(parsed, true);
   const rows: string[] = [];
@@ -156,7 +170,7 @@ function riskEvidenceRows(workspace: PromptWorkspace): string[] {
       : "none listed — enumerate the locations yourself";
     rows.push(`- ${row.id} (risk): ${redactText(row.text)} — locations: ${locations}`);
   }
-  return rows;
+  return { rows, coverageNote: resolution.coverage === "incomplete" ? riskCoverageNote(resolution.reason) : null };
 }
 
 /** Read the candidates artifact tolerantly: absent, unparsable, or
@@ -340,11 +354,13 @@ export function buildUserMessage(workspace: PromptWorkspace, classificationFile:
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
   }
   // #1577: the risk obligations ride their own fenced block, so the bytes
-  // of every earlier block stay exactly as they were for a run without them.
-  const riskRows = riskEvidenceRows(workspace);
-  if (riskRows.length > 0) {
-    const rows = riskRows.join("\n");
-    message = `${message}\n\n${RISK_EVIDENCE_PREAMBLE}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
+  // of every earlier block stay exactly as they were for a run without them
+  // (and for a complete-coverage run with them).
+  const risk = riskEvidenceBlock(workspace);
+  if (risk.rows.length > 0) {
+    const rows = risk.rows.join("\n");
+    const preamble = RISK_EVIDENCE_PREAMBLE + (risk.coverageNote ?? "");
+    message = `${message}\n\n${preamble}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
   }
   return bashCapture(message);

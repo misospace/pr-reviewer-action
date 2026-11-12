@@ -70,6 +70,30 @@ export function renderRiskUnavailable(kind: string): string {
   );
 }
 
+/** Static footer for a section rendered over a truncated diff (#1577): the
+ * rows are real targets, but the scan could not have raised obligations for
+ * hunks outside its view, so the list must not read as the full risk
+ * picture. Mirrors the derived #1449 incomplete-input footer discipline. */
+export const RISK_INCOMPLETE_FOOTER =
+  "\nNote: this scan ran over a truncated diff, so risk-evidence coverage is incomplete: "
+  + "the list above may omit obligations that hunks outside its view would raise. State the "
+  + "unavailable coverage in review_markdown instead of certifying a clean review.\n";
+
+/** The corpus section for one run's scan outcome: rows over a complete diff
+ * render exactly as `renderRiskSection`; a non-complete diff input renders
+ * the incomplete-input footer with the rows, or the static unavailable note
+ * when there are no rows to carry it (#1449 discipline). */
+export function riskCorpusSection(
+  artifact: RiskObligationsArtifact | null | undefined,
+  diffSource: "full" | "truncated" | "none",
+  maxBytes = 8000,
+): string {
+  const section = renderRiskSection(artifact, maxBytes);
+  if (diffSource === "full") return section;
+  if (diffSource === "none") return renderRiskUnavailable("input-missing");
+  return section === "" ? renderRiskUnavailable("input-truncated") : section + RISK_INCOMPLETE_FOOTER;
+}
+
 /** Render the "Risk Evidence Obligations" corpus section, or `""` for none.
  * Deterministic for identical input. */
 export function renderRiskSection(
