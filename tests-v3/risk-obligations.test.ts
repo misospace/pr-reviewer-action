@@ -262,6 +262,64 @@ test("#1577 (review fix): code after the closer on the last comment line still f
   assert.deepEqual(closerCode.obligations.map((row) => row.category), ["credential_boundary"], "the closing line's live code still scans");
 });
 
+// #1637 re-review: splitChunks discarded every `@@` hunk boundary and
+// appended all body lines of a file into one list, so scanRiskObligations
+// carried inBlockNew/inBlockOld ACROSS hunks. An unclosed block-comment
+// opener in hunk 1 (its unchanged closer outside the hunk's context window)
+// therefore suppressed a later hunk's real code — the mandatory
+// credential_boundary obligation was silently missed. The state still
+// carries WITHIN one contiguous hunk (the three-line negative above) but
+// RESETS at every `@@` boundary: the omitted lines between hunks are
+// lexically unknown and must never propagate state.
+test("#1577 (review fix): block-comment state resets at every @@ hunk boundary", () => {
+  // The re-review's exact shape: hunk 1 adds the unclosed opener and a
+  // continuation line (in-hunk carry keeps BOTH comment-only); hunk 2 adds
+  // real credential-handling code that must scan despite the open state
+  // hunk 1 ends with.
+  const acrossHunks = [
+    "diff --git a/src/auth.ts b/src/auth.ts",
+    "--- a/src/auth.ts",
+    "+++ b/src/auth.ts",
+    "@@ -10,4 +10,5 @@",
+    "  const session = readSession();",
+    "+  /* credential loading TODO: rotate before the next deploy",
+    "+  the load path must never log the credential material",
+    "  const token = mint();",
+    "@@ -50,3 +51,4 @@",
+    "  const client = buildClient();",
+    "+  const credentials = loadCredentials();",
+    "  return client;",
+  ].join("\n");
+  const across = scanRiskObligations(acrossHunks);
+  assert.deepEqual(
+    across.obligations.map((row) => row.category),
+    ["credential_boundary"],
+    "an opener in hunk 1 cannot suppress real risk code in hunk 2",
+  );
+  // The same shape on the old-file side: a removed opener in hunk 1 leaves
+  // inBlockOld open WITHIN the hunk only — a removed credential line in a
+  // later hunk still scans.
+  const removedAcross = [
+    "diff --git a/src/auth.ts b/src/auth.ts",
+    "--- a/src/auth.ts",
+    "+++ b/src/auth.ts",
+    "@@ -10,4 +10,3 @@",
+    "  const session = readSession();",
+    "-  /* credential loading TODO: rotate before the next deploy",
+    "  const token = mint();",
+    "@@ -50,3 +50,4 @@",
+    "  const client = buildClient();",
+    "-  const credentials = loadCredentials();",
+    "  return client;",
+  ].join("\n");
+  const removed = scanRiskObligations(removedAcross);
+  assert.deepEqual(
+    removed.obligations.map((row) => row.category),
+    ["credential_boundary"],
+    "an old-file opener in hunk 1 cannot suppress a later hunk's removed code",
+  );
+});
+
 test("#1577: style/validation vocabulary does not fake a risk category", () => {
   // The context scoping the categories need to stay usable opt-ins.
   assert.deepEqual(scanRiskObligations(fileDiff("src/ui/box.ts", ["  const style = { overflow: \"hidden\", textOverflow: \"ellipsis\" };"])).obligations, []);

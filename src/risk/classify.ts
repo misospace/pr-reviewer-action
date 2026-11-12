@@ -22,19 +22,25 @@
  * `/* ... *\/` opener/continuation/closer is comment-only and a closed
  * whitespace-preceded span is removed while the code after it still scans),
  * and a real mode/typechange header (`old mode 100644` → `new mode 120000`)
- * is itself a trigger. Block comments carry state ACROSS the chunk's lines,
- * tracked per file version (a context line advances both): a line inside a
- * still-open multi-line block comment is comment-only even when it carries
- * risk vocabulary, while code before/after delimiters on the same line
- * still scans. The residues are deliberately asymmetric: a quoted comment
- * marker can cut a line early (missing a fire), a multiplication
- * continuation line (`* height`) is blanked like a JSDoc line (missing a
- * fire), and a block still open where the diff window ends can hold the
- * state open across the chunk's remaining lines (missing a fire), because
- * a false obligation costs one disposition while a false silence costs
- * trust — EXCEPT where the comment shape is unambiguous, which is exactly
- * where the scan must not fire (a comment-only diff must never raise a
- * mandatory obligation). The scan is pure, deterministic, and never throws.
+ * is itself a trigger. Block comments carry state ACROSS each hunk's
+ * contiguous lines, tracked per file version (a context line advances
+ * both): a line inside a still-open multi-line block comment is comment-only
+ * even when it carries risk vocabulary, while code before/after delimiters
+ * on the same line still scans. The state never crosses a `@@` hunk
+ * boundary: the lines the header omits between hunks are unknown and may
+ * open or close a comment, so a state carried across them could suppress a
+ * later hunk's real code — each hunk re-scans from the fresh state instead,
+ * where a comment genuinely continuing over the boundary can scan as code
+ * there (the fire direction). The residues are deliberately asymmetric: a
+ * quoted comment marker can cut a line early (missing a fire), a
+ * multiplication continuation line (`* height`) is blanked like a JSDoc
+ * line (missing a fire), and a block still open at a hunk's end can hold
+ * the state open across that hunk's remaining lines (missing a fire),
+ * because a false obligation costs one disposition while a false silence
+ * costs trust — EXCEPT where the comment shape is unambiguous, which is
+ * exactly where the scan must not fire (a comment-only diff must never
+ * raise a mandatory obligation). The scan is pure, deterministic, and never
+ * throws.
  *
  * The mode digits are the one vocabulary where the bare token would be
  * noise: `120000` is also a plausible timeout in milliseconds or a byte
@@ -238,8 +244,8 @@ function firstLineCommentStart(line: string, markers: readonly string[]): number
  * every byte of actual code (the #1577 review rule: the replacement must
  * not be token-blind — it must not drop code nor mishandle the changed
  * line), and report whether a block comment is still open at the line's
- * end (the cross-line state the #1637 review fix carries across the
- * chunk's lines):
+ * end (the cross-line state the #1637 review fix carries across each
+ * hunk's contiguous lines — never across a `@@` hunk boundary):
  *
  * - `inBlock` true on entry: the line starts INSIDE a still-open block
  *   comment and is comment-only up to its first `*\/` (line-comment
@@ -341,13 +347,17 @@ interface DiffChunk {
   path: string | null;
   /** Mode-flip trigger: the chunk's header shows a real mode/typechange. */
   modeFlip: boolean;
-  lines: string[];
+  /** Body lines grouped per contiguous hunk: every `@@` header starts a new
+   * group, so no lexical state (block comments) is ever carried across the
+   * unknown omitted region between two hunks (#1637 review fix). */
+  hunks: string[][];
 }
 
 /** Split a unified diff into per-file chunks (the k-th `diff --git` header
- * owns the lines until the next one). A header whose paths cannot be split
- * (quoted/odd names) yields a null path: its lines still scan, but the
- * obligation cannot anchor to it. */
+ * owns the lines until the next one) and per-hunk groups inside each chunk
+ * (every `@@` header starts a new contiguous group). A header whose paths
+ * cannot be split (quoted/odd names) yields a null path: its lines still
+ * scan, but the obligation cannot anchor to it. */
 function splitChunks(diff: string): DiffChunk[] {
   const chunks: DiffChunk[] = [];
   let current: DiffChunk | null = null;
@@ -360,7 +370,7 @@ function splitChunks(diff: string): DiffChunk[] {
       const chunk: DiffChunk = {
         path: newPath === "/dev/null" ? (oldPath === "/dev/null" ? null : oldPath) : newPath,
         modeFlip: false,
-        lines: [],
+        hunks: [],
       };
       current = chunk;
       pendingOldMode = null;
@@ -385,8 +395,18 @@ function splitChunks(diff: string): DiffChunk[] {
       continue;
     }
     if (EXTENDED_HEADER.test(line)) continue;
-    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("\\ No newline")) continue;
-    current.lines.push(line);
+    if (line.startsWith("@@")) {
+      // Hunk boundary: the region between this header and the previous
+      // hunk's end is omitted and lexically unknown, so the group ends
+      // here. The header itself carries no file content.
+      current.hunks.push([]);
+      continue;
+    }
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("\\ No newline")) continue;
+    // Body text preceding any `@@` (binary markers, malformed diffs) keeps
+    // scanning: group it like any other contiguous run.
+    if (current.hunks.length === 0) current.hunks.push([]);
+    current.hunks[current.hunks.length - 1]!.push(line);
   }
   return chunks;
 }
@@ -446,36 +466,42 @@ export function scanRiskObligations(diff: string): RiskObligationsArtifact {
     }
     if (!isScannableFile(path)) continue;
     const extension = extensionOf(path ?? "");
-    // Block-comment state carries ACROSS the chunk's lines (#1637 review
-    // fix), tracked per file version: the new-file state guards the `+`
-    // lines, the old-file state the `-` lines, and a context line (present
-    // in both versions) advances both — a comment opened before the visible
-    // window or closed inside it is still tracked. Without the carried
-    // state, an ordinary continuation line inside a still-open multi-line
-    // block comment scans as code and a comment-only diff raises a
-    // mandatory obligation.
-    let inBlockNew = false;
-    let inBlockOld = false;
     const tracksBlocks = BLOCK_COMMENT_EXTENSIONS.has(extension);
-    for (const raw of chunk.lines) {
-      const marker = raw[0];
-      if (marker !== "+" && marker !== "-") {
-        if (tracksBlocks) {
-          const context = raw.slice(1);
-          inBlockNew = stripLineComment(context, extension, inBlockNew).inBlock;
-          inBlockOld = stripLineComment(context, extension, inBlockOld).inBlock;
+    // Block-comment state carries ACROSS one hunk's contiguous lines
+    // (#1637 review fix), tracked per file version: the new-file state
+    // guards the `+` lines, the old-file state the `-` lines, and a context
+    // line (present in both versions) advances both — a comment opened
+    // before the visible window or closed inside it is still tracked, so an
+    // ordinary continuation line inside a still-open multi-line block
+    // comment does not scan as code. The state RESETS at every `@@` hunk
+    // boundary: the lines between two hunks are omitted and lexically
+    // unknown (they may open or close the comment), so carrying the state
+    // across the boundary could suppress a later hunk's real code and
+    // silently miss its obligation — each hunk re-scans from the fresh
+    // state instead.
+    for (const hunk of chunk.hunks) {
+      let inBlockNew = false;
+      let inBlockOld = false;
+      for (const raw of hunk) {
+        const marker = raw[0];
+        if (marker !== "+" && marker !== "-") {
+          if (tracksBlocks) {
+            const context = raw.slice(1);
+            inBlockNew = stripLineComment(context, extension, inBlockNew).inBlock;
+            inBlockOld = stripLineComment(context, extension, inBlockOld).inBlock;
+          }
+          continue;
         }
-        continue;
-      }
-      const stateBefore = marker === "+" ? inBlockNew : inBlockOld;
-      const stripped = stripLineComment(raw.slice(1), extension, stateBefore);
-      if (marker === "+") inBlockNew = stripped.inBlock;
-      else inBlockOld = stripped.inBlock;
-      const content = stripped.code;
-      if (content.trim() === "") continue;
-      for (const category of RISK_CATEGORIES) {
-        if (CATEGORY_PATTERNS[category].some((pattern) => pattern.test(content))) {
-          trip(category, path);
+        const stateBefore = marker === "+" ? inBlockNew : inBlockOld;
+        const stripped = stripLineComment(raw.slice(1), extension, stateBefore);
+        if (marker === "+") inBlockNew = stripped.inBlock;
+        else inBlockOld = stripped.inBlock;
+        const content = stripped.code;
+        if (content.trim() === "") continue;
+        for (const category of RISK_CATEGORIES) {
+          if (CATEGORY_PATTERNS[category].some((pattern) => pattern.test(content))) {
+            trip(category, path);
+          }
         }
       }
     }
