@@ -220,6 +220,12 @@ truncation pass still leaves the conversation over the watermark, a second
 deterministic pass compacts the same old results to a hard floor; results
 already at or below the cap are untouched, so repeated rounds are stable.
 
+A `read_skill` result is never folded into the model-generated digest: it is
+replaced whole by a driver-written marker that says the skill body was
+discarded and can be re-read. A result counts as already discarded because
+the driver discarded it, never because its content looks like the marker, so
+the outcome does not depend on the shape of the content.
+
 **Protected overflow (#1635).** If even the hard-floored old results leave
 the conversation over the watermark, the protected newest results alone do
 not fit. Nothing is dropped or rewritten further: the overflow is recorded

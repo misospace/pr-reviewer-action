@@ -634,6 +634,16 @@ interface ToolResultEvent {
    * keep contract-bound result shapes (read_skill) from being silently
    * cut into fragments. */
   tool?: string;
+  /** #1635: the driver itself replaced this result's content with the
+   * trusted discard marker (a skill body whose bytes were reclaimed). The
+   * flag is DRIVER-OWNED state, not a property of the content: it is the
+   * only thing that marks a result as already discarded, so untrusted
+   * content can never claim the status by mimicking the marker's text
+   * (#1635 review, adversarial boundary). A content-prefix sniff would let
+   * any result labeled `read_skill` opt out of compaction by starting with
+   * the marker's prefix, keeping oversized bytes in the conversation and the
+   * request past the watermark. */
+  skillDiscarded?: boolean;
   evidence?: EvidenceProvenance;
 }
 
@@ -658,11 +668,21 @@ function repositorySkillDiscardMarker(serialized: string): string {
   return `[repository skill${suffix} discarded during context compaction — its complete body was delivered when first read; re-read it with read_skill if needed]`;
 }
 
-/** Stable prefix of the discard marker above. A result whose content already
- * starts with it is a truthful marker from an earlier pass: re-deriving it
- * would silently drop the path hint, so compaction passes leave it alone
- * (#1635 review). */
-const SKILL_DISCARD_MARKER_PREFIX = "[repository skill";
+/** Replace a `read_skill` result's content with the driver-authored discard
+ * marker above and mark the result as discarded.
+ *
+ * Returns true when the content ACTUALLY changed — the only case where bytes
+ * were freed. A result whose content already IS the marker (an injected copy
+ * of the driver's text, never written by the driver) changes nothing: it is
+ * still flagged as discarded, so no later pass re-derives it and no pass
+ * claims to have compacted a result it did not touch (#1635 review). */
+function discardSkillResult(event: ToolResultEvent): boolean {
+  const marker = repositorySkillDiscardMarker(event.content);
+  event.skillDiscarded = true;
+  if (marker === event.content) return false;
+  event.content = marker;
+  return true;
+}
 
 /** Wrap model-visible tool output in an untrusted-data boundary. */
 function toolResultEnvelope(event: ToolResultEvent): string {
@@ -980,14 +1000,15 @@ export class Conversation {
       // so it is replaced WHOLE with a trusted, explicit discarded marker
       // instead (freeing the bytes truthfully; the model may re-read).
       if (e.tool === "read_skill") {
-        // #1635 review: a marker from an earlier pass is already truthful —
-        // re-deriving it from unparseable content would drop the path hint.
-        if (body.startsWith(SKILL_DISCARD_MARKER_PREFIX)) continue;
-        const marker = repositorySkillDiscardMarker(body);
-        if (marker !== body) {
-          e.content = marker;
+        // #1635 review: a marker the DRIVER wrote in an earlier pass is
+        // already truthful — re-deriving it from unparseable content would
+        // drop the path hint. The driver's own flag decides that, never the
+        // content's text: untrusted content that mimics the marker must
+        // still be compacted like any other oversized result.
+        if (e.skillDiscarded === true) continue;
+        if (discardSkillResult(e)) {
           shortened++;
-          bytesFreed += Math.max(0, size - Buffer.byteLength(marker, "utf8"));
+          bytesFreed += Math.max(0, size - Buffer.byteLength(e.content, "utf8"));
         }
         continue;
       }
@@ -1011,9 +1032,11 @@ export class Conversation {
    * folded result's content becomes the digest; the rest become a short
    * placeholder pointing at it. The newest `keepNewest` results are left
    * verbatim. Already folded results are skipped, so this is safe to call
-   * every round. Returns the number of results folded (0 when there aren't
-   * enough old results, all are already folded, or the summary came back
-   * empty — the caller should fall back to truncation in that case). */
+   * every round. Returns the number of results whose content this pass
+   * actually changed (0 when there aren't enough old results, all are already
+   * folded, or the summary came back empty — the caller should fall back to
+   * truncation in that case). A skill result whose content already carried
+   * the discard marker frees no bytes and is therefore not counted. */
   async summarizeOldestToolResults(
     summarizeFn: (block: string) => string | Promise<string>,
     options: { keepNewest?: number } = {},
@@ -1029,11 +1052,13 @@ export class Conversation {
     // a model paraphrase of repository guidance could distort it. Old skill
     // results are instead replaced whole with an explicit discarded marker
     // (trusted driver text), freeing their bytes truthfully. #1635 review:
-    // one already replaced by a truncation pass is left alone (the marker is
-    // already truthful, and re-deriving it loses the path hint).
+    // one the driver already discarded is left alone (the marker is already
+    // truthful, and re-deriving it loses the path hint) — the driver's own
+    // flag decides that, so untrusted content mimicking the marker is
+    // compacted like any other skill result.
     const oldSkills = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
-      return e.tool === "read_skill" && !e.summarized && !e.content.startsWith(SKILL_DISCARD_MARKER_PREFIX);
+      return e.tool === "read_skill" && !e.summarized && e.skillDiscarded !== true;
     });
     const foldable = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
@@ -1043,12 +1068,15 @@ export class Conversation {
     if (foldable.length === 0) {
       // Only skill results to compact: no digest call is needed (and no
       // digest can hold them truthfully) — mark and report the freed slots.
+      // Only the results whose bytes were actually freed are counted, so a
+      // result that already carried the marker is never reported as folded.
+      let discarded = 0;
       for (const i of oldSkills) {
         const e = this.events[i] as ToolResultEvent;
-        e.content = repositorySkillDiscardMarker(e.content);
+        if (discardSkillResult(e)) discarded++;
         e.summarized = true;
       }
-      return oldSkills.length;
+      return discarded;
     }
     const block = foldable
       .map((i, n) => {
@@ -1067,12 +1095,13 @@ export class Conversation {
       e.content = "[folded into the condensed digest above]";
       e.summarized = true;
     }
+    let discardedSkills = 0;
     for (const i of oldSkills) {
       const e = this.events[i] as ToolResultEvent;
-      e.content = repositorySkillDiscardMarker(e.content);
+      if (discardSkillResult(e)) discardedSkills++;
       e.summarized = true;
     }
-    return foldable.length + oldSkills.length;
+    return foldable.length + discardedSkills;
   }
 
   // ---- wire emission -----------------------------------------------------
