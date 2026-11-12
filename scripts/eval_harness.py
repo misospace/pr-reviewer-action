@@ -2119,6 +2119,18 @@ def run_review_for_pr(
         # name it consults first — and keeps the credential out of the child's
         # argv. An empty token leaves the ambient names untouched.
         forge_token = model_config.get("github_token", "")
+        if not forge_token and semantic_fixture is not None:
+            # A fixture replay's forge reads serve from the fixture
+            # directory (buildPlatformReadAdapter) and its model endpoint
+            # is a closed local port, so the placeholder below
+            # authenticates nothing and reaches nothing. The runtime's
+            # env validation still requires the ambient token ABI
+            # (validateStageEnv: "Missing GitHub token" exits the engine
+            # before any context is built), and a qualification replay
+            # runs with the operator's real token scrubbed — so the
+            # placeholder keeps the replay both credential-free and
+            # runnable. A non-fixture run keeps requiring a real token.
+            forge_token = "eval-fixture-placeholder"
         if forge_token:
             env["GITHUB_TOKEN"] = forge_token
             env["GH_TOKEN"] = forge_token
