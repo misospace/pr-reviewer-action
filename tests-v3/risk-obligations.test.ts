@@ -234,6 +234,34 @@ test("#1577 (review fix): block-comment stripping keeps actual code firing", () 
   assert.deepEqual(deref.obligations.map((row) => row.category), ["credential_boundary"]);
 });
 
+// #1637 review: stripBlockComments was LINE-LOCAL — an ordinary continuation
+// line inside a still-open multi-line block comment carried no `/*`, `*/`,
+// `* `, or line-comment prefix, so it survived as code and a comment-only
+// diff raised a mandatory credential_boundary obligation. The block-comment
+// state now carries across the chunk's changed lines (per file version).
+test("#1577 (review fix): an ordinary continuation line inside an open block comment is comment-only", () => {
+  // The re-review's exact three-line shape; the middle line also carries the
+  // bounded-state and persisted-state vocabulary, so every category the raw
+  // text would trip if it scanned as code is covered by the one negative.
+  const openBlock = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  /*",
+    "  authorization credential handling TODO; counter overflow guard; database schema migration notes",
+    "  */",
+  ]));
+  assert.deepEqual(openBlock.obligations, [], "a continuation line inside an open block comment is comment-only");
+});
+
+test("#1577 (review fix): code after the closer on the last comment line still fires", () => {
+  // The same open-block shape, but the closing line carries real code after
+  // `*/`: the state hands that code to the scanner instead of swallowing it.
+  const closerCode = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  /*",
+    "  authorization credential handling TODO; counter overflow guard; database schema migration notes",
+    "  */ const credentials = loadCredentials();",
+  ]));
+  assert.deepEqual(closerCode.obligations.map((row) => row.category), ["credential_boundary"], "the closing line's live code still scans");
+});
+
 test("#1577: style/validation vocabulary does not fake a risk category", () => {
   // The context scoping the categories need to stay usable opt-ins.
   assert.deepEqual(scanRiskObligations(fileDiff("src/ui/box.ts", ["  const style = { overflow: \"hidden\", textOverflow: \"ellipsis\" };"])).obligations, []);

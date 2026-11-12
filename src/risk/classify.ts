@@ -22,16 +22,19 @@
  * `/* ... *\/` opener/continuation/closer is comment-only and a closed
  * whitespace-preceded span is removed while the code after it still scans),
  * and a real mode/typechange header (`old mode 100644` → `new mode 120000`)
- * is itself a trigger. The residues are deliberately asymmetric: a quoted
- * comment marker can cut a line early (missing a fire), a code-shaped line
- * inside a still-open multi-line block comment still scans (firing —
- * without cross-line state it cannot be told apart from code), and a
- * multiplication continuation line (`* height`) is blanked like a JSDoc
- * line (missing a fire), because a false obligation costs one disposition
- * while a false silence costs trust — EXCEPT where the comment shape is
- * unambiguous, which is exactly where the scan must not fire (a
- * comment-only diff must never raise a mandatory obligation). The scan is
- * pure, deterministic, and never throws.
+ * is itself a trigger. Block comments carry state ACROSS the chunk's lines,
+ * tracked per file version (a context line advances both): a line inside a
+ * still-open multi-line block comment is comment-only even when it carries
+ * risk vocabulary, while code before/after delimiters on the same line
+ * still scans. The residues are deliberately asymmetric: a quoted comment
+ * marker can cut a line early (missing a fire), a multiplication
+ * continuation line (`* height`) is blanked like a JSDoc line (missing a
+ * fire), and a block still open where the diff window ends can hold the
+ * state open across the chunk's remaining lines (missing a fire), because
+ * a false obligation costs one disposition while a false silence costs
+ * trust — EXCEPT where the comment shape is unambiguous, which is exactly
+ * where the scan must not fire (a comment-only diff must never raise a
+ * mandatory obligation). The scan is pure, deterministic, and never throws.
  *
  * The mode digits are the one vocabulary where the bare token would be
  * noise: `120000` is also a plausible timeout in milliseconds or a byte
@@ -210,16 +213,44 @@ function isScannableFile(path: string | null): boolean {
   return !EXCLUDED_PATH_PATTERNS.some((pattern) => pattern.test(path));
 }
 
+/** The index of the language's first whitespace-preceded line-comment
+ * marker in the line, or -1 (the #960 trailing-comment start). A marker at
+ * index 0 has no preceding whitespace and is not a cut; a marker-start
+ * line was blanked before this runs. */
+function firstLineCommentStart(line: string, markers: readonly string[]): number {
+  let cut = -1;
+  for (const marker of markers) {
+    let from = 0;
+    for (;;) {
+      const index = line.indexOf(marker, from);
+      if (index <= 0) break;
+      if (/\s/.test(line[index - 1]!)) {
+        if (cut === -1 || index < cut) cut = index;
+        break;
+      }
+      from = index + marker.length;
+    }
+  }
+  return cut;
+}
+
 /** Remove the C-style block comments one changed line can carry, keeping
  * every byte of actual code (the #1577 review rule: the replacement must
  * not be token-blind — it must not drop code nor mishandle the changed
- * line):
+ * line), and report whether a block comment is still open at the line's
+ * end (the cross-line state the #1637 review fix carries across the
+ * chunk's lines):
  *
+ * - `inBlock` true on entry: the line starts INSIDE a still-open block
+ *   comment and is comment-only up to its first `*\/` (line-comment
+ *   markers are comment text here, never line-comment starts); a missing
+ *   closer keeps the whole line comment and the state open, a closer hands
+ *   the code after it to the fresh-state shapes below;
  * - a line whose trimmed form starts with `/*` is comment-opener-shaped: a
  *   closer ON the line removes the closed span and the code after it still
  *   scans (`/* note *\/ const credentials = x;` fires), a missing closer
  *   means the comment continues on later lines and the whole line is
- *   comment;
+ *   comment (state stays open);
  * - a line whose trimmed form starts with `*\/` is comment-closer-shaped:
  *   the closer is removed and any code after it still scans;
  * - a JSDoc/Doxygen continuation line (`* ` with the star followed by
@@ -228,68 +259,81 @@ function isScannableFile(path: string | null): boolean {
  *   star alone is never a token-blind eraser;
  * - mid-line, a whitespace-preceded opener starts a trailing comment: a
  *   closed span is removed (code on both sides survives) and an unclosed
- *   one comments out the rest of the line.
+ *   one comments out the rest of the line (state stays open). An opener
+ *   that starts after the line's first whitespace-preceded line-comment
+ *   marker sits inside that line comment and is never an opener — the
+ *   state it would open is phantom and must not blank later lines.
  *
- * A code-shaped line inside a still-open multi-line block comment is kept
- * (the conservative firing direction — without cross-line state it cannot
- * be told apart from code). */
-function stripBlockComments(line: string, starContinuation: boolean): string {
+ * Code before/after delimiters on the same line always scans. */
+function stripBlockComments(
+  line: string,
+  starContinuation: boolean,
+  markers: readonly string[],
+  inBlock: boolean,
+): { code: string; inBlock: boolean } {
+  if (inBlock) {
+    const close = line.indexOf("*/");
+    if (close === -1) return { code: "", inBlock: true };
+    return stripBlockComments(line.slice(close + 2), starContinuation, markers, false);
+  }
   const trimmed = line.trimStart();
   if (trimmed.startsWith("/*")) {
     const open = line.indexOf("/*");
     const close = line.indexOf("*/", open + 2);
-    if (close === -1) return "";
-    return stripBlockComments(line.slice(close + 2), starContinuation);
+    if (close === -1) return { code: "", inBlock: true };
+    return stripBlockComments(line.slice(close + 2), starContinuation, markers, false);
   }
   if (trimmed.startsWith("*/")) {
     const open = line.indexOf("*/");
-    return stripBlockComments(line.slice(open + 2), starContinuation);
+    return stripBlockComments(line.slice(open + 2), starContinuation, markers, false);
   }
   if (starContinuation && trimmed.startsWith("*") && (trimmed.length === 1 || /\s/.test(trimmed[1]!))) {
-    return "";
+    return { code: "", inBlock: false };
   }
   let out = line;
   for (;;) {
     const open = out.search(/\s\/\*/);
-    if (open === -1) return out;
+    if (open === -1) return { code: out, inBlock: false };
+    const bound = firstLineCommentStart(out, markers);
+    if (bound !== -1 && open > bound) return { code: out, inBlock: false };
     const close = out.indexOf("*/", open + 3);
-    if (close === -1) return out.slice(0, open + 1);
+    if (close === -1) return { code: out.slice(0, open + 1), inBlock: true };
     out = out.slice(0, open + 1) + out.slice(close + 2);
   }
 }
 
-/** Drop the language's comments from a changed line: a line whose trimmed
- * form STARTS with a line-comment marker is blanked entirely; block
- * comments are stripped shape-aware (see stripBlockComments) for the
- * extensions that carry them; and a trailing ` <marker> ...` run is cut
- * (the #960 rule: a mention that survives only inside a recognized comment
- * never fires). Unknown extensions keep their markers unmatched (the line
- * scans whole). */
-function stripLineComment(line: string, extension: string): string {
+/** Drop the language's comments from a changed line and report the
+ * block-comment state at the line's end: a line whose trimmed form STARTS
+ * with a line-comment marker is blanked entirely (unless the line already
+ * sits INSIDE a still-open block comment — there the markers are comment
+ * text and only a `*\/` closer matters); block comments are stripped
+ * shape-aware (see stripBlockComments) for the extensions that carry them;
+ * and a trailing ` <marker> ...` run is cut (the #960 rule: a mention that
+ * survives only inside a recognized comment never fires). Unknown
+ * extensions keep their markers unmatched (the line scans whole). */
+function stripLineComment(line: string, extension: string, inBlock: boolean): { code: string; inBlock: boolean } {
   const markers = LINE_COMMENT_MARKERS[extension] ?? [];
   const trimmed = line.trimStart();
-  for (const marker of markers) {
-    if (trimmed.startsWith(marker)) return "";
-  }
-  const code = BLOCK_COMMENT_EXTENSIONS.has(extension)
-    ? stripBlockComments(line, markers.includes("//"))
-    : line;
-  if (code.trim() === "") return "";
-  // A trailing comment starts at the FIRST marker preceded by whitespace; a
-  // marker inside `https://` or `a//b` has no leading space and does not.
-  let cut = -1;
-  for (const marker of markers) {
-    let from = 0;
-    for (;;) {
-      const index = code.indexOf(marker, from);
-      if (index <= 0) break;
-      if (/\s/.test(code[index - 1]!)) {
-        if (cut === -1 || index < cut) cut = index;
-        break;
-      }
-      from = index + marker.length;
+  // Inside a still-open block comment the line-comment markers are comment
+  // text, not line-comment starts: only a `*\/` closer matters there.
+  if (!inBlock) {
+    for (const marker of markers) {
+      if (trimmed.startsWith(marker)) return { code: "", inBlock: false };
     }
   }
+  if (!BLOCK_COMMENT_EXTENSIONS.has(extension)) {
+    return { code: cutTrailingLineComment(line, markers), inBlock: false };
+  }
+  const result = stripBlockComments(line, markers.includes("//"), markers, inBlock);
+  if (result.code.trim() === "") return { code: "", inBlock: result.inBlock };
+  return { code: cutTrailingLineComment(result.code, markers), inBlock: result.inBlock };
+}
+
+/** Cut a trailing ` <marker> ...` run: a trailing comment starts at the
+ * FIRST marker preceded by whitespace; a marker inside `https://` or
+ * `a//b` has no leading space and does not. */
+function cutTrailingLineComment(code: string, markers: readonly string[]): string {
+  const cut = firstLineCommentStart(code, markers);
   return cut === -1 ? code : code.slice(0, cut);
 }
 
@@ -402,10 +446,32 @@ export function scanRiskObligations(diff: string): RiskObligationsArtifact {
     }
     if (!isScannableFile(path)) continue;
     const extension = extensionOf(path ?? "");
+    // Block-comment state carries ACROSS the chunk's lines (#1637 review
+    // fix), tracked per file version: the new-file state guards the `+`
+    // lines, the old-file state the `-` lines, and a context line (present
+    // in both versions) advances both — a comment opened before the visible
+    // window or closed inside it is still tracked. Without the carried
+    // state, an ordinary continuation line inside a still-open multi-line
+    // block comment scans as code and a comment-only diff raises a
+    // mandatory obligation.
+    let inBlockNew = false;
+    let inBlockOld = false;
+    const tracksBlocks = BLOCK_COMMENT_EXTENSIONS.has(extension);
     for (const raw of chunk.lines) {
       const marker = raw[0];
-      if (marker !== "+" && marker !== "-") continue;
-      const content = stripLineComment(raw.slice(1), extension);
+      if (marker !== "+" && marker !== "-") {
+        if (tracksBlocks) {
+          const context = raw.slice(1);
+          inBlockNew = stripLineComment(context, extension, inBlockNew).inBlock;
+          inBlockOld = stripLineComment(context, extension, inBlockOld).inBlock;
+        }
+        continue;
+      }
+      const stateBefore = marker === "+" ? inBlockNew : inBlockOld;
+      const stripped = stripLineComment(raw.slice(1), extension, stateBefore);
+      if (marker === "+") inBlockNew = stripped.inBlock;
+      else inBlockOld = stripped.inBlock;
+      const content = stripped.code;
       if (content.trim() === "") continue;
       for (const category of RISK_CATEGORIES) {
         if (CATEGORY_PATTERNS[category].some((pattern) => pattern.test(content))) {
