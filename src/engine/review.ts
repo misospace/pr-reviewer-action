@@ -6,6 +6,7 @@ import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope, type CancellationScope } from "../runtime/signals.js";
 import { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, resolveTierBudgets } from "../corpus/budgets.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
@@ -107,7 +108,7 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
@@ -612,8 +613,46 @@ function resolveReviewObligations(
   const dispositions = Array.isArray(review.required_check_dispositions)
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
-  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions);
+  // #1577 (review fix): the risk discharge must be backed by the run's OWN
+  // evidence receipt — deterministic records, never model output. Two
+  // sources, both records the run already wrote: the harness result's
+  // executed-call log (a successful read of the path) and the
+  // assembler-certified corpus-diff payload (#921's byte-exact rule — the
+  // path's complete head diff rode the review corpus, so the actual changed
+  // lines were in the reviewer's context). The candidate set feeds only the
+  // credit lookup: a path with no chunk in the raw diff earns nothing, so
+  // widening it with the dispositions' cited paths can never credit a path
+  // the run did not actually carry.
   const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown } | null;
+  const riskAnchorPaths = new Set<string>();
+  for (const row of riskRows) {
+    for (const anchor of row.anchors ?? []) {
+      const separator = anchor.lastIndexOf(":");
+      for (const part of separator === -1 ? [anchor] : [anchor, anchor.slice(0, separator)]) {
+        const normalized = part.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+        if (normalized !== "") riskAnchorPaths.add(normalized);
+      }
+    }
+  }
+  const candidatePaths = [...riskAnchorPaths];
+  for (const entry of dispositions ?? []) {
+    if (entry === null || typeof entry !== "object" || typeof entry.rationale !== "string") continue;
+    for (const token of entry.rationale.match(/[A-Za-z0-9_./\\:-]+/g) ?? []) {
+      const normalized = (token.split(":")[0] ?? "").trim().replace(/^\.\//, "").replace(/\/+$/, "");
+      if (normalized !== "") candidatePaths.push(normalized);
+    }
+  }
+  const readPaths = riskEvidenceReadPaths({
+    harness,
+    rawDiff: ws.readText("pr.diff"),
+    certifiedDiffPayloads: [
+      ws.readText(CORPUS_DIFF_SECTION_ARTIFACT),
+      ws.readText(CORPUS_DIFF_SECTION_SMART_ARTIFACT),
+      ws.readText(CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT),
+    ].filter((payload): payload is string => payload !== null && payload !== ""),
+    candidatePaths,
+  });
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, { readPaths });
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,

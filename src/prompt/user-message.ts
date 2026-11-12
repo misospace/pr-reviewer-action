@@ -128,14 +128,19 @@ const RISK_EVIDENCE_FILE = "risk-obligations.json";
 /** #1577: the risk rows ride their own steering block. The preamble states
  * how a risk row is discharged: the row id, a rationale that NAMES one of
  * the row's flagged locations, and the risk-specific counterexample
- * considered with its source or test evidence. */
+ * considered with its source or test evidence — checked against the run's
+ * own evidence receipt (a location the run never actually read and whose
+ * changed content the review corpus does not carry cannot discharge a row,
+ * #1577 review). */
 const RISK_EVIDENCE_PREAMBLE =
   "Risk evidence obligations — deterministic counterexample-evidence targets raised because this change's code "
   + "touches a high-risk surface (file identity/path mode, bounded state/concurrency, persisted state, or a "
   + "credential/security boundary). Disposition each one in the structured 'required_check_dispositions' array "
   + "by echoing the row id (risk-<n>); a satisfied risk row's rationale MUST name one of that row's listed "
   + "locations and state the risk-specific counterexample considered and the source or test evidence that the "
-  + "property holds under it. An obligation you could not verify stays unresolved: it withholds a clean review "
+  + "property holds under it. A location this run never actually read — no tool read of it and its changed "
+  + "content not carried by the review corpus — cannot discharge the row: an assertion without evidence on "
+  + "record stays unresolved. An obligation you could not verify stays unresolved: it withholds a clean review "
   + "instead of being silently certified. A real counterexample is an ordinary evidence-backed finding.";
 
 /** #1577 review follow-up: when the scan's coverage is incomplete the block

@@ -27,6 +27,7 @@ import {
   foldObligationDispositions,
   reviewObligationsFromArtifact,
   reviewObligationsToArtifact,
+  riskEvidenceReadPaths,
   type ReviewObligation,
 } from "../src/enforcement/review-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../src/enforcement/risk-obligations.js";
@@ -163,6 +164,74 @@ test("#1577: docs-only and comment-only risk mentions never fire", () => {
     "  const x = 1; // never holds a secret",
   ]);
   assert.deepEqual(scanRiskObligations(comments).obligations, []);
+});
+
+// #1577 review: stripLineComment handled only line comments — a comment-only
+// diff of `/* authorization credential handling TODO */` fired a mandatory
+// credential_boundary obligation. The block-comment shapes must never fire.
+test("#1577 (review fix): block-comment-only risk mentions never fire", () => {
+  // The review's exact false-positive shape, an added-only block comment.
+  const block = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  /* authorization credential handling TODO */",
+  ]));
+  assert.deepEqual(block.obligations, [], "a closed whole-line block comment is comment-only");
+  // The unclosed opener: the comment continues on a later line.
+  const unclosed = scanRiskObligations(fileDiff("src/tree.ts", [
+    "  /* TODO: git ls-tree cannot see the 120000 symlink mode here",
+  ]));
+  assert.deepEqual(unclosed.obligations, []);
+  // The JSDoc continuation shapes and the closer-only line.
+  const jsdoc = scanRiskObligations(fileDiff("src/concurrency.ts", [
+    " * rotate the api key and the password later",
+    " * the counter never overflows under interleaving",
+    " */",
+  ]));
+  assert.deepEqual(jsdoc.obligations, []);
+  // The same for the persisted-state vocabulary the review named.
+  const migration = scanRiskObligations(fileDiff("src/db/notes.ts", [
+    "  /* alter table jobs add column lease — planned, see issue */",
+  ]));
+  assert.deepEqual(migration.obligations, []);
+  // SQL carries block comments too, without the `*`-continuation rule.
+  const sql = scanRiskObligations(fileDiff("db/store.sql", [
+    "  /* drop table jobs planned — reviewed separately */",
+  ]));
+  assert.deepEqual(sql.obligations, []);
+  // A line-comment marker inside a block comment cannot resurrect the text.
+  const nested = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  /* authorization: see // the docs */",
+  ]));
+  assert.deepEqual(nested.obligations, []);
+});
+
+test("#1577 (review fix): trailing block comments never fire and the code before them still scans", () => {
+  const closed = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  const sessionId = rotate();  /* authorization credential handling */",
+  ]));
+  assert.deepEqual(closed.obligations, [], "a closed trailing block comment is comment-only");
+  const unclosed = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  const sessionId = rotate();  /* authorization credential TODO",
+  ]));
+  assert.deepEqual(unclosed.obligations, [], "an unclosed trailing block comment comments out the rest of the line");
+});
+
+test("#1577 (review fix): block-comment stripping keeps actual code firing", () => {
+  // Code AFTER a closed block comment still scans — a closed comment cannot
+  // hide the code that follows it (not a token-blind eraser).
+  const after = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  /* section header */ const credentials = loadCredentials();",
+  ]));
+  assert.deepEqual(after.obligations.map((row) => row.category), ["credential_boundary"]);
+  const midLine = scanRiskObligations(fileDiff("src/auth.ts", [
+    "  const token = mint(); /* note */ headers[\"authorization\"] = `Bearer ${token}`;",
+  ]));
+  assert.deepEqual(midLine.obligations.map((row) => row.category), ["credential_boundary"]);
+  // A pointer dereference keeps its identifier glued to the star: the `*`
+  // continuation rule is shape-aware, not a token-blind `*`-line eraser.
+  const deref = scanRiskObligations(fileDiff("src/auth/canon.c", [
+    "  *authorization = header_value;",
+  ]));
+  assert.deepEqual(deref.obligations.map((row) => row.category), ["credential_boundary"]);
 });
 
 test("#1577: style/validation vocabulary does not fake a risk category", () => {
@@ -510,20 +579,100 @@ const riskRow: ReviewObligation = {
 test("#1577: a satisfied risk row needs evidence naming the flagged location", () => {
   const grounded = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; tests-v3/source-verifier.test.ts pins it" },
-  ])[0]!;
+  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(grounded.status, "satisfied");
   const ungrounded = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "I considered symlinks and everything looks fine" },
-  ])[0]!;
+  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(ungrounded.status, "unresolved");
   const contradicting = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "src/context/treeentries.ts:readTreeEntries fails to check the mode" },
-  ])[0]!;
+  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(contradicting.status, "unresolved", "a satisfied rationale that asserts failure keeps the row open");
   const notApplicable = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "not_applicable", rationale: "src/context/treeentries.ts" },
-  ])[0]!;
+  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(notApplicable.status, "unresolved", "there is no not-applicable for a risk obligation");
+});
+
+// #1577 review: proof-shaped prose with NO verified evidence provenance —
+// a model can name a flagged path and claim the counterexample considered
+// with ZERO inspected source lines. The gate demands the run's own
+// evidence receipt: a successful tool read of the cited location, or its
+// complete head diff certified into the review corpus. No unique-call
+// quota and no extra model call — a pure fold over records the run wrote.
+test("#1577 (review fix): a path-only assertion without evidence on record stays unresolved", () => {
+  // The fully grounded prose shape (names the path AND the symbol, asserts
+  // nothing failed — note "counterexample" is itself a failure marker, so
+  // the fixture prose avoids it), with no receipt argument at all.
+  const groundedProse = { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; the symlink scenario was considered and the guard is safe" };
+  const noReceipt = foldObligationDispositions([riskRow], [groundedProse])[0]!;
+  assert.equal(noReceipt.status, "unresolved", "a caller with no receipt can never discharge a risk row");
+  const emptyReceipt = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set() })[0]!;
+  assert.equal(emptyReceipt.status, "unresolved", "an empty receipt is no evidence");
+  // A receipt that covers OTHER files does not launder this one.
+  const unrelatedReceipt = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["src/other.ts", "docs/notes.md"]) })[0]!;
+  assert.equal(unrelatedReceipt.status, "unresolved");
+});
+
+test("#1577 (review fix): the legitimate verified positive still completes cleanly", () => {
+  const groundedProse = { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; tests-v3/source-verifier.test.ts pins it" };
+  const toolRead = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  assert.equal(toolRead.status, "satisfied", "the tool loop actually read the flagged file");
+  const corpusDiff = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["README.md", "src/context/treeentries.ts"]) })[0]!;
+  assert.equal(corpusDiff.status, "satisfied", "the flagged path's complete head diff rode the certified corpus");
+});
+
+test("#1577 (review fix): an anchor-less risk row discharges only on a read of its cited path", () => {
+  const anchorless: ReviewObligation = { ...riskRow, anchors: [] };
+  const cited = { check: "risk-1", status: "satisfied", rationale: "read tests-v3/source-verifier.test.ts: the symlink scenarios are pinned there" };
+  const verified = foldObligationDispositions([anchorless], [cited], { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
+  assert.equal(verified.status, "satisfied", "the cited test file was actually read");
+  const unverified = foldObligationDispositions([anchorless], [cited])[0]!;
+  assert.equal(unverified.status, "unresolved");
+  // Citing a DIFFERENT path than the one read stays unresolved.
+  const mismatched = foldObligationDispositions([anchorless], [
+    { check: "risk-1", status: "satisfied", rationale: "read tests-v3/other.test.ts: the symlink scenarios are pinned there" },
+  ], { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
+  assert.equal(mismatched.status, "unresolved", "the receipt must cover the path the rationale itself cites");
+});
+
+test("#1577 (review fix): the receipt builder reads the executed-call log and the certified payloads", () => {
+  const harness = {
+    tool_calls: [
+      { tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" },
+      { tool: "read_file", args: { path: "src/never.ts" }, status: "error" },
+      { tool: "git_grep", args: { path: "" }, status: "ok" },
+      { tool: "git_blame", args: { path: "./src/b.ts/" }, status: "ok" },
+      { tool: "find_files", args: { path: "src" }, status: "ok" },
+    ],
+    tool_results: [
+      { status: "ok", result: null },
+      { status: "error" },
+      { status: "ok", result: { matches: ["src/grep-hit.ts:12:authorization header", "no-match-line"] } },
+      { status: "ok" },
+      { status: "ok", result: { files: ["src/listed.ts"] } },
+    ],
+  };
+  const read = riskEvidenceReadPaths({ harness, rawDiff: null, certifiedDiffPayloads: [], candidatePaths: [] });
+  assert.deepEqual([...read].sort(), ["src/auth.ts", "src/b.ts", "src/grep-hit.ts"]);
+  // Discovery calls and failed reads never mark a path covered; the
+  // normalization matches the receipt's own entries (./ and trailing /).
+  const malformed = riskEvidenceReadPaths({ harness: { tool_calls: "no", tool_results: [1, null, "x"] }, rawDiff: null, certifiedDiffPayloads: [], candidatePaths: [] });
+  assert.equal(malformed.size, 0);
+  assert.doesNotThrow(() => riskEvidenceReadPaths({ harness: null, rawDiff: null, certifiedDiffPayloads: [], candidatePaths: [] }));
+});
+
+test("#1577 (review fix): the corpus credit covers a flagged path only on the byte-exact certified chunk", () => {
+  const raw = fileDiff("src/auth.ts", ["  headers[\"authorization\"] = token;"]);
+  const credited = riskEvidenceReadPaths({ harness: null, rawDiff: raw, certifiedDiffPayloads: [raw], candidatePaths: ["src/auth.ts"] });
+  assert.deepEqual([...credited], ["src/auth.ts"]);
+  const clipped = riskEvidenceReadPaths({ harness: null, rawDiff: raw, certifiedDiffPayloads: [raw.slice(0, raw.length - 8)], candidatePaths: ["src/auth.ts"] });
+  assert.equal(clipped.size, 0, "a truncated chunk earns nothing");
+  const foreignChunk = riskEvidenceReadPaths({ harness: null, rawDiff: raw, certifiedDiffPayloads: [fileDiff("src/other.ts", ["  const x = 1;"])], candidatePaths: ["src/auth.ts"] });
+  assert.equal(foreignChunk.size, 0, "another file's payload credits nothing");
+  const noDiff = riskEvidenceReadPaths({ harness: null, rawDiff: null, certifiedDiffPayloads: [raw], candidatePaths: ["src/auth.ts"] });
+  assert.equal(noDiff.size, 0, "no raw diff, no credit");
 });
 
 test("#1577: unmet is a usable negative answer", () => {

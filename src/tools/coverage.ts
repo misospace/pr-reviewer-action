@@ -266,19 +266,54 @@ const FILE_READ_TOOLS = new Set(["read_file", "git_blame"]);
 const GREP_MATCH_LINE = /^(.+?):[0-9]+:/;
 
 function pathsTouchedByLoop(outcome: LoopOutcome): Set<string> {
+  return readPathsFromToolLog(
+    outcome.executed.map((call) => ({ tool: call.tool, args: call.args })),
+    outcome.executed.map((call) => call.result),
+  );
+}
+
+/**
+ * The read-receipt rules over one executed-call log — the SAME narrow
+ * definition of "read" the module header pins (`read_file` and `git_blame`
+ * by exact path, `git_grep` when the file is matched directly), applied to
+ * the persisted shape the harness result carries (`tool_calls` entries with
+ * their `tool`/`args`, index-aligned with the `tool_results` entries whose
+ * `status` is the executor's structural vocabulary). The #1577 risk-evidence
+ * receipt in the engine reads the run's own log through this ONE
+ * implementation, so the in-process fold and the persisted artifact can
+ * never drift apart on what a read is.
+ *
+ * Tolerant of shape drift (a non-object entry, a missing result): the call
+ * falls back to its own `status` field, and a result without matches simply
+ * contributes no grep credit. Never throws.
+ */
+export function readPathsFromToolLog(calls: readonly unknown[], results: readonly unknown[]): Set<string> {
   const touched = new Set<string>();
-  for (const call of outcome.executed) {
-    if (call.result.status !== "ok") continue;
-    const path = normalizeRelPath(call.args.path);
-    if (FILE_READ_TOOLS.has(call.tool) && path !== "") {
+  for (let index = 0; index < calls.length; index++) {
+    const call = calls[index];
+    if (call === null || typeof call !== "object" || Array.isArray(call)) continue;
+    const record = call as Record<string, unknown>;
+    const tool = typeof record.tool === "string" ? record.tool : "";
+    const args = record.args;
+    const path = args !== null && typeof args === "object" && !Array.isArray(args)
+      ? normalizeRelPath((args as Record<string, unknown>).path)
+      : "";
+    const result = results[index];
+    const ok = result !== null && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>).status === "ok"
+      : record.status === "ok";
+    if (!ok) continue;
+    if (FILE_READ_TOOLS.has(tool) && path !== "") {
       touched.add(path);
       continue;
     }
-    if (call.tool === "git_grep") {
+    if (tool === "git_grep") {
       // A grep scoped to the file itself reads its matching lines; a
       // directory-scoped grep does not mark its subtree covered.
       if (path !== "") touched.add(path);
-      const inner = call.result.result;
+      const inner = result !== null && typeof result === "object"
+        ? (result as Record<string, unknown>).result
+        : undefined;
       const matches = inner !== null && typeof inner === "object"
         ? (inner as Record<string, unknown>).matches
         : undefined;

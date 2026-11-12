@@ -44,9 +44,13 @@
  *   credential/security boundary (#1577). Like the derived rows these carry
  *   the flagged paths as `anchors` and are discharged only by a rationale
  *   that names one of them AND states the risk-specific counterexample
- *   considered; an undischarged risk row is coverage (approval withheld,
- *   review partial), never a fabricated blocker, and a real counterexample
- *   belongs in the ordinary findings.
+ *   considered. #1577 (review fix): the named location must ALSO be backed
+ *   by the run's own evidence receipt (`RiskEvidenceReceipt`) — a
+ *   successful tool read of it or its complete head diff certified into the
+ *   review corpus — so proof-shaped prose with zero inspected lines cannot
+ *   discharge the row; an undischarged risk row is coverage (approval
+ *   withheld, review partial), never a fabricated blocker, and a real
+ *   counterexample belongs in the ordinary findings.
  *
  * The deterministic layer enforces presence and shape only (matching the
  * #750 baseline): a disposition discharges an obligation when its identity
@@ -67,6 +71,7 @@ import type { ReviewArtifact } from "./artifact.js";
 import { forceRequestChanges } from "./enforce.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
+import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
@@ -369,9 +374,101 @@ function normalized(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/**
+ * #1577 (review fix): the verified-evidence provenance of a risk discharge.
+ *
+ * A `risk` row's `satisfied` answer is discharged only when the location it
+ * claims to have inspected is backed by the run's OWN evidence receipt —
+ * deterministic records, never model output:
+ *
+ * - the executed-call log the harness persisted (`tool_calls` /
+ *   `tool_results`): a successful read of the path (`read_file` /
+ *   `git_blame` by exact path, `git_grep` matching it — the same narrow
+ *   "read" the #810 coverage rules pin, one shared implementation in
+ *   `src/tools/coverage.ts`);
+ * - the assembler-certified corpus-diff credit (#921's byte-exact rule):
+ *   the path's complete head diff rode the review corpus, so the actual
+ *   changed lines were in the reviewer's context.
+ *
+ * A path-only model assertion with NEITHER record stays unresolved —
+ * proof-shaped prose is not provenance (the #1636 problem shape). There is
+ * deliberately no call-count quota and no extra model call: the receipt is
+ * a pure fold over records the run already wrote.
+ */
+export interface RiskEvidenceReceipt {
+  /** Normalized repository paths the run verified evidence on. */
+  readPaths: ReadonlySet<string>;
+}
+
+/** Normalize an evidence path exactly the way the receipt's own entries are
+ * normalized (`normalizeRelPath` in coverage.ts): trimmed, a leading `./`
+ * and trailing slashes dropped. The fold's membership test must compare
+ * like with like. */
+function normalizeEvidencePath(value: string): string {
+  return value.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** The locations one risk discharge claims to have inspected: for a row
+ * with usable anchors, the anchor paths its rationale actually names (the
+ * same `anchorCoveredBy` recognition the grounded rule uses); for a row
+ * with no usable anchor, every path-like token the rationale cites. */
+export function riskDischargeEvidencePaths(rationale: string, anchors: readonly string[]): string[] {
+  const paths = new Set<string>();
+  if (anchors.length > 0) {
+    for (const anchor of anchors) {
+      if (typeof anchor !== "string" || !anchorCoveredBy(rationale, anchor)) continue;
+      const separator = anchor.lastIndexOf(":");
+      const path = normalizeEvidencePath(separator === -1 ? anchor : anchor.slice(0, separator));
+      if (path !== "") paths.add(path);
+    }
+  } else {
+    for (const token of rationale.match(/[A-Za-z0-9_./\\:-]+/g) ?? []) {
+      const path = normalizeEvidencePath(token.split(":")[0] ?? "");
+      if (path !== "") paths.add(path);
+    }
+  }
+  return [...paths];
+}
+
+/** The tool-call log (`tool_calls`, index-aligned `tool_results`) the
+ * harness result persists — the run's own record of what the loop executed.
+ * Anything else on the artifact is ignored. */
+function harnessToolLog(harness: unknown): { calls: unknown[]; results: unknown[] } {
+  if (harness === null || typeof harness !== "object" || Array.isArray(harness)) return { calls: [], results: [] };
+  const record = harness as Record<string, unknown>;
+  return {
+    calls: Array.isArray(record.tool_calls) ? record.tool_calls : [],
+    results: Array.isArray(record.tool_results) ? record.tool_results : [],
+  };
+}
+
+/**
+ * Build the run's risk evidence receipt (see `RiskEvidenceReceipt`): the
+ * executed-call log's successful reads plus, for every candidate path whose
+ * complete head diff a certified corpus payload carries byte-exact, the
+ * path itself (#921's rule — the changed lines were in the review context).
+ * Pure over the run's own records; never throws.
+ */
+export function riskEvidenceReadPaths(input: {
+  harness: unknown;
+  rawDiff: string | null;
+  certifiedDiffPayloads: readonly string[];
+  candidatePaths: readonly string[];
+}): Set<string> {
+  const log = harnessToolLog(input.harness);
+  const paths = readPathsFromToolLog(log.calls, log.results);
+  for (const payload of input.certifiedDiffPayloads) {
+    for (const path of corpusDiffCoveredFiles(payload, input.rawDiff, input.candidatePaths)) {
+      paths.add(path);
+    }
+  }
+  return paths;
+}
+
 export function foldObligationDispositions(
   obligations: readonly ReviewObligation[],
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
+  evidence?: RiskEvidenceReceipt,
 ): ReviewObligation[] {
   return obligations.map((obligation) => {
     const idAlias = normalized(obligation.id);
@@ -441,9 +538,14 @@ export function foldObligationDispositions(
     // so the negative answer needs no location to be truthful. There is no
     // "not applicable" state for a derived obligation (the derivation named
     // a concrete relationship to check), so anything else stays unresolved.
-    // #1577: the `risk` source shares these rules exactly — the scan flagged
+    // #1577: the `risk` source shares these rules — the scan flagged
     // concrete changed paths, and a satisfied risk row is discharged only by
-    // evidence that names one of them.
+    // evidence that names one of them. #1577 (review fix): the risk source
+    // additionally requires VERIFIED provenance (see `RiskEvidenceReceipt`)
+    // — prose shape alone discharged a row the run may never have inspected,
+    // an extra phrase-and-path checklist instead of an evidence gate. The
+    // receipt check is risk-only: a derived row's semantic grounding is
+    // judged by the #1449 contract, not re-decided here.
     if (obligation.source === "derived" || obligation.source === "risk") {
       if (status !== "satisfied") return { ...obligation, status: "unresolved", cause: unresolvedCause };
       if (rationale === "") return { ...obligation, status: "unresolved", cause: unresolvedCause };
@@ -461,7 +563,17 @@ export function foldObligationDispositions(
       const grounded = anchors.length > 0
         ? anchors.some((anchor) => anchorCoveredBy(rationale, anchor))
         : namesPathLikeToken(rationale);
-      return grounded ? { ...obligation, status: "satisfied", cause: null } : { ...obligation, status: "unresolved", cause: unresolvedCause };
+      // #1577 (review fix): for a RISK row, the named location must be one
+      // the run actually established evidence on. A caller that supplies no
+      // receipt (the empty set) can never discharge a risk row —
+      // fail-closed. The check is risk-only: a derived row's semantic
+      // grounding stays the #1449 contract, not re-decided here.
+      const readPaths = evidence?.readPaths ?? new Set<string>();
+      const verified = obligation.source !== "risk"
+        || riskDischargeEvidencePaths(rationale, anchors).some((path) => readPaths.has(path));
+      return grounded && verified
+        ? { ...obligation, status: "satisfied", cause: null }
+        : { ...obligation, status: "unresolved", cause: unresolvedCause };
     }
     // Presence-and-shape rule (the #750 baseline): the deterministic layer
     // never judges whether a rationale is semantically grounded. The shape
