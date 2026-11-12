@@ -405,7 +405,7 @@ dispatched ref's head, and runs the parity family only. See
 | `SELF_HOSTED_GITHUB_REPOSITORY` | `owner/name` of the GitHub test repository. It must hold exactly one open pull request. | Yes, except in the parity family |
 | `GITHUB_API_URL` | Base URL of the GitHub API. The default is `https://api.github.com`. Set the repository variable `SELF_HOSTED_GITHUB_API_URL` when the GitHub side is not `https://api.github.com`. | No |
 | `FORGEJO_TOKEN` | Credential for the Forgejo side. The harness mints its own token when it provisions the disposable instance, as it does today; the controller reads this name for that token. | Only when the harness drives an existing Forgejo |
-| `PR_REVIEWER_CREDENTIAL_GITHUB` | The GitHub forge integration's credential material (`#735` reference `github`): the forge-read material the review run's worker projects. When it is absent, the GitHub review scenario skips with that reason (see Known limits). | Only for the GitHub review scenario |
+| `PR_REVIEWER_CREDENTIAL_GITHUB` | Optional static forge-read material for the GitHub forge integration's `#735` reference `github`. When absent, the controller mints the installation token per job through the GitHub App (#1624) and the scenario runs anyway. | No |
 
 These names match the self-hosted runtime. A harness that reads other names
 must update this table and the CI workflow in the same change.
@@ -488,13 +488,3 @@ installation token for each repository. See
   is contacted. The replay report proves it per row: `model_verdict` is
   true only when the runtime wrote its `ai-output.json` verdict artifact,
   and the scenario requires it to be false for every row.
-- The GitHub review scenario's worker leg (#1484) needs the forge
-  integration's credential material in the environment
-  (`PR_REVIEWER_CREDENTIAL_GITHUB`): the review run's worker projects its
-  forge-read material from the instance config's `credential: github`
-  reference (#735), and an App-only deployment has no env-defined
-  material for it. Without it the worker's publish-purpose resolution
-  fails closed (`unknown_reference`), so the scenario skips with that
-  reason instead of waiting out a guaranteed-fail review. Wiring the
-  controller's per-job installation-token mint into the worker
-  projection is the follow-up (#1484-split).
