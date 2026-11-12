@@ -200,6 +200,13 @@ class DockerClusterDouble implements KubernetesApi {
     if (this.jobs.has(manifest.name)) return "already-exists";
     const container = manifest.pod.containers[0];
     const argv: string[] = ["run", "--rm", "--network", "host"];
+    // The host-gateway alias: under colima/Virtualization.framework a
+    // `--network host` container shares the VM's loopback, not the
+    // host's, so the model endpoint the envelope carries
+    // (host.docker.internal) resolves only with this mapping. On Linux
+    // the mapping is a harmless additional entry for the same address
+    // the host network already exposes.
+    argv.push("--add-host", "host.docker.internal:host-gateway");
     // The pod's own identity: the executor pins the worker to a
     // dedicated non-root uid/gid, and the container runs as exactly that
     // identity so the route exercises the same one a cluster would.

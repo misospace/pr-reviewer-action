@@ -376,6 +376,21 @@ TMP="$(mktemp -d)"
 # run would fail every dispatch with "cache root path component is not a
 # real directory: /var".
 TMP="$(cd "$TMP" && pwd -P)"
+# The container routes' staging root. macOS Docker (colima on the
+# Virtualization.framework) shares only configured host paths into the
+# VM — /var/folders, mktemp's home, is not one, and a bind mount of it
+# comes up EMPTY inside the container (the harness's first observed runs
+# failed exactly there). $HOME is shared by default on colima and Docker
+# Desktop, and every Linux runner bind-mounts freely, so the container
+# routes stage their run dir and workspace clone here. Override with
+# SELF_HOSTED_PARITY_STAGE_ROOT.
+STAGE_ROOT="${SELF_HOSTED_PARITY_STAGE_ROOT:-$HOME/.cache/pr-reviewer-parity/$$-$(date +%s)}"
+# The stub model endpoint as the CONTAINER routes reach it: under
+# `--network host` a colima/Virtualization.framework container shares the
+# VM's loopback, not the host's, so 127.0.0.1 is unreachable from inside
+# the container. host-gateway (bound below with --add-host) resolves to
+# the host's gateway address on every Docker flavor this harness runs on.
+STUB_MODEL_URL_CONTAINER="http://host.docker.internal:${STUB_MODEL_PORT}/v1"
 PG_PASSWORD="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
 WEBHOOK_SECRET="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
 FORGEJO_ADMIN_TOKEN="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
@@ -408,6 +423,13 @@ cleanup() {
   if [[ "${SELF_HOSTED_KEEP_TMP:-}" != "1" ]]; then
     docker rm -f "$PG_NAME" "$FORGEJO_NAME" >/dev/null 2>&1 || true
     rm -rf "$TMP"
+  fi
+  # The container staging root always goes: it holds only this run's
+  # container-scoped copies, and a stage root left behind is invisible
+  # litter with a mode-widened copy of a run directory in it. The guard
+  # keeps the rm inside the directory this run created.
+  if [[ -n "${STAGE_ROOT:-}" && "$STAGE_ROOT" == "$HOME/.cache/pr-reviewer-parity/"* ]]; then
+    rm -rf "$STAGE_ROOT"
   fi
 }
 trap cleanup EXIT
@@ -1435,7 +1457,12 @@ const server = http.createServer((req, res) => {
     }));
   });
 });
-server.listen(Number(process.env.STUB_MODEL_PORT), "127.0.0.1");
+// ALL interfaces, not loopback-only: the OCI and Kubernetes routes run
+// the engine in a container that reaches the host through the docker
+// gateway (host.docker.internal), which is not a loopback address. The
+// stub is a fixed-verdict oracle that holds no credential material and
+// accepts no secrets, so the wider bind widens nothing sensitive.
+server.listen(Number(process.env.STUB_MODEL_PORT));
 STUBEOF
   STUB_MODEL_PORT="$STUB_MODEL_PORT" "$NODE_BIN" "$TMP/stub-model.mjs" \
     >"$TMP/stub-model.log" 2>&1 &
@@ -3263,21 +3290,31 @@ scenario_engine_parity_route_c_oci_worker_image() {
     tail -n 30 "$TMP/parity-worker-build.log" >&2 || true
     return 1
   fi
-  local ws="$TMP/parity-worker-ws" run="$TMP/parity-worker-run"
+  local ws="$STAGE_ROOT/parity-worker-ws" run="$STAGE_ROOT/parity-worker-run"
   git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$ws"
   (
     cd "$ws"
     git checkout -q "$PARITY_HEAD_SHA"
   )
   mkdir -p "$run"
-  jq --arg rd "/run" --arg ws "/ws" '
+  jq --arg rd "/run" --arg ws "/ws" --arg mb "$STUB_MODEL_URL_CONTAINER" '
     .runDir = $rd
     | .requestPath = ($rd + "/" + (.requestPath | split("/") | last))
     | .resultPath = ($rd + "/" + (.resultPath | split("/") | last))
-    | .workspace.rootPath = $ws' "$req" > "$run/request.json"
+    | .workspace.rootPath = $ws
+    | .modelSelection.baseUrl = $mb' "$req" > "$run/request.json"
   # The image runs as uid 1000; the mounted run dir must accept its
   # result and artifact writes.
   chmod 0777 "$run"
+  # The container worker runs as uid 65532; the controller wrote the
+  # envelope (and the engine wrote the run artifacts) 0600 as the HOST
+  # uid, so a directory-mode grant alone cannot let the container read
+  # them. This directory is a container-scoped staging copy (the
+  # durable record is read back from the database, not from here) and
+  # the workspace clone is the harness's own fixture, so widening the
+  # file modes widens nothing the controller owns.
+  chmod -R a+rwX "$run"
+  chmod -R a+rwX "$ws" 2>/dev/null || true
   local status
   set +e
   # The worker's #735-projected forge-read material (#1484) rides the
@@ -3291,6 +3328,7 @@ scenario_engine_parity_route_c_oci_worker_image() {
   # refuses as an unknown command.
   PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH="$FORGEJO_TOKEN" \
     docker run --rm --network host \
+    --add-host host.docker.internal:host-gateway \
     -v "$run":/run -v "$ws":/ws \
     -e PR_REVIEWER_CREDENTIAL_MODEL \
     -e PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH \
@@ -3337,7 +3375,7 @@ scenario_engine_parity_route_c_oci_worker_image() {
 # directory and the fresh exact-head clone are its children.
 scenario_engine_parity_route_d_kubernetes_executor() {
   local label="engine parity route D (Kubernetes executor)"
-  local root="$TMP/parity"
+  local root="$STAGE_ROOT/parity"
   local run="$root/k8s-runs/$RUN_ID"
   local ws="$root/k8s-workspace"
   local config="$TMP/parity-kubernetes-config.json"
@@ -3377,11 +3415,12 @@ scenario_engine_parity_route_d_kubernetes_executor() {
   # makes visible to both sides (the run directory under the claim root),
   # and gets a fresh deadline: the Kubernetes executor refuses a request
   # without one.
-  jq --arg run "$run" --arg ws "$ws" '
+  jq --arg run "$run" --arg ws "$ws" --arg mb "$STUB_MODEL_URL_CONTAINER" '
     .runDir = $run
     | .requestPath = ($run + "/request.json")
     | .resultPath = ($run + "/result.json")
     | .workspace.rootPath = $ws
+    | .modelSelection.baseUrl = $mb
     | .deadlineAtMs = (now * 1000 + 600000 | floor)
   ' "$req" > "$run/execution-request.json"
   # The executor's operator spec: the image route C already built, the
@@ -3427,7 +3466,15 @@ scenario_engine_parity_route_d_kubernetes_executor() {
   # writes to must accept it: the run directory takes its result and its
   # artifact, the clone takes the worker's git writes.
   chmod 0777 "$run"
-  chmod -R a+rwX "$ws"
+  # The container worker runs as uid 65532; the controller wrote the
+  # envelope (and the engine wrote the run artifacts) 0600 as the HOST
+  # uid, so a directory-mode grant alone cannot let the container read
+  # them. This directory is a container-scoped staging copy (the
+  # durable record is read back from the database, not from here) and
+  # the workspace clone is the harness's own fixture, so widening the
+  # file modes widens nothing the controller owns.
+  chmod -R a+rwX "$run"
+  chmod -R a+rwX "$ws" 2>/dev/null || true
   local status
   set +e
   "$NODE_BIN" "$ROOT_DIR/.test-build/tests/harness/kubernetes-route.js" \

@@ -342,6 +342,10 @@ test("the route-D driver runs the real executor end to end against a fake contai
     assert.ok(argv.includes("--network"));
     assert.ok(argv.includes("host"));
     assert.ok(
+      argv.includes("host.docker.internal:host-gateway"),
+      "the launcher maps the host-gateway alias: the container routes reach the host through it (colima's --network host is the VM's loopback, not the host's)",
+    );
+    assert.ok(
       flagValue(argv, "--user", "65532:65532") >= 0,
       "the container runs as the executor's pinned non-root identity",
     );
