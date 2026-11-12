@@ -32,19 +32,25 @@ import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } fr
  * #1627: when the caller supplies an ACTIVE executed-call evidence index
  * (the native tool-loop surface — see `src/enforcement/executed-calls.ts`),
  * a `satisfied` disposition is a positive evidence claim and is credited
- * only when its rationale wins the shared one-to-one citation allocation
- * (`allocateCallCitations`: one executed successful call backs at most one
- * discharge); otherwise the check is conservatively `unresolved` with
- * reason `uncited-satisfaction` (no successful call cited),
- * `citation-already-used` (every cited successful call another row already
- * took), or `malformed-executed-trace` (the trace is present but this
- * runtime cannot parse it, so nothing is citable and nothing discharges —
- * fail closed). These are the same rule, reasons, and inputs the #1381
- * obligation fold applies (`foldObligationDispositions`), and both folds
- * run the SAME allocation over the SAME canonical row keys, so they agree
- * on every row. `not_applicable` and `unmet` are never citation-gated.
- * Without a trace (fresh standard-call and fork paths) the fold is
- * byte-identical to the pre-#1627 semantics.
+ * only when its rationale wins the shared CHECK-SPECIFIC one-to-one
+ * citation allocation (`allocateCallCitations`: one executed successful
+ * call backs at most one discharge, and the call's bounded target must
+ * carry the exact identity the check names — a successful call about an
+ * unrelated target never discharges); otherwise the check is
+ * conservatively `unresolved` with reason `uncited-satisfaction` (no
+ * successful call cited), `citation-already-used` (every cited successful
+ * call another row already took), `unrelated-executed-call` (the cited
+ * call does not bear on this row's evidence identity — wrong
+ * target/package/version/head, a non-repository tool, a suite/CI ask
+ * those reconcile only through the #1612 head-bound CI matcher — or an
+ * absence ask), or `malformed-executed-trace` (the trace is present but
+ * this runtime cannot parse it, so nothing is citable and nothing
+ * discharges — fail closed). These are the same rule, reasons, and inputs
+ * the #1381 obligation fold applies (`foldObligationDispositions`), and
+ * both folds run the SAME allocation over the SAME canonical row keys, so
+ * they agree on every row. `not_applicable` and `unmet` are never
+ * citation-gated. Without a trace (fresh standard-call and fork paths) the
+ * fold is byte-identical to the pre-#1627 semantics.
  *
  * This is a faithful mirror of `pr_reviewer/completeness.py::
  * evaluate_structured_coverage`; its serialized artifact stays byte-identical
@@ -195,7 +201,11 @@ export function evaluateRequiredCheckCoverage(
         row.status = "unresolved";
         row.reason = outcomes === null
           ? "malformed-executed-trace"
-          : outcome === "shared" ? "citation-already-used" : "uncited-satisfaction";
+          : outcome === "shared"
+          ? "citation-already-used"
+          : outcome === "unrelated"
+          ? "unrelated-executed-call"
+          : "uncited-satisfaction";
       });
     }
   }

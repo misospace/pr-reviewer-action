@@ -1551,6 +1551,14 @@ test("engine admission routes precheck diagnostics to the injected error sink on
 
 import { execFileSync } from "node:child_process";
 
+// The engine's own deterministic dependency_upgrade must_check texts
+// (src/classification/classify.ts KIND_CHECKS) — the dispositions below
+// echo these rows exactly. None of them carries a bindable evidence
+// identity in its text (no package slug, version, head, or file): the
+// breaking/advisory rows are absence asks and the suite row reconciles
+// through the #1612 head-bound CI matcher, so NO citation can discharge
+// them (the #1634 human-review rule). Identity-bearing positive shapes
+// are pinned at the fold level and in the entrypoints recompute test.
 const CITATION_CHECKS = [
   "check for breaking API changes in updated dependencies",
   "run full test suite after upgrade",
@@ -1627,9 +1635,11 @@ async function citationRun(dispositions: unknown[]): Promise<{
   return { result, runDir: root, serverRequests: server.requests, cleanup: (): void => rmSync(root, { recursive: true, force: true }), close: (): Promise<void> => server.close() };
 }
 
-test("#1627: the engine withholds the native approval when must_check satisfactions cite no executed successful call — both folds agree (the #1623 shape)", async () => {
+test("#1627: the engine withholds the native approval when must_check satisfactions cite no check-specific evidence — both folds agree (the #1623 shape)", async () => {
   const run = await citationRun([
-    // (a) satisfied + cited to the SUCCESSFUL call → discharges.
+    // (a) satisfied + cited to the SUCCESSFUL call — but the breaking-change
+    //     ask is an ABSENCE check (#1627: absence is never established by a
+    //     successful call) → unresolved with its own receipt.
     { check: CITATION_CHECKS[0], status: "satisfied", rationale: "the lockfile read at head shows no breaking API change — call-1" },
     // (b) satisfied with prose-only credit, NO citation.
     { check: CITATION_CHECKS[1], status: "satisfied", rationale: "I read the diff carefully — 5/5 verified with evidence." },
@@ -1646,13 +1656,14 @@ test("#1627: the engine withholds the native approval when must_check satisfacti
     // untargeted follow-up reads, which is exactly why no call-2 exists).
     const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ status?: string }> };
     assert.deepEqual((harness.tool_calls ?? []).map((call) => call.status), ["ok"]);
-    // (a) discharged; (b)-(d) unresolved with the #1627 reason; (e) the
-    // pre-#1627 no-disposition reason — every receipt content-free.
+    // (a) cited-but-unrelated (absence ask — no call establishes it);
+    // (b)-(d) unresolved with the #1627 reasons; (e) the pre-#1627
+    // no-disposition reason — every receipt content-free.
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ status: string; reason?: string }>;
     };
     assert.deepEqual(persisted.obligations.map((row) => [row.status, row.reason]), [
-      ["satisfied", "ok"],
+      ["unresolved", "unrelated-executed-call"],
       ["unresolved", "uncited-satisfaction"],
       ["unresolved", "uncited-satisfaction"],
       ["unresolved", "uncited-satisfaction"],
@@ -1674,18 +1685,16 @@ test("#1627: the engine withholds the native approval when must_check satisfacti
   }
 });
 
-test("#1627: paired positive — the cited satisfaction and the non-gated rows discharge; both folds agree, the run is natively eligible, and the verdict turn carried the proof index", async () => {
-  // #1634 (review): one executed call backs at most ONE satisfied
-  // disposition, so the clean shape behind a single executed call cites it
-  // on exactly one check and answers the rest `not_applicable` (an
-  // applicability answer, never citation-gated). The all-cited clean shape
-  // with distinct calls is pinned at the fold level in
-  // `tests-v3/review-obligations.test.ts`; the shared-call failure shape has
-  // its own end-to-end test below.
-  const dispositions = [
-    { check: CITATION_CHECKS[0], status: "satisfied", rationale: "the lockfile read at head shows no breaking API change — call-1" },
-    ...CITATION_CHECKS.slice(1).map((check) => ({ check, status: "not_applicable", rationale: "no test-suite change, single-version lockfile bump with no upstream network surface in scope" })),
-  ];
+test("#1627: paired positive — the non-gated applicability answers discharge, both folds agree, the run is natively eligible, and the verdict turn carried the proof index", async () => {
+  // None of the engine's organic dependency_upgrade rows carries a bindable
+  // evidence identity in its text (absence asks + the #1612 CI-reconciled
+  // suite ask), so the end-to-end clean shape here is the applicability
+  // path: every row answered `not_applicable` with a rationale — never
+  // citation-gated, both folds agree, no second model call. The cited
+  // check-specific satisfaction shape is pinned end-to-end in
+  // `tests-v3/entrypoints.test.ts` (path-identity row) and at the fold
+  // level in `tests-v3/review-obligations.test.ts`.
+  const dispositions = CITATION_CHECKS.map((check) => ({ check, status: "not_applicable", rationale: "single-version lockfile bump: no test-suite change, no API surface, no upstream network call in scope" }));
   const run = await citationRun(dispositions);
   try {
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
@@ -1723,12 +1732,14 @@ test("#1634 (review): one executed successful call cannot discharge five satisfa
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ status: string; reason?: string }>;
     };
-    // Canonical-key allocation: exactly one row wins call-1; the rest fail
-    // closed as already-claimed. Both folds agree (required_checks
-    // incomplete), and the native approval is withheld.
+    // Check-specific gate over the ONE executed read: NONE of the organic
+    // rows is citation-citable (absence asks, the #1612 CI suite ask, and
+    // rows with no bindable identity), so every cited satisfaction fails
+    // closed as unrelated and the approval is withheld. Both folds agree
+    // (required_checks incomplete).
     const rows = persisted.obligations.map((row) => [row.status, row.reason]);
-    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 1, JSON.stringify(rows));
-    assert.equal(rows.filter((row) => row[1] === "citation-already-used").length, 4, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 0, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[1] === "unrelated-executed-call").length, 5, JSON.stringify(rows));
     const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
     assert.equal(output.required_checks, "incomplete");
     assert.equal(run.result.outputs.reviewResult, "partial");

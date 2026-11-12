@@ -19,6 +19,7 @@ import {
 } from "../src/enforcement/review-obligations.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { evaluateRequiredCheckCoverage } from "../src/enforcement/required-checks.js";
+import { reconcileObligationsWithCiEvidence } from "../src/enforcement/required-check-ci.js";
 import { applyStrictVerdictPolicy, relaxVerificationOnlyVerdict } from "../src/enforcement/verdict-policy.js";
 import { buildPlanningContext, computeRequiredEvidenceReservation, requiredEvidenceSection } from "../src/tools/harness.js";
 import { REQUIRED_EVIDENCE_TURN_NOTE } from "../src/tools/loop.js";
@@ -837,17 +838,19 @@ test("#1627: the fold artifact carries the parser drop receipt; the reader parse
 // call id from the proof index; both folds agree on the rule.
 // ---------------------------------------------------------------------------
 
-import { allocateCallCitations, executedCallEvidenceIndex, MAX_EXECUTED_CALL_INDEX, type ExecutedCallEvidenceEntry, type ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
+import { allocateCallCitations, executedCallEvidenceIndex, executedCallTarget, MAX_EXECUTED_CALL_INDEX, type CitationOutcome, type ExecutedCallEvidenceEntry, type ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
 
 /** The #1623-shaped surface: 5 must_check obligations, an executed-call
- * index where only some rows have relevant successful calls, and a verdict
- * whose PROSE claims "5/5 verified" (prose is never read as credit — only
- * the structured dispositions' citations are). */
+ * index where only some rows have identity-matched successful calls, and a
+ * verdict whose PROSE claims "5/5 verified" (prose is never read as credit —
+ * only the structured dispositions' check-specific citations are). The
+ * executed-call entries carry the deterministic evidence identity (tool +
+ * bounded target) the citation reconciliation matches against. */
 function citationFixture() {
   const texts = [
-    "check for breaking API changes in updated dependencies",
+    "check the exact version bump recorded in package-lock.json",
     "run full test suite after upgrade",
-    "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+    "establish upstream provenance for the dependency recorded in package-lock.json: publisher and canonical source repository",
     "inspect the exact old→new upstream release delta for the updated dependency",
     "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
   ];
@@ -858,9 +861,9 @@ function citationFixture() {
     gate: true,
     refused: false,
     entries: [
-      { id: "call-1", ok: true },
-      { id: "call-2", ok: false },
-      { id: "call-3", ok: true },
+      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
+      { id: "call-2", ok: false, tool: "gh_api", target: "/repos/lodash/lodash" },
+      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/other/pkg" },
     ],
   };
   return { texts, obligations, executedCalls };
@@ -869,8 +872,8 @@ function citationFixture() {
 test("#1627: the #1623-shaped negative — uncited, failed-cited, and phantom-cited satisfactions stay unresolved in BOTH folds, and prose claims never credit", () => {
   const { texts, obligations, executedCalls } = citationFixture();
   const dispositions = [
-    // (a) satisfied + cited to a SUCCESSFUL call → discharges.
-    { check: texts[0]!, status: "satisfied", rationale: "git_grep over the lockfile diff found no breaking change; see call-1" },
+    // (a) satisfied + cited to the identity-matched successful call → discharges.
+    { check: texts[0]!, status: "satisfied", rationale: "the lockfile read at call-1 shows the exact version bump" },
     // (b) satisfied with prose-only credit ("5/5 verified") and NO citation.
     { check: texts[1]!, status: "satisfied", rationale: "I read the changes carefully — 5/5 checks verified with evidence." },
     // (c) satisfied citing a FAILED call.
@@ -933,31 +936,36 @@ test("#1627: the #1623-shaped negative — uncited, failed-cited, and phantom-ci
   );
 });
 
-test("#1627: the paired positive — cited satisfactions discharge in both folds and the strict policy approves natively", () => {
+test("#1627: the paired positive — check-specific cited satisfactions discharge in both folds and the strict policy approves natively", () => {
   const { texts, obligations } = citationFixture();
+  // Every satisfied row cites a successful call whose bounded target
+  // carries the identity the check names: the lockfile read for the version
+  // bump, the forge read of the same named file for provenance. The suite
+  // (never citable — #1612 head-bound CI evidence reconciles it) and the
+  // delta (no bindable identity) and advisory (absence) rows are answered
+  // not_applicable — applicability answers, never citation-gated.
   const executedCalls: ExecutedCallEvidenceIndex = {
     gate: true,
     refused: false,
     entries: [
-      { id: "call-1", ok: true },
-      { id: "call-2", ok: true },
-      { id: "call-3", ok: true },
-      { id: "call-4", ok: true },
-      { id: "call-5", ok: true },
+      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/contents/package-lock.json" },
     ],
   };
-  const dispositions = texts.map((text, index) => ({
-    check: text,
-    status: "satisfied",
-    rationale: `verified against the repository state at head — call-${index + 1}`,
-  }));
+  const dispositions = [
+    { check: texts[0]!, status: "satisfied", rationale: "the lockfile read at call-1 shows the exact version bump" },
+    { check: texts[1]!, status: "not_applicable", rationale: "no test-suite change in scope" },
+    { check: texts[2]!, status: "satisfied", rationale: "the forge read of the named lockfile at call-2 confirms the publisher" },
+    { check: texts[3]!, status: "not_applicable", rationale: "single-version lockfile bump, no upstream delta in scope" },
+    { check: texts[4]!, status: "not_applicable", rationale: "no advisory surface in scope" },
+  ];
   const folded = foldObligationDispositions(obligations, dispositions, executedCalls);
   assert.deepEqual(folded.map((row) => [row.status, row.reason]), Array.from({ length: 5 }, () => ["satisfied", "ok"]));
   assert.deepEqual(unresolvedReviewObligations(folded), []);
   // #750 completeness agrees on the same inputs and index.
   const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, executedCalls);
   assert.equal(coverage.status, "complete");
-  assert.ok(coverage.checks.every((row) => row.reason === "ok" && row.status === "satisfied"));
+  assert.ok(coverage.checks.every((row) => row.reason === "ok" && (row.status === "satisfied" || row.status === "not_applicable")));
   // Native eligibility affirmative: the strict mapping keeps the model's
   // approve and the marker reads clean (no abstention), with no second
   // model call in the path — this is the existing in-conversation verdict
@@ -980,58 +988,68 @@ test("#1627: the paired positive — cited satisfactions discharge in both folds
 
 test("#1627: only successful executed calls are citable — the citation matcher is word-bounded and content-free", () => {
   const index: ExecutedCallEvidenceEntry[] = [
-    { id: "call-1", ok: true },
-    { id: "call-10", ok: true },
-    { id: "call-3", ok: false },
+    { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
+    { id: "call-10", ok: true, tool: "read_file", target: "package-lock.json" },
+    { id: "call-3", ok: false, tool: "read_file", target: "package-lock.json" },
   ];
-  const citable = (rationale: string): boolean =>
-    allocateCallCitations([{ key: "check one", rationale }], index)[0] === "assigned";
-  assert.equal(citable("checked via call-1"), true);
-  assert.equal(citable("checked via `call-10` at head"), true);
+  const outcomeOf = (rationale: string): CitationOutcome =>
+    allocateCallCitations([{ key: "check the exact version bump recorded in package-lock.json", rationale }], index)[0]!;
+  assert.equal(outcomeOf("checked via call-1"), "assigned");
+  assert.equal(outcomeOf("checked via `call-10` at head"), "assigned");
   // call-1 must not match inside call-10, and prose half-echoes fail.
-  assert.equal(citable("checked via call-10 details"), true);
-  assert.equal(citable("checked via call-1 after the fix"), true);
-  assert.equal(citable("the failed call-3 attempt shows it"), false, "a FAILED call is never citable");
-  assert.equal(citable("call-99 and call-0 are fabricated"), false);
-  assert.equal(citable("xcall-1 call-1x"), false, "word-bounded tokens only");
-  assert.equal(citable(""), false);
+  assert.equal(outcomeOf("checked via call-10 details"), "assigned");
+  assert.equal(outcomeOf("checked via call-1 after the fix"), "assigned");
+  assert.equal(outcomeOf("the failed call-3 attempt shows it"), "uncited", "a FAILED call is never citable");
+  assert.equal(outcomeOf("call-99 and call-0 are fabricated"), "uncited");
+  assert.equal(outcomeOf("xcall-1 call-1x"), "uncited", "word-bounded tokens only");
+  assert.equal(outcomeOf(""), "uncited");
+  // A successful but UNRELATED call is successful-and-cited yet not probative.
+  assert.equal(
+    allocateCallCitations(
+      [{ key: "check the exact version bump recorded in package-lock.json", rationale: "checked via call-1" }],
+      [{ id: "call-1", ok: true, tool: "gh_api", target: "/repos/other/pkg" }],
+    )[0],
+    "unrelated",
+  );
 });
 
 test("#1634 (review): one executed call backs at most ONE satisfied disposition — the shared allocator fails the second row closed, identically for both folds", () => {
   const index: ExecutedCallEvidenceEntry[] = [
-    { id: "call-1", ok: true },
-    { id: "call-2", ok: true },
+    { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
+    { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
   ];
-  // Both rows cite ONLY call-1: the allocation (canonical key order, lowest
-  // free cited id) gives it to one row and the other is `shared` — a single
-  // unrelated successful call cannot discharge every required check.
+  // Both rows are identity-matched to the same call set and cite call-1:
+  // the allocation (canonical key order, lowest free matching id) gives
+  // call-1 to the canonical-first row and the other is `shared` — a single
+  // cited call cannot discharge two rows.
   const outcomes = allocateCallCitations([
-    { key: "check two", rationale: "proven by call-1" },
-    { key: "check one", rationale: "proven by call-1 and call-2" },
+    { key: "verify the publisher of lodash/lodash", rationale: "proven by call-1" },
+    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1 and call-2" },
   ], index);
   assert.deepEqual(outcomes, ["shared", "assigned"], "result is aligned to the input row order");
   // Order-independent: the same row set in any iteration order allocates the
   // same way (this is what keeps the two folds' agreement structural).
   const shuffled = allocateCallCitations([
-    { key: "check one", rationale: "proven by call-1 and call-2" },
-    { key: "check two", rationale: "proven by call-1" },
+    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1 and call-2" },
+    { key: "verify the publisher of lodash/lodash", rationale: "proven by call-1" },
   ], index);
   assert.deepEqual(shuffled, ["assigned", "shared"]);
   // EVERY row consumes its own outcome: two same-key rows cannot share one
   // call — the second is `shared`, never a second `assigned`.
   assert.deepEqual(allocateCallCitations([
-    { key: "check one", rationale: "proven by call-1" },
-    { key: "check one", rationale: "proven by call-1" },
+    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1" },
+    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1" },
   ], index), ["assigned", "shared"]);
   // Obligation fold: the second satisfaction lands as `citation-already-used`.
-  const texts = ["check one", "check two"];
+  const texts = ["verify provenance for lodash/lodash", "verify the publisher of lodash/lodash"];
   const dispositions = [
-    { check: "check one", status: "satisfied", rationale: "verified via call-1" },
-    { check: "check two", status: "satisfied", rationale: "also call-1" },
+    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1" },
+    { check: texts[1]!, status: "satisfied", rationale: "also call-1" },
   ];
   const gate: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: index };
   const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, gate);
-  // "check one" < "check two" — the canonical key winner discharges.
+  // "verify provenance..." < "verify the publisher..." — the canonical key
+  // winner discharges (and takes call-1; call-2 stays free).
   assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
     ["satisfied", "ok"],
     ["unresolved", "citation-already-used"],
@@ -1049,13 +1067,16 @@ test("#1634 (review): an invalidated (duplicate) row never consumes a citation �
   const gate: ExecutedCallEvidenceIndex = {
     gate: true,
     refused: false,
-    entries: [{ id: "call-1", ok: true }, { id: "call-2", ok: true }],
+    entries: [
+      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
+      { id: "call-2", ok: true, tool: "read_file", target: "package-lock.json" },
+    ],
   };
-  const texts = ["check a", "check b"];
+  const texts = ["check the exact version bump recorded in package-lock.json", "check the lockfile diff of package-lock.json"];
   const dispositions = [
-    { check: "check a", status: "satisfied", rationale: "verified via call-1" },
-    { check: "check a", status: "satisfied", rationale: "verified via call-1 again" },
-    { check: "check b", status: "satisfied", rationale: "verified via call-1" },
+    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1" },
+    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1 again" },
+    { check: texts[1]!, status: "satisfied", rationale: "verified via call-1" },
   ];
   // Obligation fold: A is invalidated BEFORE gating (conflicting) and never
   // gates; B is the only allocation row and wins call-1.
@@ -1072,6 +1093,183 @@ test("#1634 (review): an invalidated (duplicate) row never consumes a citation �
     ["unresolved", "duplicate-dispositions"],
     ["satisfied", "ok"],
   ]);
+});
+
+test("#1634 (human review): an unrelated successful call can NEVER discharge an unrelated must_check row — the cited call must carry the identity the check names, in BOTH folds", () => {
+  // The exact shape the human review blocks on: `read README -> call-1`
+  // certifying a provenance/security/version check about something else.
+  // The check names lodash/lodash; the successful calls target a DIFFERENT
+  // repo (or a generic read with no identity) — the deterministic evidence
+  // identity cannot establish that the call proves this row.
+  const unrelated: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/other/pkg" },
+      { id: "call-2", ok: true, tool: "read_file", target: "README.md" },
+    ],
+  };
+  const texts = [
+    "establish upstream provenance for lodash/lodash: publisher and canonical source repository",
+    "inspect the exact upstream release delta for lodash/lodash from 1.2.3 to 4.5.6",
+  ];
+  const dispositions = [
+    { check: texts[0]!, status: "satisfied", rationale: "the successful forge call-1 confirms the publisher" },
+    { check: texts[1]!, status: "satisfied", rationale: "the read at call-2 shows the delta" },
+  ];
+  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, unrelated);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["unresolved", "unrelated-executed-call"],
+    ["unresolved", "unrelated-executed-call"],
+  ]);
+  // #750 fold parity: the same unrelated shape fails closed there too.
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, unrelated);
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
+    ["unresolved", "unrelated-executed-call"],
+    ["unresolved", "unrelated-executed-call"],
+  ]);
+  assert.equal(coverage.status, "incomplete");
+  // The paired positive: the SAME check text citing a call whose target
+  // carries the named identity discharges in both folds — the gate binds
+  // citations to check-specific evidence, it does not refuse all of them.
+  const matched: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
+    ],
+  };
+  const cited = [
+    { check: texts[0]!, status: "satisfied", rationale: "the forge read of lodash/lodash at call-1 confirms the publisher" },
+    { check: texts[1]!, status: "satisfied", rationale: "the compare fetch at call-2 shows the delta" },
+  ];
+  const foldedMatched = foldObligationDispositions(candidateRowsToObligations([], texts), cited, matched);
+  assert.deepEqual(foldedMatched.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["satisfied", "ok"],
+  ]);
+  const coverageMatched = evaluateRequiredCheckCoverage(texts, cited as never, matched);
+  assert.deepEqual(coverageMatched.checks.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["satisfied", "ok"],
+  ]);
+  assert.equal(coverageMatched.status, "complete");
+});
+
+test("#1634 (human review): the stale-head, wrong-package/version distinctions stay unresolved — the check's exact head/version/package tokens must ALL be in the cited call's target", () => {
+  const head = "a".repeat(40);
+  const otherHead = "b".repeat(40);
+  const texts = [
+    `confirm the released tag for lodash/lodash 4.5.6 was built from the reviewed head ${head}`,
+    "establish upstream provenance for expressjs/express: publisher and canonical source repository",
+  ];
+  // call-1 targets a DIFFERENT head; call-2 the right head but the wrong
+  // package; call-3 the right package but missing the head token.
+  const index: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: `/repos/lodash/lodash/commits/${otherHead}` },
+      { id: "call-2", ok: true, tool: "gh_api", target: `/repos/expressjs/express/commits/${head}` },
+      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v4.5.6" },
+    ],
+  };
+  const dispositions = [
+    { check: texts[0]!, status: "satisfied", rationale: `verified as call-1 and call-3 against head ${head}` },
+    { check: texts[1]!, status: "satisfied", rationale: "verified as call-3" },
+  ];
+  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, index);
+  // Row 1: call-1 carries the wrong head (and no version), call-3 the right
+  // package/version but no head — NO cited call carries every token.
+  // Row 2: call-3 targets the wrong package entirely. Neither row has one
+  // call bearing its full identity.
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["unresolved", "unrelated-executed-call"],
+    ["unresolved", "unrelated-executed-call"],
+  ]);
+  // The exact-match positive for the same texts: one call carrying EVERY
+  // token (package + version + head) discharges.
+  const exact: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: `/repos/lodash/lodash/compare/v4.5.6...${head}` },
+    ],
+  };
+  const foldedExact = foldObligationDispositions(
+    candidateRowsToObligations([], [texts[0]!]),
+    [{ check: texts[0]!, status: "satisfied", rationale: `the compare call-1 pins tag v4.5.6 to head ${head}` }],
+    exact,
+  );
+  assert.deepEqual(foldedExact.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+});
+
+test("#1634 (human review): negative-advisory, unrelated/test-only CI, and non-repository tools never discharge — and the suite/CI ask reconciles only through the #1612 head-bound CI matcher", () => {
+  // Advisory absence: the check asks for an advisory SEARCH; even a
+  // successful forge call naming the exact package+version proves only that
+  // a search RAN, never its result — the row stays unresolved.
+  const advisory = "check upstream security advisories for lodash/lodash 4.5.6";
+  const suite = "run full test suite after upgrade";
+  const index: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/advisories?ecosystem=npm&version=4.5.6" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/actions/runs?head_sha=" + "c".repeat(40) },
+      { id: "call-3", ok: true, tool: "web_search", target: "lodash 4.5.6 advisories" },
+      { id: "call-4", ok: true, tool: "run_command", target: "git_status_short" },
+    ],
+  };
+  const dispositions = [
+    { check: advisory, status: "satisfied", rationale: "the advisory search ran as call-1 and call-3 and came back clean" },
+    { check: suite, status: "satisfied", rationale: "the CI run call-2 for the head is green" },
+  ];
+  const folded = foldObligationDispositions(candidateRowsToObligations([], [advisory, suite]), dispositions, index);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["unresolved", "unrelated-executed-call"],
+    ["unresolved", "unrelated-executed-call"],
+  ]);
+  // #1612 integration: the suite/CI ask discharges ONLY through the
+  // head-bound CI evidence reconciliation (a green in-scope test-execution
+  // check on the exact reviewed head), never through a cited call.
+  const reviewedHead = "c".repeat(40);
+  const reconciled = reconcileObligationsWithCiEvidence(folded, {
+    headSha: reviewedHead,
+    finalState: "success",
+    checks: [{ name: "test suite", state: "success", conclusion: "success" }],
+  }, reviewedHead);
+  // The advisory row is not a test-execution ask — CI evidence leaves it
+  // unresolved; the suite row discharges with the CI provenance record.
+  assert.deepEqual(reconciled.map((row) => row.status), ["unresolved", "satisfied"]);
+  assert.deepEqual(reconciled[1]!.resolvedBy, { kind: "ci-evidence", check: "test suite", headSha: reviewedHead });
+  // Head-mismatched CI evidence does NOT discharge: the matcher is
+  // head-bound.
+  const notDischarged = reconcileObligationsWithCiEvidence(folded, {
+    headSha: "d".repeat(40),
+    finalState: "success",
+    checks: [{ name: "test suite", state: "success", conclusion: "success" }],
+  }, reviewedHead);
+  assert.deepEqual(notDischarged.map((row) => row.status), ["unresolved", "unresolved"]);
+});
+
+test("#1634 (human review): the executed-call target is the bounded identity the trace already owns", () => {
+  assert.equal(executedCallTarget({ endpoint: "/repos/o/r/releases/tags/v1.2.3" }), "/repos/o/r/releases/tags/v1.2.3");
+  assert.equal(executedCallTarget({ path: "src/auth.ts", limit: 5 }), "src/auth.ts");
+  assert.equal(executedCallTarget({ path: "a.ts", ref: "abc" }), "a.ts abc");
+  assert.equal(executedCallTarget({ repo: "o/r", ref: "head" }), "head o/r");
+  assert.equal(executedCallTarget({ pattern: "traversal", path: "src" }), "src traversal");
+  assert.equal(executedCallTarget({ url: "https://x.test/a" }), "https://x.test/a");
+  assert.equal(executedCallTarget({ query: "q" }), "q");
+  assert.equal(executedCallTarget({ command: "git_diff_stat" }), "git_diff_stat");
+  // No identity args / non-object args: targetless, never a refusal.
+  assert.equal(executedCallTarget({ limit: 5 }), "");
+  assert.equal(executedCallTarget({}), "");
+  assert.equal(executedCallTarget("forged"), "");
+  assert.equal(executedCallTarget(null), "");
+  assert.equal(executedCallTarget(undefined), "");
+  // Bounded: a target never exceeds the proof index's rendered bound.
+  assert.equal(executedCallTarget({ path: "a".repeat(400) }).length, 300);
 });
 
 test("#1627 (m1): the index parser TRUNCATES an over-cap trace to the first MAX_EXECUTED_CALL_INDEX entries — the bounded prefix keeps its 1-based positional alignment and the gate stays live", () => {
@@ -1132,7 +1330,7 @@ test("#1634 (review): a malformed executed-call trace FAILS THE GATE CLOSED — 
 });
 
 test("#1627: not_applicable and unmet are never citation-gated; guidance and derived rows keep their rules; the gate is inert without an index", () => {
-  const executedCalls: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: [{ id: "call-1", ok: true }] };
+  const executedCalls: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: [{ id: "call-1", ok: true, tool: "read_file", target: "src/a.ts" }] };
   const rows = candidateRowsToObligations([
     { id: "obligation-1", source: "must_check", text: "check one" },
     { id: "obligation-2", source: "trusted_base_guidance", text: "Before approval, verify the matrix." },

@@ -109,6 +109,14 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  *   One executed call backs at most ONE discharge (`allocateCallCitations`);
  *   both folds run the same allocator over the same rows, so they still
  *   agree on every row.
+ * - `unrelated-executed-call` — the human review on #1634: the rationale
+ *   cites a successful call, but the deterministic evidence identity
+ *   (`allocateCallCitations` in `src/enforcement/executed-calls.ts`)
+ *   cannot establish that the call bears on THIS row — a different
+ *   target/package/version/head than the check names, a non-repository
+ *   tool, a suite/CI ask (those reconcile only through the #1612 head-bound
+ *   CI matcher), a security/breaking-change absence ask, or a check that
+ *   names no bindable identity at all. The row stays unresolved.
  * - `malformed-executed-trace` — #1634 (review): the harness artifact's
  *   executed-call trace is present but this runtime cannot parse it, so no
  *   citation is verifiable and no `satisfied` must_check answer can
@@ -127,6 +135,7 @@ export type ReviewObligationReason =
   | "unresolved-disposition"
   | "uncited-satisfaction"
   | "citation-already-used"
+  | "unrelated-executed-call"
   | "malformed-executed-trace";
 
 export interface ReviewObligation {
@@ -735,7 +744,11 @@ export function foldObligationDispositions(
         cause,
         reason: outcomes === null
           ? "malformed-executed-trace"
-          : outcome === "shared" ? "citation-already-used" : "uncited-satisfaction",
+          : outcome === "shared"
+          ? "citation-already-used"
+          : outcome === "unrelated"
+          ? "unrelated-executed-call"
+          : "uncited-satisfaction",
       };
     });
   }
@@ -1091,7 +1104,7 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   "ok", "no-structured-dispositions", "no-disposition", "conflicting-dispositions",
   "malformed-disposition", "missing-rationale", "ungrounded-derived", "derivation-incomplete",
   "unresolved-disposition", "uncited-satisfaction",
-  "citation-already-used", "malformed-executed-trace",
+  "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
 ]);
 
 /**

@@ -1451,11 +1451,11 @@ test("#1627: the publish-side required-check recompute folds the executed-call i
     writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
       stop_reason: "obligations-settled",
       tool_calls: [
-        { tool: "read_file", args: { path: "src/a.ts" }, status: "ok" },
+        { tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" },
         { tool: "web_fetch", args: { url: "https://blocked.test/x" }, status: "error" },
       ],
     }));
-    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
     // Satisfied citing the FAILED call (call-2): the engine's fold reads
     // uncited-satisfaction → unresolved; the publish-side recompute must
     // agree (without the index it would silently mark the row satisfied and
@@ -1463,17 +1463,17 @@ test("#1627: the publish-side required-check recompute folds the executed-call i
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
       verdict: "request_changes",
       required_check_dispositions: [
-        { check: "Check the auth path", status: "satisfied", rationale: "the fetch ran as call-2 and confirmed it" },
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the fetch ran as call-2 and confirmed it" },
       ],
     }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
-    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path"]);
+    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path in src/auth.ts"]);
     // Paired positive: citing the SUCCESSFUL call (call-1) discharges — the
     // publish side agrees with the engine fold in the positive direction too.
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
       verdict: "request_changes",
       required_check_dispositions: [
-        { check: "Check the auth path", status: "satisfied", rationale: "the read at head confirmed it — call-1" },
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the read of src/auth.ts at head confirmed it — call-1" },
       ],
     }));
     const cited = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");

@@ -345,16 +345,16 @@ const INDEX: ExecutedCallEvidenceIndex = {
   gate: true,
   refused: false,
   entries: [
-    { id: "call-1", ok: true },
-    { id: "call-2", ok: false },
-    { id: "call-3", ok: true },
+    { id: "call-1", ok: true, tool: "read_file", target: "src/paths.ts" },
+    { id: "call-2", ok: false, tool: "git_grep", target: "traversal src" },
+    { id: "call-3", ok: true, tool: "read_file", target: "src/paths.ts" },
   ],
 };
 
-test("#1627: a satisfied check with a successful-call citation stays ok; uncited, failed-cited, and phantom-cited become uncited-satisfaction", () => {
-  const checks = ["review path traversal vulnerabilities"];
+test("#1627: a satisfied check with an identity-matched successful-call citation stays ok; uncited, failed-cited, phantom-cited, and unrelated-cited become unresolved", () => {
+  const checks = ["review the path resolution in src/paths.ts"];
   const cases: Array<[string, string, string]> = [
-    ["git_grep found no traversal in the changed resolvers; call-1", "satisfied", "ok"],
+    ["the read of src/paths.ts at call-1 shows the resolution", "satisfied", "ok"],
     ["verified by reading the diff carefully — 5/5 checks pass", "unresolved", "uncited-satisfaction"],
     ["the fetch ran as call-2 and came back clean", "unresolved", "uncited-satisfaction"],
     ["confirmed via call-99 at head", "unresolved", "uncited-satisfaction"],
@@ -367,6 +367,15 @@ test("#1627: a satisfied check with a successful-call citation stays ok; uncited
     // The rationale is disclosure, never credit — it is kept verbatim.
     assert.equal(coverage.checks[0]!.rationale, rationale);
   }
+  // A successful call whose target does not carry the check's identity is
+  // cited-but-unrelated (#1634 human review): the row stays unresolved with
+  // its own receipt.
+  const unrelated = evaluateRequiredCheckCoverage(
+    checks,
+    [d(checks[0]!, "satisfied", "the successful call-4 read confirms it")],
+    { gate: true, refused: false, entries: [{ id: "call-4", ok: true, tool: "read_file", target: "README.md" }] },
+  );
+  assert.deepEqual(unrelated.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]]);
 });
 
 test("#1627: not_applicable and unmet rows are never citation-gated", () => {
@@ -394,12 +403,12 @@ test("#1627: without an active gate (no trace at all) a bare satisfied still dis
 });
 
 test("#1634 (review): one successful call backs at most one satisfied disposition; a refused trace fails every satisfaction closed", () => {
-  const checks = ["review path traversal vulnerabilities", "review SSRF in URL fetching"];
+  const checks = ["review the path resolution in src/paths.ts", "review the path tests in src/paths.ts"];
   const shared = evaluateRequiredCheckCoverage(
     checks,
     [
-      d(checks[0]!, "satisfied", "no traversal found; call-1"),
-      d(checks[1]!, "satisfied", "ssrf guard confirmed; call-1"),
+      d(checks[0]!, "satisfied", "the resolution read at call-1"),
+      d(checks[1]!, "satisfied", "the path tests read at call-1"),
     ],
     INDEX,
   );
@@ -415,8 +424,8 @@ test("#1634 (review): one successful call backs at most one satisfied dispositio
   const failedTrace = evaluateRequiredCheckCoverage(
     checks,
     [
-      d(checks[0]!, "satisfied", "no traversal found; call-1"),
-      d(checks[1]!, "satisfied", "ssrf guard confirmed; call-2"),
+      d(checks[0]!, "satisfied", "the resolution read at call-1"),
+      d(checks[1]!, "satisfied", "the path tests read at call-2"),
     ],
     refused,
   );
