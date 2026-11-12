@@ -1566,10 +1566,10 @@ function gitInit(dir: string): void {
 }
 
 /** Scripted native-loop model endpoint: loop turn 1 executes a read (the
- * scoped dependency plan's lead-claim window admits the first turn and
- * refuses further untargeted reads — one executed call is the surface this
- * fixture needs), loop turn 2 stops, then the verdict turn carries the
- * dispositions. */
+ * scoped dependency plan's lead-claim window admits the lockfile-targeted
+ * read and refuses further untargeted reads — one executed call is the
+ * surface this fixture needs), loop turn 2 stops, then the verdict turn
+ * carries the dispositions. */
 function citationLoopHandler(dispositions: unknown[]) {
   let loopTurns = 0;
   return (_req: unknown, body: string, res: { setHeader: (k: string, v: string) => void; end: (b: string) => void }) => {
@@ -1674,12 +1674,18 @@ test("#1627: the engine withholds the native approval when must_check satisfacti
   }
 });
 
-test("#1627: paired positive — every must_check satisfaction cites the successful executed call; both folds agree, the run is natively eligible, and the verdict turn carried the proof index", async () => {
-  const dispositions = CITATION_CHECKS.map((check) => ({
-    check,
-    status: "satisfied",
-    rationale: "verified against the repository state at head — call-1",
-  }));
+test("#1627: paired positive — the cited satisfaction and the non-gated rows discharge; both folds agree, the run is natively eligible, and the verdict turn carried the proof index", async () => {
+  // #1634 (review): one executed call backs at most ONE satisfied
+  // disposition, so the clean shape behind a single executed call cites it
+  // on exactly one check and answers the rest `not_applicable` (an
+  // applicability answer, never citation-gated). The all-cited clean shape
+  // with distinct calls is pinned at the fold level in
+  // `tests-v3/review-obligations.test.ts`; the shared-call failure shape has
+  // its own end-to-end test below.
+  const dispositions = [
+    { check: CITATION_CHECKS[0], status: "satisfied", rationale: "the lockfile read at head shows no breaking API change — call-1" },
+    ...CITATION_CHECKS.slice(1).map((check) => ({ check, status: "not_applicable", rationale: "no test-suite change, single-version lockfile bump with no upstream network surface in scope" })),
+  ];
   const run = await citationRun(dispositions);
   try {
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
@@ -1700,6 +1706,32 @@ test("#1627: paired positive — every must_check satisfaction cites the success
     assert.match(body, /# Required-Check Proof Index/);
     assert.match(body, /- call-1 — `read_file` \(ok\)/);
     assert.match(body, /Verify the exact must_check check text|must_check/);
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
+});
+
+test("#1634 (review): one executed successful call cannot discharge five satisfactions — the shared allocation keeps exactly one row clean and the approval withheld", async () => {
+  const dispositions = CITATION_CHECKS.map((check) => ({
+    check,
+    status: "satisfied",
+    rationale: "verified against the repository state at head — call-1",
+  }));
+  const run = await citationRun(dispositions);
+  try {
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ status: string; reason?: string }>;
+    };
+    // Canonical-key allocation: exactly one row wins call-1; the rest fail
+    // closed as already-claimed. Both folds agree (required_checks
+    // incomplete), and the native approval is withheld.
+    const rows = persisted.obligations.map((row) => [row.status, row.reason]);
+    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 1, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[1] === "citation-already-used").length, 4, JSON.stringify(rows));
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "incomplete");
+    assert.equal(run.result.outputs.reviewResult, "partial");
   } finally {
     await run.close();
     run.cleanup();

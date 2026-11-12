@@ -1724,7 +1724,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
             // proof index is present, a satisfied must_check rationale must
             // cite one of its executed successful call ids. Kept in lockstep
             // with the request.ts copy.
-            description: "When the Required-Check Proof Index section is present and status is 'satisfied' for a must_check check, the rationale must cite at least one executed successful call id from that index (for example 'call-7').",
+            description: "When the Required-Check Proof Index section is present and status is 'satisfied' for a must_check check, the rationale must cite at least one executed successful call id from that index (for example 'call-7'). Each call id can back at most one 'satisfied' disposition.",
             properties: {
               check: { type: "string" },
               status: {

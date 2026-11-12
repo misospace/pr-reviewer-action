@@ -28,7 +28,7 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
-import type { ExecutedCallEvidenceEntry } from "./executed-calls.js";
+import type { ExecutedCallEvidenceIndex } from "./executed-calls.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
 
@@ -49,7 +49,7 @@ export interface RequiredCheckValidationResult {
 export function structuredCoverage(
   mustCheck: readonly string[],
   artifact: ReviewArtifact,
-  executedCalls?: readonly ExecutedCallEvidenceEntry[],
+  executedCalls?: ExecutedCallEvidenceIndex,
 ): RequiredCheckCoverage {
   const emitted = Object.prototype.hasOwnProperty.call(artifact, "required_check_dispositions");
   const raw = artifact.required_check_dispositions;
@@ -84,8 +84,9 @@ export function applyRequiredCheckValidation(
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
     /** #1627: the executed-call evidence index (native tool-loop surface).
-     * Optional; absent/empty keeps the fold byte-identical to pre-#1627. */
-    executedCalls?: readonly ExecutedCallEvidenceEntry[];
+     * Optional; an index without an active gate keeps the fold
+     * byte-identical to pre-#1627. */
+    executedCalls?: ExecutedCallEvidenceIndex;
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();

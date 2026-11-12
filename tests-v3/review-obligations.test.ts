@@ -837,7 +837,7 @@ test("#1627: the fold artifact carries the parser drop receipt; the reader parse
 // call id from the proof index; both folds agree on the rule.
 // ---------------------------------------------------------------------------
 
-import { executedCallEvidenceIndex, MAX_EXECUTED_CALL_INDEX, rationaleCitesSuccessfulCall, type ExecutedCallEvidenceEntry } from "../src/enforcement/executed-calls.js";
+import { allocateCallCitations, executedCallEvidenceIndex, MAX_EXECUTED_CALL_INDEX, type ExecutedCallEvidenceEntry, type ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
 
 /** The #1623-shaped surface: 5 must_check obligations, an executed-call
  * index where only some rows have relevant successful calls, and a verdict
@@ -854,11 +854,15 @@ function citationFixture() {
   const obligations = candidateRowsToObligations([], texts);
   // call-1 ok, call-2 FAILED, call-3 ok — the shape that separates a cited
   // successful call from a cited failure and from a fabricated id.
-  const executedCalls = [
-    { id: "call-1", ok: true },
-    { id: "call-2", ok: false },
-    { id: "call-3", ok: true },
-  ];
+  const executedCalls: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true },
+      { id: "call-2", ok: false },
+      { id: "call-3", ok: true },
+    ],
+  };
   return { texts, obligations, executedCalls };
 }
 
@@ -931,13 +935,17 @@ test("#1627: the #1623-shaped negative — uncited, failed-cited, and phantom-ci
 
 test("#1627: the paired positive — cited satisfactions discharge in both folds and the strict policy approves natively", () => {
   const { texts, obligations } = citationFixture();
-  const executedCalls = [
-    { id: "call-1", ok: true },
-    { id: "call-2", ok: true },
-    { id: "call-3", ok: true },
-    { id: "call-4", ok: true },
-    { id: "call-5", ok: true },
-  ];
+  const executedCalls: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true },
+      { id: "call-2", ok: true },
+      { id: "call-3", ok: true },
+      { id: "call-4", ok: true },
+      { id: "call-5", ok: true },
+    ],
+  };
   const dispositions = texts.map((text, index) => ({
     check: text,
     status: "satisfied",
@@ -971,20 +979,99 @@ test("#1627: the paired positive — cited satisfactions discharge in both folds
 });
 
 test("#1627: only successful executed calls are citable — the citation matcher is word-bounded and content-free", () => {
-  const index = [
+  const index: ExecutedCallEvidenceEntry[] = [
     { id: "call-1", ok: true },
     { id: "call-10", ok: true },
     { id: "call-3", ok: false },
   ];
-  assert.equal(rationaleCitesSuccessfulCall("checked via call-1", index), true);
-  assert.equal(rationaleCitesSuccessfulCall("checked via `call-10` at head", index), true);
+  const citable = (rationale: string): boolean =>
+    allocateCallCitations([{ key: "check one", rationale }], index)[0] === "assigned";
+  assert.equal(citable("checked via call-1"), true);
+  assert.equal(citable("checked via `call-10` at head"), true);
   // call-1 must not match inside call-10, and prose half-echoes fail.
-  assert.equal(rationaleCitesSuccessfulCall("checked via call-10 details", index), true);
-  assert.equal(rationaleCitesSuccessfulCall("checked via call-1 after the fix", index), true);
-  assert.equal(rationaleCitesSuccessfulCall("the failed call-3 attempt shows it", index), false, "a FAILED call is never citable");
-  assert.equal(rationaleCitesSuccessfulCall("call-99 and call-0 are fabricated", index), false);
-  assert.equal(rationaleCitesSuccessfulCall("xcall-1 call-1x", index), false, "word-bounded tokens only");
-  assert.equal(rationaleCitesSuccessfulCall("", index), false);
+  assert.equal(citable("checked via call-10 details"), true);
+  assert.equal(citable("checked via call-1 after the fix"), true);
+  assert.equal(citable("the failed call-3 attempt shows it"), false, "a FAILED call is never citable");
+  assert.equal(citable("call-99 and call-0 are fabricated"), false);
+  assert.equal(citable("xcall-1 call-1x"), false, "word-bounded tokens only");
+  assert.equal(citable(""), false);
+});
+
+test("#1634 (review): one executed call backs at most ONE satisfied disposition — the shared allocator fails the second row closed, identically for both folds", () => {
+  const index: ExecutedCallEvidenceEntry[] = [
+    { id: "call-1", ok: true },
+    { id: "call-2", ok: true },
+  ];
+  // Both rows cite ONLY call-1: the allocation (canonical key order, lowest
+  // free cited id) gives it to one row and the other is `shared` — a single
+  // unrelated successful call cannot discharge every required check.
+  const outcomes = allocateCallCitations([
+    { key: "check two", rationale: "proven by call-1" },
+    { key: "check one", rationale: "proven by call-1 and call-2" },
+  ], index);
+  assert.deepEqual(outcomes, ["shared", "assigned"], "result is aligned to the input row order");
+  // Order-independent: the same row set in any iteration order allocates the
+  // same way (this is what keeps the two folds' agreement structural).
+  const shuffled = allocateCallCitations([
+    { key: "check one", rationale: "proven by call-1 and call-2" },
+    { key: "check two", rationale: "proven by call-1" },
+  ], index);
+  assert.deepEqual(shuffled, ["assigned", "shared"]);
+  // EVERY row consumes its own outcome: two same-key rows cannot share one
+  // call — the second is `shared`, never a second `assigned`.
+  assert.deepEqual(allocateCallCitations([
+    { key: "check one", rationale: "proven by call-1" },
+    { key: "check one", rationale: "proven by call-1" },
+  ], index), ["assigned", "shared"]);
+  // Obligation fold: the second satisfaction lands as `citation-already-used`.
+  const texts = ["check one", "check two"];
+  const dispositions = [
+    { check: "check one", status: "satisfied", rationale: "verified via call-1" },
+    { check: "check two", status: "satisfied", rationale: "also call-1" },
+  ];
+  const gate: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: index };
+  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, gate);
+  // "check one" < "check two" — the canonical key winner discharges.
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["unresolved", "citation-already-used"],
+  ]);
+  // #750 fold parity on the same inputs and index.
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, gate);
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["unresolved", "citation-already-used"],
+  ]);
+  assert.equal(coverage.status, "incomplete");
+});
+
+test("#1634 (review): an invalidated (duplicate) row never consumes a citation — fold parity for the shared-call neighbor of a duplicate disposition", () => {
+  const gate: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [{ id: "call-1", ok: true }, { id: "call-2", ok: true }],
+  };
+  const texts = ["check a", "check b"];
+  const dispositions = [
+    { check: "check a", status: "satisfied", rationale: "verified via call-1" },
+    { check: "check a", status: "satisfied", rationale: "verified via call-1 again" },
+    { check: "check b", status: "satisfied", rationale: "verified via call-1" },
+  ];
+  // Obligation fold: A is invalidated BEFORE gating (conflicting) and never
+  // gates; B is the only allocation row and wins call-1.
+  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, gate);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["unresolved", "conflicting-dispositions"],
+    ["satisfied", "ok"],
+  ]);
+  // Completeness fold: A's second answer invalidates it AFTER its provisional
+  // credit — the row must then drop out of the allocation (not consume
+  // call-1), so B stays satisfied here too. Same statuses, both folds.
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, gate);
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
+    ["unresolved", "duplicate-dispositions"],
+    ["satisfied", "ok"],
+  ]);
 });
 
 test("#1627 (m1): the index parser TRUNCATES an over-cap trace to the first MAX_EXECUTED_CALL_INDEX entries — the bounded prefix keeps its 1-based positional alignment and the gate stays live", () => {
@@ -993,24 +1080,59 @@ test("#1627 (m1): the index parser TRUNCATES an over-cap trace to the first MAX_
     args: {},
     status: position % 2 === 0 ? "ok" : "error",
   }));
-  const index = executedCallEvidenceIndex(trace);
+  const { gate, refused, entries } = executedCallEvidenceIndex(trace);
+  assert.equal(gate, true);
+  assert.equal(refused, false);
   // Not the old whole-index refusal (fail-open gate): the prefix survives.
-  assert.equal(index.length, MAX_EXECUTED_CALL_INDEX);
-  assert.equal(index[0]!.id, "call-1");
-  assert.equal(index[0]!.ok, true);
-  assert.equal(index[MAX_EXECUTED_CALL_INDEX - 1]!.id, `call-${MAX_EXECUTED_CALL_INDEX}`);
-  assert.equal(index[MAX_EXECUTED_CALL_INDEX - 1]!.ok, false, "positional statuses are preserved exactly");
+  assert.equal(entries.length, MAX_EXECUTED_CALL_INDEX);
+  assert.equal(entries[0]!.id, "call-1");
+  assert.equal(entries[0]!.ok, true);
+  assert.equal(entries[MAX_EXECUTED_CALL_INDEX - 1]!.id, `call-${MAX_EXECUTED_CALL_INDEX}`);
+  assert.equal(entries[MAX_EXECUTED_CALL_INDEX - 1]!.ok, false, "positional statuses are preserved exactly");
   // A malformed entry inside the bounded prefix still refuses the WHOLE
-  // index — the strict no-half-trusted-ids rule is unchanged; only the cap
-  // refusal became a truncation (entries past the cap were never renderable
-  // by the corpus section, which shares the same bound).
+  // index — but a REFUSAL is not an absence (#1634 review): the gate stays
+  // ACTIVE with zero citable entries, never the inert `[]` that was
+  // indistinguishable from the no-loop case.
   const malformed = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 25 }, () => ({ tool: "read_file", args: {}, status: "ok" }));
   malformed[3] = "forged" as never;
-  assert.deepEqual(executedCallEvidenceIndex(malformed), []);
+  assert.deepEqual(executedCallEvidenceIndex(malformed), { gate: true, refused: true, entries: [] });
+  // Absent / non-array / empty traces are the no-native-loop surface: inert.
+  for (const absent of [undefined, null, "forged", {}, []]) {
+    assert.deepEqual(executedCallEvidenceIndex(absent), { gate: false, refused: false, entries: [] }, JSON.stringify(absent));
+  }
+});
+
+test("#1634 (review): a malformed executed-call trace FAILS THE GATE CLOSED — a cited satisfaction cannot discharge behind an unverifiable trace, in BOTH folds", () => {
+  const index = executedCallEvidenceIndex([{ tool: "read_file", args: {}, status: "ok" }, "forged" as never]);
+  assert.deepEqual(index, { gate: true, refused: true, entries: [] });
+  const texts = ["check one", "check two"];
+  const dispositions = [
+    { check: "check one", status: "satisfied", rationale: "verified via call-1" },
+    { check: "check two", status: "satisfied", rationale: "verified via call-2" },
+  ];
+  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, index);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["unresolved", "malformed-executed-trace"],
+    ["unresolved", "malformed-executed-trace"],
+  ]);
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, index);
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
+    ["unresolved", "malformed-executed-trace"],
+    ["unresolved", "malformed-executed-trace"],
+  ]);
+  assert.equal(coverage.status, "incomplete");
+  // Negative/applicability answers are not positive evidence claims — a
+  // refused trace never gates them (same rule as a valid index).
+  const unmet = foldObligationDispositions(
+    candidateRowsToObligations([], ["check one"]),
+    [{ check: "check one", status: "unmet", rationale: "performed, requirement absent" }],
+    index,
+  );
+  assert.deepEqual(unmet.map((row) => [row.status, row.reason]), [["unmet", "ok"]]);
 });
 
 test("#1627: not_applicable and unmet are never citation-gated; guidance and derived rows keep their rules; the gate is inert without an index", () => {
-  const executedCalls = [{ id: "call-1", ok: true }];
+  const executedCalls: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: [{ id: "call-1", ok: true }] };
   const rows = candidateRowsToObligations([
     { id: "obligation-1", source: "must_check", text: "check one" },
     { id: "obligation-2", source: "trusted_base_guidance", text: "Before approval, verify the matrix." },
@@ -1053,9 +1175,10 @@ test("#1627: not_applicable and unmet are never citation-gated; guidance and der
   );
   assert.equal(coverage.checks[0]!.reason, "ok");
 
-  // Fresh-call path regression: WITHOUT an index (undefined or empty), a
-  // bare satisfied still discharges — byte-identical to pre-#1627.
-  for (const absent of [undefined, [] as ExecutedCallEvidenceEntry[]]) {
+  // Fresh-call path regression: WITHOUT an active gate (undefined, or an
+  // index with no trace behind it), a bare satisfied still discharges —
+  // byte-identical to pre-#1627.
+  for (const absent of [undefined, { gate: false, refused: false, entries: [] } as ExecutedCallEvidenceIndex]) {
     const bare = foldObligationDispositions(
       candidateRowsToObligations([], ["check one"]),
       [{ check: "check one", status: "satisfied" }],

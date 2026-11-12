@@ -73,7 +73,7 @@ import { forceRequestChanges } from "./enforce.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
-import { rationaleCitesSuccessfulCall, type ExecutedCallEvidenceEntry } from "./executed-calls.js";
+import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } from "./executed-calls.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
@@ -104,6 +104,16 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  *   cites no executed successful call id from the proof index (see
  *   `src/enforcement/executed-calls.ts`); #750's completeness fold records
  *   the same shape under the same reason.
+ * - `citation-already-used` — #1634 (review): the rationale cites a
+ *   successful call that another satisfied row's disposition already took.
+ *   One executed call backs at most ONE discharge (`allocateCallCitations`);
+ *   both folds run the same allocator over the same rows, so they still
+ *   agree on every row.
+ * - `malformed-executed-trace` — #1634 (review): the harness artifact's
+ *   executed-call trace is present but this runtime cannot parse it, so no
+ *   citation is verifiable and no `satisfied` must_check answer can
+ *   discharge (fail closed — the refusal never degrades into the inert
+ *   no-index case).
  */
 export type ReviewObligationReason =
   | "ok"
@@ -115,7 +125,9 @@ export type ReviewObligationReason =
   | "ungrounded-derived"
   | "derivation-incomplete"
   | "unresolved-disposition"
-  | "uncited-satisfaction";
+  | "uncited-satisfaction"
+  | "citation-already-used"
+  | "malformed-executed-trace";
 
 export interface ReviewObligation {
   id: string;
@@ -520,10 +532,19 @@ export function riskEvidenceReadPaths(input: {
 export function foldObligationDispositions(
   obligations: readonly ReviewObligation[],
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
-  executedCalls?: readonly ExecutedCallEvidenceEntry[],
+  executedCalls?: ExecutedCallEvidenceIndex,
   evidence?: RiskEvidenceReceipt,
 ): ReviewObligation[] {
-  return obligations.map((obligation) => {
+  // #1627/#1634: the citation gate runs as a SHARED ALLOCATION pass after
+  // the per-row shape fold (see `allocateCallCitations`) — one executed
+  // successful call backs at most one discharge, and both folds key rows
+  // through `citationKey`, so the #1381 and #750 folds make the identical
+  // assignment. The gate is collected only when it is ACTIVE (a trace was
+  // present, valid or refused); with no trace the fold below is
+  // byte-identical to the pre-#1627 semantics.
+  const citationGate = executedCalls !== undefined && executedCalls.gate;
+  const gated: { position: number; key: string; rationale: string; cause: ReviewObligation["cause"] }[] = [];
+  const folded: ReviewObligation[] = obligations.map((obligation, position) => {
     const idAlias = normalized(obligation.id);
     const textAlias = normalized(obligation.text);
     // Alias-echo rules (#1388): `must_check` rows fold ONLY on the exact
@@ -667,25 +688,22 @@ export function foldObligationDispositions(
     // require a non-empty rationale for any discharge, as their section
     // preamble tells the model.
     // #1627: the evidence citation gate. When the run EXECUTED tool calls
-    // (a non-empty executed-call index — the native-loop surface), a
-    // must_check `satisfied` answer is a positive evidence claim and is
-    // discharged only by a rationale that cites at least one executed
-    // successful call id from the proof index the verdict corpus showed.
-    // Prose-only "verified" claims can no longer produce a false native
-    // approval. `not_applicable` and `unmet` are NOT citation-gated
-    // (applicability and confirmed negatives are not positive evidence
-    // claims; a negative counterexample surfaces as a finding), and the
-    // gate is inert whenever the index is absent or empty (fresh
-    // standard-call and fork paths keep today's behavior byte-identical).
-    // trusted_base_guidance and derived rows keep their existing rules.
-    if (
-      status === "satisfied"
-      && obligation.source === "must_check"
-      && executedCalls !== undefined
-      && executedCalls.length > 0
-      && !rationaleCitesSuccessfulCall(rationale, executedCalls)
-    ) {
-      return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "uncited-satisfaction" };
+    // (an active citation gate — the native-loop surface), a must_check
+    // `satisfied` answer is a positive evidence claim and is discharged
+    // only by a rationale whose citation of an executed successful call id
+    // wins the shared one-to-one allocation (see `allocateCallCitations`):
+    // one call backs at most one discharge. Prose-only "verified" claims
+    // can no longer produce a false native approval. `not_applicable` and
+    // `unmet` are NOT citation-gated (applicability and confirmed negatives
+    // are not positive evidence claims; a negative counterexample surfaces
+    // as a finding), and the gate is inert whenever no trace was present
+    // (fresh standard-call and fork paths keep today's behavior
+    // byte-identical). A PRESENT-but-malformed trace keeps the gate active
+    // with nothing citable — the post-pass fails every gated row closed
+    // (#1634 review). trusted_base_guidance and derived rows keep their
+    // existing rules.
+    if (citationGate && status === "satisfied" && obligation.source === "must_check") {
+      gated.push({ position, key: citationKey(obligation.text), rationale, cause: unresolvedCause });
     }
     const discharges = status === "satisfied"
       ? obligation.source === "must_check" || rationale !== ""
@@ -700,6 +718,28 @@ export function foldObligationDispositions(
     if (status === "unresolved") return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "unresolved-disposition" };
     return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "missing-rationale" };
   });
+  // The shared allocation pass: an unassigned gated row never discharges.
+  // A refused trace has NOTHING citable, so no allocation is attempted and
+  // every gated row fails closed with its own reason.
+  if (citationGate && gated.length > 0) {
+    const index = executedCalls!;
+    const outcomes = index.refused
+      ? null
+      : allocateCallCitations(gated.map(({ key, rationale }) => ({ key, rationale })), index.entries);
+    gated.forEach(({ position, cause }, allocation) => {
+      const outcome = outcomes === null ? "uncited" : outcomes[allocation] ?? "uncited";
+      if (outcome === "assigned") return;
+      folded[position] = {
+        ...folded[position]!,
+        status: "unresolved",
+        cause,
+        reason: outcomes === null
+          ? "malformed-executed-trace"
+          : outcome === "shared" ? "citation-already-used" : "uncited-satisfaction",
+      };
+    });
+  }
+  return folded;
 }
 
 export type UnresolvedReviewObligationCause = ReviewObligation["cause"];
@@ -1051,6 +1091,7 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   "ok", "no-structured-dispositions", "no-disposition", "conflicting-dispositions",
   "malformed-disposition", "missing-rationale", "ungrounded-derived", "derivation-incomplete",
   "unresolved-disposition", "uncited-satisfaction",
+  "citation-already-used", "malformed-executed-trace",
 ]);
 
 /**

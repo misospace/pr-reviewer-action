@@ -114,7 +114,7 @@ import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obl
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
-import { executedCallEvidenceIndex, type ExecutedCallEvidenceEntry } from "../enforcement/executed-calls.js";
+import { executedCallEvidenceIndex, type ExecutedCallEvidenceIndex } from "../enforcement/executed-calls.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -551,7 +551,7 @@ function resolveReviewObligations(
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceEntry[] } {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -632,9 +632,10 @@ function resolveReviewObligations(
   // #1627: the executed-call evidence index — derived STRICTLY from the
   // enforcement harness artifact's `tool_calls` trace (the executed-call
   // records the native loop already persists in execution order; the same
-  // surface `verdictHarnessFindingsBody` renders from). Empty when the
-  // artifact is absent (fresh standard-call and fork paths) or carries no
-  // executed calls, which leaves the #1627 citation gate inert.
+  // surface `verdictHarnessFindingsBody` renders from). The gate is INERT
+  // only when the artifact is absent (fresh standard-call and fork paths)
+  // or carries no executed calls; a PRESENT-but-malformed trace REFUSES the
+  // index, which keeps the gate active with nothing citable (#1634 review).
   const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown } | null;
   const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
   const riskAnchorPaths = new Set<string>();
@@ -2765,11 +2766,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   );
   // #1627: the #750 completeness fold gates the SAME satisfied answers with
   // the SAME executed-call index the #1381 fold was given, so the two folds
-  // can never disagree on a cited satisfaction. When no index exists (no
-  // executed calls) the option is omitted and the fold is byte-identical.
+  // can never disagree on a cited satisfaction. When the gate is inert (no
+  // trace at all) the option is omitted and the fold is byte-identical; a
+  // REFUSED trace passes the active-but-uncitable index, failing every
+  // gated satisfaction closed on both folds.
   const completenessOptions = {
     ...completenessBaseOptions,
-    ...(resolvedObligations.executedCalls.length > 0 ? { executedCalls: resolvedObligations.executedCalls } : {}),
+    ...(resolvedObligations.executedCalls.gate ? { executedCalls: resolvedObligations.executedCalls } : {}),
   };
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, resolvedObligations.dispositionReceipt, log);
