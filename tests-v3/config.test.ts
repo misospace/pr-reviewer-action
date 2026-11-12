@@ -41,8 +41,9 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  // #1481: 178 inputs — ai-confidence-tokens-param joined the confidence family.
-  assert.equal(contract.inputs.length, 178);
+  // #1635: 179 inputs — tool-max-conversation-tokens sizes the loop's
+  // compaction watermark explicitly.
+  assert.equal(contract.inputs.length, 179);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 

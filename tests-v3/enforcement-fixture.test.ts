@@ -228,3 +228,127 @@ test("enforcement fixture keeps relax-then-force provenance and body honest end 
     assert.doesNotMatch(artifact.review_markdown, /_Verdict relaxed from/, "the stale relaxed-verdict claim must not stand unqualified");
   });
 });
+
+const CI_HEAD = "0123456789abcdef0123456789abcdef01234567";
+const CI_STALE = "aabbccddeeff00112233445566778899aabbccdd";
+
+test("#1594 fixture: exact-head green test check discharges the test-run ask (strict, no dispositions)", () => {
+  withFixtures((dir) => {
+    const result = runEnforcementFixture(writeJson(dir, "ci-discharge.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run full test suite after upgrade"],
+      ci_evidence: {
+        version: 1, head_sha: CI_HEAD, final_state: "success",
+        checks: [{ name: "test suite", state: "success", conclusion: "success" }],
+      },
+      reviewed_head_sha: CI_HEAD,
+      config: { verdict_policy: "strict" },
+    }));
+    assert.equal(result.ok, true);
+    assert.equal(result.values!.required_checks!, "complete");
+    const completeness = JSON.parse(result.values!.completeness_result!);
+    assert.equal(completeness.status, "complete");
+    assert.deepEqual(completeness.missing, []);
+    assert.equal(completeness.checks[0].status, "satisfied");
+    assert.equal(completeness.checks[0].reason, "ci-evidence");
+    assert.equal(completeness.checks[0].rationale, `trusted CI check "test suite" succeeded on head ${CI_HEAD}`);
+    const artifact = JSON.parse(result.values!.artifact!);
+    assert.equal(artifact.required_checks, "complete");
+    assert.equal(artifact.verdict, "approve", "coverage never demotes the strict verdict here, it only completes it");
+    assert.doesNotMatch(artifact.review_markdown, /Unaddressed required checks/);
+  });
+});
+
+test("#1594 fixture: stale-head evidence keeps coverage incomplete with the bounded reason code", () => {
+  withFixtures((dir) => {
+    const result = runEnforcementFixture(writeJson(dir, "ci-stale.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run full test suite after upgrade"],
+      ci_evidence: {
+        version: 1, head_sha: CI_STALE, final_state: "success",
+        checks: [{ name: "test suite", state: "success", conclusion: "success" }],
+      },
+      reviewed_head_sha: CI_HEAD,
+      config: { verdict_policy: "strict" },
+    }));
+    assert.equal(result.ok, true);
+    assert.equal(result.values!.required_checks!, "incomplete");
+    const completeness = JSON.parse(result.values!.completeness_result!);
+    assert.deepEqual(completeness.missing, ["run full test suite after upgrade"]);
+    assert.equal(completeness.checks[0].status, "unresolved");
+    assert.equal(completeness.checks[0].reason, "ci-evidence-head-mismatch");
+  });
+});
+
+test("#1594 fixture: a failed head-bound test check contradicts the model satisfied claim", () => {
+  withFixtures((dir) => {
+    const result = runEnforcementFixture(writeJson(dir, "ci-contradiction.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "approve",
+        review_markdown: "review",
+        findings: [],
+        required_check_dispositions: [{ check: "run full test suite after upgrade", status: "satisfied", rationale: null }],
+      },
+      must_check: ["run full test suite after upgrade"],
+      ci_evidence: {
+        version: 1, head_sha: CI_HEAD, final_state: "failure",
+        checks: [{ name: "Unit Tests", state: "failure", conclusion: "failure" }],
+      },
+      reviewed_head_sha: CI_HEAD,
+      config: { verdict_policy: "strict", required_check_validation_mode: "warn" },
+    }));
+    assert.equal(result.ok, true);
+    assert.equal(result.values!.required_checks!, "incomplete");
+    const completeness = JSON.parse(result.values!.completeness_result!);
+    assert.equal(completeness.checks[0].status, "unresolved");
+    assert.equal(completeness.checks[0].reason, "ci-evidence-contradiction");
+    const artifact = JSON.parse(result.values!.artifact!);
+    assert.match(artifact.review_markdown, /### Unaddressed required checks/);
+    assert.match(artifact.review_markdown, /At least one of these rows had a reviewer disposition claiming satisfaction; validated head-bound CI evidence contradicts that claim \(#1594\)\./);
+
+    // failure-first precedence: a green matrix leg never out-ranks a red one
+    // — a never-dispositioned row stays unresolved, annotated with the
+    // contradicted reason code, and never discharges.
+    const refuted = runEnforcementFixture(writeJson(dir, "ci-red-sibling.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run full test suite after upgrade"],
+      ci_evidence: {
+        version: 1, head_sha: CI_HEAD, final_state: "success",
+        checks: [
+          { name: "test (20)", state: "success", conclusion: "success" },
+          { name: "Unit Tests", state: "failure", conclusion: "failure" },
+        ],
+      },
+      reviewed_head_sha: CI_HEAD,
+      config: { verdict_policy: "strict" },
+    }));
+    assert.equal(refuted.ok, true);
+    assert.equal(refuted.values!.required_checks!, "incomplete");
+    const refutedCompleteness = JSON.parse(refuted.values!.completeness_result!);
+    assert.equal(refutedCompleteness.checks[0].status, "unresolved");
+    assert.equal(refutedCompleteness.checks[0].reason, "ci-evidence-test-check-contradicted");
+  });
+});
+
+test("#1594 fixture: absent or invalid ci_evidence keeps the pipeline byte-identical", () => {
+  withFixtures((dir) => {
+    const base = {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run full test suite after upgrade"],
+      config: { verdict_policy: "strict" },
+    };
+    const plain = runEnforcementFixture(writeJson(dir, "no-evidence.json", base));
+    assert.equal(plain.ok, true);
+    for (const ciEvidence of [null, { version: 2, head_sha: CI_HEAD, final_state: "success", checks: [] }, "prose", { version: 1, head_sha: "nope", final_state: "success", checks: [] }]) {
+      const polluted = runEnforcementFixture(writeJson(dir, `polluted-${JSON.stringify(ciEvidence)}.json`, { ...base, ci_evidence: ciEvidence, reviewed_head_sha: CI_HEAD }));
+      assert.equal(polluted.ok, true);
+      assert.deepEqual(polluted.values, plain.values, "an unusable evidence value behaves as absent");
+    }
+    assert.equal(JSON.parse(plain.values!.completeness_result!).checks[0].reason, "no-structured-dispositions");
+  });
+});

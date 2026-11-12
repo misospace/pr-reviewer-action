@@ -1330,6 +1330,71 @@ test("#1537: required-check ids are recomputed from the run's own fold inputs", 
   });
 });
 
+test("#1594: the reconciled required-check coverage artifact takes precedence over the raw re-fold", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "incomplete" });
+    // The raw inputs would re-fold BOTH checks as unresolved (no
+    // dispositions present) — the engine's reconciled artifact says one was
+    // CI-discharged, and that is the published truth.
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["run full test suite after upgrade", "Check the rollback story"] }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
+    writeFileSync(join(dir, "required-check-coverage.json"), JSON.stringify({
+      version: 1,
+      status: "incomplete",
+      mode: "warn",
+      structured: false,
+      missing: ["Check the rollback story"],
+      addressed: ["run full test suite after upgrade"],
+      checks: [
+        { check: "run full test suite after upgrade", status: "satisfied", rationale: `trusted CI check "test" succeeded on head ${"f".repeat(40)}`, reason: "ci-evidence" },
+        { check: "Check the rollback story", status: "unresolved", rationale: null, reason: "no-structured-dispositions" },
+      ],
+      dropped_unknown: [],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the rollback story"], "the discharged row must not be re-listed");
+  });
+});
+
+test("#1594: a reconciled coverage artifact that disagrees with the recorded fold status fails closed", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "incomplete" });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
+    // The artifact claims the fold was COMPLETE while the coverage record
+    // says incomplete: neither the artifact nor the raw re-fold is trusted,
+    // and the fields stay absent.
+    writeFileSync(join(dir, "required-check-coverage.json"), JSON.stringify({
+      version: 1,
+      status: "complete",
+      mode: "warn",
+      structured: true,
+      missing: [],
+      addressed: ["Check the auth path"],
+      checks: [{ check: "Check the auth path", status: "satisfied", rationale: null, reason: "ok" }],
+      dropped_unknown: [],
+    }));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // Malformed artifacts likewise fall through to the pre-#1594 re-fold
+    // (which then names the row): version mismatch, foreign row keys, a row
+    // outside the status vocabulary.
+    for (const body of [
+      JSON.stringify({ version: 2, status: "incomplete", checks: [] }),
+      JSON.stringify({ version: 1, status: "incomplete", checks: [{ check: "x", status: "satisfied", rationale: null, reason: "ok", smuggled: 1 }] }),
+      JSON.stringify({ version: 1, status: "incomplete", checks: [{ check: "x", status: "done", rationale: null, reason: "ok" }] }),
+      "not json",
+    ]) {
+      writeFileSync(join(dir, "required-check-coverage.json"), body);
+      assert.deepEqual(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, ["Check the auth path"], body.slice(0, 40));
+    }
+    // The artifact absent keeps the pre-#1594 re-fold exactly.
+    rmSync(join(dir, "required-check-coverage.json"));
+    assert.deepEqual(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, ["Check the auth path"]);
+  });
+});
+
 test("#1537: required-check ids are recomputed only when the fold itself was incomplete", () => {
   withRunDir((dir) => {
     writeEngineRecord(dir);

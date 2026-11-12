@@ -1,4 +1,12 @@
 import { appendFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  MAX_EVIDENCE_CHECKS,
+  MAX_EVIDENCE_FIELD_LENGTH,
+  MAX_EVIDENCE_RAW_JSON_CHARS,
+  ciCheckIdentity,
+  isTestExecutionCheckName,
+  parseHeadBoundCiEvidence,
+} from "../enforcement/required-check-ci.js";
 import { ciAttemptTimeoutMs } from "../platform/bounded.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
@@ -30,6 +38,13 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/typ
  *   1 (timeout with `CI_SKIP_ON_TIMEOUT=true`), 2 (fatal, or timeout without
  *   skip); the `ci_status_*` outputs; the atomic `ci-checks-context.md`
  *   evidence file and its temp-file cleanup on TERM/INT.
+ *
+ * #1594 adds one v3-only output: on a FINALIZED wait (never on timeout or
+ * skip) the gate also writes a `ci_checks_evidence=` line — the compact-JSON,
+ * head-bound check list the enforcement pass reconciles required-check
+ * completion against (`src/enforcement/required-check-ci.ts`). It stays out
+ * of the published action outputs (the `ciGateOutputs` whitelist does not
+ * name it) and re-presents only data this gate already read.
  *
  * One deliberate divergence from v2 (covered by the retained node:test
  * regression): reads use `transientAsUnknown`, so a transient read failure is
@@ -130,6 +145,126 @@ export function escapeTableCell(value: unknown): string {
 
 function renderRows(checks: readonly ExternalCheck[]): string {
   return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.conclusion ?? check.state)} |`).join("\n");
+}
+
+/** Collapse control runs and truncate to the parser's UTF-16 field bound
+ * without splitting a surrogate pair (`Array.from` truncates by code point,
+ * the parser counts UTF-16 units — an emoji-heavy name must still fit). */
+function boundedEvidenceField(value: string): string {
+  const collapsed = value.replace(CELL_BREAK_RE, " ").trim();
+  let bounded = "";
+  for (const codePoint of collapsed) {
+    if (bounded.length + codePoint.length > MAX_EVIDENCE_FIELD_LENGTH) break;
+    bounded += codePoint;
+  }
+  return bounded;
+}
+
+interface EvidenceRow {
+  name: string;
+  state: string;
+  conclusion?: string;
+}
+
+/** One source check plus its ORIGINAL-name classification. Retention and
+ * trimming decisions use this classification only: a bounded (truncated)
+ * name is emission data, never proof of what the check actually was. */
+interface EvidenceEntry {
+  row: EvidenceRow;
+  testExecution: boolean;
+}
+
+/** #1594: the head-bound check-evidence gate output — the compact-JSON
+ * artifact the enforcement pass reconciles required-check completion against
+ * (src/enforcement/required-check-ci.ts). Written ONLY on a finalized wait
+ * (never on timeout or skip), so a mid-wait or skipped gate produces no
+ * evidence. Check names and conclusions remain untrusted DATA: control runs
+ * collapse, both are bounded to the parser's 200-UTF-16-unit field limit,
+ * invalid states and empty values are dropped, and a malformed SHA yields no
+ * line at all.
+ *
+ * The producer obeys the consumer's limits without ever dropping decision
+ * evidence. Test-execution rows (the ones the consumer can discharge or
+ * contradict from) are classified by their ORIGINAL names and retained in
+ * full; non-test rows are context and may be trimmed to fit 50 rows /
+ * 16,384 characters. If bounding a name would change its decision identity
+ * (test classification, proved scope, or exhaustive identity), or the
+ * complete test-row set cannot fit, NO evidence line is emitted: an artifact
+ * missing a skipped/pending test leg could otherwise look falsely complete
+ * and discharge a full-suite ask. When trimming non-test rows, failed rows
+ * are kept first. The final strict parser round-trip is a self-check: if it
+ * ever refuses the line, emit nothing rather than an unusable artifact. The
+ * line is NOT in the `ciGateOutputs` action-output whitelist, so it never
+ * reaches published action outputs. */
+export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
+  try {
+    if (!/^[0-9a-f]{7,64}$/i.test(sha)) return "";
+    if (finalState !== "success" && finalState !== "failure" && finalState !== "none") return "";
+    const entries: EvidenceEntry[] = [];
+    for (const check of checks) {
+      if (typeof check.name !== "string") continue;
+      if (check.state !== "pending" && check.state !== "success" && check.state !== "failure") continue;
+      const name = boundedEvidenceField(check.name);
+      if (name === "") continue;
+      // Bounding may truncate a test suffix/scope or collapse a disqualifier
+      // away. Classification is only sound on the complete source name, and
+      // the consumer can only see the bounded one, so any identity drift
+      // makes the whole artifact unsafe: emit no evidence.
+      if (ciCheckIdentity(check.name) !== ciCheckIdentity(name)) return "";
+      const conclusion = typeof check.conclusion === "string" ? boundedEvidenceField(check.conclusion) : "";
+      entries.push({
+        // Original-name classification is the retention decision; the bounded
+        // name is never allowed to downgrade a test row into disposable context.
+        testExecution: isTestExecutionCheckName(check.name),
+        row: {
+          name,
+          state: check.state,
+          ...(conclusion === "" ? {} : { conclusion }),
+        },
+      });
+    }
+    if (entries.length === 0) return "";
+    const rows = entries.map((entry) => entry.row);
+    const serialize = (candidate: readonly EvidenceRow[]): string =>
+      jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: candidate });
+    const emit = (json: string): string => {
+      if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
+      // Same parser the enforcement pass uses; a refused line is no evidence.
+      if (parseHeadBoundCiEvidence(json) === null) return "";
+      return `ci_checks_evidence=${json}`;
+    };
+    // Fast path: no truncation needed, preserve the original row order.
+    if (rows.length <= MAX_EVIDENCE_CHECKS) {
+      const json = serialize(rows);
+      if (json.length <= MAX_EVIDENCE_RAW_JSON_CHARS) return emit(json);
+    }
+    // Lossy truncation is allowed ONLY for rows the consumer ignores. Test-
+    // execution rows are the decision evidence: retain every one or emit
+    // nothing at all. A failure-first order keeps red rows visible when
+    // non-test context is trimmed.
+    const byFailureFirst = (list: readonly EvidenceEntry[]): EvidenceEntry[] => [
+      ...list.filter((entry) => entry.row.state === "failure"),
+      ...list.filter((entry) => entry.row.state !== "failure"),
+    ];
+    const testEntries = byFailureFirst(entries.filter((entry) => entry.testExecution));
+    if (testEntries.length > MAX_EVIDENCE_CHECKS) return "";
+    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution));
+    let retained = testEntries.map((entry) => entry.row);
+    let json = serialize(retained);
+    if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
+    for (const entry of otherEntries) {
+      if (retained.length >= MAX_EVIDENCE_CHECKS) break;
+      const next = [...retained, entry.row];
+      const nextJson = serialize(next);
+      if (nextJson.length > MAX_EVIDENCE_RAW_JSON_CHARS) break;
+      retained = next;
+      json = nextJson;
+    }
+    if (retained.length === 0) return "";
+    return emit(json);
+  } catch {
+    return "";
+  }
 }
 
 class Finished {
@@ -266,6 +401,8 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
 
   const finalize = (state: string): never => {
     renderEvidence(state);
+    const evidenceLine = renderCiEvidenceOutput(sha, state, checks ?? []);
+    if (evidenceLine !== "") output(evidenceLine);
     output(`ci_status_final=${state}`);
     output("ci_status_skipped=false");
     throw new Finished(0);

@@ -590,13 +590,17 @@ inputs:
     required: false
     default: "180"
   tool-corpus-max-bytes:
-    description: "Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000. When primary-model-context-tokens / smart-model-context-tokens / model-context-tokens declares a window, it derives from it instead: normally about 15% of the window (up to 600000 bytes), and lower for small windows, since it never exceeds ~60% of the loop's conversation budget after the per-turn completion is reserved (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
+    description: "Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000. When primary-model-context-tokens / smart-model-context-tokens / model-context-tokens declares a window, it derives from it instead: normally about 15% of the window (up to 600000 bytes), and lower for small windows, since it never exceeds ~60% of the loop's conversation budget after the per-turn completion, framing, and advertised tool-schema reserves are taken (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
     required: false
     default: ""
   tool-max-tokens-per-turn:
     description: Maximum completion tokens for each model turn of the tool-mode=native_loop exchange. Default 16384, so reasoning models are not cut off before they emit the tool call.
     required: false
     default: "16384"
+  tool-max-conversation-tokens:
+    description: "Approximate conversation size (tokens) past which the native_loop compacts its OLDEST tool results before the next request; the newest results always stay verbatim (#1635). Empty (the default) derives the watermark from the tier's declared context window: about 75% of it — never more than what remains after the per-turn completion (tool-max-tokens-per-turn), framing, and advertised tool-schema reserves — between 24000 and 250000, e.g. ~98304 for a 131072-token window. With no declared window the conservative 24000 constant applies. An explicit value is an operator override used as-is; it must be positive and must fit the declared window after the reserves, or the run is refused."
+    required: false
+    default: ""
   tool-max-response-bytes:
     description: "Maximum bytes captured from each tool execution result. Empty (the default) resolves to 12000. With a declared context window it derives from it instead: normally about 2% of the window (up to 64000 bytes), and lower for small windows, since it never exceeds ~8% of the loop's conversation budget (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
     required: false

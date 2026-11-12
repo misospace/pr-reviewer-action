@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, LOOP_TOOL_SCHEMA_TOKENS, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { TOOL_SCHEMAS, WEB_SEARCH_SCHEMA } from "../src/model/conversation.js";
 import { STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
@@ -2418,25 +2419,84 @@ test("#899: redactedJson keeps the serialized-redaction bytes whenever they pars
 });
 
 test("#922: without a declared window the loop keeps the v3.1 context limits", () => {
-  assert.deepEqual(loopContextLimits({}, "primary"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
-  assert.deepEqual(loopContextLimits({ TOOL_CORPUS_MAX_BYTES: "", TOOL_MAX_RESPONSE_BYTES: "" }, "smart"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  assert.deepEqual(loopContextLimits({}, "primary"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000, declaredWindowTokens: null, watermarkOverride: false });
+  assert.deepEqual(loopContextLimits({ TOOL_CORPUS_MAX_BYTES: "", TOOL_MAX_RESPONSE_BYTES: "" }, "smart"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000, declaredWindowTokens: null, watermarkOverride: false });
+});
+
+test("#1635: the default watermark is ~75% of the declared window, reserves held", () => {
+  // The organic regression shape: 131072 declared, 16384 per-turn completion.
+  // The v3.8 25% cap compacted at ~32k; the default now sits at 98304 and
+  // leaves a ~35k-40k conversation completely untouched.
+  assert.equal(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary").maxConversationTokens,
+    98304,
+  );
+  // The 24000 floor and 250000 ceiling still bound the derived value.
+  assert.equal(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "32000", TOOL_MAX_TOKENS_PER_TURN: "400" }, "primary").maxConversationTokens, 24000);
+  assert.equal(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "primary").maxConversationTokens, 250000);
+});
+
+test("#1635 review: the advertised tool schemas fit the reserved window remainder", () => {
+  // The reserve is only honest while the advertised set stays under it: the
+  // schemas ride in the request's `tools` field and are excluded from
+  // approxTokens(), so growth here re-breaks the declared-window fit.
+  const bytes = Buffer.byteLength(JSON.stringify([...TOOL_SCHEMAS, WEB_SEARCH_SCHEMA]), "utf8");
+  assert.ok(bytes / 4 <= LOOP_TOOL_SCHEMA_TOKENS, `advertised schemas ~${Math.ceil(bytes / 4)} tokens exceed the ${LOOP_TOOL_SCHEMA_TOKENS}-token reserve`);
+});
+
+test("#1635: tool-max-conversation-tokens is an explicit, validated override", () => {
+  const limits = loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384", TOOL_MAX_CONVERSATION_TOKENS: "60000" }, "primary");
+  assert.equal(limits.maxConversationTokens, 60000);
+  assert.equal(limits.watermarkOverride, true);
+  assert.equal(limits.declaredWindowTokens, 131072);
+  // Honored without a declared window too (the operator asserts the budget).
+  assert.equal(loopContextLimits({ TOOL_MAX_CONVERSATION_TOKENS: "40000" }, "primary").maxConversationTokens, 40000);
+  // Impossible overrides are refused, never silently clamped.
+  assert.throws(
+    () => loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384", TOOL_MAX_CONVERSATION_TOKENS: "200000" }, "primary"),
+    LoopContextError,
+  );
+  assert.throws(() => loopContextLimits({ TOOL_MAX_CONVERSATION_TOKENS: "0" }, "primary"), LoopContextError);
+  assert.throws(() => loopContextLimits({ TOOL_MAX_CONVERSATION_TOKENS: "-5" }, "primary"), LoopContextError);
+  assert.throws(() => loopContextLimits({ TOOL_MAX_CONVERSATION_TOKENS: "98k" }, "primary"), LoopContextError);
+  // The override is validated per tier (engine/review.ts preflight calls
+  // loopContextLimits for every configured lane): one shared override sized
+  // for a large primary window must be refused against a smaller smart lane.
+  assert.throws(
+    () => loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", SMART_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384", TOOL_MAX_CONVERSATION_TOKENS: "120000" }, "smart"),
+    LoopContextError,
+  );
+  // Exactly the remaining window fits (window − completion − framing − schemas).
+  assert.equal(
+    loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384", TOOL_MAX_CONVERSATION_TOKENS: "110388" }, "smart").maxConversationTokens,
+    110388,
+  );
+  // One token past it — the schemas no longer fit — is refused, not clamped.
+  assert.throws(
+    () => loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384", TOOL_MAX_CONVERSATION_TOKENS: "110389" }, "smart"),
+    LoopContextError,
+  );
 });
 
 test("#922: a declared window scales the loop's context limits per tier", () => {
-  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "primary"), { maxConversationTokens: 250000, corpusMaxBytes: 450000, maxResponseBytes: 60000 });
-  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "262144" }, "primary"), { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 });
-  // A small window reserves the per-turn completion first: 32768 - 16384 - 2000.
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "primary"), { maxConversationTokens: 250000, corpusMaxBytes: 450000, maxResponseBytes: 60000, declaredWindowTokens: 1000000, watermarkOverride: false });
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "262144" }, "primary"), { maxConversationTokens: 196608, corpusMaxBytes: 117964, maxResponseBytes: 15728, declaredWindowTokens: 262144, watermarkOverride: false });
+  // A small window reserves the per-turn completion, framing and the
+  // advertised tool schemas first: 32768 - 16384 - 2000 - 2300.
   assert.deepEqual(
     loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "32768", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary"),
-    { maxConversationTokens: 14384, corpusMaxBytes: 25891, maxResponseBytes: 3452 },
+    { maxConversationTokens: 12084, corpusMaxBytes: 21751, maxResponseBytes: 2900, declaredWindowTokens: 32768, watermarkOverride: false },
   );
+  // The #1635 review case: with a 4,096-token completion the 75% fraction
+  // (24,576) no longer fits — the schemas (measured ~2.2k, reserved 2,300)
+  // must, so the watermark drops to what's left.
   assert.deepEqual(
     loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "32768", TOOL_MAX_TOKENS_PER_TURN: "4096" }, "primary"),
-    { maxConversationTokens: 24000, corpusMaxBytes: 43200, maxResponseBytes: 5760 },
+    { maxConversationTokens: 24372, corpusMaxBytes: 43869, maxResponseBytes: 5849, declaredWindowTokens: 32768, watermarkOverride: false },
   );
   // The smart tier reads its own window, then the global one.
-  assert.equal(loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "400000", PRIMARY_MODEL_CONTEXT_TOKENS: "32768" }, "smart").maxConversationTokens, 100000);
-  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 100000);
+  assert.equal(loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "400000", PRIMARY_MODEL_CONTEXT_TOKENS: "32768" }, "smart").maxConversationTokens, 250000);
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 250000);
 });
 
 test("#1598 review: the fallback tier's context limits read the FALLBACK window, not the primary one", () => {
@@ -2444,13 +2504,13 @@ test("#1598 review: the fallback tier's context limits read the FALLBACK window,
   // larger one — the fallback loop dials the fallback model.
   assert.deepEqual(
     loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", FALLBACK_MODEL_CONTEXT_TOKENS: "262144" }, "fallback"),
-    { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 },
+    { maxConversationTokens: 196608, corpusMaxBytes: 117964, maxResponseBytes: 15728, declaredWindowTokens: 262144, watermarkOverride: false },
   );
   assert.equal(loopContextLimits({ FALLBACK_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback").maxConversationTokens, 250000);
   // Unset falls to the global key, then the v3.1 constants — and a primary
   // window alone must NOT size the fallback tier.
-  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "fallback").maxConversationTokens, 100000);
-  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "fallback").maxConversationTokens, 250000);
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000, declaredWindowTokens: null, watermarkOverride: false });
   // The LOOP LIMITS still resolve on the primary profile's keys.
   assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2", TOOL_LOOP_WALL_CLOCK_SEC: "120" }, "fallback"), [2, 120, true]);
 });
@@ -2552,12 +2612,44 @@ test("#922: loop telemetry carries the conversation budget and peak only when th
   });
   assert.equal((withContext!.budget as Record<string, unknown>).max_conversation_tokens, 250000);
   assert.equal((withContext!.usage as Record<string, unknown>).peak_conversation_tokens, 61234);
+
+  // #1635: the watermark provenance and the per-pass compaction records
+  // mirror from the raw meta into the artifact's budget/compaction blocks.
+  const compactionEvent = {
+    round: 3,
+    kind: "truncate",
+    before_approx_tokens: 99000,
+    after_approx_tokens: 90123,
+    results_shortened: 2,
+    bytes_freed: 35508,
+    cacheable_prefix_changed: true,
+  };
+  const withProvenance = buildToolLoopTelemetry({
+    ...base,
+    tool_loop_meta: {
+      ...(base.tool_loop_meta as Record<string, unknown>),
+      max_conversation_tokens: 98304,
+      declared_window_tokens: 131072,
+      watermark_override: true,
+      compaction_events: [compactionEvent],
+      compaction_overflow_protected: true,
+    },
+  });
+  assert.equal((withProvenance!.budget as Record<string, unknown>).declared_window_tokens, 131072);
+  assert.equal((withProvenance!.budget as Record<string, unknown>).watermark_override, true);
+  const compaction = withProvenance!.compaction as Record<string, unknown>;
+  assert.deepEqual(compaction.events, [compactionEvent]);
+  assert.equal(compaction.overflow_protected, true);
+  // Absent fields stay absent — a legacy meta never grows them from nothing.
+  const legacyCompaction = legacy!.compaction as Record<string, unknown>;
+  assert.equal("events" in legacyCompaction, false);
+  assert.equal("overflow_protected" in legacyCompaction, false);
 });
 
-test("#922: the conversation plus the per-turn completion always fits a declared window", () => {
-  for (const window of [24576, 32768, 65536, 131072, 262144, 1000000]) {
+test("#922: the conversation plus the completion, framing and schemas always fit a declared window", () => {
+  for (const window of [32768, 65536, 131072, 262144, 1000000]) {
     const limits = loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: String(window), TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary");
-    assert.ok(limits.maxConversationTokens + 16384 + 2000 <= window, `window ${window}`);
+    assert.ok(limits.maxConversationTokens + 16384 + 2000 + LOOP_TOOL_SCHEMA_TOKENS <= window, `window ${window}`);
     assert.ok(limits.corpusMaxBytes / 3 <= limits.maxConversationTokens, `window ${window}`);
   }
 });
@@ -2565,6 +2657,14 @@ test("#922: the conversation plus the per-turn completion always fits a declared
 test("#922: a declared window too small for the per-turn completion is refused", () => {
   assert.throws(
     () => loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "16384", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary"),
+    LoopContextError,
+  );
+  // #1635 review: the advertised schemas count in the fit — a 24,576 window
+  // with a 16,384-token completion leaves 3,892 after framing and schemas,
+  // under the 4,000-token minimum conversation, so it is refused at startup
+  // instead of silently over-subscribing the window.
+  assert.throws(
+    () => loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "24576", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary"),
     LoopContextError,
   );
 });
@@ -2853,7 +2953,8 @@ test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens
 test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so the records derive the aggregate", async () => {
   const { root, deps } = workspace();
   // A conversation budget small enough that compaction fires mid-loop:
-  // context 6400 → conversation budget 4000 approx tokens, result envelope cap
+  // context 8700 → conversation budget 4000 approx tokens (what's left after
+  // the completion, framing and tool-schema reserves), result envelope cap
   // 2000 bytes, corpus cap 7200 bytes. The corpus (~1850 tokens) plus four
   // read results (~512 tokens each) crosses the budget before round 5, so the
   // single digest model call happens exactly there — between rounds, carrying
@@ -2882,7 +2983,7 @@ test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so 
   ];
   let n = 0;
   const { result } = await runToolHarness(deps({
-    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "6400", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
+    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "8700", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
     transport: async () => scripted[n++],
   }));
   assert.equal(result.native_loop_verdict_produced, true);
@@ -2895,7 +2996,18 @@ test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so 
   // one of them — it has no round record.
   assert.equal(rounds.length, 6);
   assert.equal(rounds.map((r: Record<string, unknown>) => r.prompt_tokens).join(","), "850,860,870,880,890,920");
-  assert.deepEqual(telemetry.compaction, { summarize: 1, truncate: 0 });
+  // #1635: the compaction block now also carries one content-free record per
+  // pass — sizes/counts only, never tool content, and the explicit marker
+  // that the mutation changed the cacheable request prefix.
+  assert.equal(telemetry.compaction.summarize, 1);
+  assert.equal(telemetry.compaction.truncate, 0);
+  assert.equal(telemetry.compaction.events.length, 1);
+  const compactionEvent = telemetry.compaction.events[0] as Record<string, unknown>;
+  assert.equal(compactionEvent.kind, "summarize");
+  assert.equal(compactionEvent.results_shortened, 2);
+  assert.equal(compactionEvent.cacheable_prefix_changed, true);
+  assert.ok((compactionEvent.after_approx_tokens as number) < (compactionEvent.before_approx_tokens as number));
+  assert.equal("bytes_freed" in compactionEvent, false, "only the truncation pass measures freed bytes");
   // ... its spend is instead persisted as the unrecorded category it is.
   assert.deepEqual(telemetry.unrecorded_usage, {
     context_compaction: { requests: 1, prompt_tokens: 3210, completion_tokens: 55, cached_prompt_tokens: 0, cache_hit_ratio: 0 },

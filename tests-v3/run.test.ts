@@ -1978,8 +1978,9 @@ test("#965: auto native loop starts on primary with the primary context window",
     };
     const telemetry = harness.tool_loop_telemetry;
     assert.equal(telemetry?.route, "primary");
-    // The initial pass uses its declared 200k primary context window.
-    assert.equal(telemetry?.budget?.max_conversation_tokens, 50000);
+    // The initial pass uses its declared 200k primary context window (#1635:
+    // the watermark is 75% of it, reserves held — not the old 25% cap).
+    assert.equal(telemetry?.budget?.max_conversation_tokens, 150000);
     assert.match(result.outputs.reviewMarkdown, /Primary native review\./);
   } finally {
     await primaryServer.close();
