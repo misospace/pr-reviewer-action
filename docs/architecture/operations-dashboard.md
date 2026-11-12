@@ -9,15 +9,15 @@ truth and the single enforcement point.
 
 ## What gets served
 
-`src/admin/dashboard.ts` holds two compile-time constants: an HTML shell
-and a small vanilla-JS script. The pure function `serveDashboard(pathname)`
-answers exactly two GET routes: `GET /dashboard` serves the shell
-(`200`, `text/html; charset=utf-8`) and `GET /dashboard/app.js` serves
-the script (`200`, `text/javascript; charset=utf-8`). Any other method
-or path under `/dashboard`, including subpaths like `/dashboard/extra`,
-returns `null`, and the host renders the fixed JSON 404. The shell
-carries zero dynamic data: no request echo, no repository content, no
-configuration, no token.
+`src/admin/dashboard.ts` holds the shell's style block, an HTML shell,
+and a small vanilla-JS script as module constants. The pure function
+`serveDashboard(pathname)` answers exactly two GET routes. `GET /dashboard`
+serves the shell (`200`, `text/html; charset=utf-8`) and
+`GET /dashboard/app.js` serves the script (`200`,
+`text/javascript; charset=utf-8`). Any other method or path under
+`/dashboard`, including subpaths like `/dashboard/extra`, returns `null`,
+and the host renders the fixed JSON 404. The shell carries zero dynamic
+data: no request echo, no repository content, no configuration, no token.
 
 ## Optional mount, off by default
 
@@ -56,11 +56,22 @@ to the same listener the shell came from.
 Every dashboard response carries:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-rONVvIFCCcUKe79zLNUofwEI2VTQb/s419LLyrxm4tQ='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 ```
 
-`style-src 'unsafe-inline'` covers the small inline style block in the
-shell. `connect-src 'self'` is the structural guarantee: the UI can only
+`style-src` names the SHA-256 hash of the style block in the shell, and
+nothing else. The browser applies that one block and refuses every other
+inline style. The hash is computed from the same constant that the shell
+serves, so the served text and the hash never drift apart. The test and
+this page both carry the pinned value. If you change the style block, you
+must change both.
+
+A browser that predates CSP3 ignores the hash source. It then applies no
+style at all, because `default-src 'none'` covers `style-src`. The shell
+renders without its styles. No browser applies an inline style that the
+hash does not name.
+
+`connect-src 'self'` is the structural guarantee: the UI can only
 send requests to the controller API on the same origin. It can never
 reach a database, the Kubernetes API, or a forge API directly.
 `frame-ancestors 'none'` and `X-Frame-Options: DENY` keep the shell out
@@ -97,7 +108,9 @@ their exact content types and security headers, method and path
 discipline (including raw verbatim-path traversal requests that never
 serve shell content), the inert and byte-identical shell, the intact auth
 boundary on every data route, structural fence checks on the script
-source, and an EXECUTION fence test in the #252 pattern: the script runs
+source, the CSP style fence (the `style-src` hash equals the hash of the
+served style block, and no `'unsafe-inline'` source remains), and an
+EXECUTION fence test in the #252 pattern: the script runs
 in a `node:vm` sandbox against a minimal DOM stub, fed hostile API
 payloads (markup injection, fence escapes, attribute breakouts, control
 characters, a credential-shaped string), and every hostile string must
