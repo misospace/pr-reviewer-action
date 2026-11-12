@@ -658,6 +658,12 @@ function repositorySkillDiscardMarker(serialized: string): string {
   return `[repository skill${suffix} discarded during context compaction — its complete body was delivered when first read; re-read it with read_skill if needed]`;
 }
 
+/** Stable prefix of the discard marker above. A result whose content already
+ * starts with it is a truthful marker from an earlier pass: re-deriving it
+ * would silently drop the path hint, so compaction passes leave it alone
+ * (#1635 review). */
+const SKILL_DISCARD_MARKER_PREFIX = "[repository skill";
+
 /** Wrap model-visible tool output in an untrusted-data boundary. */
 function toolResultEnvelope(event: ToolResultEvent): string {
   const provenance = event.provenance || "tool_result";
@@ -944,36 +950,55 @@ export class Conversation {
   // ---- overflow handling -------------------------------------------------
 
   /** Shrink the oldest tool results so each fits within
-   * `maxBytesPerResult`. Newest results are left alone (they're what the
-   * model is acting on); we only trim what is least likely to be
-   * re-referenced. Returns the number of results that were actually
-   * shortened. The cut is UTF-8/newline-safe (see truncateText). */
-  truncateOldestToolResults(maxBytesPerResult: number): number {
-    let shrunk = 0;
-    for (const e of this.events) {
-      if (e.kind !== "tool_result") continue;
+   * `maxBytesPerResult`. #1635: the newest `keepNewest` results (default 0,
+   * the loop passes its configured count) are left verbatim — they are what
+   * the model is acting on, and mutating them is exactly the evidence
+   * destruction this method's name always promised against. Returns the
+   * number of results actually shortened and the UTF-8 bytes freed (content-
+   * free accounting for compaction telemetry). The cut is UTF-8/newline-safe
+   * (see truncateText). Any mutation of an older result changes the cacheable
+   * request prefix — the driver records that on its compaction event. */
+  truncateOldestToolResults(
+    maxBytesPerResult: number,
+    options: { keepNewest?: number } = {},
+  ): { shortened: number; bytesFreed: number } {
+    const keep = Math.max(0, Math.floor(options.keepNewest ?? 0));
+    const indices = this.events
+      .map((e, i) => (e.kind === "tool_result" ? i : -1))
+      .filter((i) => i >= 0);
+    const targets = keep > 0 ? indices.slice(0, Math.max(0, indices.length - keep)) : indices;
+    let shortened = 0;
+    let bytesFreed = 0;
+    for (const index of targets) {
+      const e = this.events[index] as ToolResultEvent;
       const body = e.content;
-      if (Buffer.byteLength(body, "utf8") <= maxBytesPerResult) continue;
+      const size = Buffer.byteLength(body, "utf8");
+      if (size <= maxBytesPerResult) continue;
       // #1043 (review): a read_skill result's shape is contract-bound — the
       // executor guarantees the complete body and reports content_complete.
       // Blunt truncation would leave a partial skill advertised as complete,
       // so it is replaced WHOLE with a trusted, explicit discarded marker
       // instead (freeing the bytes truthfully; the model may re-read).
       if (e.tool === "read_skill") {
+        // #1635 review: a marker from an earlier pass is already truthful —
+        // re-deriving it from unparseable content would drop the path hint.
+        if (body.startsWith(SKILL_DISCARD_MARKER_PREFIX)) continue;
         const marker = repositorySkillDiscardMarker(body);
         if (marker !== body) {
           e.content = marker;
-          shrunk++;
+          shortened++;
+          bytesFreed += Math.max(0, size - Buffer.byteLength(marker, "utf8"));
         }
         continue;
       }
       const { text: newBody } = truncateText(body, maxBytesPerResult);
       if (newBody !== body) {
         e.content = newBody;
-        shrunk++;
+        shortened++;
+        bytesFreed += size - Buffer.byteLength(newBody, "utf8");
       }
     }
-    return shrunk;
+    return { shortened, bytesFreed };
   }
 
   /** Fold the oldest tool results into one model-generated digest.
@@ -1003,10 +1028,12 @@ export class Conversation {
     // #1043 (review): read_skill results are never folded into the digest —
     // a model paraphrase of repository guidance could distort it. Old skill
     // results are instead replaced whole with an explicit discarded marker
-    // (trusted driver text), freeing their bytes truthfully.
+    // (trusted driver text), freeing their bytes truthfully. #1635 review:
+    // one already replaced by a truncation pass is left alone (the marker is
+    // already truthful, and re-deriving it loses the path hint).
     const oldSkills = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
-      return e.tool === "read_skill" && !e.summarized;
+      return e.tool === "read_skill" && !e.summarized && !e.content.startsWith(SKILL_DISCARD_MARKER_PREFIX);
     });
     const foldable = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;

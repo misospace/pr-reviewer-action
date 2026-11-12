@@ -292,6 +292,84 @@ test("summarize folds the oldest results and skips already-folded ones", async (
   assert.equal(await c.summarizeOldestToolResults(() => ""), 0); // empty digest → no fold
 });
 
+test("#1635: truncateOldestToolResults reports shortened count and exact bytes freed", () => {
+  const c = new Conversation();
+  c.addToolResult("a", "x".repeat(1000), { maxBytes: 2000 });
+  c.addToolResult("b", "y".repeat(50), { maxBytes: 2000 });
+  c.addToolResult("c", "z".repeat(1000), { maxBytes: 2000 });
+  const { shortened, bytesFreed } = c.truncateOldestToolResults(100);
+  assert.equal(shortened, 2);
+  // No newlines in the bodies → the cut lands exactly on the 100-byte cap.
+  assert.equal(bytesFreed, 2 * (1000 - 100));
+  const events = c.events as Array<{ kind: string; content: string }>;
+  assert.equal(Buffer.byteLength(events[0]!.content, "utf8"), 100);
+  assert.equal(events[1]!.content, "y".repeat(50));
+  assert.equal(Buffer.byteLength(events[2]!.content, "utf8"), 100);
+});
+
+test("#1635: keepNewest protects the newest oversized results from truncation", () => {
+  const c = new Conversation();
+  c.addToolResult("a", "x".repeat(1000), { maxBytes: 2000 });
+  c.addToolResult("b", "y".repeat(1000), { maxBytes: 2000 });
+  const first = c.truncateOldestToolResults(100, { keepNewest: 1 });
+  assert.equal(first.shortened, 1);
+  assert.equal(first.bytesFreed, 1000 - 100);
+  const events = c.events as Array<{ kind: string; content: string }>;
+  assert.equal(Buffer.byteLength(events[0]!.content, "utf8"), 100);
+  assert.equal(events[1]!.content, "y".repeat(1000));
+  // keepNewest >= result count: nothing is a target, nothing mutates.
+  const untouched = c.truncateOldestToolResults(0, { keepNewest: 2 });
+  assert.deepEqual(untouched, { shortened: 0, bytesFreed: 0 });
+  assert.equal(events[1]!.content, "y".repeat(1000));
+});
+
+test("#1635: truncation replaces an over-cap read_skill result whole, non-skill results truncate", () => {
+  const c = new Conversation();
+  c.addToolResult(
+    "s1",
+    { path: ".agents/skills/review-style/SKILL.md", content: `skill body ${"y".repeat(2000)}`, content_complete: true },
+    { tool: "read_skill", maxBytes: 60_000 },
+  );
+  c.addToolResult("r1", "q".repeat(2000), { maxBytes: 60_000 });
+  const { shortened, bytesFreed } = c.truncateOldestToolResults(100);
+  assert.equal(shortened, 2);
+  assert.ok(bytesFreed > 0);
+  const events = c.events as Array<{ kind: string; content: string }>;
+  assert.match(events[0]!.content, /\[repository skill \(\.agents\/skills\/review-style\/SKILL\.md\) discarded during context compaction/);
+  assert.doesNotMatch(events[0]!.content, /skill body/);
+  assert.equal(Buffer.byteLength(events[1]!.content, "utf8"), 100);
+});
+
+test("#1635: an over-cap read_skill result inside the protected newest set stays verbatim", () => {
+  const c = new Conversation();
+  c.addToolResult(
+    "s1",
+    { path: ".agents/skills/review-style/SKILL.md", content: `skill body ${"y".repeat(2000)}`, content_complete: true },
+    { tool: "read_skill", maxBytes: 60_000 },
+  );
+  c.addToolResult("r1", "fresh", { maxBytes: 60_000 });
+  const { shortened, bytesFreed } = c.truncateOldestToolResults(100, { keepNewest: 2 });
+  assert.deepEqual({ shortened, bytesFreed }, { shortened: 0, bytesFreed: 0 });
+  const events = c.events as Array<{ kind: string; content: string }>;
+  assert.match(events[0]!.content, /skill body/);
+  assert.match(events[0]!.content, /content_complete/);
+});
+
+test("#1635: a skill discard marker from an earlier pass is never rewritten (path hint survives)", () => {
+  const c = new Conversation();
+  c.addToolResult(
+    "s1",
+    { path: ".agents/skills/review-style/SKILL.md", content: `skill body ${"y".repeat(2000)}`, content_complete: true },
+    { tool: "read_skill", maxBytes: 60_000 },
+  );
+  c.truncateOldestToolResults(100);
+  const marker = (c.events[0] as { content: string }).content;
+  const again = c.truncateOldestToolResults(1);
+  assert.deepEqual(again, { shortened: 0, bytesFreed: 0 });
+  assert.equal((c.events[0] as { content: string }).content, marker);
+  assert.match(marker, /\.agents\/skills\/review-style\/SKILL\.md/);
+});
+
 test("the strict verdict schema literal stays contractually identical", () => {
   const schema = (OPENAI_VERDICT_JSON_SCHEMA as { json_schema: { schema: Record<string, unknown> } }).json_schema.schema;
   assert.deepEqual(schema.required, [

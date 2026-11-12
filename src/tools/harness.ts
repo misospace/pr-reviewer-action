@@ -318,6 +318,11 @@ export interface LoopContextLimits {
   corpusMaxBytes: number;
   /** Bytes kept from each tool result. */
   maxResponseBytes: number;
+  /** #1635: the tier's declared window, and whether the watermark came from
+   * the explicit tool-max-conversation-tokens override — attribution for the
+   * loop's compaction telemetry. */
+  declaredWindowTokens: number | null;
+  watermarkOverride: boolean;
 }
 
 export class LoopContextError extends Error {}
@@ -326,22 +331,59 @@ export class LoopContextError extends Error {}
 const LOOP_FRAMING_TOKENS = 2000;
 /** Smallest conversation a declared window must leave room for. */
 const LOOP_MIN_CONVERSATION_TOKENS = 4000;
+/** #1635: default conversation-compaction watermark, as a fraction of the
+ * DECLARED model window. v3.8 compacted at 25% — a driver policy cap that
+ * destroyed tool evidence at one quarter of the advertised window (a
+ * 131,072-token model started truncating at ~32k). 75% keeps the append-only
+ * prefix stable and the cache warm until the window is genuinely approached;
+ * the derived value is also capped by what the window still leaves after the
+ * per-turn completion and framing reserves are subtracted, and the hard
+ * ceiling below stays. */
+export const LOOP_CONVERSATION_WATERMARK_FRACTION = 0.75;
+/** Hard ceiling on the derived watermark, regardless of window size. */
+const LOOP_CONVERSATION_WATERMARK_CEILING = 250000;
 
 /** #922: native-loop context limits. Without a declared window they are the
  * v3.1 constants. With one, the window first reserves the per-turn completion
  * (tool-max-tokens-per-turn) plus framing, then the conversation budget is
- * ~25% of the window (24k..250k, never above what's left), the first-turn
- * corpus ~60% of that budget and each result ~8%, at ~3 bytes/token.
- * Explicit byte inputs win. A window too small for the per-turn completion
- * and a minimal conversation is refused, like a too-small corpus window. */
+ * ~75% of the window (#1635; 24k..250k, never above what's left), the
+ * first-turn corpus ~60% of that budget and each result ~8%, at ~3 bytes/
+ * token. Explicit byte inputs win. A window too small for the per-turn
+ * completion and a minimal conversation is refused, like a too-small corpus
+ * window. #1635: tool-max-conversation-tokens is the explicit watermark
+ * override — it must be positive and must fit the remaining window, or the
+ * run is refused rather than silently capped. */
 export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits {
   const window = declaredWindowTokens(env, tier);
   const explicitCorpus = env.TOOL_CORPUS_MAX_BYTES || "";
   const explicitResponse = env.TOOL_MAX_RESPONSE_BYTES || "";
   const corpus = (derived: number): number => (explicitCorpus !== "" ? pyInt(explicitCorpus, "TOOL_CORPUS_MAX_BYTES") : derived);
   const response = (derived: number): number => (explicitResponse !== "" ? pyInt(explicitResponse, "TOOL_MAX_RESPONSE_BYTES") : derived);
+  // #1635: the explicit watermark override, validated once for both branches.
+  const overrideRaw = (env.TOOL_MAX_CONVERSATION_TOKENS ?? "").trim();
+  let override: number | null = null;
+  if (overrideRaw !== "") {
+    try {
+      override = pyInt(overrideRaw, "TOOL_MAX_CONVERSATION_TOKENS");
+    } catch (cause) {
+      throw new LoopContextError(
+        `invalid TOOL_MAX_CONVERSATION_TOKENS: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    if (override <= 0) {
+      throw new LoopContextError(
+        `TOOL_MAX_CONVERSATION_TOKENS must be a positive token count, got ${override}`,
+      );
+    }
+  }
   if (window === null) {
-    return { maxConversationTokens: 24000, corpusMaxBytes: corpus(50000), maxResponseBytes: response(12000) };
+    return {
+      maxConversationTokens: override ?? 24000,
+      corpusMaxBytes: corpus(50000),
+      maxResponseBytes: response(12000),
+      declaredWindowTokens: null,
+      watermarkOverride: override !== null,
+    };
   }
   const perTurn = pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN");
   const available = window - perTurn - LOOP_FRAMING_TOKENS;
@@ -350,11 +392,22 @@ export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits
       `Model context ${window} cannot fit TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing and a ${LOOP_MIN_CONVERSATION_TOKENS}-token tool-loop conversation`,
     );
   }
-  const maxConversationTokens = Math.min(clampInt(window * 0.25, 24000, 250000), available);
+  if (override !== null && override > available) {
+    throw new LoopContextError(
+      `TOOL_MAX_CONVERSATION_TOKENS=${override} does not fit model context ${window}: TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing leave ${available}`,
+    );
+  }
+  const maxConversationTokens = override
+    ?? Math.min(
+      clampInt(window * LOOP_CONVERSATION_WATERMARK_FRACTION, 24000, LOOP_CONVERSATION_WATERMARK_CEILING),
+      available,
+    );
   return {
     maxConversationTokens,
     corpusMaxBytes: corpus(Math.min(clampInt(window * 0.15 * 3, 50000, 600000), Math.floor(maxConversationTokens * 1.8))),
     maxResponseBytes: response(Math.min(clampInt(window * 0.02 * 3, 12000, 64000), Math.max(2000, Math.floor(maxConversationTokens * 0.24)))),
+    declaredWindowTokens: window,
+    watermarkOverride: override !== null,
   };
 }
 
@@ -2306,6 +2359,10 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.verdict_reserve_sec !== undefined ? { verdict_reserve_sec: meta.verdict_reserve_sec } : {}),
         ...(meta.trace_repair_extra_requests !== undefined ? { trace_repair_extra_requests: meta.trace_repair_extra_requests } : {}),
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
+        // #1635: which window the watermark was derived from (null = the
+        // model window was undeclared), and whether the operator overrode it.
+        ...(meta.declared_window_tokens !== undefined ? { declared_window_tokens: meta.declared_window_tokens } : {}),
+        ...(meta.watermark_override !== undefined ? { watermark_override: meta.watermark_override } : {}),
         // #1381; #1396: budget provenance for the ONE enforced obligation
         // window — present for every loop run; the keys appear in the
         // artifact whenever the raw meta carries them. The counters mirror
@@ -2344,6 +2401,17 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       compaction: {
         summarize: meta.compaction_summarize ?? 0,
         truncate: meta.compaction_truncate ?? 0,
+        // #1635: one content-free record per compaction pass (approx sizes
+        // before/after, count of results shortened, bytes freed where the
+        // truncation pass measured them, and the always-true marker that the
+        // mutation changed the cacheable request prefix). Absent when the
+        // loop never compacted; `overflow_protected: true` only when even the
+        // hard-floored old results left the protected tail over the
+        // watermark (nothing was silently dropped in that case).
+        ...(Array.isArray(meta.compaction_events) && meta.compaction_events.length > 0
+          ? { events: meta.compaction_events }
+          : {}),
+        ...(meta.compaction_overflow_protected === true ? { overflow_protected: true } : {}),
       },
       // #1199: one bounded, content-free record per native-loop model turn
       // (latency + provider-reported usage + tool disposition counts). A turn
@@ -3009,12 +3077,24 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     typeof wallClockSecCap === "number" && Number.isFinite(wallClockSecCap)
       ? Math.max(0, Math.min(wallClock, wallClockSecCap))
       : wallClock;
+  // #1635: resolve the tier's context limits once, and make the chosen
+  // compaction watermark attributable from the run log onward (declared
+  // window, or the explicit tool-max-conversation-tokens override).
+  const contextLimits = loopContextLimits(env, input.tier);
+  log(
+    `  native_loop: conversation watermark ~${contextLimits.maxConversationTokens} approx tokens ` +
+      `(${contextLimits.watermarkOverride ? "explicit tool-max-conversation-tokens override"
+        : contextLimits.declaredWindowTokens !== null
+          ? `${Math.round(LOOP_CONVERSATION_WATERMARK_FRACTION * 100)}% of the declared ${contextLimits.declaredWindowTokens}-token window, output/framing reserves held`
+          : "undeclared window: v3.1 conservative default"}; ` +
+      "older tool results compact only past it, newest stay verbatim)",
+  );
   const budgets = {
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, effectiveWallClock, roundsExplicit),
     // The context window follows the TIER (the model the lane dials), not
     // the loop-limit profile — #1598 (review): the fallback tier enforces
     // its own FALLBACK_MODEL_CONTEXT_TOKENS window.
-    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
+    maxConversationTokens: contextLimits.maxConversationTokens,
   };
   const traceRepairExtraRequests =
     input.tier === "primary" && input.traceGapProbe !== undefined
@@ -3655,6 +3735,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     compaction_truncate: outcome.compactionTruncate,
     max_conversation_tokens: budgets.maxConversationTokens,
     peak_conversation_tokens: outcome.peakConversationTokens,
+    // #1635: attribution for the compaction policy and every pass it made —
+    // sizes/counts only, never tool content. A recorded pass always means the
+    // cacheable request prefix changed; declared_window_tokens null means the
+    // model window was undeclared (conservative fallback watermark).
+    declared_window_tokens: contextLimits.declaredWindowTokens,
+    ...(contextLimits.watermarkOverride ? { watermark_override: true } : {}),
+    ...(outcome.compactionEvents.length > 0 ? { compaction_events: outcome.compactionEvents } : {}),
+    ...(outcome.compactionOverflowProtected ? { compaction_overflow_protected: true } : {}),
     // #1381; #1396: budget provenance for the one enforced obligation
     // window; the telemetry budget block mirrors these conditionally. The
     // enforceability counters (blocker 5728634290): the rows the window
@@ -4345,9 +4433,25 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             // outstanding obligations the continuation already covered.
             // `required` describes the rows the run committed to and stays
             // unchanged; `attempts` rides the seeded run-wide counter.
-            const evidenceMeta = input.result.tool_loop_meta;
-            if (evidenceMeta !== null && evidenceMeta !== undefined) {
-              evidenceMeta.required_evidence_refusals =
+              const evidenceMeta = input.result.tool_loop_meta;
+              if (evidenceMeta !== null && evidenceMeta !== undefined) {
+                // #1635: the continuation shares the conversation and can
+                // compact it too — its passes are run-wide compaction facts,
+                // tagged so the artifact keeps them distinguishable from the
+                // investigation loop's own passes.
+                if (repair.compactionEvents.length > 0) {
+                  const prior = Array.isArray(evidenceMeta.compaction_events) ? evidenceMeta.compaction_events : [];
+                  evidenceMeta.compaction_events = [
+                    ...prior,
+                    ...repair.compactionEvents.map((event) => ({ ...event, phase: "repair" })),
+                  ];
+                  evidenceMeta.compaction_summarize = Number(evidenceMeta.compaction_summarize ?? 0)
+                    + repair.compactionEvents.filter((event) => event.kind === "summarize").length;
+                  evidenceMeta.compaction_truncate = Number(evidenceMeta.compaction_truncate ?? 0)
+                    + repair.compactionEvents.filter((event) => event.kind === "truncate").length;
+                }
+                if (repair.compactionOverflowProtected) evidenceMeta.compaction_overflow_protected = true;
+                evidenceMeta.required_evidence_refusals =
                 Number(evidenceMeta.required_evidence_refusals ?? 0) + repair.requiredEvidenceRefusals;
               // #1396 (review): the continuation's attempts counter is seeded
               // with the main loop's (the cap is run-wide), so its outcome
