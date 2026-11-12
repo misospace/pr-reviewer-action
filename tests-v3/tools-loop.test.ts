@@ -21,7 +21,7 @@ import {
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
 } from "../src/tools/loop.js";
-import { buildSummarizerConversation } from "../src/tools/harness.js";
+import { buildSummarizerConversation, loopContextLimits } from "../src/tools/harness.js";
 import { attachTransportTiming, readTransportTiming, type TransportTiming } from "../src/transport/timing.js";
 
 function scriptedLoop(responses: unknown[], execResults: Record<string, unknown>[], clock: number[] = []) {
@@ -612,12 +612,23 @@ test("compaction: blunt truncation backstops when no summarizer frees enough", a
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
     model: "m",
-    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 100, truncatedResultBytes: 100 },
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 100, truncatedResultBytes: 100, summarizeKeepNewest: 0 },
     timeFn,
   });
   assert.ok(outcome.compactionTruncate >= 1);
   const event = conversation.events.find((e) => e.kind === "tool_result") as { content: string };
   assert.ok(Buffer.byteLength(event.content, "utf8") <= 100);
+  // The 500-char user turn alone keeps the watermark unreachable: the driver
+  // proceeds on the protected conversation instead of dropping more.
+  assert.equal(outcome.compactionOverflowProtected, true);
+  const events = outcome.compactionEvents;
+  assert.ok(events.length >= 1);
+  const last = events.at(-1)!;
+  assert.equal(last.kind, "truncate");
+  assert.equal(last.cacheable_prefix_changed, true);
+  assert.ok(last.results_shortened >= 1);
+  assert.ok((last.bytes_freed ?? 0) > 0);
+  assert.ok(last.after_approx_tokens < last.before_approx_tokens);
 });
 
 test("#1043 review: compaction replaces a read_skill result with a truthful marker, never a partial body", async () => {
@@ -634,6 +645,8 @@ test("#1043 review: compaction replaces a read_skill result with a truthful mark
   conversation.addToolResult("s1", skillPayload, { tool: "read_skill", maxBytes: 60_000 });
   conversation.addAssistantToolCalls([{ id: "c2", name: "read_file", arguments: "{}" }]);
   conversation.addToolResult("c2", { blob: "z".repeat(30_000) }, { maxBytes: 40_000 });
+  conversation.addAssistantToolCalls([{ id: "c3", name: "read_file", arguments: "{}" }]);
+  conversation.addToolResult("c3", "small newest evidence");
   const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -647,7 +660,9 @@ test("#1043 review: compaction replaces a read_skill result with a truthful mark
   assert.match(skill.content, /\[repository skill \(\.agents\/skills\/dependency-upgrades\/SKILL\.md\) discarded during context compaction/);
   assert.doesNotMatch(skill.content, /skill body/, "no partial skill content survives");
   const normal = events.find((e) => e.call_id === "c2")!;
-  assert.ok(Buffer.byteLength(normal.content, "utf8") <= 100, "non-skill results still blunt-truncate");
+  assert.equal(normal.content, `{"blob": "${"z".repeat(30_000)}"}`, "protected newest results are never mutated");
+  assert.equal(events.find((e) => e.call_id === "c3")!.content, "small newest evidence");
+  assert.equal(outcome.compactionOverflowProtected, true);
 });
 
 test("#1043 review: digest folding leaves skill results out of the digest and marks them discarded", async () => {
@@ -706,6 +721,246 @@ test("compaction: the model-generated digest folds old results, newest stay verb
   const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
   assert.match(events[0]!.content, /Condensed digest/);
   assert.equal(events.at(-1)!.content, "result 2");
+});
+
+test("#1638 review: the folded digest survives both truncation passes intact", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("x".repeat(500));
+  // A ~900-byte digest: inside the 2000-byte digest cap but ABOVE the
+  // 256-byte second-pass floor. Before the write-time cap + fold skip, the
+  // floor pass silently cut the preserved evidence down to 256 bytes.
+  const digest = `digest of old results\n${"d".repeat(900)}`;
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const budgets = {
+    ...adaptiveLoopBudgets(1, 8, 120),
+    maxConversationTokens: 10,
+    truncatedResultBytes: 2000,
+    summarizeKeepNewest: 1,
+  };
+  for (let i = 0; i < 3; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "t", arguments: "{}" }]);
+    conversation.addToolResult(`c${i}`, `result ${i}`);
+  }
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets,
+    summarizeFn: () => digest,
+    timeFn,
+  });
+  assert.ok(outcome.compactionSummarize >= 1);
+  assert.ok(outcome.compactionTruncate >= 1);
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
+  assert.equal(events[0]!.content, "Condensed digest of earlier tool results:\n" + digest);
+  assert.equal(events.at(-1)!.content, "result 2");
+});
+
+test("#1635: no compaction below the watermark", async () => {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("u".repeat(1000));
+  for (let i = 1; i <= 4; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "read_file", arguments: "{}" }]);
+    conversation.addToolResult(`c${i}`, "r".repeat(5000), { maxBytes: 9000 });
+  }
+  const resultsBefore = (conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>).map((e) => e.content);
+  const renderedBefore = JSON.stringify(conversation.renderOpenAiMessages());
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 98304 },
+    timeFn,
+  });
+  assert.equal(outcome.finalText, "done");
+  assert.equal(outcome.compactionEvents.length, 0);
+  assert.equal(outcome.compactionTruncate, 0);
+  assert.equal(outcome.compactionSummarize, 0);
+  const resultsAfter = (conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>).map((e) => e.content);
+  assert.deepEqual(resultsAfter, resultsBefore);
+  // Append-only history: the loop may add turn notes/newer messages, never
+  // rewrite an earlier one.
+  const renderedAfter = conversation.renderOpenAiMessages() as unknown[];
+  assert.ok(JSON.stringify(renderedAfter).startsWith(renderedBefore));
+  assert.equal(
+    JSON.stringify(renderedAfter.slice(0, 8)),
+    JSON.stringify(JSON.parse(renderedBefore).slice(0, 8)),
+  );
+});
+
+test("#1635: past-watermark compaction keeps the newest N verbatim and stays wire-valid", async () => {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("u".repeat(1000));
+  const originals: string[] = [];
+  for (let i = 1; i <= 4; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "read_file", arguments: "{}" }]);
+    const body = `r${i}-`.padEnd(4000, "x");
+    originals.push(body);
+    conversation.addToolResult(`c${i}`, body, { maxBytes: 8000 });
+  }
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 3000, truncatedResultBytes: 100, summarizeKeepNewest: 2 },
+    timeFn,
+  });
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
+  assert.equal(events[2]!.content, originals[2]!);
+  assert.equal(events[3]!.content, originals[3]!);
+  assert.ok(Buffer.byteLength(events[0]!.content, "utf8") <= 100);
+  assert.ok(Buffer.byteLength(events[1]!.content, "utf8") <= 100);
+  const openai = conversation.renderOpenAiMessages() as Array<{ role: string; tool_call_id?: string; tool_calls?: Array<{ id: string }> }>;
+  const assistantIds = new Set(openai.flatMap((m) => (m.tool_calls ?? []).map((c) => c.id)));
+  const resultIds = new Set(openai.filter((m) => m.role === "tool").map((m) => m.tool_call_id).filter((id): id is string => id !== undefined));
+  assert.equal(resultIds.size, assistantIds.size);
+  for (const id of resultIds) assert.ok(assistantIds.has(id));
+  for (const id of assistantIds) assert.ok(resultIds.has(id));
+  const anthropic = conversation.renderAnthropicMessages() as Array<{ role: string; content: unknown }>;
+  const toolUseIds = new Set<string>();
+  const toolResultIds = new Set<string>();
+  for (const m of anthropic) {
+    if (typeof m.content === "string") continue;
+    for (const block of m.content as Array<Record<string, unknown>>) {
+      if (block.type === "tool_use") toolUseIds.add(String(block.id));
+      if (block.type === "tool_result") toolResultIds.add(String(block.tool_use_id));
+    }
+  }
+  assert.deepEqual([...toolResultIds].sort(), [...toolUseIds].sort());
+  assert.equal(outcome.compactionEvents.length, 1);
+  assert.equal(outcome.compactionEvents[0]!.kind, "truncate");
+  assert.equal(outcome.compactionEvents[0]!.cacheable_prefix_changed, true);
+  assert.equal(outcome.compactionEvents[0]!.results_shortened, 2);
+});
+
+test("#1635: protected overflow is recorded, not silently truncated", async () => {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("u".repeat(1000));
+  const originals: string[] = [];
+  for (let i = 1; i <= 2; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "read_file", arguments: "{}" }]);
+    const body = `r${i}-`.padEnd(6000, "x");
+    originals.push(body);
+    conversation.addToolResult(`c${i}`, body, { maxBytes: 8000 });
+  }
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 10, summarizeKeepNewest: 2 },
+    timeFn,
+  });
+  assert.ok(outcome.compactionTruncate >= 1);
+  assert.equal(outcome.compactionOverflowProtected, true);
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>;
+  assert.deepEqual(events.map((e) => e.content), originals);
+  assert.equal(outcome.compactionEvents.at(-1)!.kind, "truncate");
+  assert.equal(outcome.compactionEvents.at(-1)!.results_shortened, 0);
+});
+
+/**
+ * #1635: the deterministic fixture reproducing PR #12090's compaction
+ * signature (home-ops run 43140955629, pinned v3.8.0). The driver's
+ * `approxTokens()` counts system + 16 bytes/event + content bytes, ÷4 rounded
+ * up, so the byte arithmetic below lands on the incident's pair exactly:
+ *
+ * - before: 1 + (16+56,036) + 9×(16+11) + 9×16 + 95,860 = 152,300 bytes
+ *   → ceil(152,300/4) = 38,075 approximate tokens (round 18);
+ * - the v3.8 rail compacted at 25% of the declared window (32,768 for
+ *   131,072), so this exact conversation hit the old blunt pass
+ *   (every result over the cap, none protected); at a 2,000-byte cap with no
+ *   newlines the clip is exact: 1 + 56,052 + 243 + 9×2,016 = 74,440 bytes
+ *   → ceil(74,440/4) = 18,610 approximate tokens (round 19) — the ~51%
+ *   evidence destruction.
+ *
+ * The fixture pins those driver-side numbers only; it claims nothing about
+ * provider-reported tokens or backend latency.
+ */
+function pr12090Fixture(): Conversation {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("c".repeat(56036));
+  for (let i = 1; i <= 9; i++) {
+    conversation.addAssistantToolCalls([{ id: `c${i}`, name: "read_file", arguments: "{}" }]);
+    conversation.addToolResult(`c${i}`, "e".repeat(i === 9 ? 10652 : 10651), { maxBytes: 12000 });
+  }
+  return conversation;
+}
+
+test("#1635: the #12090-shaped 38,075→18,610 fixture compacts under the old rail only", () => {
+  // The old 25% watermark: 32,768 approximate tokens for a 131,072 window.
+  const oldWatermark = Math.floor(131072 * 0.25);
+  const control = pr12090Fixture();
+  assert.equal(control.approxTokens(), 38075, "round-18 size of the incident");
+  assert.ok(38075 > oldWatermark, "the fixture straddles the historical trigger");
+  // v3.8 behavior: cap every oversized result, newest included.
+  const crushed = control.truncateOldestToolResults(2000, { keepNewest: 0 });
+  assert.equal(crushed.shortened, 9);
+  assert.equal(control.approxTokens(), 18610, "the round-19 collapse, byte-for-byte");
+});
+
+test("#1635: the #12090 fixture never compacts under the 75% policy and stays byte-stable across rounds", async () => {
+  const limits = loopContextLimits(
+    { PRIMARY_MODEL_CONTEXT_TOKENS: "131072", TOOL_MAX_TOKENS_PER_TURN: "16384" },
+    "primary",
+  );
+  assert.equal(limits.maxConversationTokens, 98304);
+  const conversation = pr12090Fixture();
+  assert.equal(conversation.approxTokens(), 38075);
+  const responses = [
+    openAiCall("c10", "read_file", '{"path":"x.ts"}'),
+    openAiCall("c11", "read_file", '{"path":"y.ts"}'),
+    openAiText("done"),
+  ];
+  const messageBytes: string[] = [];
+  let responseIndex = 0;
+  const outcome = await driveToolLoop(
+    conversation,
+    async (payload) => {
+      messageBytes.push(JSON.stringify((payload as Record<string, unknown>).messages));
+      return responses[responseIndex++];
+    },
+    async (_name, args) => ({ tool: "read_file", status: "ok", result: { content: String(args.path ?? "") } }),
+    {
+      apiFormat: "openai",
+      model: "m",
+      budgets: {
+        ...adaptiveLoopBudgets(3, 8, 120),
+        maxConversationTokens: limits.maxConversationTokens,
+        truncatedResultBytes: 2000,
+        summarizeKeepNewest: 2,
+      },
+      timeFn: () => 0,
+    },
+  );
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  // Multi-round pre-watermark byte/prefix stability: every serialized request
+  // after the first replays its predecessor's message bytes unchanged, with
+  // only new events appended.
+  assert.equal(messageBytes.length, 3);
+  for (let index = 1; index < messageBytes.length; index++) {
+    assert.ok(
+      messageBytes[index]!.length > messageBytes[index - 1]!.length,
+      `round ${index + 1} appended no events — the prefix check below would be vacuous`,
+    );
+    assert.ok(
+      messageBytes[index]!.startsWith(messageBytes[index - 1]!.slice(0, -1)),
+      `round ${index + 1} rewrote the earlier request bytes below the watermark`,
+    );
+  }
+  assert.equal(outcome.compactionEvents.length, 0, "no destructive compaction before the watermark");
+  assert.equal(outcome.compactionTruncate, 0);
+  assert.equal(outcome.compactionSummarize, 0);
+  assert.equal(outcome.compactionOverflowProtected, false);
+  assert.ok(outcome.peakConversationTokens <= limits.maxConversationTokens);
+  const results = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>;
+  assert.deepEqual(
+    results.slice(0, 9).map((e) => Buffer.byteLength(e.content, "utf8")),
+    [...Array.from({ length: 8 }, () => 10651), 10652],
+    "the nine incident-shaped results survive untouched",
+  );
 });
 
 test("anthropic tool_use inputs serialise once at the boundary; text blocks ride along", async () => {
@@ -2914,4 +3169,32 @@ test("#1396: a window opened by scarce ROUNDS renders the rounds wording, not th
   assert.ok(newestNote.includes("Only 4 loop turn(s) remain"));
   assert.ok(newestNote.includes("upstream publisher/source provenance"));
   assert.ok(!newestNote.includes("tool request(s) remain"));
+});
+
+test("#1635: sustained overflow is stable across rounds — no repeated mutation, no cache churn", async () => {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("x".repeat(500));
+  conversation.addAssistantToolCalls([{ id: "c1", name: "t", arguments: "{}" }]);
+  conversation.addToolResult("c1", { blob: "e".repeat(6000) }, { maxBytes: 8000 });
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [openAiCall("c2", "t", "{}"), openAiText("done")],
+    [{ tool: "t", status: "ok", result: "ok" }],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(2, 8, 120), maxConversationTokens: 10, truncatedResultBytes: 100, summarizeKeepNewest: 0 },
+    timeFn,
+  });
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ content: string }>;
+  const firstAfterRoundOne = events[0]!.content;
+  assert.ok(Buffer.byteLength(firstAfterRoundOne, "utf8") <= 100);
+  assert.equal(outcome.compactionEvents.length, 2, "one truncation event per round that ran a pass");
+  assert.equal(outcome.compactionEvents[0]!.results_shortened, 1);
+  assert.equal(outcome.compactionEvents[0]!.cacheable_prefix_changed, true);
+  assert.equal(outcome.compactionEvents[1]!.results_shortened, 0);
+  assert.equal(outcome.compactionEvents[1]!.cacheable_prefix_changed, false, "a pass that mutates nothing invalidates no cache");
+  assert.equal(events[0]!.content, firstAfterRoundOne, "the floored result is byte-identical on the next round");
+  assert.equal(outcome.compactionOverflowProtected, true);
 });

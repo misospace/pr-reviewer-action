@@ -34,6 +34,8 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    compactionEvents: [],
+    compactionOverflowProtected: false,
     requiredEvidenceRequestsHint: 0,
     requiredEvidenceRefusals: 0,
     requiredEvidenceRequired: 0,

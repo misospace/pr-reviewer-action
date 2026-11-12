@@ -399,3 +399,19 @@ test("validateContract rejects a secret input marked repo-configurable", () => {
   target["repo-configurable"] = true;
   assert.throws(() => validateContract(mutated), /must never be repo-configurable/);
 });
+
+// #1635 (PR #1638 review): the precheck fingerprint hashes the ADMISSION env
+// — the request's inputs — and the repository config is resolved AFTER
+// admission (the trusted base ref is unknown until then), so a repository-set
+// value could never invalidate a cached review. The compaction watermark is
+// therefore operator-only: it reaches the fingerprint through the workflow
+// input, and the repository config file cannot set it at all.
+test("#1635: the compaction watermark is operator-only — repository config cannot set it", () => {
+  const byId = new Map(contract.inputs.map((input) => [input.id, input]));
+  assert.equal(byId.get("tool-max-conversation-tokens")?.["repo-configurable"], undefined);
+  const operatorRaw = baseOperatorRaw();
+  const resolution = applyRepositoryConfig(contract, operatorRaw, fileOf("tool-max-conversation-tokens: 4096\n"));
+  assert.equal(resolution.appliedKeys.length, 0);
+  assert.match(resolution.warnings[0]!, /tool-max-conversation-tokens.*not repo-configurable/);
+  assert.equal(resolution.raw["tool-max-conversation-tokens"], operatorRaw["tool-max-conversation-tokens"]);
+});

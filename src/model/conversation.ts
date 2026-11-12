@@ -389,6 +389,13 @@ export const WEB_SEARCH_SCHEMA: ToolSchema = {
  * truncated response doesn't grow on every loop round. */
 export const TOOL_RESULT_MAX_BYTES = 8000;
 
+/** #1635: how many of the newest tool results a compaction pass leaves verbatim
+ * when the caller does not state a count. Both overflow paths share this ONE
+ * default (#1638 review) so a future caller that omits the option cannot
+ * silently opt out of the "never touch the newest results" invariant. The loop
+ * driver builds `summarizeKeepNewest` from this same constant. */
+export const DEFAULT_PROTECTED_NEWEST_RESULTS = 2;
+
 /** Approximate bytes-per-token used by the budget helpers. Deliberately
  * conservative (under-fills) — local models reject over-long prompts harder
  * than they reject slightly under-filled ones. The loop driver owns the
@@ -634,6 +641,16 @@ interface ToolResultEvent {
    * keep contract-bound result shapes (read_skill) from being silently
    * cut into fragments. */
   tool?: string;
+  /** #1635: the driver itself replaced this result's content with the
+   * trusted discard marker (a skill body whose bytes were reclaimed). The
+   * flag is DRIVER-OWNED state, not a property of the content: it is the
+   * only thing that marks a result as already discarded, so untrusted
+   * content can never claim the status by mimicking the marker's text
+   * (#1635 review, adversarial boundary). A content-prefix sniff would let
+   * any result labeled `read_skill` opt out of compaction by starting with
+   * the marker's prefix, keeping oversized bytes in the conversation and the
+   * request past the watermark. */
+  skillDiscarded?: boolean;
   evidence?: EvidenceProvenance;
 }
 
@@ -656,6 +673,22 @@ function repositorySkillDiscardMarker(serialized: string): string {
   }
   const suffix = path !== "" ? ` (${path})` : "";
   return `[repository skill${suffix} discarded during context compaction — its complete body was delivered when first read; re-read it with read_skill if needed]`;
+}
+
+/** Replace a `read_skill` result's content with the driver-authored discard
+ * marker above and mark the result as discarded.
+ *
+ * Returns true when the content ACTUALLY changed — the only case where bytes
+ * were freed. A result whose content already IS the marker (an injected copy
+ * of the driver's text, never written by the driver) changes nothing: it is
+ * still flagged as discarded, so no later pass re-derives it and no pass
+ * claims to have compacted a result it did not touch (#1635 review). */
+function discardSkillResult(event: ToolResultEvent): boolean {
+  const marker = repositorySkillDiscardMarker(event.content);
+  event.skillDiscarded = true;
+  if (marker === event.content) return false;
+  event.content = marker;
+  return true;
 }
 
 /** Wrap model-visible tool output in an untrusted-data boundary. */
@@ -944,56 +977,96 @@ export class Conversation {
   // ---- overflow handling -------------------------------------------------
 
   /** Shrink the oldest tool results so each fits within
-   * `maxBytesPerResult`. Newest results are left alone (they're what the
-   * model is acting on); we only trim what is least likely to be
-   * re-referenced. Returns the number of results that were actually
-   * shortened. The cut is UTF-8/newline-safe (see truncateText). */
-  truncateOldestToolResults(maxBytesPerResult: number): number {
-    let shrunk = 0;
-    for (const e of this.events) {
-      if (e.kind !== "tool_result") continue;
+   * `maxBytesPerResult`. #1635: the newest `keepNewest` results (default
+   * `DEFAULT_PROTECTED_NEWEST_RESULTS`, the loop passes its configured count)
+   * are left verbatim — they are what the model is acting on, and mutating
+   * them is exactly the evidence destruction this method's name always
+   * promised against. Returns the number of results actually shortened and the
+   * UTF-8 bytes freed (content-free accounting for compaction telemetry). The
+   * cut is UTF-8/newline-safe (see truncateText). Results a fold pass already
+   * compacted (`summarized`) are never rewritten — their content is the
+   * digest the fold preserved, and the fold caps it at write time
+   * (`digestMaxBytes`). Any mutation of an older result changes the cacheable
+   * request prefix — the driver records that on its compaction event. */
+  truncateOldestToolResults(
+    maxBytesPerResult: number,
+    options: { keepNewest?: number } = {},
+  ): { shortened: number; bytesFreed: number } {
+    const keep = Math.max(0, Math.floor(options.keepNewest ?? DEFAULT_PROTECTED_NEWEST_RESULTS));
+    const indices = this.events
+      .map((e, i) => (e.kind === "tool_result" ? i : -1))
+      .filter((i) => i >= 0);
+    const targets = keep > 0 ? indices.slice(0, Math.max(0, indices.length - keep)) : indices;
+    let shortened = 0;
+    let bytesFreed = 0;
+    for (const index of targets) {
+      const e = this.events[index] as ToolResultEvent;
+      // #1638 review: a driver-folded result IS the preserved evidence. The
+      // loop caps the digest at write time (`digestMaxBytes`), so it never
+      // exceeds the first-pass cap; cutting it to the hard floor instead
+      // would silently discard exactly what the fold pass saved. When even
+      // the preserved digests leave the conversation over the watermark the
+      // driver records the overflow and the request proceeds.
+      if (e.summarized === true) continue;
       const body = e.content;
-      if (Buffer.byteLength(body, "utf8") <= maxBytesPerResult) continue;
+      const size = Buffer.byteLength(body, "utf8");
+      if (size <= maxBytesPerResult) continue;
       // #1043 (review): a read_skill result's shape is contract-bound — the
       // executor guarantees the complete body and reports content_complete.
       // Blunt truncation would leave a partial skill advertised as complete,
       // so it is replaced WHOLE with a trusted, explicit discarded marker
       // instead (freeing the bytes truthfully; the model may re-read).
       if (e.tool === "read_skill") {
-        const marker = repositorySkillDiscardMarker(body);
-        if (marker !== body) {
-          e.content = marker;
-          shrunk++;
+        // #1635 review: a marker the DRIVER wrote in an earlier pass is
+        // already truthful — re-deriving it from unparseable content would
+        // drop the path hint. The driver's own flag decides that, never the
+        // content's text: untrusted content that mimics the marker must
+        // still be compacted like any other oversized result.
+        if (e.skillDiscarded === true) continue;
+        if (discardSkillResult(e)) {
+          shortened++;
+          bytesFreed += Math.max(0, size - Buffer.byteLength(e.content, "utf8"));
         }
         continue;
       }
       const { text: newBody } = truncateText(body, maxBytesPerResult);
       if (newBody !== body) {
         e.content = newBody;
-        shrunk++;
+        shortened++;
+        bytesFreed += size - Buffer.byteLength(newBody, "utf8");
       }
     }
-    return shrunk;
+    return { shortened, bytesFreed };
   }
 
   /** Fold the oldest tool results into one model-generated digest.
    * When the conversation outgrows the loop's context budget, blunt
    * truncation drops the tail of each old result — losing whatever evidence
    * sat past the byte cap. This instead compresses the older results (all but
-   * the newest `keepNewest`) into a single dense digest via `summarizeFn`.
+   * the newest `keepNewest`, default `DEFAULT_PROTECTED_NEWEST_RESULTS`) into
+   * a single dense digest via `summarizeFn`.
    * Wire validity is preserved: every tool_result keeps its `call_id` so the
    * assistant_tool_calls ↔ tool_result pairing stays intact. The oldest
    * folded result's content becomes the digest; the rest become a short
    * placeholder pointing at it. The newest `keepNewest` results are left
    * verbatim. Already folded results are skipped, so this is safe to call
-   * every round. Returns the number of results folded (0 when there aren't
-   * enough old results, all are already folded, or the summary came back
-   * empty — the caller should fall back to truncation in that case). */
+   * every round. Returns the number of results whose content this pass
+   * actually changed (0 when there aren't enough old results, all are already
+   * folded, or the summary came back empty — the caller should fall back to
+   * truncation in that case). A skill result whose content already carried
+   * the discard marker frees no bytes and is therefore not counted.
+   *
+   * #1638 review: `digestMaxBytes` (the loop passes its truncation cap)
+   * bounds the digest at write time. Without it a verbose summarizer could
+   * fold ten results into one oversized block that blunt truncation would
+   * then cut mid-digest — silently discarding the evidence the fold was
+   * meant to preserve. The cap keeps the digest inside the same per-result
+   * budget every other old result obeys. */
   async summarizeOldestToolResults(
     summarizeFn: (block: string) => string | Promise<string>,
-    options: { keepNewest?: number } = {},
+    options: { keepNewest?: number; digestMaxBytes?: number } = {},
   ): Promise<number> {
-    const keepNewest = options.keepNewest ?? 2;
+    const keepNewest = options.keepNewest ?? DEFAULT_PROTECTED_NEWEST_RESULTS;
     const indices = this.events
       .map((e, i) => (e.kind === "tool_result" ? i : -1))
       .filter((i) => i >= 0);
@@ -1003,10 +1076,14 @@ export class Conversation {
     // #1043 (review): read_skill results are never folded into the digest —
     // a model paraphrase of repository guidance could distort it. Old skill
     // results are instead replaced whole with an explicit discarded marker
-    // (trusted driver text), freeing their bytes truthfully.
+    // (trusted driver text), freeing their bytes truthfully. #1635 review:
+    // one the driver already discarded is left alone (the marker is already
+    // truthful, and re-deriving it loses the path hint) — the driver's own
+    // flag decides that, so untrusted content mimicking the marker is
+    // compacted like any other skill result.
     const oldSkills = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
-      return e.tool === "read_skill" && !e.summarized;
+      return e.tool === "read_skill" && !e.summarized && e.skillDiscarded !== true;
     });
     const foldable = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
@@ -1016,12 +1093,15 @@ export class Conversation {
     if (foldable.length === 0) {
       // Only skill results to compact: no digest call is needed (and no
       // digest can hold them truthfully) — mark and report the freed slots.
+      // Only the results whose bytes were actually freed are counted, so a
+      // result that already carried the marker is never reported as folded.
+      let discarded = 0;
       for (const i of oldSkills) {
         const e = this.events[i] as ToolResultEvent;
-        e.content = repositorySkillDiscardMarker(e.content);
+        if (discardSkillResult(e)) discarded++;
         e.summarized = true;
       }
-      return oldSkills.length;
+      return discarded;
     }
     const block = foldable
       .map((i, n) => {
@@ -1029,23 +1109,34 @@ export class Conversation {
         return `[earlier result ${n + 1}${e.is_error ? " (error)" : ""}]\n${e.content}`;
       })
       .join("\n\n");
+    const header = "Condensed digest of earlier tool results:\n";
+    const bodyCap = options.digestMaxBytes === undefined
+      ? Infinity
+      : Math.floor(options.digestMaxBytes) - Buffer.byteLength(header, "utf8");
+    // A cap smaller than the header would store a header-only digest that
+    // preserves nothing — fold nothing (without paying for the summarizer
+    // call) and let truncation backstop.
+    if (bodyCap <= 0) return 0;
     const digest = ((await summarizeFn(block)) || "").trim();
     if (!digest) return 0;
+    const body = truncateText(digest, bodyCap).text;
+    if (!body) return 0;
     const head = foldable[0]!;
     const headEvent = this.events[head] as ToolResultEvent;
-    headEvent.content = "Condensed digest of earlier tool results:\n" + digest;
+    headEvent.content = header + body;
     headEvent.summarized = true;
     for (const i of foldable.slice(1)) {
       const e = this.events[i] as ToolResultEvent;
       e.content = "[folded into the condensed digest above]";
       e.summarized = true;
     }
+    let discardedSkills = 0;
     for (const i of oldSkills) {
       const e = this.events[i] as ToolResultEvent;
-      e.content = repositorySkillDiscardMarker(e.content);
+      if (discardSkillResult(e)) discardedSkills++;
       e.summarized = true;
     }
-    return foldable.length + oldSkills.length;
+    return foldable.length + discardedSkills;
   }
 
   // ---- wire emission -----------------------------------------------------

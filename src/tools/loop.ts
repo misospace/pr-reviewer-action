@@ -26,6 +26,7 @@
  */
 import {
   Conversation,
+  DEFAULT_PROTECTED_NEWEST_RESULTS,
   pyDumps,
   pyDumpsCompactSortedAscii,
   pyDumpsSorted,
@@ -760,12 +761,22 @@ export interface LoopBudgets {
   /** Whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC). */
   wallClockSec: number;
   /** When the conversation outgrows this, the oldest tool results are
-   * compacted before the next request (newest stay intact). */
+   * compacted before the next request. #1635: the watermark is derived from
+   * the tier's declared context window (~75% of it, reserves held) by the
+   * harness; the constant here is only the undeclared-window fallback. */
   maxConversationTokens: number;
   truncatedResultBytes: number;
-  /** Results kept verbatim when summarizing the rest. */
+  /** Results kept verbatim when compacting — the digest's keep-newest count
+   * and, since #1635, the same count protected from blunt truncation. */
   summarizeKeepNewest: number;
 }
+
+/** #1635: second-pass floor. When the first truncation pass (at
+ * `truncatedResultBytes`) leaves the conversation over the watermark, old
+ * results are compacted once more to this byte cap before the driver gives
+ * up and records the protected overflow. Deterministic and idempotent:
+ * results already at or below the cap are never touched again. */
+export const TRUNCATED_RESULT_MIN_BYTES = 256;
 
 /**
  * #895: ceiling for the size-scaled round cap below — high enough that a
@@ -809,7 +820,9 @@ export function adaptiveLoopBudgets(
     wallClockSec,
     maxConversationTokens: 24000,
     truncatedResultBytes: 2000,
-    summarizeKeepNewest: 2,
+    // #1638 review: ONE constant with the Conversation compaction default, so
+    // the driver's protected count and the class's cannot drift apart.
+    summarizeKeepNewest: DEFAULT_PROTECTED_NEWEST_RESULTS,
   };
 }
 
@@ -1139,6 +1152,31 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
+  /** #1635: one bounded, content-free record per compaction pass — sizes and
+   * counts only, never tool content. `cacheable_prefix_changed` is true only
+   * when the pass actually mutated history: rewriting an older block
+   * invalidates every provider prompt-cache built on the prior prefix, while
+   * a sustained-overflow pass that shortened nothing changed nothing.
+   * A truncation round reports ONE event folding both passes (first cap and
+   * 256-byte floor); `round` is the count of model turns already completed,
+   * so the pre-first-request pass reports 0. Bounded by the loop's own round
+   * ceiling; older records are kept. */
+  compactionEvents: Array<{
+    round: number;
+    kind: "summarize" | "truncate";
+    before_approx_tokens: number;
+    after_approx_tokens: number;
+    results_shortened: number;
+    /** UTF-8 bytes freed; only the truncation pass measures them exactly. */
+    bytes_freed?: number;
+    cacheable_prefix_changed: boolean;
+  }>;
+  /** #1635: true when the conversation stayed over the watermark even after
+   * every OLD result had been compacted to the hard floor — the protected
+   * newest results plus system/framing alone do not fit. Nothing is silently
+   * dropped in that case: the request proceeds and the provider error, if
+   * any, stays attributable, unlike destroyed evidence. */
+  compactionOverflowProtected: boolean;
   /** #1381; #1396: requests reserved at the end of the budget for the ONE
    * enforced obligation window (review-owned obligation rows plus, for a
    * dependency-update PR, the dependency-evidence shape rows). Inside this
@@ -1439,6 +1477,8 @@ export async function driveToolLoop(
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    compactionEvents: [],
+    compactionOverflowProtected: false,
     requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls, Math.floor(options.reserveForRequiredEvidence ?? 0))),
     requiredEvidenceRefusals: 0,
     requiredEvidenceRequired: 0,
@@ -1663,27 +1703,87 @@ export async function driveToolLoop(
     }
 
     // Keep the next request within the advisory context budget by compacting
-    // the oldest tool results (newest stay intact). When a summarizer is
-    // wired, fold them into a model-generated digest that preserves salient
-    // facts; otherwise (or if it frees nothing / fails) fall back to blunt
-    // truncation, which is the guaranteed backstop.
+    // the oldest tool results. #1635: the newest `summarizeKeepNewest` results
+    // are protected on BOTH paths — blunt truncation used to rewrite every
+    // oversized result including the ones the model is acting on, destroying
+    // fresh evidence far below the model's real window. When a summarizer is
+    // wired, fold the older results into a model-generated digest that
+    // preserves salient facts; otherwise (or if it frees nothing / fails)
+    // fall back to blunt truncation, which is the guaranteed backstop. If the
+    // first truncation pass leaves the conversation over the watermark, a
+    // second deterministic pass compacts the same OLD-only results to a hard
+    // floor; results already at or below the cap are untouched, so repeated
+    // rounds are stable. #1638 review: the digest is capped at write time at
+    // `truncatedResultBytes`, and both truncation passes leave folded results
+    // alone — after a fold they ARE the preserved evidence, and cutting them
+    // (especially to the floor) would silently discard what the digest saved.
+    // If even that leaves the conversation over the
+    // watermark, the protected tail itself does not fit: nothing more is
+    // dropped, the overflow is recorded, and the request proceeds — an
+    // attributable provider error beats silently discarded evidence.
     outcome.peakConversationTokens = Math.max(outcome.peakConversationTokens, conversation.approxTokens());
     if (conversation.approxTokens() > budgets.maxConversationTokens) {
+      const recordCompaction = (
+        kind: "summarize" | "truncate",
+        beforeTokens: number,
+        resultsShortened: number,
+        bytesFreed: number | undefined,
+      ): void => {
+        outcome.compactionEvents.push({
+          round: outcome.rounds,
+          kind,
+          before_approx_tokens: beforeTokens,
+          after_approx_tokens: conversation.approxTokens(),
+          results_shortened: resultsShortened,
+          ...(bytesFreed !== undefined ? { bytes_freed: bytesFreed } : {}),
+          // A pass that shortened nothing mutated no history and therefore
+          // invalidated no provider prompt cache (#1635 review).
+          cacheable_prefix_changed: resultsShortened > 0,
+        });
+      };
       let summarized = 0;
+      const beforeSummarize = conversation.approxTokens();
       if (summarizeFn !== null) {
         try {
           summarized = await conversation.summarizeOldestToolResults(
             async (block) => await summarizeFn!(block),
-            { keepNewest: budgets.summarizeKeepNewest },
+            {
+              keepNewest: budgets.summarizeKeepNewest,
+              // #1638 review: cap the digest at the truncation cap at write
+              // time, so neither truncation pass has a reason to rewrite it —
+              // blunt cuts would silently discard the preserved evidence.
+              digestMaxBytes: budgets.truncatedResultBytes,
+            },
           );
         } catch {
           summarized = 0; // summarization is best-effort
         }
       }
-      if (summarized > 0) outcome.compactionSummarize++;
+      if (summarized > 0) {
+        outcome.compactionSummarize++;
+        recordCompaction("summarize", beforeSummarize, summarized, undefined);
+      }
       if (summarized === 0 || conversation.approxTokens() > budgets.maxConversationTokens) {
         outcome.compactionTruncate++;
-        conversation.truncateOldestToolResults(budgets.truncatedResultBytes);
+        const beforeTruncate = conversation.approxTokens();
+        const first = conversation.truncateOldestToolResults(budgets.truncatedResultBytes, {
+          keepNewest: budgets.summarizeKeepNewest,
+        });
+        let second = { shortened: 0, bytesFreed: 0 };
+        if (conversation.approxTokens() > budgets.maxConversationTokens) {
+          second = conversation.truncateOldestToolResults(TRUNCATED_RESULT_MIN_BYTES, {
+            keepNewest: budgets.summarizeKeepNewest,
+          });
+        }
+        recordCompaction(
+          "truncate",
+          beforeTruncate,
+          first.shortened + second.shortened,
+          first.bytesFreed + second.bytesFreed,
+        );
+      }
+      if (conversation.approxTokens() > budgets.maxConversationTokens) {
+        outcome.compactionOverflowProtected = true;
       }
     }
 

@@ -279,6 +279,19 @@ test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from
       assert.notEqual(hashOf("120"), hashOf("900"));
     });
   }
+  // #1635: the compaction watermark changes what the native loop sends on an
+  // unchanged diff, so switching it must invalidate a cached review.
+  await t.test("changing tool-max-conversation-tokens changes the config hash", () => {
+    const linesFor = (value: string) => collectConfigLines(stageFor(runnerEnv({ "tool-max-conversation-tokens": value })));
+    assert.ok(linesFor("60000").includes("TOOL_MAX_CONVERSATION_TOKENS=60000"));
+    assert.notEqual(computeConfigHash(linesFor("40000")), computeConfigHash(linesFor("60000")));
+    // PR #1638 review: the contract default is "" and stageEnvFromConfig
+    // stages every input even when empty, so the unset/default shape must
+    // emit no line — otherwise every release churns every installation's
+    // config hash and re-runs every cached review.
+    assert.ok(!linesFor("").some((line) => line.startsWith("TOOL_MAX_CONVERSATION_TOKENS")));
+    assert.equal(computeConfigHash(linesFor("")), computeConfigHash(collectConfigLines(stageFor(runnerEnv({})))));
+  });
 });
 
 test("#928: env-only stage knobs survive buildStageEnv, so blind replays really skip human reviews", async () => {
