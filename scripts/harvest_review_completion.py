@@ -143,8 +143,9 @@ def fetch_repo_pulls(
     """The in-scope pull requests of one repo, newest-updated first.
 
     Returns ``(pulls, truncated)`` where ``truncated`` is True when the
-    page bound cut the PR-list walk short (the walk may then have missed
-    PRs; the report says so rather than presenting a cut list as
+    page bound cut the PR-list walk short or the ``--max-prs`` cap
+    stopped it with entries left unexamined (the walk may then have
+    missed PRs; the report says so rather than presenting a cut list as
     complete). The walk stops at ``--max-prs`` collected or at the first
     PR whose ``updated_at`` is older than ``since`` — the list is sorted
     descending, so everything after is older too.
@@ -156,7 +157,7 @@ def fetch_repo_pulls(
         max_pages=max_pages,
     )
     collected: list[dict[str, Any]] = []
-    for pull in pulls:
+    for index, pull in enumerate(pulls):
         if not isinstance(pull, dict):
             continue
         updated_at = pull.get("updated_at") or ""
@@ -172,6 +173,10 @@ def fetch_repo_pulls(
             {"number": number, "head_sha": head if isinstance(head, str) else "", "updated_at": updated_at}
         )
         if len(collected) >= max_prs:
+            # The cap stopped the walk with entries still unexamined:
+            # the population may be incomplete, so the report must not
+            # present this capped list as the full denominator.
+            truncated = truncated or index < len(pulls) - 1
             break
     return collected, truncated
 

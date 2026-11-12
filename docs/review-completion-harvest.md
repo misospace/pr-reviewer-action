@@ -45,7 +45,7 @@ Flags:
 | `--since` / `--until` | `YYYY-MM-DD`; filters on PR `updated_at`. The PR-list walk stops at the first PR older than `--since` (newest-updated first). |
 | `--bot-login` | Reviewer bot login (repeatable). Defines whose records are attempts and enables native-event attribution. Without it, attempt authorship cannot be attributed, so the collector fails closed with zero rows — bot identity is an input, never hardcoded or inferred from a marker. |
 | `--action-version` | Action version token in scope, e.g. `3.5.0` or `v3.5.0` (repeatable). Keeps only the rows published by that version; a row whose version is `unknown` is excluded, because it cannot be proven to be in scope. The token is at most 32 characters (`ACTION_VERSION_LIMIT`, the bound the published version is truncated at), so a longer token is rejected before the run starts. |
-| `--max-prs` | Per-repo PR cap (default 100). |
+| `--max-prs` | Per-repo PR cap (default 100). Stopping the walk at the cap with entries left unexamined sets `collection.truncated`, so a capped population is never presented as a complete denominator. |
 | `--max-pages` | Page-walk bound per list read (default 20); truncation is reported in `collection.truncated`, never silently trusted. |
 | `--per-page` | Page size (default 100). |
 | `--out PATH` | JSON report path (default: stdout only). |

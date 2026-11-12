@@ -1318,7 +1318,9 @@ def test_live_collect_stops_at_max_prs(monkeypatch):
                      "head": {"sha": HEAD}}
                     for n in range(1, 6)
                 ]
-                return pulls, True
+                # Pagination itself completed: the only truncation is the
+                # --max-prs cap, which must still surface in the report.
+                return pulls, False
             return [], False
 
     args = hrc.build_parser().parse_args(
@@ -1326,6 +1328,42 @@ def test_live_collect_stops_at_max_prs(monkeypatch):
     )
     _rows, _names, truncated, _att, _adj = hrc.collect(args, FakeForge())
     assert truncated is True
+
+
+def test_fetch_repo_pulls_cap_with_entries_left_is_truncated():
+    class FakeForge:
+        token = ""
+
+        def get_pages_report(self, path, params=None, per_page=100, max_pages=None):
+            return [
+                {"number": n, "updated_at": f"2026-11-0{n}T00:00:00Z", "head": {"sha": HEAD}}
+                for n in range(1, 4)
+            ], False
+
+    pulls, truncated = hrc.fetch_repo_pulls(
+        FakeForge(), REPO, since_floor=None, until_ceiling=None,
+        max_prs=2, per_page=100, max_pages=20,
+    )
+    assert [p["number"] for p in pulls] == [1, 2]
+    assert truncated is True
+
+
+def test_fetch_repo_pulls_cap_exactly_at_end_is_not_truncated():
+    class FakeForge:
+        token = ""
+
+        def get_pages_report(self, path, params=None, per_page=100, max_pages=None):
+            return [
+                {"number": n, "updated_at": f"2026-11-0{n}T00:00:00Z", "head": {"sha": HEAD}}
+                for n in range(1, 3)
+            ], False
+
+    pulls, truncated = hrc.fetch_repo_pulls(
+        FakeForge(), REPO, since_floor=None, until_ceiling=None,
+        max_prs=2, per_page=100, max_pages=20,
+    )
+    assert [p["number"] for p in pulls] == [1, 2]
+    assert truncated is False
 
 
 def test_live_collect_since_stops_the_walk(monkeypatch):
