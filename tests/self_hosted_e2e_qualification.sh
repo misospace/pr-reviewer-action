@@ -2234,12 +2234,12 @@ model-profiles:
 # review without the private repository's content ever reaching the
 # workspace, the run artifacts, the durable payload, or the published
 # comment — and with the fork flag resolved from LIVE forge state, not
-# from the webhook payload. The reviewed content's linked-issue
-# reference is fetched like any other (the pipeline fetches every
-# explicit owner/repo#N ref it sees); what carries the boundary is the
-# daemon's SCOPED runner credential, which the platform refuses on the
-# private repository, plus the refusal being observable in the forge
-# access log and recorded as a failed fetch by the stage itself.
+# from the webhook payload. The boundary is the deterministic pre-fetch
+# gate (#1617): cross-repository linked-issue refs on a fork PR are
+# refused BEFORE adapter.getIssue in both fetch stages, so the forge
+# must see zero requests for the private repository — no runtime
+# permission check is trusted to carry it. The daemon's scoped runner
+# credential (below) is defense in depth, not the boundary itself.
 scenario_fork_private_data_boundary() {
   local label="fork private-data boundary"
   local private_marker
@@ -2363,14 +2363,10 @@ CFGEOF
   # /data/gitea/log/access.log, Apache-style, one line per request ending
   # its quoted request with the response status). Snapshot the byte
   # offset before the webhook lands: every line after it is inside the
-  # review's call window. The production linked-issue stage fetches every
-  # explicit owner/repo#N reference the PR body names using the
-  # controller's credential, so a REQUEST line for the private repository
-  # is expected here — what the scoped runner credential guarantees (and
-  # this gate requires) is that it is REFUSED: Forgejo v9 answers 404 to
-  # a non-collaborator token on a foreign private repo (verified against
-  # the pinned image). Any private-vault line WITHOUT a refusal status is
-  # a successful private read — the boundary crossed.
+  # review's call window, and the fork trust boundary (#1617) must keep
+  # the private repository's name out of it entirely — the product
+  # refuses cross-repository linked-issue refs on a fork PR before any
+  # fetch, whatever credential the daemon runs on.
   local access_offset
   access_offset="$(docker exec -u git "$FORGEJO_NAME" \
     sh -c 'wc -c < /data/gitea/log/access.log 2>/dev/null' || true)"
@@ -2396,27 +2392,24 @@ CFGEOF
   fi
   # The trace window is everything the instance logged after the
   # snapshot. It must be non-empty (an empty window would make the
-  # absence below vacuous), and it must not name the private repository.
+  # absence below vacuous).
   local access_window="$TMP/forgejo-access-fork-window.log"
   docker exec -u git "$FORGEJO_NAME" \
     sh -c "tail -c +$((access_offset + 1)) /data/gitea/log/access.log" > "$access_window"
   if [[ ! -s "$access_window" ]]; then
     scenario_fail "$label" "the instance logged no request during the fork review: the call trace gate observed nothing (fail closed)"
   fi
-  # A request line naming the private repository is not by itself a
-  # violation: the linked-issue stage fetches the reference the untrusted
-  # body names, and under the scoped runner credential the platform
-  # refuses it. What must never appear is a private-vault line that was
-  # NOT refused (403/404), because that is a successful private read.
-  # Fail closed if the attempt itself is missing: an absent line would
-  # mean the scenario no longer exercises the path the boundary is about.
-  local private_lines="$TMP/forgejo-access-fork-vault.log"
-  grep -F "private-vault" "$access_window" > "$private_lines" || true
-  if [[ ! -s "$private_lines" ]]; then
-    scenario_fail "$label" "the pipeline never requested the private repository during the fork review: the call trace gate observed no attempt to refuse (fail closed)"
-  fi
-  if grep -Eqv '" [45][0-9]{2} ' "$private_lines"; then
-    scenario_fail "$label" "the pipeline read the private repository during the fork review (a request line without a refused status is in the forge access log window)"
+  # ZERO private-vault request lines may appear. The fork trust boundary
+  # is a deterministic, pre-fetch gate in the product (#1617:
+  # cross-repository linked-issue refs on a fork PR are refused before
+  # adapter.getIssue, in both the review-corpus stage and the
+  # selection-fingerprint stage), so it must hold no matter how privileged
+  # the deployed credential is — a runtime-refused attempt (4xx) is
+  # already a gate failure here. The scoped runner credential stays as
+  # defense in depth: whatever residual read power the daemon holds
+  # covers exactly the reviewed repository.
+  if grep -qF "private-vault" "$access_window"; then
+    scenario_fail "$label" "the pipeline requested the private repository during the fork review (request line found in the forge access log window): the deterministic fork gate failed to refuse before the fetch"
   fi
   local run_dir
   run_dir="$(run_dir_for_head "$head_sha" "$TMP/adversarial/runs")" ||
@@ -2425,14 +2418,14 @@ CFGEOF
   # state (the worker's own PR read), not from the webhook payload.
   jq -e '.is_fork_pr == "true"' "$run_dir/review-request.json" >/dev/null ||
     scenario_fail "$label" "the review did not run with is_fork_pr resolved to true"
-  # The pipeline itself records the refusal: the linked-issue stage
-  # renders its failed-fetch notice for the reference (#1617 review:
-  # together with the refused access-log line above, this distinguishes
-  # "refused at the platform" from "fetched then discarded" — the stage
-  # says the fetch failed, and the forge says WHY).
-  grep -qF "(Could not fetch issue reviewer/private-vault#${private_issue_number}" \
+  # The pipeline positively records its own refusal: the linked-issue
+  # stage renders a fork-boundary skip notice for the reference (#1617),
+  # so linked-issues.md proves the ref was seen and refused BEFORE the
+  # fetch — matching the zero-request access log above, and ruling out
+  # "silently dropped" as well as "fetched then discarded".
+  grep -qF "(Skipped issue reviewer/private-vault#${private_issue_number} from reviewer/private-vault: cross-repository linked-issue reference on a fork pull request)" \
     "$run_dir/linked-issues.md" ||
-    scenario_fail "$label" "the review did not record the private-vault linked issue as a failed fetch"
+    scenario_fail "$label" "the review did not record the private-vault linked issue as a fork-boundary refusal"
   # The private repository's content must never surface: not in the run
   # artifacts, not in an acquisition workspace (the exact-head worktree
   # lives under the workspace cache, outside the run directory), not in
@@ -2455,7 +2448,7 @@ CFGEOF
   assert_admin_reports_publication "$ADVERSARIAL_ADMIN_PORT" "$ADVERSARIAL_ADMIN_TOKEN" "$TMP/admin-fork.cfg" "$RUN_ID"
   assert_no_credential_leakage "$label" "$TMP/adversarial-controller.log" \
     "$run_dir/request.json" "$run_dir/result.json" "$TMP/fork-comment.json"
-  echo "PASS: fork PR served through the operator pipeline with the private-data boundary intact (fork head outsider/sample, PR ${number}, is_fork_pr=true; the forge access log shows the private-vault request refused with 4xx, linked-issues.md records it as a failed fetch, and the private marker is absent from run artifacts, workspaces, durable payload, and comment)"
+  echo "PASS: fork PR served through the operator pipeline with the private-data boundary intact (fork head outsider/sample, PR ${number}, is_fork_pr=true; the forge access log shows ZERO private-vault requests during the review, linked-issues.md records the fork-boundary refusal, and the private marker is absent from run artifacts, workspaces, durable payload, and comment)"
 }
 
 # Planted secret-shaped values in a pull request diff: the pattern layer
@@ -2735,15 +2728,13 @@ scenario_missed_webhook_reconciliation_reviews_once
 #
 # The adversarial daemon runs on its OWN scoped forge credential, not
 # the instance-admin token the harness provisions with (#1617 review):
-# the linked-issue stage fetches every explicit owner/repo#N reference an
-# untrusted PR body names using the controller's credential, so an
-# admin-token controller could read any private repository on the
-# instance a fork body pointed at — the boundary the fork scenario
-# qualifies would not exist to observe. A non-admin bot account that is
-# a collaborator on the reviewed repository only is the honest operator
-# posture: private reads are then REFUSED BY THE PLATFORM (Forgejo v9
-# answers 404 to a scoped token on a foreign private repo, verified
-# against the pinned image) and the scenario observes that refusal.
+# this is defense in depth behind the deterministic product gate. The
+# linked-issue stages now refuse fork-authored cross-repository refs
+# before any fetch, so no credential is trusted with the boundary — but
+# the qualification posture still mirrors a real deployment's least
+# privilege: a non-admin bot account that is a collaborator on the
+# reviewed repository only, so whatever residual read power the daemon
+# holds covers exactly the repository under review.
 RUNNER_USER="review-bot"
 RUNNER_PASSWORD="runner-pass-$(random_hex 8)"
 container_forgejo admin user create \

@@ -109,6 +109,33 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
   return items;
 }
 
+/** #1617: the fork trust boundary for linked-issue FETCHES, applied BEFORE
+ * any privileged fetch. On a fork PR the body and title are fully
+ * attacker-authored, while the fetch runs with the operator's forge
+ * credential: an explicit `owner/repo#N` reference could point that
+ * privileged read at any repository the operator can see and the
+ * contributor cannot (a private planning repository whose contents the
+ * review would then carry). Cross-repository refs are therefore refused by
+ * rule, deterministically and model-free, no matter what credential the
+ * deployment runs on — the boundary must not depend on the credential
+ * happening to be scoped.
+ *
+ * Same-repository refs are untouched: a bare `#N` (resolved against the
+ * reviewed repository) or an explicit spelling of it — compared
+ * case-insensitively, the same identity the dedupe above uses — keeps
+ * working, because that repository is the one under review. Fail-closed by
+ * construction: callers pass fork state from `deriveIsFork` / the precheck
+ * fork flag, whose own convention is that uncertainty counts as fork.
+ *
+ * BOTH linked-issue fetch sites (`buildLinkedIssueContext` and
+ * `buildSelectionSignature`) MUST apply this identical filter, exactly as
+ * they share `acceptedLinkedIssues` (#872): a ref fetched in one stage and
+ * not the other re-opens the fingerprint-divergence class that fix closed. */
+export function linkedIssueFetchAllowed(ref: LinkedIssueRef, defaultRepo: string, isForkPr: boolean): boolean {
+  if (!isForkPr) return true;
+  return ref.repo.toLowerCase() === defaultRepo.toLowerCase();
+}
+
 /** True when a fetched GitHub/Forgejo "issue" payload is actually a pull
  * request (#872): both platforms' issue-fetch APIs return PRs through the
  * same endpoint, distinguished only by a `pull_request` object on the raw

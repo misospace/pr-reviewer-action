@@ -1,7 +1,7 @@
 import type { PlatformAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
 import { canonicalLinkedIssue, type LinkedIssue } from "../context/types.js";
-import { acceptedLinkedIssues, extractLinkedIssueRefs, type LinkedIssueFetchResult, type LinkedIssueRef } from "./linked-issues.js";
+import { acceptedLinkedIssues, extractLinkedIssueRefs, linkedIssueFetchAllowed, type LinkedIssueFetchResult, type LinkedIssueRef } from "./linked-issues.js";
 import { collectFromPr, extractIssueIdentifiers, parsePrefixes } from "./linear.js";
 import { pythonJsonStringify } from "./metadata.js";
 import { createHash } from "node:crypto";
@@ -85,7 +85,16 @@ export async function buildSelectionSignature(
       : "unusable response";
     return { ok: false, error };
   };
-  for await (const outcome of acceptedLinkedIssues(extractLinkedIssueRefs(body, repo, title), fetchIssue)) {
+  // #1617: the identical fork trust boundary buildLinkedIssueContext applies
+  // — cross-repository refs on a fork PR are refused BEFORE any fetch, here
+  // too, so the privileged label read is never pointed at a repository the
+  // contributor cannot see, and the two stages keep agreeing on the exact
+  // accepted-issue set (#872). A refused ref perturbs the hashed signature
+  // exactly as much as one that was never written: not at all.
+  const isFork = deriveIsFork(record);
+  const refItems = extractLinkedIssueRefs(body, repo, title)
+    .filter((item) => linkedIssueFetchAllowed(item, repo, isFork));
+  for await (const outcome of acceptedLinkedIssues(refItems, fetchIssue)) {
     if (outcome.kind === "fetch_failed") {
       // Unknown labels cannot be omitted into a skip: fail the build so the
       // caller forces a fresh review.
