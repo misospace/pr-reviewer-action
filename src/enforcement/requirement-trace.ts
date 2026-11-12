@@ -2589,16 +2589,14 @@ function subjectTouched(text: string, changed: string): boolean {
   return strongTerms.some((term) => termWordMatch(term, changed));
 }
 
-// ── #1600: standards scope needs a connection to an affected boundary ────
+// ── #1600: standards scope needs a connection to its affected boundary ───
 
 /** #1600: extensions whose files are prose documents. A prose-document path
  * is decided by extension alone — never by directory — so nothing about the
  * file's location can exempt or condemn it: `AGENTS.md` at the repo root and
- * `docs/architecture/code-map.md` are the same class, and both stay subject
- * to the boundary-connection rule below (a trusted policy edit is kept in
- * scope by the standards-source signal, not by its extension). The class
- * only decides whether a lexical match needs boundary corroboration; it is
- * never a blanket exemption of Markdown or docs directories. */
+ * `docs/architecture/code-map.md` are the same class. The class only decides
+ * which content-level boundary signals apply; it is never a blanket
+ * exemption of Markdown or docs directories. */
 const PROSE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
   ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc", ".txt",
 ]);
@@ -2606,8 +2604,7 @@ const PROSE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
 /** True when the path names a prose document: its final path segment carries
  * one of the prose extensions above (case-insensitive; production callers
  * pass lowercased paths, tests and future callers may not). A file with no
- * extension (`README`, `Makefile`) is NOT a prose document — the
- * implementation-surface class below keeps such changes boundary-connected. */
+ * extension (`README`, `Makefile`) is NOT a prose document. */
 function isProseDocumentPath(path: string): boolean {
   const lower = path.toLowerCase();
   const dot = lower.lastIndexOf(".");
@@ -2616,22 +2613,94 @@ function isProseDocumentPath(path: string): boolean {
   return PROSE_DOCUMENT_EXTENSIONS.has(lower.slice(dot));
 }
 
-/** #1600: an implementation-surface path — a changed file that can itself
- * carry or gate behavior: source, scripts, executable examples, workflows,
- * infrastructure/config, lockfiles. Defined independently of any requirement
- * text (never a model-authored or repo-specific rule) as the complement of
- * two narrow scaffolding classes: prose documents ({@link
- * isProseDocumentPath}) and test files (`isTestPath`, the same classifier
- * the trace validator applies to cited test locations). A diff whose ONLY
- * changed paths are prose documents and test files cannot reach a security
- * boundary by itself, so for a standards-sourced requirement it no longer
- * turns quoted boundary vocabulary into a trace demand; every other path
- * class (YAML workflows and configs included — never blanket-exempted)
- * keeps the lexical signal at full strength. Repos that treat a runbook,
- * policy doc, or test file as boundary-owning declare it via the base-ref
- * owner map, which is checked first. */
-function implementationSurfaceTouched(paths: readonly string[]): boolean {
-  return paths.some((path) => !isProseDocumentPath(path) && !isTestPath(path));
+/** #1600: path words that mark a prose document as security/operational
+ * policy rather than a descriptive document. This is a semantic class, not
+ * an extension gate: a security runbook stays material wherever it lives,
+ * while a code-map or architecture note does not become boundary evidence
+ * merely by quoting a standard. The class alone never scopes a requirement
+ * in — {@link securityDocumentTouched} always requires this requirement's
+ * own subject or an instruction about it. */
+const SECURITY_DOCUMENT_WORDS: ReadonlySet<string> = new Set([
+  "security", "threat", "threats", "policy", "policies", "runbook", "runbooks",
+  "operations", "operational", "ops", "incident", "incidents", "deploy",
+  "deployment", "deployments", "auth", "authentication", "authorization",
+  "credential", "credentials", "secret", "secrets", "trust", "sandbox",
+  "isolation", "hardening", "compliance", "guardrail", "guardrails",
+  "privilege", "privileges", "privileged", "boundary", "boundaries",
+]);
+
+function pathWords(path: string): string[] {
+  return path.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word !== "");
+}
+
+function isSecurityDocumentPath(path: string): boolean {
+  return pathWords(path).some((word) => SECURITY_DOCUMENT_WORDS.has(word));
+}
+
+/** #1600: a non-prose executable example/script directory. The changed
+ * example itself must repeat this requirement's subject before it counts; a
+ * source tree that merely shares a path word with a standard does not. */
+const EXECUTABLE_EXAMPLE_SEGMENTS: ReadonlySet<string> = new Set([
+  "example", "examples", "sample", "samples", "demo", "demos",
+  "snippet", "snippets", "cookbook",
+]);
+
+function isExecutableExamplePath(path: string): boolean {
+  if (isProseDocumentPath(path) || isTestPath(path)) return false;
+  const directories = path.toLowerCase().split("/").slice(0, -1);
+  return directories.some((segment) => EXECUTABLE_EXAMPLE_SEGMENTS.has(segment));
+}
+
+/** #1600: the base-ref-trusted boundary/trace configuration itself. An edit
+ * to the owner map is a security-policy change even when the diff repeats
+ * none of a standard's prose, so it scopes the standards rows in (#1600
+ * positive control). */
+const TRUSTED_POLICY_PATHS: ReadonlySet<string> = new Set([
+  ".github/pr-reviewer-owners.yml",
+  ".pr-reviewer-owners.yml",
+]);
+
+function trustedPolicyTouched(paths: readonly string[]): boolean {
+  return paths.some((path) => TRUSTED_POLICY_PATHS.has(path.toLowerCase()));
+}
+
+/** Normalize a requirement's path token for exact changed-path comparison:
+ * repository-relative, case-insensitive, no trailing punctuation or
+ * `:line`/`#anchor` suffix. Returns null for prose tokens and escaping
+ * paths, so a requirement cannot name a location outside the checkout. */
+function requirementPathToken(token: string): string | null {
+  let value = token.trim().replace(/^\.\//, "").replace(/[),.;]+$/, "");
+  const hash = value.indexOf("#");
+  if (hash > 0) value = value.slice(0, hash);
+  const colon = value.lastIndexOf(":");
+  if (colon > 0 && /^\d+$/.test(value.slice(colon + 1))) value = value.slice(0, colon);
+  if (value === "" || value.startsWith("/") || /\s/.test(value) || value.split("/").includes("..")) return null;
+  return value.toLowerCase();
+}
+
+/** #1600: true when a changed path is named by this requirement. Both
+ * backticked and bare path-shaped tokens are considered; a token containing
+ * `/` must equal the full changed path (a directory such as
+ * `src/transport/` is not itself a changed file), while a bare filename may
+ * match the changed path's final segment. This is the per-requirement
+ * replacement for the former global "any implementation file" signal: a
+ * runbook the standard names is boundary evidence even though it is
+ * Markdown, and an unrelated source file is not. */
+function requirementNamedPathTouched(text: string, paths: readonly string[]): boolean {
+  if (paths.length === 0) return false;
+  const lowerPaths = paths.map((path) => path.toLowerCase());
+  const { quoted, bare } = verbatimTokens(text);
+  for (const token of [...quoted, ...bare]) {
+    if (!looksLikePath(token)) continue;
+    const candidate = requirementPathToken(token);
+    if (candidate === null) continue;
+    if (candidate.includes("/")) {
+      if (lowerPaths.includes(candidate)) return true;
+    } else if (lowerPaths.some((path) => path.split("/").pop() === candidate)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** #1600: true when one of the requirement's own standards provenance refs —
@@ -2651,6 +2720,61 @@ function standardsSourceTouched(standardsRefs: readonly string[], paths: readonl
     }
   }
   return false;
+}
+
+/** A bounded scan of the changed lines available to scope. `changed` already
+ * carries the full raw diff's added/removed lines (#935), without file
+ * attribution; the path class below bounds which files those lines can
+ * substantiate. An over-budget diff returns null instead of a partial scan, so
+ * a truncated view can never narrow a requirement out. */
+const MAX_SCOPE_CHANGED_LINES = 20_000;
+
+function scopeChangedLines(changed: string): string[] | null {
+  const lines = changed.split("\n");
+  return lines.length > MAX_SCOPE_CHANGED_LINES ? null : lines;
+}
+
+/** #1600: normative/operational instruction shape. A descriptive quotation
+ * ("fence-safe renderers …", "the trust boundary must not be weakened" in a
+ * code map) is not enough unless the document itself is a security/runbook
+ * document; the path class and subject match below keep this bounded. */
+const SECURITY_INSTRUCTION_RE = /\b(?:must|shall|never|required|forbidden|prohibited|deny|denied|reject|refuse|ensure|avoid|allowed|disallowed|do not|don't|fail[- ]closed)\b/;
+
+function isSecurityInstructionLine(line: string): boolean {
+  return SECURITY_INSTRUCTION_RE.test(line.toLowerCase());
+}
+
+/** #1600: a changed prose document is boundary evidence for this requirement
+ * when the requirement names it or its path names the requirement's subject.
+ * A security/operational document additionally stays in scope when the
+ * changed text carries an instruction about this requirement. The
+ * `docs/fork-review.md` positive control is covered by the first two; a
+ * generic `SECURITY.md`/runbook edit stays in scope through the instruction
+ * signal. A code-map/docs-only diff that merely quotes the vocabulary matches
+ * none of them. */
+function securityDocumentTouched(
+  text: string,
+  proseDocuments: readonly string[],
+  securityDocuments: readonly string[],
+  changedLines: readonly string[],
+): boolean {
+  if (proseDocuments.some((path) => requirementNamedPathTouched(text, [path]) || subjectTouched(text, path))) return true;
+  if (securityDocuments.length === 0) return false;
+  return changedLines.some((line) => {
+    const lower = line.toLowerCase();
+    return isSecurityInstructionLine(lower) && subjectTouched(text, lower);
+  });
+}
+
+/** #1600: an executable example/script is a reachable demonstration of the
+ * boundary when its path names the requirement or its changed text repeats
+ * the requirement's subject. The example class is narrow (examples/samples/
+ * demos), so an unrelated source file that happens to quote the standard is
+ * not corroboration. */
+function executableExampleTouched(text: string, examples: readonly string[], changedLines: readonly string[]): boolean {
+  if (examples.length === 0) return false;
+  if (examples.some((path) => requirementNamedPathTouched(text, [path]) || subjectTouched(text, path))) return true;
+  return changedLines.some((line) => subjectTouched(text, line.toLowerCase()));
 }
 
 export interface RequirementTraceScope {
@@ -2677,18 +2801,23 @@ export interface RequirementTraceScope {
  * #1600 narrows the remaining dimension for pure standards-sourced
  * requirements (every provenance source is `standards`): there, a lexical
  * subject match alone is no longer trace-required — the change must also
- * reach an affected boundary, evidenced by any of (a) a declared owner path
- * among the changed files (base-ref-trusted `.github/pr-reviewer-owners.yml`
- * globs), (b) the requirement's own standards source document among the
- * changed files (a trusted security-policy edit — extension irrelevant), or
- * (c) an implementation-surface file among the changed files (anything that
- * is not a prose document and not a test file — executable examples, scripts,
- * workflows and configs stay in scope; a docs-prose/test-only diff quoting
- * `untrusted content`, `credentials`, or `fence` cannot activate a security
- * standard it cannot reach). Prose-document and test classes are decided by
- * extension and path shape only — Markdown/YAML/docs directories are never
- * blanket-exempted: a `.md` security-policy or boundary-owner change stays
- * in scope through (a)/(b). Linked-issue requirements and entries without
+ * reach an affected boundary **of that requirement**, evidenced by any of:
+ * (a) a declared owner path among the changed files (base-ref-trusted
+ * `.github/pr-reviewer-owners.yml` globs), (b) the requirement's own
+ * standards source document among the changed files (a trusted
+ * security-policy edit — extension irrelevant), (c) a changed path the
+ * requirement names (a path token in its text, exact file match), (d) the
+ * base-ref-trusted owner/trace policy file itself, (e) a changed
+ * security/operational document that names the requirement, whose path names
+ * its subject, or whose changed text carries an instruction about it, or
+ * (f) an executable example/sample whose path or changed text repeats its
+ * subject. The former global "any implementation file" signal is deliberately
+ * gone: an unrelated source, workflow or config change that merely quotes the
+ * vocabulary is not boundary evidence. Prose-document and test classes are
+ * decided by path shape only — Markdown/YAML/docs directories are never
+ * blanket-exempted: a security runbook stays material without being the exact
+ * standards source or a declared owner, and a requirement-named runbook stays
+ * in scope through (c). Linked-issue requirements and entries without
  * provenance are untouched (always in scope — fail closed), and so is a
  * mixed-provenance requirement (any non-standards source keeps the old
  * rule). The narrowing also needs changed-path evidence: when `paths` is
@@ -2705,32 +2834,57 @@ export function requirementTraceScope(
   const ownership = context.ownership ?? [];
   const paths = context.paths ?? [];
   const compiledOwnership = ownership.length > 0 && paths.length > 0 ? compileOwnership(ownership) : [];
+  // #1600 content/path classes are computed from the same bounded change
+  // evidence for every standards row. The document/example lists are path
+  // classifications only; whether one is relevant to a requirement is decided
+  // per entry below.
+  const proseDocuments = paths.filter((path) => isProseDocumentPath(path) && !isTestPath(path));
+  const securityDocuments = proseDocuments.filter((path) => isSecurityDocumentPath(path));
+  const executableExamples = paths.filter((path) => isExecutableExamplePath(path));
+  const scopeChanged = changed === undefined ? [] : scopeChangedLines(changed);
   const scope: RequirementTraceScope = { inScope: [], outOfScope: [] };
   for (const { entry, sources, standardsRefs } of ledgerTraceCandidates(ledger)) {
     const owned = compiledOwnership.length > 0 && ownershipTouched(compiledOwnership, entry.text, paths);
     let touched = changed !== undefined && subjectTouched(entry.text, changed);
     // #1600: for a pure standards-sourced requirement, corroborate the lexical
-    // match with a connection to an affected boundary (see the doc comment).
-    // Only the lexical signal is narrowed; declared owners, linked issues,
-    // unknown provenance and mixed provenance keep their existing weight.
+    // match with a connection to an affected boundary of THIS requirement (see
+    // the doc comment). Only the lexical signal is narrowed; declared owners,
+    // linked issues, unknown provenance and mixed provenance keep their
+    // existing weight. (a), (b), (c), (d) are independent per-requirement
+    // signals: editing the standard's source or a path it names, or the
+    // trusted owner policy, is material even when the diff repeats none of its
+    // prose.
     const standardsOnly = sources !== null && sources.length > 0 && sources.every((source) => source === "standards");
+    const hasPathEvidence = standardsOnly && paths.length > 0;
+    const sourceTouched = hasPathEvidence && standardsSourceTouched(standardsRefs, paths);
+    const namedPathTouched = hasPathEvidence && requirementNamedPathTouched(entry.text, paths);
+    const policyTouched = hasPathEvidence && trustedPolicyTouched(paths);
     let boundaryNarrowed = false;
     if (
-      touched && !owned && standardsOnly
-      && paths.length > 0
-      && !standardsSourceTouched(standardsRefs, paths)
-      && !implementationSurfaceTouched(paths)
+      touched && standardsOnly && hasPathEvidence && scopeChanged !== null
+      && !owned && !sourceTouched && !namedPathTouched && !policyTouched
     ) {
-      touched = false;
-      boundaryNarrowed = true;
+      // The remaining corroboration classes are content/path classes that
+      // cannot apply without changed-path evidence; when paths are missing (or
+      // the diff is too large to scan fully) the lexical match keeps full
+      // weight (fail closed).
+      const securityDocument = securityDocumentTouched(entry.text, proseDocuments, securityDocuments, scopeChanged);
+      const executableExample = executableExampleTouched(entry.text, executableExamples, scopeChanged);
+      if (!securityDocument && !executableExample) {
+        touched = false;
+        boundaryNarrowed = true;
+      }
     }
-    if (changed === undefined || sources === null || sources.includes("linked_issues") || touched || owned) {
+    if (
+      changed === undefined || sources === null || sources.includes("linked_issues")
+      || touched || owned || sourceTouched || namedPathTouched || policyTouched
+    ) {
       scope.inScope.push(entry);
     } else {
       scope.outOfScope.push({
         entry,
         reason: boundaryNarrowed
-          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary in a prose-document/test-only change with no affected-boundary connection (no declared owner path, no edit to its standards source (${standardsRefs.length > 0 ? [...new Set(standardsRefs)].join("/").slice(0, 96) : "unknown"}), and no implementation-surface file among the changed paths)`
+          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example among the changed files)`
           : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
       });
     }

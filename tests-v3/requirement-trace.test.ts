@@ -2109,7 +2109,7 @@ test("#957: the #956 linked-issue change does not scope unrelated AGENTS standar
  * metadata, not an inferred lexical signal. */
 const OWNERSHIP = [
   { match: ["fork", "privilege", "separation"], owners: [".github/workflows/ai-pr-review-fork.yaml", "scripts/fork_review_gate.py"] },
-  { match: ["untrusted", "content", "data"], owners: ["src/context/pr-thread.ts", "src/context/review-threads.ts", "src/specialists/render.ts", "src/claims/render.ts", "src/requirements/ledger.ts", "src/publish/publish.ts"] },
+  { match: ["untrusted", "content", "data"], owners: ["src/context/fence.ts", "src/context/pr-thread.ts", "src/context/review-threads.ts", "src/specialists/render.ts", "src/claims/render.ts", "src/requirements/ledger.ts", "src/publish/publish.ts"] },
   { match: ["model", "api", "credentials"], owners: ["src/transport/http.ts", "src/transport/sse.ts", "src/transport/transport.ts"] },
 ];
 
@@ -2660,11 +2660,12 @@ test("#1600: quoted boundary vocabulary in a #1573-shaped docs/test change leave
   assert.deepEqual(scope.inScope, []);
   assert.deepEqual(scope.outOfScope.map((o) => o.entry.id).sort(), ["req-credential", "req-fork", "req-untrusted"]);
   // The out-of-scope reason is explainable from the artifact alone: it names
-  // the quoted-vocabulary class, the missed boundary signals, and the source.
+  // the quoted-vocabulary class and every boundary signal the change missed.
   for (const row of scope.outOfScope) {
     assert.match(row.reason, /^out of scope: from standards; its subject terms appear only as quoted vocabulary/);
-    assert.match(row.reason, /no declared owner path, no edit to its standards source \(agents\.md\)/);
-    assert.match(row.reason, /no implementation-surface file among the changed paths/);
+    assert.match(row.reason, /no standards-source or trusted-policy edit/);
+    assert.match(row.reason, /no requirement-named path/);
+    assert.match(row.reason, /no requirement-relevant security runbook or executable example/);
   }
 });
 
@@ -2705,24 +2706,72 @@ test("#1600: a trusted security-policy edit keeps its standards in scope regardl
   assert.deepEqual(
     requirementTraceScope(pr1573Ledger(), pr1573ChangedText(), { paths: [".github/agents.md"] }).inScope.length, 3,
   );
+  // The source-edit signal is independent of lexical overlap: a formatting
+  // edit to the standards file still leaves every requirement extracted from
+  // it in scope. Markdown is never blanket-exempted.
+  const formatting = changedSubjectText("+  (formatting only)\n", paths);
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), formatting, { paths }).inScope.length, 3);
 });
 
-test("#1600: an executable-example change and a declared-owner runbook change stay in scope", () => {
-  // An executable example (or script) is implementation surface: quoting the
-  // boundary vocabulary there is genuine reach, and .sh is never a prose class.
-  assert.deepEqual(
-    requirementTraceScope(pr1573Ledger(), pr1573ChangedText(), { paths: ["examples/secure-transport.sh"] }).inScope.length, 3,
-  );
-  // A security runbook does not evade its standard by being .md: declared via
-  // the base-ref owner map, it is a boundary-owning file (the owner signal is
-  // checked before the narrowing and is extension-blind).
-  const ownership = [{ match: ["fork", "privilege", "separation"], owners: ["docs/fork-review.md"] }];
+test("#1600: a trusted owner-policy edit scopes standards in without repeating their prose", () => {
+  // The owner map is base-ref-trusted security configuration. Editing it is a
+  // policy change even when the diff carries none of a standard's vocabulary,
+  // and it is never classed out merely because it is YAML.
+  for (const path of [".github/pr-reviewer-owners.yml", ".pr-reviewer-owners.yml"]) {
+    const paths = [path];
+    const changed = changedSubjectText("+  # boundary map maintenance\n", paths);
+    assert.deepEqual(
+      requirementTraceScope(pr1573Ledger(), changed, { paths }).inScope.map((e) => e.id).sort(),
+      ["req-credential", "req-fork", "req-untrusted"],
+      path,
+    );
+  }
+  // The policy file is repository-wide trusted configuration, so every
+  // standards row stays in scope regardless of which source document it came
+  // from — fail closed on a boundary map edit.
+  const other = { requirements: [
+    { id: "req-other", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "docs/team-standards.md", line: 1 }] },
+  ] };
+  const policyPaths = [".github/pr-reviewer-owners.yml"];
+  const changed = changedSubjectText("+  # boundary map maintenance\n", policyPaths);
+  assert.deepEqual(requirementTraceScope(other, changed, { paths: policyPaths }).inScope.map((e) => e.id), ["req-other"]);
+});
+
+test("#1600: a requirement-named runbook and a requirement-relevant executable example stay in scope", () => {
   const forkLedger = { requirements: [
     { id: "req-fork", text: STANDARDS_FORK, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 2 }] },
   ] };
-  const paths = ["docs/fork-review.md"];
-  const changed = changedSubjectText("+  fork code is never checked out in privileged runs; the fork trust boundary holds.\n", paths);
-  assert.deepEqual(requirementTraceScope(forkLedger, changed, { ownership, paths }).inScope.map((e) => e.id), ["req-fork"]);
+  // docs/fork-review.md is named by the fork standard itself. No subject
+  // vocabulary is needed in the changed lines: editing the runbook is a
+  // boundary-relevant policy change even though it is Markdown and is not the
+  // exact standards source or a declared owner.
+  const runbookPaths = ["docs/fork-review.md"];
+  const runbookChanged = changedSubjectText("+  (clarify the privileged-run step)\n", runbookPaths);
+  assert.deepEqual(
+    requirementTraceScope(forkLedger, runbookChanged, { paths: runbookPaths }).inScope.map((e) => e.id), ["req-fork"],
+  );
+
+  // A generic security/operational document need not be named or owned: an
+  // instruction about this requirement in a security path is boundary
+  // evidence (fail closed on ambiguous security instructions).
+  const credentialLedger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const securityPaths = ["docs/security/transport.md"];
+  const securityChanged = changedSubjectText(
+    "+  Never log model API credentials; send them only through the HTTP auth headers.\n", securityPaths,
+  );
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger, securityChanged, { paths: securityPaths }).inScope.map((e) => e.id), ["req-credential"],
+  );
+
+  // An executable example that repeats the standard's subject is a reachable
+  // demonstration, not prose commentary.
+  const examplePaths = ["examples/secure-transport.sh"];
+  const exampleChanged = changedSubjectText("+  curl -H \"x-api-key: $MODEL_API_KEY\" ...\n", examplePaths);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger, exampleChanged, { paths: examplePaths }).inScope.map((e) => e.id), ["req-credential"],
+  );
 });
 
 test("#1600: an owner-path code change without matching prose still scopes its standard in", () => {
@@ -2735,10 +2784,15 @@ test("#1600: an owner-path code change without matching prose still scopes its s
   const paths = ["src/transport/http.ts"];
   const changed = changedSubjectText("+  const header = \"x\";\n", paths);
   assert.deepEqual(requirementTraceScope(ledger, changed, { ownership, paths }).inScope.map((e) => e.id), ["req-credential"]);
-  // And a plain code change that DOES repeat the standard's prose keeps the
-  // lexical signal at full strength: implementation surface corroborates it.
-  const proseChanged = changedSubjectText("+  // credentials travel only through the http auth headers\n", ["src/transport/extra.ts"]);
-  assert.deepEqual(requirementTraceScope(ledger, proseChanged, { paths: ["src/transport/extra.ts"] }).inScope.map((e) => e.id), ["req-credential"]);
+  // An unrelated source file that merely quotes the standard is NOT an owner
+  // and is not implementation-surface corroboration: the affected-boundary
+  // connection is per requirement, never "some source file changed".
+  const unrelatedPaths = ["src/transport/extra.ts"];
+  const unrelatedChanged = changedSubjectText("+  // model api credentials travel only through the http auth headers\n", unrelatedPaths);
+  assert.deepEqual(requirementTraceScope(ledger, unrelatedChanged, { ownership, paths: unrelatedPaths }).inScope, []);
+  // The same owner path does corroborate a lexical match.
+  const proseChanged = changedSubjectText("+  // credentials travel only through the http auth headers\n", paths);
+  assert.deepEqual(requirementTraceScope(ledger, proseChanged, { ownership, paths }).inScope.map((e) => e.id), ["req-credential"]);
 });
 
 test("#1600: linked-issue, unknown-provenance, and mixed-provenance requirements are never narrowed", () => {
@@ -2775,18 +2829,33 @@ test("#1600: missing or empty changed-path evidence keeps the lexical rule (fail
   assert.deepEqual(requirementTraceScope(pr1573Ledger(), changed, { paths: [] }).inScope.length, 3);
 });
 
-test("#1600: a boundary-connected code change with quoted vocabulary still scopes in", () => {
-  // The narrowing targets prose-quoting docs/test-only diffs; a diff that
-  // touches an implementation file and repeats the standard's wording keeps
-  // the standard trace-required (the #957/#1000 positive controls, now with
-  // paths supplied explicitly).
-  const paths = ["src/context/fence.ts"];
-  const changed = changedSubjectText("+  // the untrusted-data delimiters are the boundary\n", paths);
-  assert.deepEqual(requirementTraceScope(pr1573Ledger(), changed, { paths }).inScope.map((e) => e.id), ["req-untrusted"]);
-  // A YAML workflow edit is implementation surface too — never blanket-exempted.
+test("#1600: boundary-owning source and workflow changes keep only their own standard in scope", () => {
+  // The declared owner map is what makes an implementation path boundary
+  // evidence. The same quoted vocabulary in a NON-owner source is not
+  // corroboration — the per-requirement association comes from ownership, not
+  // from the file extension or directory.
+  const ownerPaths = ["src/context/fence.ts"];
+  const ownerChanged = changedSubjectText("+  // the untrusted-data delimiters are the boundary\n", ownerPaths);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), ownerChanged, { ownership: OWNERSHIP, paths: ownerPaths }).inScope.map((e) => e.id),
+    ["req-untrusted"],
+  );
+  const unrelatedPaths = ["src/context/unrelated.ts"];
+  const unrelatedChanged = changedSubjectText("+  // the untrusted-data delimiters are the boundary\n", unrelatedPaths);
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), unrelatedChanged, { paths: unrelatedPaths }).inScope, []);
+
+  // A YAML workflow is never blanket-exempted, but it is boundary evidence
+  // only when it is declared as this requirement's owner (or named by the
+  // requirement / trusted policy).
   const wfPaths = [".github/workflows/ai-pr-review-fork.yaml"];
   const wfChanged = changedSubjectText("+  fork_code_checkout: denied # the fork trust boundary holds\n", wfPaths);
-  assert.deepEqual(requirementTraceScope(pr1573Ledger(), wfChanged, { paths: wfPaths }).inScope.map((e) => e.id), ["req-fork"]);
+  assert.deepEqual(
+    requirementTraceScope(pr1573Ledger(), wfChanged, { ownership: OWNERSHIP, paths: wfPaths }).inScope.map((e) => e.id),
+    ["req-fork"],
+  );
+  const otherWfPaths = [".github/workflows/unrelated.yaml"];
+  const otherWfChanged = changedSubjectText("+  fork_code_checkout: denied # the fork trust boundary holds\n", otherWfPaths);
+  assert.deepEqual(requirementTraceScope(pr1573Ledger(), otherWfChanged, { paths: otherWfPaths }).inScope, []);
 });
 
 // ── #959: a verdict with zero trace claims ──────────────────────────────
