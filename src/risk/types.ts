@@ -50,9 +50,12 @@ export const RISK_OBLIGATION_TEXTS: Readonly<Record<RiskCategory, string>> = Obj
     "File identity and path mode: this change compares or trusts file identity across sources "
     + "that can differ in mode. A git ls-tree blob equality proof cannot distinguish regular-file "
     + "mode 100644/100755 from symlink mode 120000 — the symlink blob stores only its target "
-    + "pathname. Consider the relevant counterexample (a symlink, a mode flip, or a "
-    + "symlink-to-regular typechange where the identity conclusion changes) and cite the source "
-    + "or test evidence that the mode is actually checked.",
+    + "pathname. A flip also changes what the path dereferences to: a symlink resolving to a "
+    + "different dependency serves different content than the regular file a prior evidence claim "
+    + "described. Consider the relevant counterexample (a symlink, a mode flip, or a "
+    + "symlink-to-regular typechange where the identity conclusion or the dereferenced dependency "
+    + "changes) and cite the source or test evidence that the mode is actually checked before "
+    + "trusting a prior evidence claim.",
   bounded_state:
     "Bounded state and concurrency: this change alters bounded counters or concurrent state. "
     + "Consider the relevant counterexample (zero, cap, wrap-around/overflow, or an interleaving "

@@ -127,6 +127,11 @@ export function resolveRiskObligations(record: unknown, enabled: boolean): RiskO
   if (record.input_complete !== true) {
     return { enabled: true, coverage: "incomplete", reason: "input-incomplete", rows };
   }
+  // The current writer always serializes `truncated: false` (per-path capping
+  // rides per-obligation as `pathsTruncated`), so no fresh artifact trips
+  // this. It is the fail-closed data guard for what is READ BACK from disk:
+  // a stale, foreign-version or hand-edited record claiming a truncated
+  // obligation set must never resolve as complete coverage.
   if (record.truncated === true) {
     return { enabled: true, coverage: "incomplete", reason: "obligation-set-truncated", rows };
   }

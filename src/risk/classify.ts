@@ -318,10 +318,14 @@ export function scanRiskObligations(diff: string): RiskObligationsArtifact {
   for (const chunk of chunks) {
     const path = chunk.path;
     if (chunk.modeFlip) {
+      // The header alone is the file-identity trigger. The body then scans
+      // under the SAME code-extension coverage bound as any other chunk:
+      // a typechange to a regular file can carry changed code, and skipping
+      // the body outright would silently miss the other categories in the
+      // same file — the silent-miss direction the module header calls the
+      // costly one. (Extensionless flip targets like hooks/pre-commit stay
+      // unscanned bodies by that same documented bound.)
       trip("file_identity_mode", path);
-      // A mode-flip chunk's body is not re-scanned for other categories:
-      // there is usually none, and the header alone is the trigger.
-      continue;
     }
     if (!isScannableFile(path)) continue;
     const extension = extensionOf(path ?? "");

@@ -67,6 +67,11 @@ test("#1577: ls-tree blob-comparison code raises the file-identity-mode obligati
   // The obligation statement names the first target case explicitly.
   assert.match(row.obligation, /120000/);
   assert.match(row.obligation, /symlink/);
+  // And the dereferenced-dependency impact the issue requires: a flip can
+  // change what the path resolves to, which is why a prior evidence claim
+  // about the file's content is not trustworthy across the flip.
+  assert.match(row.obligation, /dereference/);
+  assert.match(row.obligation, /prior evidence/);
   assert.equal(artifact.method, "scan");
 });
 
@@ -77,6 +82,47 @@ test("#1577: symlink mode literals and mode flips fire", () => {
   const scanned = scanRiskObligations(flip);
   assert.deepEqual(scanned.obligations.map((row) => row.category), ["file_identity_mode"]);
   assert.deepEqual(scanned.obligations[0]!.paths, ["hooks/pre-commit"]);
+});
+
+test("#1577: a mode-flip chunk's changed body still scans for the other categories", () => {
+  // A flip that also changes content must not blind the scan: the header
+  // trips file_identity_mode, and the body's own triggers still fire.
+  const flipWithBody = [
+    "diff --git a/src/scripts/rotate.ts b/src/scripts/rotate.ts",
+    "old mode 100644",
+    "new mode 100755",
+    "--- a/src/scripts/rotate.ts",
+    "+++ b/src/scripts/rotate.ts",
+    "@@ -1 +1,1 @@",
+    "+  const password = process.env[\"DB_PASSWORD\"];",
+  ].join("\n");
+  const artifact = scanRiskObligations(flipWithBody);
+  assert.deepEqual(artifact.obligations.map((row) => row.category), [
+    "file_identity_mode",
+    "credential_boundary",
+  ]);
+  assert.deepEqual(artifact.obligations[1]!.paths, ["src/scripts/rotate.ts"]);
+  // The typechange-to-symlink shape: the body is the target line, and a
+  // target naming a secret path is data worth one disposition. A flip whose
+  // target body carries no trigger stays the single file_identity_mode row.
+  const toSymlink = [
+    "diff --git a/config.ts b/config.ts",
+    "old mode 100644",
+    "new mode 120000",
+    "--- a/config.ts",
+    "+++ b/config.ts",
+    "@@ -1 +1,1 @@",
+    "-const flag = true;",
+    "+../deployment/api-keys.yaml",
+  ].join("\n");
+  assert.deepEqual(scanRiskObligations(toSymlink).obligations.map((row) => row.category), [
+    "file_identity_mode",
+    "credential_boundary",
+  ]);
+  const benignTarget = toSymlink.replace("../deployment/api-keys.yaml", "../shared/config.json");
+  assert.deepEqual(scanRiskObligations(benignTarget).obligations.map((row) => row.category), [
+    "file_identity_mode",
+  ]);
 });
 
 test("#1577: bounded state, persisted state, and credential boundary each fire", () => {
