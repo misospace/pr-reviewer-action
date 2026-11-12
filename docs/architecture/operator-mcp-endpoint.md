@@ -196,8 +196,10 @@ source it does not join (#727 owns that reference).
 
 ## Out of scope
 
-Wiring the host into the daemon composition (the admin listener itself is
-not yet wired; the deployment composition owns it), SSE/streaming and
+Wiring the host into the daemon composition — the admin listener itself is
+served by `src/controller/main.ts` (#1348), which does not yet pass the
+`AdminHostOptions.mcp` mount, so its `/mcp` path answers the fixed 404;
+the deployment composition owns that switch —, SSE/streaming and
 resource/prompt MCP capabilities, outcome/usefulness filters (#1027
 operator persistence), any mutation tool (v1 and beyond until a contract
 change says otherwise), and any UI (#742 consumes this surface).

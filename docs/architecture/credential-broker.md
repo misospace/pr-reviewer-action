@@ -1,11 +1,11 @@
 # Credential broker and per-review secret scoping (#735)
 
 Design of `src/credentials/`: the handoff boundary between the long-lived
-controller and the short-lived review workers. Like the event/job, queue,
-acquisition, and executor layers before it, this is **a library for the
-future self-hosted controller daemon — it is not wired into the running
-action pipeline**. Parent: #725 (post-v3 self-hosted); builds on #729
-(GitHub App ingress), #730 (Forgejo adapter), #731 (durable queue), #732
+controller and the short-lived review workers. It is consumed live by the
+controller daemon (#1348): `src/controller/main.ts` builds and resolves the
+per-run credential set at the worker handoff. Parent: #725 (post-v3
+self-hosted); builds on #729 (GitHub App ingress), #730 (Forgejo adapter),
+#731 (durable queue), #732
 (acquisition), #733 (executor boundary).
 
 The one-sentence rule: **a worker receives only the credentials the current

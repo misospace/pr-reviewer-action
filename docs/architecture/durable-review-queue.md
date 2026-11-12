@@ -3,9 +3,9 @@
 Design of `src/queue/`: the controller's durable scheduling semantics for
 review jobs. It builds on the #728 contract layer — `ReviewJob`
 (`src/jobs/`) is the immutable unit of work, `prIdentityKey` scopes it, and
-`isExpired` decides its deadline. Like the event/job layer before it, this
-is **a library for the future self-hosted controller daemon — it is not
-wired into the running action pipeline**.
+`isExpired` decides its deadline. It is consumed live by the
+controller daemon (#1348), which runs `ReviewQueueController` as the
+service scheduler; the shipped Action runtime never enqueues.
 
 The module is pure and deterministic: no I/O outside the `QueueStore`
 seam, no timers, no ambient clock. Callers supply epoch-ms numbers and
@@ -231,9 +231,9 @@ this library: `src/followup/controller.ts` plans and executes one canonical
 command never enqueues), and the operator consumer mints the rereview
 generation through `dispatchCanonicalEvent` and hands it to the daemon's
 queue via `enqueueRereviewJob` when one exists. The scheduler/store in this
-module stay the future daemon's own machinery — `prIdentityKey` keeping
-`follow_up` and `review` generations independent — and this module remains
-unwired into the running action pipeline.
+module are the controller daemon's own machinery (#1348) — `prIdentityKey`
+keeping `follow_up` and `review` generations independent — and the shipped
+Action runtime never enqueues through them.
 
 ### The operator lane's production binding
 

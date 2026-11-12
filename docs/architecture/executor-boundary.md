@@ -3,9 +3,10 @@
 Design of `src/executor/`: the seam that lets the durable review-queue
 controller (#731) run each review without knowing whether it executes as a
 local child process, in an OCI container, or as a Kubernetes Job (#734).
-Like the event/job, queue, and acquisition layers before it, this is **a
-library for the future self-hosted controller daemon — it is not wired
-into the running action pipeline**. Kubernetes is first-class as an
+It is consumed live by the controller daemon (#1348): the
+`execution.ts` profile→executor selector runs every queued attempt through
+`LocalExecutor` or `KubernetesExecutor`; the Action runtime launches reviews
+directly, never through this seam. Kubernetes is first-class as an
 executor ADAPTER: it contributes no Kubernetes-specific field to any
 engine or scheduler contract, and consumes the same `ExecutionRequest`
 contract and the OCI worker-image contract defined here.
