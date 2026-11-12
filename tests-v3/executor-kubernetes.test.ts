@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -432,6 +432,8 @@ test("the manifest pins the restrictive security defaults field by field", () =>
     runAsNonRoot: true,
     runAsUser: WORKER_RUN_AS_ID,
     runAsGroup: WORKER_RUN_AS_ID,
+    fsGroup: WORKER_RUN_AS_ID,
+    fsGroupChangePolicy: "OnRootMismatch",
     seccompProfile: { type: "RuntimeDefault" },
   });
   assert.equal(manifest.pod.containers.length, 1);
@@ -459,6 +461,174 @@ test("the manifest pins the restrictive security defaults field by field", () =>
     persistentVolumeClaim: { claimName: "pr-reviewer-data", readOnly: false },
   }]);
   rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("the written envelope is the validated request plus exactly the shared-claim group id (#1631)", async () => {
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    const handle = await fixture.executor.start(fixture.request, new AbortController().signal);
+    await handle.collect();
+    const envelope = JSON.parse(readFileSync(fixture.request.requestPath, "utf8"));
+    // Exactly one executor-added field: the shared-claim group id the
+    // worker can only learn from the envelope.
+    assert.deepEqual(envelope, { ...fixture.request, sharedGroupId: WORKER_RUN_AS_ID });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the envelope and run directory carry the shared-claim modes regardless of umask (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  const oldUmask = process.umask(0o077);
+  try {
+    const handle = await fixture.executor.start(fixture.request, new AbortController().signal);
+    await handle.collect();
+    // The explicit chmod/fchmod defeats the 0o077 umask the open/mkdir
+    // modes alone could not.
+    assert.equal(statSync(fixture.request.requestPath).mode & 0o7777, 0o640);
+    assert.equal(statSync(fixture.request.runDir).mode & 0o7777, 0o2770);
+  } finally {
+    process.umask(oldUmask);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a pre-created run directory chain still ends up 0o2770 after launch (the chmod walk covers pre-existing components) (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    // A deeper run directory INSIDE the fixture's volume mapping, whose
+    // components were pre-created by the test under the 0o077 umask: the
+    // executor's chmod walk must still land both on the shared-claim
+    // mode.
+    const runDir = path.join(fixture.root, "pre", "deeper");
+    mkdirSync(runDir, { recursive: true });
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir,
+      requestPath: path.join(runDir, "request.json"),
+      resultPath: path.join(runDir, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const oldUmask = process.umask(0o077);
+    try {
+      const handle = await fixture.executor.start(request, new AbortController().signal);
+      await handle.collect();
+      assert.equal(statSync(path.join(fixture.root, "pre")).mode & 0o7777, 0o2770);
+      assert.equal(statSync(runDir).mode & 0o7777, 0o2770);
+    } finally {
+      process.umask(oldUmask);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the chmod walk restyles every nested component but never the claim root itself (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    // A DISTINCT initial claim-root mode: the claim root is the volume
+    // mount point whose mode the kubelet owns (fsGroup) — the executor's
+    // walk must leave it exactly as it found it, whatever it was.
+    chmodSync(fixture.root, 0o755);
+    const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
+    // Pre-created nested components INSIDE the volume mapping (created
+    // before the launch, so nothing the controller's umask freshly made):
+    // the walk must land each of them on the shared-claim mode.
+    const runDir = path.join(fixture.root, "pre", "deeper");
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir,
+      requestPath: path.join(runDir, "request.json"),
+      resultPath: path.join(runDir, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const handle = await fixture.executor.start(request, new AbortController().signal);
+    await handle.collect();
+    // Every component strictly below the claim root is group-accessible...
+    assert.equal(statSync(path.join(fixture.root, "pre")).mode & 0o7777, 0o2770);
+    assert.equal(statSync(runDir).mode & 0o7777, 0o2770);
+    // ...and the claim root's mode is EXACTLY what the fixture gave it —
+    // the walk stops AT the root, never restyles the shared volume root
+    // other workloads depend on.
+    assert.equal(claimRootModeBefore, 0o755, "the fixture's distinct initial claim-root mode survived to the comparison");
+    assert.equal(statSync(fixture.root).mode & 0o7777, claimRootModeBefore);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a run directory equal to the claim root refuses the launch instead of chmod-ing the claim root (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    chmodSync(fixture.root, 0o755);
+    const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
+    // The run directory IS the claim root: there is no component strictly
+    // below the root for the walk to restyle, and the executor must never
+    // restyle the root itself (the kubelet owns its mode) — so the launch
+    // is refused cleanly instead.
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir: fixture.root,
+      requestPath: path.join(fixture.root, "request.json"),
+      resultPath: path.join(fixture.root, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const handle = await fixture.executor.start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /claim root/);
+    // The claim root was never restyled and never written into: the
+    // refusal precedes the envelope write, so no request file exists on
+    // the root either.
+    assert.equal(statSync(fixture.root).mode & 0o7777, claimRootModeBefore);
+    assert.equal(existsSync(request.requestPath), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the shared-claim chmod walk refuses a symlinked intermediate component and never chmods through it (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    // A deeper run directory whose INTERMEDIATE component is a symlink to
+    // a directory outside the shared claim: the walk must refuse the
+    // launch and leave the symlink target's mode exactly as it was —
+    // never restyle a directory it was pointed at.
+    const target = path.join(fixture.root, "outside-target");
+    mkdirSync(target, { mode: 0o700 });
+    // The scratch TMPDIR itself may be setgid (children inherit the bit),
+    // so the assertion pins the mode as observed, not a hardcoded value.
+    const targetModeBefore = statSync(target).mode & 0o7777;
+    const pre = path.join(fixture.root, "pre");
+    symlinkSync(target, pre, "dir");
+    const runDir = path.join(pre, "deeper");
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir,
+      requestPath: path.join(runDir, "request.json"),
+      resultPath: path.join(runDir, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const handle = await fixture.executor.start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /symbolic link/);
+    // Nothing was chmod-ed through the link and nothing was written: the
+    // target keeps its mode and no envelope exists on either path.
+    assert.equal(statSync(target).mode & 0o7777, targetModeBefore);
+    assert.equal(existsSync(path.join(target, "deeper", "request.json")), false);
+    assert.equal(existsSync(request.requestPath), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("every worker pod template carries the NetworkPolicy selector and joins no host network", () => {
@@ -506,6 +676,8 @@ test("the pod template carries the operator's RuntimeClass pin only when the spe
     runAsNonRoot: true,
     runAsUser: WORKER_RUN_AS_ID,
     runAsGroup: WORKER_RUN_AS_ID,
+    fsGroup: WORKER_RUN_AS_ID,
+    fsGroupChangePolicy: "OnRootMismatch",
     seccompProfile: { type: "RuntimeDefault" },
   }, "the fixed pod security context survives the pin unchanged");
   assert.deepEqual(manifest.pod.containers[0]!.securityContext, {

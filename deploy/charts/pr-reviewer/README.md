@@ -68,10 +68,14 @@ common library templates at render time. Run
 
 ## Security defaults
 
-- `runAsNonRoot`, uid/gid 1000, `fsGroup` 1000, seccomp
+- `runAsNonRoot`, uid/gid 1000, `fsGroup` 65532, seccomp
   `RuntimeDefault`, all capabilities dropped, no privilege escalation,
   read-only root filesystem (writable roots are PVCs; `/tmp` is an
-  emptyDir).
+  emptyDir). `fsGroup` is the worker executor's pinned group
+  (`WORKER_RUN_AS_ID`, uid/gid 65532): setgid propagation on the shared
+  claims is what lets the controller read the worker's result file and
+  the worker read the controller's envelope across the uid boundary
+  (#1631).
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.

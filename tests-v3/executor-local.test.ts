@@ -1430,6 +1430,24 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   );
 });
 
+test("validateExecutionRequest accepts an optional valid sharedGroupId and refuses malformed ones (#1631)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+  // Present and valid: carried through.
+  assert.equal(validateExecutionRequest({ ...valid, sharedGroupId: 65532 }).sharedGroupId, 65532);
+  // Absent: accepted, and the property stays absent (the single-uid
+  // exchange).
+  const absent = validateExecutionRequest(valid);
+  assert.equal("sharedGroupId" in absent, false);
+  // A float, a negative, zero, and a non-integer number are refused.
+  for (const bad of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "65532", null]) {
+    assert.throws(
+      () => validateExecutionRequest({ ...valid, sharedGroupId: bad }),
+      /sharedGroupId must be an integer >= 1/,
+    );
+  }
+});
+
 test("validateExecutionRequest enforces the forge API base coordinate (#1433)", () => {
   const { request } = makeRequest();
   const valid = JSON.parse(JSON.stringify(request));
