@@ -12,6 +12,7 @@ import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.j
 import { applyReviewObligationEnforcement, isForcingObligation, type ReviewObligation } from "./review-obligations.js";
 import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
+import { harnessExecutionCounts } from "../tools/execution-counts.js";
 
 export interface EvidenceProviderArtifact {
   has_blocker?: boolean;
@@ -22,13 +23,20 @@ export interface ToolHarnessArtifact {
   planning_error?: string | null;
   error?: string | null;
   planned_request_count?: number;
-  /** #1597: the ok-status count, truthfully named. `executed_request_count`
-   * now counts ATTEMPTED executions; this enforcement keeps the historical
-   * successful-only predicate exactly (fail-closed behavior must not shift
-   * with a diagnostics rename). */
+  /** #1597: the ok-status count, truthfully named — the calls that
+   * SUCCEEDED. */
   successful_request_count?: number;
+  /** #1597: the ATTEMPTED-executor count — every call that reached an
+   * executor, successful OR failed. #1606: the "all tool requests failed"
+   * check reads THIS count to learn that calls were made at all; reading
+   * the successful count for that purpose is exactly what kept the check
+   * from ever firing. */
   executed_request_count?: number;
   tool_results?: Array<{ status?: string }>;
+  /** The counters above are read through ONE shared reader
+   * (`src/tools/execution-counts.ts`), so this enforcement, the step
+   * summary and the evidence-cause consumer can never read the same
+   * artifact with different meanings. */
 }
 
 export interface EnforcementOutcome {
@@ -82,6 +90,14 @@ export function applyEvidenceBlockerEnforcement(
   );
 }
 
+/**
+ * #1606: the number of tool calls that SUCCEEDED (executor status "ok") —
+ * the count the min-successful overlay asks about.
+ */
+function successfulRequestCount(harness: ToolHarnessArtifact | null): number {
+  return harnessExecutionCounts(harness).succeeded ?? 0;
+}
+
 function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string | null {
   if (!harness) return null;
   if (harness.planning_error !== undefined && harness.planning_error !== null) {
@@ -90,22 +106,26 @@ function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string |
   if (harness.error !== undefined && harness.error !== null) {
     return String(harness.error);
   }
-  // #1597: read the successful count, exactly the value the historical
-  // `executed_request_count` carried — this fail-closed gate is approval
-  // policy, so it must not change when a diagnostics field is renamed.
-  const successful = harness.successful_request_count ?? 0;
-  if (successful > 0) {
-    const statuses = harness.tool_results ?? [];
-    if (!statuses.some((t) => t && t.status === "ok")) {
-      return "all tool requests failed";
-    }
+  // #1606: the "all tool requests failed" check reads the TWO settled
+  // execution counters by their OWN meaning — `executed_request_count` is
+  // every call that reached an executor (successful OR failed) and
+  // `successful_request_count` is the ok-status subset. A run that
+  // attempted at least one call and succeeded on NONE is an all-failed
+  // run, and it must be reported.
+  //
+  // Before #1606 the check asked "successful > 0" and then "no result has
+  // an ok status" — a contradiction that could never hold, so the check
+  // never fired and a run whose every tool call failed kept its model
+  // verdict. (The successful count IS the count of ok-status results, so
+  // "successful > 0" already implied "some result is ok".)
+  //
+  // A run that dispatched NO call to an executor is NOT an all-failed run —
+  // there was no tool call to fail; the min-successful gate owns that case.
+  const counts = harnessExecutionCounts(harness);
+  if (counts.attempted !== null && counts.attempted > 0 && counts.succeeded === 0) {
+    return "all tool requests failed";
   }
   return null;
-}
-
-function countSuccessfulRequests(harness: ToolHarnessArtifact | null): number {
-  if (!harness) return 0;
-  return (harness.tool_results ?? []).filter((t) => t && t.status === "ok").length;
 }
 
 /** Override the verdict when tool-harness planning or execution failed. */
@@ -135,7 +155,9 @@ export function applyToolMinSuccessfulEnforcement(
   minRequired: number,
   harness: ToolHarnessArtifact | null,
 ): EnforcementOutcome {
-  const successful = countSuccessfulRequests(harness);
+  // #1606: "how many calls succeeded" is the successful count's own
+  // meaning — the same settled counter the summary and the marker publish.
+  const successful = successfulRequestCount(harness);
   if (successful >= minRequired) {
     return { applied: false, reason: "" };
   }
@@ -241,7 +263,7 @@ export function failClosedEnforcementFired(inputs: Pick<
   if (inputs.toolFailureEnabled) {
     if (toolHarnessFailureReason(inputs.toolHarness ?? null)) return true;
     if (inputs.toolMinSuccessful > 0
-      && countSuccessfulRequests(inputs.toolHarness ?? null) < inputs.toolMinSuccessful) {
+      && successfulRequestCount(inputs.toolHarness ?? null) < inputs.toolMinSuccessful) {
       return true;
     }
   }

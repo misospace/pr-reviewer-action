@@ -21,6 +21,7 @@ import {
   applyEvidenceBlockerEnforcement,
   applyToolHarnessFailureEnforcement,
   applyToolMinSuccessfulEnforcement,
+  failClosedEnforcementFired,
   normalizeEnforcedReviewMarkdown,
 } from "../src/enforcement/enforce.js";
 import { extractCoveragePayload, normalizeRequirementCoverage } from "../src/enforcement/requirement-coverage.js";
@@ -526,19 +527,87 @@ test("evidence/tool helpers preserve exact sections, reasons, precedence, null b
   });
   assert.ok(evidence.review_markdown.endsWith("## Evidence Provider Blockers\nOne or more configured evidence providers reported blocker-level findings (sec). Resolve blocker findings before approval."));
 
-  for (const [harness, reason] of [[{ planning_error: "planning", error: "execution", executed_request_count: 2 }, "planning"], [{ error: "execution" }, "execution"], [{ successful_request_count: 2, tool_results: [{ status: "failed" }] }, "all tool requests failed"]] as Array<[any, string]>) {
+  for (const [harness, reason] of [[{ planning_error: "planning", error: "execution", executed_request_count: 2 }, "planning"], [{ error: "execution" }, "execution"]] as Array<[any, string]>) {
     const a = artifact();
     const outcome = applyToolHarnessFailureEnforcement(a, harness);
     assert.equal(outcome.reason, `Tool harness failure detected (${reason}). The tool harness failed during planning or execution; this workflow is configured fail-closed for tool harness failures.`);
     assert.ok(a.review_markdown.includes(`## Tool Harness Failure\nThe tool harness failed during planning or execution (${reason}).`));
   }
-  // #1597: the fail-closed gate keeps the historical successful-only
-  // predicate; an executed (attempted) count > 0 with zero successful calls
-  // must NOT flip the verdict — the ok-only semantics did not, and approval
-  // behavior must not shift with the telemetry rename.
-  assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), { executed_request_count: 2, successful_request_count: 0, tool_results: [{ status: "error" }, { status: "error" }] }), { applied: false, reason: "" });
   assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), null), { applied: false, reason: "" });
   assert.deepEqual(applyToolMinSuccessfulEnforcement(artifact(), 1, { tool_results: [{ status: "ok" }] }), { applied: false, reason: "" });
+});
+
+test("#1606: the tool-harness failure check fires for a run whose every tool call failed", () => {
+  // The artifact shapes below are the ones the harness ACTUALLY writes
+  // (#1597 partitions: issued = executed + refused + deduplicated, and one
+  // `tool_calls`/`tool_results` entry per executed call).
+  const allFailed = {
+    planned_request_count: 2,
+    executed_request_count: 2,
+    successful_request_count: 0,
+    refused_request_count: 0,
+    deduplicated_request_count: 0,
+    tool_calls: [
+      { tool: "read_file", args: { path: "missing.md" }, status: "error" },
+      { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+    ],
+    tool_results: [
+      { tool: "read_file", status: "error", result: { error: "no such file" } },
+      { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+    ],
+  };
+  const a = artifact();
+  const outcome = applyToolHarnessFailureEnforcement(a, allFailed);
+  assert.equal(outcome.applied, true);
+  assert.equal(outcome.reason, "Tool harness failure detected (all tool requests failed). The tool harness failed during planning or execution; this workflow is configured fail-closed for tool harness failures.");
+  assert.ok(a.review_markdown.includes("## Tool Harness Failure\nThe tool harness failed during planning or execution (all tool requests failed)."));
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict_source, "enforcement");
+
+  // A run with at least one successful call stays silent.
+  const mixed = {
+    ...allFailed,
+    successful_request_count: 1,
+    tool_calls: [
+      { tool: "read_file", args: { path: "src/a.ts" }, status: "ok" },
+      { tool: "list_dir", args: { path: "missing/" }, status: "error" },
+    ],
+    tool_results: [
+      { tool: "read_file", status: "ok", result: { content: "code" } },
+      { tool: "list_dir", status: "error", result: { error: "no such directory" } },
+    ],
+  };
+  assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), mixed), { applied: false, reason: "" });
+
+  // A run that dispatched NO call is not an all-failed run: there was no
+  // tool call to fail (the min-successful gate owns that case).
+  const none = {
+    planned_request_count: 0,
+    executed_request_count: 0,
+    successful_request_count: 0,
+    refused_request_count: 0,
+    deduplicated_request_count: 0,
+    tool_calls: [],
+    tool_results: [],
+  };
+  assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), none), { applied: false, reason: "" });
+
+  // The fail-closed signal agrees with the overlay: an all-failed run can
+  // never be relaxed into an approval.
+  assert.equal(failClosedEnforcementFired({
+    evidenceBlockerEnabled: false,
+    toolFailureEnabled: true,
+    toolMinSuccessful: 0,
+    evidence: null,
+    toolHarness: allFailed,
+  }), true);
+  assert.equal(failClosedEnforcementFired({
+    evidenceBlockerEnabled: false,
+    toolFailureEnabled: true,
+    toolMinSuccessful: 0,
+    evidence: null,
+    toolHarness: mixed,
+  }), false);
 });
 
 test("requirement coverage credits grounded claims, downgrades unsafe claims, and reports ledger errors", () => {

@@ -235,7 +235,7 @@ Read-only model-planned evidence gathering.
 | `tool-request-timeout-sec` | `20` | Timeout in seconds for each tool request execution |
 | `search-url` | empty | Search-engine endpoint (e.g. a SearXNG instance's /search URL) that enables the read-only web_search tool in the native tool loop. When set, the model can search for a page (release notes, a support/compatibility matrix) and then web_fetch the best result — useful when it doesn't know the exact URL. Empty (default) leaves web_search un-advertised. The model supplies only the query; the host is fixed by this setting. Subject to the same fork gating as the rest of the tool harness. |
 | `tool-max-search-results` | `5` | Maximum results returned per web_search call; bounded to 1..15 |
-| `tool-failure-enforcement` | `false` | If true, force request_changes when tool harness planning fails |
+| `tool-failure-enforcement` | `false` | If true, force request_changes when the tool harness reports a failure, or when every executed tool call failed |
 | `tool-min-successful-requests` | `0` | Minimum number of successful tool requests required when tool failure enforcement is enabled |
 | `tool-enable-for-forks` | `false` | If true, allow the tool harness to run on cross-repository pull requests |
 | `tool-mcp-servers` | empty | Optional allowlist of read-only MCP servers for tool-mode=native_loop, as a newline/comma list of name=url (e.g. konflate=https://konflate.example/mcp). Their read-verb tools (list/get/read/…) are advertised as mcp__<name>__<tool> (double underscores); write-verb tools are refused. Empty = off (default). Fork-gated like the rest of the harness (tool-enable-for-forks). Only host-bearing http(s) URLs are accepted (HTTPS recommended); other schemes are dropped. |

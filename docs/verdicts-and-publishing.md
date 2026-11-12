@@ -25,6 +25,8 @@ Under `strict`, the model's verdict is an input, not the final answer. The rule:
 
 A fail-closed enforcement layer (evidence blocker, tool-harness failure, `required-check-validation-mode: fail`, `min-successful-requests`) can still force `request_changes` even with zero open blocking findings; that forced verdict is never relaxed back to `approve`, even if the model also asked for changes independently.
 
+The tool-harness failure overlay covers three states. The harness fails to plan its tool calls. The harness reports an error. Or the harness runs tool calls and every call fails. The overlay reads two counters in the harness artifact. `executed_request_count` counts the calls that reached the executor. `successful_request_count` counts the calls that succeeded. A run that dispatches no call to an executor is not a failed run. The `min-successful-requests` overlay covers that case.
+
 ### `findings_severity_gated` and non-blocking categories
 
 `non-blocking-finding-categories` (comma-separated: `tests`, `docs`, `style`, `question`, `performance`, `bug`, `other` — `security` is never eligible) lets a repo declare categories that can't request changes on their own. Under `findings_severity_gated`:
