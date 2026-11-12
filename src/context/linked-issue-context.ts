@@ -38,7 +38,7 @@ import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqEr
 import { pyOr, pyStr, pyStrip } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload } from "../precheck/linked-issues.js";
+import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, type LinkedIssueRef } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 import { redactPrTextLines } from "./redact.js";
 
@@ -163,6 +163,9 @@ export interface LinkedIssueContextResult {
    * rejected before projection — never a failure (the fetch succeeded), so
    * these never feed `linkedMetadataUncertainty`. */
   githubPullRequestSkips: string[];
+  /** #1617: cross-repository refs refused by the fork trust boundary BEFORE
+   * any fetch: never attempted, never failures, never uncertainty. */
+  githubForkSkips: string[];
   linearFetchFailures: string[];
   linearKnownDisabled: boolean;
 }
@@ -216,15 +219,30 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
   // loop actually attempted, in order, and is what `linked-issues.json` /
   // the requirement ledger see — refs beyond it are never fetched at all.
   const refItems = extractLinkedIssueRefs(body, input.repo, title);
+  // #1617: the fork trust boundary gates WHICH refs may be fetched at all,
+  // before any privileged read: on a fork PR, cross-repository refs are
+  // refused by rule regardless of how capable the deployment's credential
+  // is. Refused refs never enter `acceptedLinkedIssues`, never consume a
+  // MAX_LINKED_ISSUES slot, and never appear in `processedRefs` (which is
+  // exactly the refs the loop attempted). They render a refusal notice and
+  // are recorded in the status artifact, so the review proves the attempt
+  // was refused rather than silently dropped.
+  const isForkPr = input.isForkPr === "true";
+  const fetchableRefs: LinkedIssueRef[] = [];
+  const forkSkippedRefs: LinkedIssueRef[] = [];
+  for (const item of refItems) {
+    (linkedIssueFetchAllowed(item, input.repo, isForkPr) ? fetchableRefs : forkSkippedRefs).push(item);
+  }
   const md: Buffer[] = [];
   const githubFailures: string[] = [];
   const pullRequestSkips: string[] = [];
+  const forkSkips: string[] = forkSkippedRefs.map((item) => item.ref);
   const processedRefs: { ref: string; repo: string; number: number }[] = [];
   const labelsByRef = new Map<string, unknown[]>();
   let anyLabels = false;
 
   for await (const outcome of acceptedLinkedIssues(
-    refItems,
+    fetchableRefs,
     (repo, number) => input.adapter.getIssue(repo, String(number)),
   )) {
     const item = outcome.ref;
@@ -242,6 +260,16 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
       md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));
       githubFailures.push(item.ref);
     }
+    md.push(enc("\n"));
+  }
+
+  // #1617: refusals render in candidate order after the fetched set, each
+  // with its own heading so the artifact positively records that the
+  // reference existed and was refused — never with the referenced issue's
+  // content (there is none: the fetch never happened).
+  for (const item of forkSkippedRefs) {
+    md.push(enc(`## ${item.ref}\n`));
+    md.push(enc(`(Skipped issue ${item.ref} from ${item.repo}: cross-repository linked-issue reference on a fork pull request)\n`));
     md.push(enc("\n"));
   }
 
@@ -286,12 +314,16 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
     // artifact. A skip is a deliberate rejection, not a failure — it is
     // never folded into `linkedMetadataUncertainty`.
     ...(pullRequestSkips.length > 0 ? { github_pull_request_skips: pullRequestSkips } : {}),
+    // Additive (#1617): the same rule for the fork-boundary refusals — a
+    // deliberate policy refusal, never uncertainty.
+    ...(forkSkips.length > 0 ? { github_fork_skips: forkSkips } : {}),
   })}\n`));
   return {
     artifacts,
     linkedIssues: linked,
     githubFetchFailures: githubFailures,
     githubPullRequestSkips: pullRequestSkips,
+    githubForkSkips: forkSkips,
     linearFetchFailures: linearFailures,
     linearKnownDisabled,
   };
