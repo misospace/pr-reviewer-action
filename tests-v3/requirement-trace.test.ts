@@ -2675,10 +2675,6 @@ function pr1573Evidence(): ChangeEvidence {
   return changeEvidence(pr1573Sections(), ["docs/architecture/code-map.md", "tests-v3/docs-lint.test.ts"]);
 }
 
-function pr1573ChangedText(): string {
-  return pr1573Evidence().changed;
-}
-
 function pr1573Ledger(): unknown {
   return { requirements: [
     { id: "req-untrusted", text: STANDARDS_UNTRUSTED, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] },
@@ -2869,6 +2865,56 @@ test("#1600: an executable example's unrelated change is no connection for anoth
   // the subject, it is a reachable boundary and the standard is in scope.
   const same = changeEvidence([
     diffSection("examples/other-thing.sh", ["+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1"]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), same.changed, { paths: same.paths, fileLines: same.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+});
+
+// ── #1600: the executable-script class (the issue's "examples or scripts") ──
+
+test("#1600: a changed operational script with requirement-relevant content keeps its standard in scope", () => {
+  // scripts/rotate-credentials.sh is exactly the material-change class #1600
+  // names ("executable examples or scripts"): the script IS the boundary
+  // demonstration. No declared owner, no standards-source edit, no named
+  // path — the same-file instruction line alone keeps it in scope.
+  const script = changeEvidence([
+    diffSection("scripts/rotate-credentials.sh", [
+      "+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1/rotate",
+    ]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), script.changed, { paths: script.paths, fileLines: script.fileLines }).inScope.map((e) => e.id),
+    ["req-credential"],
+  );
+  // The class is path-directory-scoped, not extension-based: the same
+  // instruction in an ordinary source tree is not script corroboration.
+  const src = changeEvidence([
+    diffSection("src/ops/rotate-credentials.ts", [
+      "+  curl -H \"x-api-key: $MODEL_API_KEY\" https://inference.example/v1/rotate",
+    ]),
+  ]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), src.changed, { paths: src.paths, fileLines: src.fileLines }).inScope, [],
+  );
+});
+
+test("#1600: an unrelated script is no connection for another file's matching text", () => {
+  // NEGATIVE: the script class must not restore any generic implementation
+  // signal — scripts/unrelated.sh changing while a DIFFERENT file carries the
+  // credential standard's instruction shapes no boundary connection.
+  const combined = changeEvidence([
+    diffSection("scripts/unrelated.sh", ["+  echo done # reworded"]),
+    diffSection("src/foo/notes.ts", ["+  // model API credentials must never appear in process argv"]),
+  ], ["scripts/unrelated.sh", "src/foo/notes.ts"]);
+  assert.deepEqual(
+    requirementTraceScope(credentialLedger(), combined.changed, { paths: combined.paths, fileLines: combined.fileLines }).inScope, [],
+  );
+  // Same script, same standard: the moment the script itself carries the
+  // instruction, it is in scope — the difference is attribution, not class.
+  const same = changeEvidence([
+    diffSection("scripts/unrelated.sh", ["+  # model API credentials must never appear in process argv"]),
   ]);
   assert.deepEqual(
     requirementTraceScope(credentialLedger(), same.changed, { paths: same.paths, fileLines: same.fileLines }).inScope.map((e) => e.id),
@@ -3078,6 +3124,9 @@ test("#1600: parseChangedFileLines reads plain unified diffs, deletions, and quo
   // a guess.
   assert.equal(parseChangedFileLines(['--- "a/tab\\tfile.md"', '+++ "b/tab\\tfile.md"', "@@ -1 +1 @@", "+  nope"].join("\n")), null);
   assert.equal(parseChangedFileLines(["--- a/../escape.md", "+++ b/../escape.md", "@@ -1 +1 @@", "+  nope"].join("\n")), null);
+  // A NUL byte in a header path (a hostile or corrupt diff) names no usable
+  // path: with changed lines present the attribution fails closed.
+  assert.equal(parseChangedFileLines(["--- a/be\0tween.md", "+++ b/be\0tween.md", "@@ -1 +1 @@", "+  nope"].join("\n")), null);
   // Text that is not a diff at all yields no attribution (callers fail closed).
   assert.equal(parseChangedFileLines("just prose, no headers"), null);
 });

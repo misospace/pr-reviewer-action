@@ -2833,12 +2833,18 @@ function isSecurityDocumentPath(path: string): boolean {
   return pathWords(path).some((word) => SECURITY_DOCUMENT_WORDS.has(word));
 }
 
-/** #1600: a non-prose executable example/script directory. The changed
- * example itself must repeat this requirement's subject before it counts; a
- * source tree that merely shares a path word with a standard does not. */
+/** #1600: a non-prose executable example or operational-script directory —
+ * the material-change class the issue names ("executable examples or
+ * scripts"). Directory-segment shaped and narrow: the changed script itself
+ * must repeat this requirement's subject (or its path must name it) before it
+ * counts, and a source tree that merely shares a path word with a standard is
+ * not in this class. Nothing here restores a generic "any non-prose
+ * implementation file" signal: `src/`, `.github/workflows/` and every other
+ * implementation directory stay outside it. */
 const EXECUTABLE_EXAMPLE_SEGMENTS: ReadonlySet<string> = new Set([
   "example", "examples", "sample", "samples", "demo", "demos",
   "snippet", "snippets", "cookbook",
+  "script", "scripts",
 ]);
 
 function isExecutableExamplePath(path: string): boolean {
@@ -2954,11 +2960,11 @@ function securityDocumentTouched(
   return false;
 }
 
-/** #1600: an executable example/script is a reachable demonstration of the
- * boundary when its path names the requirement or a line belonging to THAT
- * example repeats the requirement's subject. The example class is narrow
- * (examples/samples/demos), and another file's matching line is never
- * attribution for this example. */
+/** #1600: an executable example or operational script is a reachable
+ * demonstration of the boundary when its path names the requirement or a line
+ * belonging to THAT same file repeats the requirement's subject. The class is
+ * narrow (examples/samples/demos/scripts directories), and another file's
+ * matching line is never attribution for this example or script. */
 function executableExampleTouched(
   text: string,
   examples: readonly string[],
@@ -3006,9 +3012,10 @@ export interface RequirementTraceScope {
  * base-ref-trusted owner/trace policy file itself, (e) a changed
  * security/operational document that names the requirement, whose path names
  * its subject, or whose changed text carries an instruction about it, or
- * (f) an executable example/sample whose path or changed text repeats its
- * subject. Signals (e) and (f) are file-attributed: the matching text must be
- * an added/removed line of the very document or example whose path provides
+ * (f) an executable example or script (examples/samples/demos/scripts
+ * directories) whose path or changed text repeats its subject. Signals (e)
+ * and (f) are file-attributed: the matching text must be an added/removed
+ * line of the very document or example whose path provides
  * the class, because a global diff's lines can come from anywhere. When the
  * diff cannot be attributed per file, those two content classes contribute
  * nothing and the lexical match keeps its weight (fail closed) — attribution
@@ -3103,7 +3110,7 @@ export function requirementTraceScope(
       scope.outOfScope.push({
         entry,
         reason: boundaryNarrowed
-          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example among the changed files)`
+          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
           : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
       });
     }
