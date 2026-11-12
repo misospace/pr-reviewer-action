@@ -1029,7 +1029,13 @@ export function createModelCredentialVault(options: {
  * - a mint failure (or mint output that fails the vault's own material
  *   discipline) refuses the WHOLE credential set with a fixed, bounded,
  *   credential-free reason — never an unauthenticated, stale, or
- *   echoed-error degradation. */
+ *   echoed-error degradation. Because the refusal code is the closed
+ *   `unknown_reference` (the mint holds no reference — it is an
+ *   authority) and the executor boundary keeps only that code, the
+ *   daemon's own logs would otherwise read a transient App-side failure
+ *   as missing operator configuration; `onMintFailure` therefore reports
+ *   each mint-path refusal's fixed diagnosis to the CONTROLLER side only,
+ *   never toward the executor. */
 export function createGitHubPublishMintingBroker(
   base: CredentialBroker,
   mint: (
@@ -1040,6 +1046,7 @@ export function createGitHubPublishMintingBroker(
     readonly expiresAtMs: number;
   }>,
   declaredReferences: readonly string[],
+  onMintFailure: (detail: string) => void = () => {},
 ): CredentialBroker {
   const mintable = new Set(declaredReferences);
   return {
@@ -1064,19 +1071,28 @@ export function createGitHubPublishMintingBroker(
       }
       if (request.installationId === "" || request.repoFullName === "") {
         // Both identity dimensions are required: the installation to mint
-        // against and the repository to scope the grant to.
-        return refusalFromMint(
-          "the per-job GitHub installation-token mint cannot run: the plan carries no installation or repository identity to scope the mint to",
-        );
+        // against and the repository to scope the mint to. This mint-path
+        // refusal is diagnosed controller-side too (the executor keeps
+        // only the code), with a distinct fixed string: the mint was
+        // never reached, so it is not a mint failure.
+        const noIdentity =
+          "the per-job GitHub installation-token mint cannot run: the plan carries no installation or repository identity to scope the mint to";
+        onMintFailure(noIdentity);
+        return refusalFromMint(noIdentity);
       }
       let minted: { readonly value: string; readonly expiresAtMs: number };
       try {
         minted = await mint(request.installationId, request.repoFullName);
-      } catch {
+      } catch (error) {
         // The mint's own reason is bounded and credential-free by its
         // contract, but the broker refusal stays a FIXED string: the
         // closed-vocabulary reason must never echo mint or transport
-        // detail toward the executor boundary.
+        // detail toward the executor boundary. The mint's diagnosis is
+        // reported to the controller side only, where the code alone
+        // would misread a transient App failure as missing configuration.
+        onMintFailure(
+          `the per-job GitHub installation-token mint failed: ${mintFailureDetail(errorMessage(error))}`,
+        );
         return refusalFromMint("the per-job GitHub installation-token mint failed");
       }
       // The vault's material discipline applied to mint output too
@@ -1090,6 +1106,7 @@ export function createGitHubPublishMintingBroker(
         || !Number.isFinite(minted.expiresAtMs)
         || minted.expiresAtMs < 0
       ) {
+        onMintFailure("the per-job GitHub installation-token mint returned no usable material");
         return refusalFromMint("the per-job GitHub installation-token mint returned no usable material");
       }
       return { ok: true, material: Object.freeze({ value: minted.value, expiresAtMs: minted.expiresAtMs }) };
@@ -1104,6 +1121,18 @@ export function createGitHubPublishMintingBroker(
       return base.describe();
     },
   };
+}
+
+/** The mint error's message for the CONTROLLER-side diagnostic: the
+ * composed mint's own contract says its reason is bounded and
+ * credential-free (same discipline as `tokenFor`), but a diagnostic is
+ * exactly where an injected mint's output is not taken at its word —
+ * whitespace is collapsed so one mint failure is one stderr line (a
+ * newline-bearing message could forge extra log lines), and the detail is
+ * truncated. Never crosses the executor boundary. */
+function mintFailureDetail(message: string): string {
+  const singleLine = message.replace(/\s+/gu, " ").trim();
+  return singleLine.length <= 200 ? singleLine : `${singleLine.slice(0, 199)}…`;
 }
 
 /** A mint-path refusal: the closed `unknown_reference` code (the mint
@@ -1221,6 +1250,7 @@ export async function controllerMain(
         credentialVault,
         mintInstallationToken,
         startup.instance.forges.map((entry) => entry.credential),
+        (detail) => diagnostic(detail),
       );
   const credentialBinding = createWorkerCredentialBinding({
     instance: startup.instance,

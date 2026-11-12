@@ -1795,6 +1795,115 @@ test("a mint that yields no usable material fails closed (#1624)", async () => {
   }
 });
 
+test("a mint failure diagnoses controller-side, never in the refusal (#1624 review)", async () => {
+  const base = {
+    async resolve() {
+      return { ok: false as const, code: "unknown_reference" as const, reason: "not held" };
+    },
+    revoke() {
+      return false;
+    },
+    describe() {
+      return [];
+    },
+  };
+  const mintRequest = {
+    purpose: "forge_publish" as const,
+    platform: "github" as const,
+    installationId: "4242",
+    repoFullName: "owner/repo",
+    profileName: "",
+  };
+  const details: string[] = [];
+  // A plan with no mint identity: the mint is never reached, and this
+  // mint-path refusal is diagnosed controller-side with its own fixed
+  // string (the executor keeps only the `unknown_reference` code).
+  const noIdentity = createGitHubPublishMintingBroker(
+    base,
+    async () => {
+      throw new Error("must not be reached");
+    },
+    ["forge-cred"],
+    (detail) => {
+      details.push(detail);
+    },
+  );
+  const identityRefused = await noIdentity.resolve("forge-cred", {
+    ...mintRequest,
+    installationId: "",
+  });
+  assert.equal(identityRefused.ok, false);
+  assert.equal(
+    details[0],
+    "the per-job GitHub installation-token mint cannot run: the plan carries no installation or repository identity to scope the mint to",
+  );
+  // A transient App-side throw: the daemon's diagnostic names the mint's
+  // diagnosis (so `unknown_reference` is not misread as missing config),
+  // while the refusal toward the executor stays the FIXED reason.
+  const thrown = createGitHubPublishMintingBroker(
+    base,
+    async () => {
+      throw new Error("GitHub App authentication failed:\ninstallation rate limited by api.github.com");
+    },
+    ["forge-cred"],
+    (detail) => {
+      details.push(detail);
+    },
+  );
+  const refused = await thrown.resolve("forge-cred", mintRequest);
+  assert.equal(refused.ok, false);
+  if (!refused.ok) {
+    assert.equal(refused.code, "unknown_reference");
+    assert.equal(refused.reason, "the per-job GitHub installation-token mint failed");
+  }
+  assert.equal(details.length, 2);
+  assert.ok(
+    details[1]?.includes("the per-job GitHub installation-token mint failed: GitHub App authentication failed: installation rate limited"),
+    details[1] ?? "",
+  );
+  // Mint output is not taken at its word for the single-line discipline:
+  // the newline-bearing throw is one diagnostic line, never two.
+  assert.ok(!details[1]?.includes("\n"), details[1] ?? "");
+  // An oversized mint message stays bounded.
+  const oversized = createGitHubPublishMintingBroker(
+    base,
+    async () => {
+      throw new Error(`x${"y".repeat(500)}`);
+    },
+    ["forge-cred"],
+    (detail) => {
+      details.push(detail);
+    },
+  );
+  await oversized.resolve("forge-cred", mintRequest);
+  assert.equal(details.length, 3);
+  // The 51-char prefix plus the 200-char bounded detail, nothing looser.
+  assert.ok((details[2] ?? "").length <= 251, String((details[2] ?? "").length));
+  // Unusable mint output gets the fixed controller-side diagnostic too.
+  const unusable = createGitHubPublishMintingBroker(
+    base,
+    async () => ({ value: "", expiresAtMs: 1_800_000_000_000 }),
+    ["forge-cred"],
+    (detail) => {
+      details.push(detail);
+    },
+  );
+  await unusable.resolve("forge-cred", mintRequest);
+  assert.equal(details[3], "the per-job GitHub installation-token mint returned no usable material");
+  // A served mint reports nothing.
+  const served = createGitHubPublishMintingBroker(
+    base,
+    async () => ({ value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 }),
+    ["forge-cred"],
+    (detail) => {
+      details.push(detail);
+    },
+  );
+  const ok = await served.resolve("forge-cred", mintRequest);
+  assert.equal(ok.ok, true);
+  assert.equal(details.length, 4);
+});
+
 test("the composed GitHub mint is repository-scoped and speaks epoch-ms expiry (#1624)", async () => {
   // Pins the two conversion rules the fake-mint binding tests cannot see:
   // GitHub's `expires_at` (epoch SECONDS on the wire) becomes the #735
