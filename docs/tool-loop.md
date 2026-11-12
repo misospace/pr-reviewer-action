@@ -163,7 +163,7 @@ scale with it:
 
 | Limit | No window declared | Window declared (normal range, ceiling) | Input override |
 | --- | --- | --- | --- |
-| Conversation budget (compaction threshold) | 24,000 tokens | ~25% of the window, up to 250k tokens | — |
+| Conversation budget (compaction threshold) | 24,000 tokens | ~75% of the window, up to 250k tokens | `tool-max-conversation-tokens` |
 | First-turn corpus | 50 KB | ~15% of the window, up to 600 KB | `tool-corpus-max-bytes` |
 | Each tool result | 12 KB | ~2% of the window, up to 64 KB | `tool-max-response-bytes` |
 
@@ -177,7 +177,17 @@ tokens of framing, so the conversation and each turn's completion always fit;
 the first-turn corpus stays within ~60% of the conversation budget and each
 result within ~8%. A window too small for the per-turn completion plus a
 4,000-token conversation is refused at startup. For a 1M-token model that is
-250k tokens / 450 KB / 60 KB; for 262k it is 65k tokens / 118 KB / 16 KB.
+250k tokens / 450 KB / 60 KB; for 262k it is 196k tokens / 118 KB / 16 KB.
+The conversation budget is measured against `approxTokens()`, which counts
+the system prompt and every message and tool result — the schemas are not
+part of that count. They ride in the request's `tools` field, and the
+non-conversation remainder covers them: at a 131,072-token window the ~98.3k
+watermark leaves ~32.7k tokens outside the conversation, and the full
+advertised schema set is under 10 KB (~2.3k approximate tokens), well inside
+what the completion and framing reserves already left.
+`tool-max-conversation-tokens` overrides the derived watermark directly; it
+must be positive and must fit the declared window after those reserves, or
+the run is refused rather than silently capped.
 Explicit byte inputs are operator overrides: they're used as-is, even
 beyond the derived envelope, and fitting the model's window is then up to
 you. The marker's
@@ -187,8 +197,9 @@ of it the conversation actually reached (see [Telemetry](telemetry.md)).
 ### Context compaction
 
 When the conversation outgrows its context budget, the oldest tool
-results are compacted before the next turn so the model's view stays within
-budget while the newest results stay verbatim:
+results are compacted before the next turn so the model's view fits back
+under the watermark, with the newest results verbatim (the exception is
+**Protected overflow** below):
 
 - Default: blunt truncation of the oldest results.
 - `tool-loop-summarize: "true"`: the oldest results are folded into a
@@ -197,6 +208,25 @@ budget while the newest results stay verbatim:
   (`tool-loop-summarize-max-tokens` bounds that call, default 512). If
   summarization frees nothing or fails, the loop falls back to truncation —
   truncation is always the backstop.
+
+Both paths leave the two newest tool results verbatim (#1635) — they are
+what the model is acting on, and rewriting fresh evidence is exactly what
+the pre-#1635 loop did far below the model's real window. If the first
+truncation pass still leaves the conversation over the watermark, a second
+deterministic pass compacts the same old results to a hard floor; results
+already at or below the cap are untouched, so repeated rounds are stable.
+
+**Protected overflow (#1635).** If even the hard-floored old results leave
+the conversation over the watermark, the protected newest results alone do
+not fit. Nothing is dropped or rewritten further: the overflow is recorded
+(`overflow_protected: true` in the harness artifact's
+`tool_loop_telemetry.compaction`) and the request is sent anyway. Such a
+run can therefore fail at the provider with a context-window error instead
+of degrading — an intentional policy: an attributable provider error beats
+silently discarded evidence. Every compaction pass also records a
+content-free event in `compaction.events` (approximate tokens before and
+after, results shortened, bytes freed, and whether the change invalidated
+the provider's prompt cache).
 
 Every turn after the first states the remaining request/round budget
 in-conversation. Once two or fewer requests remain, the note switches from
