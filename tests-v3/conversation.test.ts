@@ -437,6 +437,12 @@ test("#1635: a result that already carries the marker text frees nothing and is 
 // that rewrites them.
 test("#1635: both compaction paths protect the same default number of newest results", async () => {
   const oversized = (n: number) => `${"x".repeat(4000)} ${n}`;
+  // Derived from the constant, so raising it keeps this pin honest (one result
+  // beyond the protected count; the protected tail survives verbatim).
+  const keptVerbatim = Array.from(
+    { length: DEFAULT_PROTECTED_NEWEST_RESULTS },
+    (_, k) => oversized(k + 1),
+  );
   const truncating = new Conversation();
   const folding = new Conversation();
   for (let i = 0; i < DEFAULT_PROTECTED_NEWEST_RESULTS + 1; i++) {
@@ -449,14 +455,14 @@ test("#1635: both compaction paths protect the same default number of newest res
   const keptTruncated = truncEvents.slice(-DEFAULT_PROTECTED_NEWEST_RESULTS);
   assert.deepEqual(
     keptTruncated.map((e) => e.content),
-    [oversized(1), oversized(2)],
+    keptVerbatim,
     "the newest results stay verbatim by default",
   );
   assert.equal(await folding.summarizeOldestToolResults(() => "digest"), 1);
   const foldEvents = folding.events as Array<{ content: string }>;
   assert.deepEqual(
     foldEvents.slice(-DEFAULT_PROTECTED_NEWEST_RESULTS).map((e) => e.content),
-    [oversized(1), oversized(2)],
+    keptVerbatim,
     "the same newest count survives the fold by default",
   );
 });

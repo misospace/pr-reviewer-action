@@ -392,8 +392,8 @@ export const TOOL_RESULT_MAX_BYTES = 8000;
 /** #1635: how many of the newest tool results a compaction pass leaves verbatim
  * when the caller does not state a count. Both overflow paths share this ONE
  * default (#1638 review) so a future caller that omits the option cannot
- * silently opt out of the "never touch the newest results" invariant. Matches
- * the loop driver's configured default (`summarizeKeepNewest`). */
+ * silently opt out of the "never touch the newest results" invariant. The loop
+ * driver builds `summarizeKeepNewest` from this same constant. */
 export const DEFAULT_PROTECTED_NEWEST_RESULTS = 2;
 
 /** Approximate bytes-per-token used by the budget helpers. Deliberately

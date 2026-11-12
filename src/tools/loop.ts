@@ -26,6 +26,7 @@
  */
 import {
   Conversation,
+  DEFAULT_PROTECTED_NEWEST_RESULTS,
   pyDumps,
   pyDumpsCompactSortedAscii,
   pyDumpsSorted,
@@ -819,7 +820,9 @@ export function adaptiveLoopBudgets(
     wallClockSec,
     maxConversationTokens: 24000,
     truncatedResultBytes: 2000,
-    summarizeKeepNewest: 2,
+    // #1638 review: ONE constant with the Conversation compaction default, so
+    // the driver's protected count and the class's cannot drift apart.
+    summarizeKeepNewest: DEFAULT_PROTECTED_NEWEST_RESULTS,
   };
 }
 
