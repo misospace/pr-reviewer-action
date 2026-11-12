@@ -1205,7 +1205,7 @@ test("#1634 (human review): the stale-head, wrong-package/version distinctions s
   assert.deepEqual(foldedExact.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
 });
 
-test("#1634 (re-review): identity tokens match as EXACT identities, not substrings — the version prefix (1.2.3 vs 1.2.30), the repo-slug prefix (owner/repo vs owner/repository), and a head sha embedded in a longer hex run stay unrelated-executed-call while the exact-identity positives discharge, in BOTH folds", () => {
+test("#1634 (re-review): identity tokens match as EXACT identities, not substrings — the version prefix (1.2.3 vs 1.2.30), the version's build-metadata extension (1.2.3 vs 1.2.3+build.7), the version's pre-release extension (1.2.3 vs 1.2.3-beta), the repo-slug prefix (owner/repo vs owner/repository), and a head sha embedded in a longer hex run stay unrelated-executed-call while the exact-identity positives discharge, in BOTH folds", () => {
   const head = "a".repeat(40);
   // A DIFFERENT (longer) hex identity that merely contains the head as a
   // prefix/substring — the #1634 re-review's SHA boundary collision class.
@@ -1217,9 +1217,14 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
 
   // The prefix-collision targets: each successful forge read carries the
   // check's tokens only as SUBSTRINGS of a different identity — the version
-  // 1.2.3 inside 1.2.30, the slug owner/repo inside owner/repository, the
-  // head inside a longer hex run. None is the identity the check names, so
-  // every cited row fails closed as unrelated-executed-call in both folds.
+  // 1.2.3 inside 1.2.30, inside a build-metadata extension (1.2.3+build.7,
+  // the re-review's round-3 case: the generic segment extenders omit `+`, so
+  // before the kind-authoritative boundary fix the generic segment branch
+  // admitted the occurrence versionBoundaryHolds intentionally rejects), or
+  // inside a pre-release extension (1.2.3-beta); the slug owner/repo inside
+  // owner/repository; the head inside a longer hex run. None is the identity
+  // the check names, so every cited row fails closed as
+  // unrelated-executed-call in both folds.
   const collisions: ExecutedCallEvidenceIndex = {
     gate: true,
     refused: false,
@@ -1227,12 +1232,16 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
       { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.30" },
       { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repository" },
       { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${embedded64}` },
+      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3+build.7" },
+      { id: "call-5", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3-beta" },
     ],
   };
   const collisionCases: Array<[string, string]> = [
     [versionCheck, "the tag fetch at call-1 confirms 1.2.3"],
     [slugCheck, "the forge read at call-2 confirms it"],
     [shaCheck, "the commit fetch at call-3 confirms the head"],
+    [versionCheck, "the release fetch at call-4 confirms 1.2.3"],
+    [versionCheck, "the pre-release fetch at call-5 confirms 1.2.3"],
   ];
   for (const [check, rationale] of collisionCases) {
     const folded = foldObligationDispositions(
@@ -1246,8 +1255,10 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
   }
 
   // The exact-identity positives for the SAME checks: one call per check
-  // carrying the exact named identity (tag v1.2.3, repo owner/repo, the
-  // full head) discharges in both folds.
+  // carrying the exact named identity (bare/tagged v1.2.3 with no version
+  // extension, repo owner/repo, the full head) discharges in both folds —
+  // including exact counterparts of the build-metadata and pre-release
+  // collision calls, so the boundary fix is what separates the pairs.
   const exact: ExecutedCallEvidenceIndex = {
     gate: true,
     refused: false,
@@ -1255,6 +1266,8 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
       { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
       { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repo" },
       { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${head}` },
+      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3" },
+      { id: "call-5", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
     ],
   };
   for (const [check, rationale] of collisionCases) {

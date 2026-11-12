@@ -287,8 +287,10 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
 /** #1634 (re-review): the required tokens are EXACT identities, so the
  * target-side match is boundary-aware per identity kind, never a bare
  * substring of the flattened target. The shapes re-used here mirror the
- * extractor regexes above (a token can only be verified under the kinds it
- * could have been extracted from). */
+ * extractor regexes above: a token that matches a kind shape is verified
+ * under that kind's boundary ALONE (authoritative — the generic segment
+ * rule must not weaken version/SHA semantics), and only a kindless token
+ * (slug/path) falls to the segment boundary. */
 const VERSION_TOKEN_SHAPE_RE = /^\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?$/;
 const HEAD_SHA_TOKEN_SHAPE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -342,12 +344,22 @@ function versionBoundaryHolds(text: string, start: number, end: number): boolean
 }
 
 /** Whether the bounded target carries `token` as an EXACT identity: some
- * occurrence of the token is boundary-delimited under one of the identity
- * kinds the token could have been extracted as (slug/path always; version
- * and sha when shaped so). A token that appears only inside a longer
+ * occurrence of the token is boundary-delimited under the identity kind the
+ * token was extracted as — slug/path tokens under the generic segment
+ * boundary, and (when shaped so) version and head-sha tokens under their
+ * KIND-SPECIFIC boundary alone. A token that appears only inside a longer
  * identity — `1.2.3` in `1.2.30`, `owner/repo` in `owner/repository`, a
  * head sha embedded in a longer hex run — is NOT carried, and the row
- * fails closed as `unrelated`. Empty target or token carries nothing. */
+ * fails closed as `unrelated`. Empty target or token carries nothing.
+ *
+ * #1634 (re-review, round 3): the kind-specific boundary is AUTHORITATIVE
+ * for version/SHA tokens — the generic segment rule is never consulted for
+ * them, so it cannot weaken version/SHA semantics. Its extender set omits
+ * `+`, so consulting it first let a version flush against build metadata
+ * (`1.2.3` inside `1.2.3+build.7`) certify bare `1.2.3` before
+ * `versionBoundaryHolds` could reject the build-metadata extension —
+ * evidence for `1.2.3+build.7` certified exact `1.2.3`, the same
+ * proof-identity class the layer exists to refuse. */
 function targetCarriesIdentity(target: string, token: string): boolean {
   if (target === "" || token === "") return false;
   const haystack = target.toLowerCase();
@@ -357,9 +369,13 @@ function targetCarriesIdentity(target: string, token: string): boolean {
   let at = haystack.indexOf(needle);
   while (at !== -1) {
     const end = at + needle.length;
-    if (segmentBoundaryHolds(haystack, at, end)) return true;
-    if (asVersion && versionBoundaryHolds(haystack, at, end)) return true;
-    if (asSha && shaBoundaryHolds(haystack, at, end)) return true;
+    if (asVersion) {
+      if (versionBoundaryHolds(haystack, at, end)) return true;
+    } else if (asSha) {
+      if (shaBoundaryHolds(haystack, at, end)) return true;
+    } else if (segmentBoundaryHolds(haystack, at, end)) {
+      return true;
+    }
     at = haystack.indexOf(needle, at + 1);
   }
   return false;
