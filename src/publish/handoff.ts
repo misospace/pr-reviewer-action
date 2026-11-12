@@ -48,6 +48,7 @@ import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { safePath } from "../findings/safe-path.js";
 import { RESERVED_MARKER_PATTERNS, REVIEW_HANDOFF_ANCHOR } from "../metadata/markers.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
+import type { ReviewDisposition } from "./disposition.js";
 
 /** The container anchor. It marks the START of the action-owned block and is
  * reserved against model-authored text on every published surface, so the
@@ -389,6 +390,19 @@ export interface ReviewHandoffInput {
   headSha: string;
   verdict: string;
   reviewResult: string;
+  /** #1596: the review's authoritative disposition (`computeReviewDisposition`,
+   * computed once at the publish boundary). When it proves a blocking defect —
+   * the final `request_changes` verdict OR a still-open blocker/major finding
+   * a non-strict verdict policy left under an approve — the handoff's
+   * `verdict` and `review_result` publish the AUTHORITATIVE semantics
+   * ("request_changes" and "issues", the marker word both verdict policies
+   * give a proven blocking defect), never the raw model verdict the native
+   * event overrode: without this, the native review could publish
+   * REQUEST_CHANGES while this document told a controller `approve`/`clean`.
+   * Absent, or a disposition that proves no blocker, leaves both fields at
+   * the run's own values — every other disposition kind is DERIVED from that
+   * raw pair, so the pair already agrees with it. */
+  disposition?: ReviewDisposition | undefined;
   requiredChecks: string;
   /** The FINAL post-enforcement findings (the artifact's findings), never
    * raw model output. */
@@ -563,6 +577,21 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // #1521: the shared row projection (the local bundle uses the same one).
   const obligations = boundedObligationRows(input.unresolvedReviewObligations);
   const derivedState = publishedDerivedObligationState(input.derivedObligationState);
+  // #1596: the authoritative disposition owns the handoff's verdict-level
+  // words when it proves a blocking defect. The native review event and the
+  // published recommendation line already follow the disposition (an open
+  // blocker/major finding under a non-strict approve publishes
+  // REQUEST_CHANGES); these two fields must follow it too, or the
+  // machine-readable handoff would tell a controller `approve`/`clean`
+  // beside a blocking request. "issues" is the marker word BOTH verdict
+  // policies give a proven blocking defect (`strictReviewResult` and the
+  // non-strict `markerReviewResult` both map a `request_changes` verdict to
+  // it), so the handoff states exactly what the marker states for the
+  // disposition it carries. Every other disposition kind is DERIVED FROM the
+  // raw verdict and review_result (the kind precedence cannot reach
+  // `incomplete`/`approve`/`unavailable` without them), so for those the raw
+  // pair already agrees and is published unchanged.
+  const blockerOwned = input.disposition?.blockerProven === true;
   const serialize = (
     items: ReviewHandoffItem[],
     reqIds: string[],
@@ -574,8 +603,8 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: boundedPublishedText(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     head_sha: boundedPublishedText(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    verdict: boundedPublishedText(input.verdict, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    review_result: boundedPublishedText(input.reviewResult, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    verdict: boundedPublishedText(blockerOwned ? "request_changes" : input.verdict, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    review_result: boundedPublishedText(blockerOwned ? "issues" : input.reviewResult, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     required_checks: boundedPublishedText(input.requiredChecks, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     items,
     items_total: candidates.length,
