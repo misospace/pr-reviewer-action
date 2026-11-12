@@ -78,7 +78,6 @@ export const EXACT_CONFIG_KEYS: readonly string[] = [
   "TOOL_TURN_TIMEOUT_SEC",
   "TOOL_CORPUS_MAX_BYTES",
   "TOOL_MAX_TOKENS_PER_TURN",
-  "TOOL_MAX_CONVERSATION_TOKENS",
   "TOOL_MAX_RESPONSE_BYTES",
   "TOOL_ALLOWED_GH_API_REPOS",
   "TOOL_REQUEST_TIMEOUT_SEC",
@@ -397,6 +396,15 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   if ((env.DERIVED_OBLIGATIONS ?? "").trim().toLowerCase() === "true") {
     lines.push("DERIVED_OBLIGATIONS=true");
   }
+  // #1635 (PR #1638 review): the compaction watermark changes what the
+  // native loop sends, so a CONFIGURED override must invalidate a cached
+  // review. But its contract default is "" and `stageEnvFromConfig` stages
+  // every input even when empty, so an exact key here would emit
+  // `TOOL_MAX_CONVERSATION_TOKENS=` for every installation and churn every
+  // cached review on upgrade. Conditional like the blocks above: an unset
+  // configuration contributes nothing and keeps the pre-feature hash.
+  const conversationTokens = (env.TOOL_MAX_CONVERSATION_TOKENS ?? "").trim();
+  if (conversationTokens !== "") lines.push(`TOOL_MAX_CONVERSATION_TOKENS=${conversationTokens}`);
   // #1003/#1005: human-review triage and its routing layer only run when
   // opted in, so only the enabled state contributes and the defaults leave
   // existing fingerprints valid (same rule as CLAIM_FALSIFICATION above).
