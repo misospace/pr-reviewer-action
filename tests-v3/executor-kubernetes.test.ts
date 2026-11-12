@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -520,6 +520,74 @@ test("a pre-created run directory chain still ends up 0o2770 after launch (the c
     } finally {
       process.umask(oldUmask);
     }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the chmod walk restyles every nested component but never the claim root itself (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    // A DISTINCT initial claim-root mode: the claim root is the volume
+    // mount point whose mode the kubelet owns (fsGroup) — the executor's
+    // walk must leave it exactly as it found it, whatever it was.
+    chmodSync(fixture.root, 0o755);
+    const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
+    // Pre-created nested components INSIDE the volume mapping (created
+    // before the launch, so nothing the controller's umask freshly made):
+    // the walk must land each of them on the shared-claim mode.
+    const runDir = path.join(fixture.root, "pre", "deeper");
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir,
+      requestPath: path.join(runDir, "request.json"),
+      resultPath: path.join(runDir, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const handle = await fixture.executor.start(request, new AbortController().signal);
+    await handle.collect();
+    // Every component strictly below the claim root is group-accessible...
+    assert.equal(statSync(path.join(fixture.root, "pre")).mode & 0o7777, 0o2770);
+    assert.equal(statSync(runDir).mode & 0o7777, 0o2770);
+    // ...and the claim root's mode is EXACTLY what the fixture gave it —
+    // the walk stops AT the root, never restyles the shared volume root
+    // other workloads depend on.
+    assert.equal(claimRootModeBefore, 0o755, "the fixture's distinct initial claim-root mode survived to the comparison");
+    assert.equal(statSync(fixture.root).mode & 0o7777, claimRootModeBefore);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a run directory equal to the claim root refuses the launch instead of chmod-ing the claim root (#1631)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  try {
+    chmodSync(fixture.root, 0o755);
+    const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
+    // The run directory IS the claim root: there is no component strictly
+    // below the root for the walk to restyle, and the executor must never
+    // restyle the root itself (the kubelet owns its mode) — so the launch
+    // is refused cleanly instead.
+    const request = validateExecutionRequest({
+      ...fixture.request,
+      runDir: fixture.root,
+      requestPath: path.join(fixture.root, "request.json"),
+      resultPath: path.join(fixture.root, "result.json"),
+    });
+    fixture.api.workerRequest = request;
+    const handle = await fixture.executor.start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /claim root/);
+    // The claim root was never restyled and never written into: the
+    // refusal precedes the envelope write, so no request file exists on
+    // the root either.
+    assert.equal(statSync(fixture.root).mode & 0o7777, claimRootModeBefore);
+    assert.equal(existsSync(request.requestPath), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

@@ -465,10 +465,17 @@ function coveringControllerRoot(
  * own umask, so an explicit `chmod` is what makes the group traversal —
  * and the run directory's group-writability (the worker creates the
  * result file and engine artifacts inside it) — deterministic regardless
- * of umask. The claim root itself is never chmod-ed (its group access is
- * the kubelet's fsGroup application to own), and a covering root of `/`
- * (a pathological mapping) narrows the walk to `runDir` alone — never
- * system directories.
+ * of umask. The claim root itself is never chmod-ed — in NO case does it
+ * enter the walk's chmod list (a nested run directory walks its parents
+ * down TO the root but never past it into the root; its group access is
+ * the kubelet's fsGroup application to own, and restyling it would
+ * change a shared volume root other workloads depend on) — and a
+ * covering root of `/` (a pathological mapping) narrows the walk to
+ * `runDir` alone — never system directories. A run directory EQUAL to
+ * the claim root is refused outright: there is no component strictly
+ * below the root for the walk to restyle, and the executor must not
+ * launch on a directory whose group access it cannot establish without
+ * touching the root.
  *
  * The same no-follow discipline as the containment proofs applies: every
  * component is `lstat`-ed FIRST and a symbolic link or a non-directory
@@ -486,12 +493,18 @@ async function shareRunDirectoryGroup(
   if (root === null) {
     return `${runDir} is not covered by any configured volume mapping, so its components cannot be made group-accessible for the shared claim`;
   }
+  if (runDir === root) {
+    return `${runDir} is the volume mapping's claim root itself, whose mode the executor must never change (the kubelet owns the claim root's mode), so a run directory equal to the claim root is not supported`;
+  }
+  // The chain covers every component STRICTLY BELOW the claim root: it
+  // walks the parents down TO the root but never past it — the root
+  // itself is excluded from the chmod list in every case (see above).
   const chain: string[] = [runDir];
   let current = runDir;
   while (current !== root && root !== "/") {
     const parent = dirname(current);
     if (parent === current || !(parent === root || parent.startsWith(`${root}/`))) break;
-    chain.push(parent);
+    if (parent !== root) chain.push(parent);
     current = parent;
   }
   for (const component of chain) {
