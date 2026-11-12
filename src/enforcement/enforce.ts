@@ -12,7 +12,7 @@ import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.j
 import { applyReviewObligationEnforcement, isForcingObligation, type ReviewObligation } from "./review-obligations.js";
 import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
-import { harnessExecutionCounts } from "../tools/execution-counts.js";
+import { harnessExecutionCounts, harnessFailuresAllDeadlineClamps } from "../tools/execution-counts.js";
 
 export interface EvidenceProviderArtifact {
   has_blocker?: boolean;
@@ -32,7 +32,7 @@ export interface ToolHarnessArtifact {
    * the successful count for that purpose is exactly what kept the check
    * from ever firing. */
   executed_request_count?: number;
-  tool_results?: Array<{ status?: string }>;
+  tool_results?: Array<{ status?: string; result?: { error?: string } }>;
   /** The counters above are read through ONE shared reader
    * (`src/tools/execution-counts.ts`), so this enforcement, the step
    * summary and the evidence-cause consumer can never read the same
@@ -121,8 +121,19 @@ function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string |
   //
   // A run that dispatched NO call to an executor is NOT an all-failed run —
   // there was no tool call to fail; the min-successful gate owns that case.
+  //
+  // #1464 (review): a call whose failure IS a loop-deadline clamp is not a
+  // tool failure either — the deadline stopped the executor, the harness did
+  // not break. The smart-tier fallback trigger in `src/tools/harness.ts`
+  // already reads the shared predicate that tells the two apart; the
+  // all-failed read uses it too, so a run whose every call was clamped by
+  // the exploration deadline stays silent here instead of forcing
+  // request_changes. Only the `tool_results` trace carries the per-call
+  // error text — an artifact without it cannot prove WHY calls failed, so
+  // the counters keep their fail-closed reading.
   const counts = harnessExecutionCounts(harness);
-  if (counts.attempted !== null && counts.attempted > 0 && counts.succeeded === 0) {
+  if (counts.attempted !== null && counts.attempted > 0 && counts.succeeded === 0
+    && !harnessFailuresAllDeadlineClamps(harness)) {
     return "all tool requests failed";
   }
   return null;

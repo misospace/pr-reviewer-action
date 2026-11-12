@@ -9,7 +9,13 @@ import {
   type HarnessResult,
   type RunNativeLoopInput,
 } from "../src/tools/harness.js";
-import { harnessExecutionCounts, harnessGatheredNoEvidence } from "../src/tools/execution-counts.js";
+import {
+  TOOL_LOOP_DEADLINE_ERROR,
+  TOOL_LOOP_EXPLORATION_DEADLINE_ERROR,
+  harnessExecutionCounts,
+  harnessFailuresAllDeadlineClamps,
+  harnessGatheredNoEvidence,
+} from "../src/tools/execution-counts.js";
 import { applyToolHarnessFailureEnforcement, type ToolHarnessArtifact } from "../src/enforcement/enforce.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 
@@ -185,5 +191,103 @@ test("#1606: the overlay stays silent for a run that dispatched no call to an ex
     applyToolHarnessFailureEnforcement(artifact(), partial).applied,
     true,
     "an artifact without the counters still reports an all-failed run",
+  );
+});
+
+test("#1464/#1606 review: a deadline-clamped failure is not a tool failure — the overlay stays silent", () => {
+  // The exact executor-result shape the loop writes into `tool_results` when
+  // a call is clamped by a deadline (src/tools/harness.ts executeFn).
+  const clampedCall = (error: string, tool = "read_file") => ({
+    tool,
+    status: "error",
+    result: { error },
+  });
+  const clamped = {
+    planned_request_count: 2,
+    executed_request_count: 2,
+    successful_request_count: 0,
+    refused_request_count: 0,
+    deduplicated_request_count: 0,
+    tool_results: [
+      clampedCall(TOOL_LOOP_EXPLORATION_DEADLINE_ERROR),
+      clampedCall(TOOL_LOOP_EXPLORATION_DEADLINE_ERROR, "list_dir"),
+    ],
+  };
+  assert.equal(harnessFailuresAllDeadlineClamps(clamped), true);
+  assert.deepEqual(
+    applyToolHarnessFailureEnforcement(artifact(), clamped),
+    { applied: false, reason: "" },
+    "a run whose every call was clamped by the exploration deadline is not an all-failed run",
+  );
+
+  // The whole-run deadline text is likewise not a tool failure.
+  const wholeRun = { ...clamped, tool_results: [clampedCall(TOOL_LOOP_DEADLINE_ERROR)] };
+  assert.equal(applyToolHarnessFailureEnforcement(artifact(), wholeRun).applied, false);
+
+  // One real failure among the clamped calls reports the run again.
+  const mixed = {
+    tool_results: [
+      clampedCall(TOOL_LOOP_EXPLORATION_DEADLINE_ERROR),
+      clampedCall("read failed: EACCES", "list_dir"),
+    ],
+  };
+  assert.equal(harnessFailuresAllDeadlineClamps(mixed), false);
+  assert.equal(applyToolHarnessFailureEnforcement(artifact(), mixed).applied, true);
+
+  // Without the per-call trace nothing proves WHY the calls failed — the
+  // settled counters keep their fail-closed reading.
+  assert.equal(harnessFailuresAllDeadlineClamps({ executed_request_count: 2, successful_request_count: 0 }), false);
+  assert.equal(
+    applyToolHarnessFailureEnforcement(artifact(), {
+      executed_request_count: 2,
+      successful_request_count: 0,
+    }).applied,
+    true,
+  );
+});
+
+test("#1464/#1606 review: the overlay stays silent for the REAL artifact of a deadline-clamped run", async () => {
+  const { root: dir, deps } = workspace();
+  fs.writeFileSync(path.join(dir, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(dir, "src.ts"), "export const x = 1;\n");
+  // Wall clock 100s anchors the loop deadline at t=10 (110) with the verdict
+  // reserve (30s) cutting the exploration boundary at 80. The first model
+  // call returns with the clock jumped to 95 — past the boundary but inside
+  // the deadline — so the executor answers the boundary error, the next
+  // round stops at the reserve, and the closing verdict still runs (the
+  // #1464 shape). Every executed call of this run failed, only because the
+  // deadline stopped it: pre-#1606-review the all-failed overlay forced
+  // request_changes on exactly this artifact.
+  let jumped = false;
+  let calls = 0;
+  const scripted: unknown[] = [
+    openAiCalls([readCall("a1", "src.ts")]),
+    openAiVerdict(),
+  ];
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(deps({
+      env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+      transport: async () => {
+        const response = scripted[calls++];
+        if (calls === 1) jumped = true;
+        return response;
+      },
+      timeFn: () => (jumped ? 95 : 10),
+    }), { result }),
+  );
+  assert.equal(handled, true);
+  // The real artifact: one call attempted, none successful, and the failure
+  // IS the deadline marker.
+  assert.equal(result.executed_request_count, 1);
+  assert.equal(result.successful_request_count, 0);
+  const toolResults = result.tool_results as Array<{ status: string; result?: { error?: string } }>;
+  assert.equal(toolResults.length, 1);
+  assert.equal(toolResults[0]!.status, "error");
+  assert.equal(toolResults[0]!.result!.error, TOOL_LOOP_EXPLORATION_DEADLINE_ERROR);
+  // The overlay reads THAT artifact and stays silent.
+  assert.deepEqual(
+    applyToolHarnessFailureEnforcement(artifact(), result as unknown as ToolHarnessArtifact),
+    { applied: false, reason: "" },
   );
 });
