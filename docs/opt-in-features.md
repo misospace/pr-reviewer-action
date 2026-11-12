@@ -53,7 +53,7 @@ The features below default to `false`. None change the verdict policy on their o
 
 | Name | Default | Notes |
 | --- | --- | --- |
-| `risk-obligations.json` / `risk-obligations.md` | — | Per-run scan artifacts (JSON only when enabled) |
+| `risk-obligations.json` / `risk-obligations.md` | — | Per-run scan artifacts (both written only when the scan is enabled) |
 | `RISK_OBLIGATIONS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
 
 **Status:** default off; deterministic scan, model-free by construction (#1577).

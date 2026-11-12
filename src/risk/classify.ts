@@ -81,11 +81,13 @@ const LINE_COMMENT_MARKERS: Readonly<Record<string, string[]>> = Object.freeze({
  *  storage context for "schema".
  *
  *  The context is the word "mode" in any case spelling, with an optional
- *  plural "s". The character after it must not be a LOWERCASE letter, so
- *  "model" and "models" are not contexts while "mode", "Mode", "MODE",
- *  "file_mode", "FILE_MODE" and "modeBits" are. The letters are spelled out
- *  in both cases on purpose: the `i` flag folds `[a-z]` to cover the
- *  uppercase letters too, and then "modeBits" would be rejected. */
+ *  plural "s" ADJACENT to it: "modes" is a context, while "models" is
+ *  "mode"+"l"+"s" and never is. The character after the context must not
+ *  be a LOWERCASE letter, so "model", "models" and "remodeling" are not
+ *  contexts while "mode", "modes", "Mode", "MODE", "file_mode", "FILE_MODE"
+ *  and "modeBits" are. The letters are spelled out in both cases on
+ *  purpose: the `i` flag folds `[a-z]` to cover the uppercase letters too,
+ *  and then "modeBits" would be rejected. */
 const FILE_MODE_LITERAL = /\b(?:120000|100644|100755)\b/;
 const FILE_MODE_CONTEXT = /(?:[mM][oO][dD][eE][sS]?)(?![a-z])/;
 

@@ -149,6 +149,8 @@ test("#1577: a bare mode literal without mode vocabulary never fires", () => {
     "  if (FILE_MODE === \"120000\") continue;",
     "  const symlinkMode = \"120000\";",
     "  const modeBits = 120000;",
+    // The plural "s" is accepted when it is ADJACENT to the context word.
+    "  const modes = 120000;",
   ]) {
     assert.deepEqual(
       scanRiskObligations(fileDiff("src/context/treeentries.ts", [line])).obligations.map((row) => row.category),
@@ -159,6 +161,11 @@ test("#1577: a bare mode literal without mode vocabulary never fires", () => {
   // A word that merely starts with "mode" is not mode vocabulary.
   assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const model = \"gpt-4\"; const limit = 120000;"])).obligations, []);
   assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const models = 120000;"])).obligations, []);
+  // "models" is "mode" + "l" + "s": the plural "s" is not adjacent to the
+  // context word, so the context never matches it. Same for a word that
+  // merely ENDS with "mode" and keeps a lowercase letter after it.
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const remodeling = 120000;"])).obligations, []);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const demoded = 120000;"])).obligations, []);
 });
 
 test("#1577: ordinary code and lockfiles never fire", () => {
@@ -644,9 +651,10 @@ test("#1577: a disabled run leaves no risk artifacts at all", async () => {
     const req = engineRequest(server.url, f.runDir);
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, riskyDiff));
     assert.equal(existsSync(join(f.runDir, "risk-obligations.json")), false);
-    // The md slot is written empty unconditionally (like the claims slot);
-    // an empty section is byte-identical to an absent one in the corpus.
-    assert.equal(readFileSync(join(f.runDir, "risk-obligations.md")).length, 0);
+    // No risk artifact at all: a disabled scan writes neither the JSON
+    // record nor the corpus section file, so the run directory stays
+    // byte-identical to a pre-#1577 build.
+    assert.equal(existsSync(join(f.runDir, "risk-obligations.md")), false);
     if (existsSync(join(f.runDir, "review-obligations.json"))) {
       const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
         obligations: Array<{ source: string }>;
