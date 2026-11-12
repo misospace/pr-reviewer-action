@@ -370,6 +370,12 @@ FORGEJO_USER=reviewer
 FORGEJO_PASSWORD="selfhosted-e2e-pass"
 TOKEN_NAME="pr-reviewer-selfhosted-e2e"
 TMP="$(mktemp -d)"
+# The physical path: on macOS mktemp hands back a /var/... path whose first
+# component is a symlink, and the acquisition layer's real-directory check
+# refuses symlinked cache-root components (fail closed, #732) — the parity
+# run would fail every dispatch with "cache root path component is not a
+# real directory: /var".
+TMP="$(cd "$TMP" && pwd -P)"
 PG_PASSWORD="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
 WEBHOOK_SECRET="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
 FORGEJO_ADMIN_TOKEN="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
@@ -399,8 +405,10 @@ cleanup() {
   if [[ -n "$STUB_MODEL_PID" ]]; then
     kill "$STUB_MODEL_PID" >/dev/null 2>&1 || true
   fi
-  docker rm -f "$PG_NAME" "$FORGEJO_NAME" >/dev/null 2>&1 || true
-  rm -rf "$TMP"
+  if [[ "${SELF_HOSTED_KEEP_TMP:-}" != "1" ]]; then
+    docker rm -f "$PG_NAME" "$FORGEJO_NAME" >/dev/null 2>&1 || true
+    rm -rf "$TMP"
+  fi
 }
 trap cleanup EXIT
 
