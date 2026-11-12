@@ -165,7 +165,7 @@ test("#1577: a bare mode literal without mode vocabulary never fires", () => {
   // context word, so the context never matches it. Same for a word that
   // merely ENDS with "mode" and keeps a lowercase letter after it.
   assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const remodeling = 120000;"])).obligations, []);
-  assert.deepEqual(scanRiskObligations(fileDiff("src/ml/client.ts", ["  const demoded = 120000;"])).obligations, []);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/net/modem.ts", ["  const modemBuffer = 120000;"])).obligations, []);
 });
 
 test("#1577: ordinary code and lockfiles never fire", () => {
