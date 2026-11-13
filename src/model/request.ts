@@ -253,6 +253,13 @@ export function wireEffortOf(payload: TransportWirePayload): string {
  * fallback lane normally runs `ai-fallback-model`, so the common case is no
  * cross-lane reuse at all.
  *
+ * LENGTH FLOOR (#1655 review): Anthropic caches a prefix only when it reaches
+ * the model's minimum cacheable prompt length — from 512 up to 4,096 tokens
+ * depending on the model — and a shorter prefix is processed WITHOUT caching
+ * and WITHOUT any error. A system prompt below that floor keeps the
+ * checkpoint inert (no cost, no benefit), so the win above is real only for
+ * system prompts at or above the floor, not for every deployment.
+ *
  * Shaped exactly like the Conversation renderer's stable system breakpoint
  * (`[{ type: "text", text, cache_control: { type: "ephemeral" } }]`) so the
  * two surfaces cache identically and a gateway that already serves the native
