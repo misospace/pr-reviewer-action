@@ -381,11 +381,19 @@ const kubernetesTests = executorConformanceTests(
   {
     requestOf: (scenario: ConformanceScenario): ExecutionRequest => {
       const script = SCRIPTS[scenario];
-      const fixture = makeFixture(script, {
-        deadlineAtMs: scenario === "deadline"
-          ? Date.now() + 50
-          : scenario === "past-deadline" ? Date.now() - 1_000 : Date.now() + 60_000,
-      });
+      const deadlineAtMs = scenario === "deadline"
+        ? Date.now() + 50
+        : scenario === "past-deadline" ? Date.now() - 1_000 : Date.now() + 60_000;
+      // The deadline scenario's short window bounds the EXPIRY, not the
+      // pre-launch path: on a loaded runner a real 50 ms deadline expires
+      // before anything is launched, where "failed deadline" is already true
+      // without the expiry timer ever running. Its controller clock is held
+      // 50 ms short of the deadline so the expiry can only land after launch.
+      const fixture = makeFixture(
+        script,
+        { deadlineAtMs },
+        scenario === "deadline" ? () => deadlineAtMs - 50 : undefined,
+      );
       pending.set(scenario, fixture);
       return fixture.request;
     },
@@ -1456,11 +1464,12 @@ test("the per-run credential Secret is deleted when the execution settles — su
     { name: "success", script: { kind: "succeed", result: "ok" } as Script, deadlineMs: 60_000, expectedStatus: "completed" as const, expectedCategory: "", cancel: true },
     { name: "cancellation", script: { kind: "hang" } as Script, deadlineMs: 60_000, expectedStatus: "cancelled" as const, expectedCategory: "", cancel: true },
     // The deadline is the Job's OWN server-side expiry report, not a
-    // wall-clock timer: a timer short enough to make this test quick can
-    // expire inside the pre-launch path on a loaded runner, where the
-    // correct outcome is that NOTHING was projected — a run with no Secret
-    // to delete proves nothing here. The controller-side timer is pinned by
-    // the deadline-expiry test below and the conformance suite.
+    // wall-clock timer: a timer short enough to keep this test quick can
+    // expire inside the pre-launch path on a loaded runner, where the correct
+    // outcome is that NOTHING was projected — a run with no Secret to delete
+    // proves nothing here. The controller-side timer is pinned by the
+    // deadline-expiry test below, whose controller clock is held for exactly
+    // that reason.
     { name: "deadline", script: { kind: "fail", reason: "DeadlineExceeded" } as Script, deadlineMs: 60_000, expectedStatus: "failed" as const, expectedCategory: "deadline", cancel: false },
   ];
   for (const scenario of scenarios) {
