@@ -208,8 +208,10 @@ async function runChatRequestLoop(
       // unchanged so the tier seam sees the same instance and can fail over
       // immediately. Checked BEFORE the clamp/strip retries, deliberately: a
       // permanently-failed lane must not spend an extra wire attempt proving
-      // it, and both of those decisions only fire on a 400 whose body states a
-      // token cap or names a structured-output parameter, neither of which is
+      // it, and all three of those decisions only fire on a request-shape
+      // rejection whose body states a token cap, names a structured-output
+      // parameter, or names the system cache checkpoint (400, or the 415/422
+      // a validation-style gateway returns), none of which is
       // terminal evidence. The retry budgets and backoff constants below are
       // unchanged for every non-terminal failure.
       const terminal = classifyTerminalProviderFailure(outcome.failure);
