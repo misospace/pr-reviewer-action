@@ -74,6 +74,7 @@ import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
 import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } from "./executed-calls.js";
+import type { LoopEvidenceSettlement } from "./settlement.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
@@ -162,6 +163,16 @@ export interface ReviewObligation {
    * head-bound test-execution evidence discharged. Set only by
    * `reconcileObligationsWithCiEvidence`; absent on every other row. */
   resolvedBy?: { kind: "ci-evidence"; check: string; headSha: string };
+  /**
+   * #1659: the loop-settlement receipt — set ONLY by the fold's deferral to
+   * the canonical settlement record when the loop reported the row
+   * `discharged` with a successful admitted executed call and the
+   * finalization citation allocator would otherwise have flipped the row
+   * unresolved (uncited/shared/unrelated). Objective provenance only: the
+   * loop's admission (token/shape overlap) plus a successful executed call
+   * the loop recorded — never a semantic resolution on its own.
+   */
+  settledBy?: { kind: "loop-settlement"; call: string };
 }
 
 /** One row of the harness-authored candidates artifact, verbatim. */
@@ -543,6 +554,9 @@ export function foldObligationDispositions(
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
   executedCalls?: ExecutedCallEvidenceIndex,
   evidence?: RiskEvidenceReceipt,
+  // #1659: the canonical per-row settlement record the loop persisted.
+  // Absent/empty ⇒ byte-identical pre-#1659 behavior.
+  settlements?: ReadonlyMap<string, LoopEvidenceSettlement>,
 ): ReviewObligation[] {
   // #1627/#1634: the citation gate runs as a SHARED ALLOCATION pass after
   // the per-row shape fold (see `allocateCallCitations`) — one executed
@@ -730,14 +744,49 @@ export function foldObligationDispositions(
   // The shared allocation pass: an unassigned gated row never discharges.
   // A refused trace has NOTHING citable, so no allocation is attempted and
   // every gated row fails closed with its own reason.
+  //
+  // #1659: the deferral to the loop's own settlement — the ONE case where
+  // finalization's citation vocabulary disagrees with a settled row on
+  // ALLOCATION alone: the model cited a successful executed call the loop's
+  // own admission tied to this row, but the one-to-one allocator assigned
+  // that call to a DIFFERENT row (`citation-already-used`). There the loop's
+  // terminal settlement stands — the row's receipt (its admitting call id
+  // plus that call's successful execution) is objective provenance, not
+  // model prose, and a bookkeeping disagreement must not flip a row the
+  // loop settled. The allocator-refusal shapes that carry a REAL objection
+  // keep failing closed exactly as pre-#1659: `uncited-satisfaction` (the
+  // model cited NO call — a prose-only claim is never credit, #1627),
+  // `unrelated-executed-call` (the deterministic identity cannot bind the
+  // call to this row), and `malformed-executed-trace` (this runtime could
+  // not parse the trace the deferral would trust). A `cap-released`/`open`
+  // settlement never defers either (a budget release is not a settlement),
+  // and a legacy run with no record keeps today's behavior byte-for-byte.
   if (citationGate && gated.length > 0) {
     const index = executedCalls!;
     const outcomes = index.refused
       ? null
       : allocateCallCitations(gated.map(({ key, rationale }) => ({ key, rationale })), index.entries);
+    // #1659: the one-to-one receipt bound — a deferral receipt consumes its
+    // call id for THIS fold pass, so one executed successful call can never
+    // back two deferred rows (the #1627/#1634 invariant survives the
+    // deferral; a second same-call row fails closed as before).
+    const deferredCalls = new Set<string>();
     gated.forEach(({ position, cause }, allocation) => {
       const outcome = outcomes === null ? "uncited" : outcomes[allocation] ?? "uncited";
       if (outcome === "assigned") return;
+      const settlement = settlements?.get(folded[position]!.id);
+      const receiptCall = settlement?.settledVia === "discharged" ? settlement.successfulBy[0] : undefined;
+      if (outcome === "shared" && receiptCall !== undefined && !deferredCalls.has(receiptCall)) {
+        deferredCalls.add(receiptCall);
+        folded[position] = {
+          ...folded[position]!,
+          status: "satisfied",
+          cause: null,
+          reason: "ok",
+          settledBy: { kind: "loop-settlement", call: receiptCall },
+        };
+        return;
+      }
       folded[position] = {
         ...folded[position]!,
         status: "unresolved",
@@ -1068,11 +1117,15 @@ export function reviewObligationsToArtifact(
     // #1627: `reason` rides on every row the #1627 fold produced (a
     // pre-#1627 caller may pass rows without one; the field is then
     // omitted, exactly like the pre-#1449 shape).
-    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy }) => {
+    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy, settledBy }) => {
       const row: Record<string, unknown> = { id, source, text, status, cause };
       if (reason !== undefined) row.reason = reason;
       if (anchors !== undefined) row.anchors = anchors;
       if (resolvedBy !== undefined) row.resolved_by = { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha };
+      // #1659: the loop-settlement deferral receipt rides the artifact too —
+      // the explainable provenance for a satisfied row the citation
+      // allocator did not assign (absent on every other row).
+      if (settledBy !== undefined) row.settled_by = { kind: settledBy.kind, call: settledBy.call };
       return row;
     }),
   };
@@ -1146,7 +1199,8 @@ export function dispositionReceiptFromArtifact(value: unknown): RequiredCheckDis
  * reach the published handoff through this seam. The same rule covers the
  * row's SHAPE: `reviewObligationsToArtifact` writes exactly the keys `id`,
  * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors`, the
- * optional #1594 `resolved_by`, and the #1627 `reason` — the reason is
+ * optional #1594 `resolved_by`, the optional #1659 `settled_by`, and the
+ * #1627 `reason` — the reason is
  * written on every row the #1627 fold produces, and its absence is accepted
  * for a pre-#1627 artifact),
  * and always records `cause` (a vocabulary string, or `null` for a row with
@@ -1171,7 +1225,7 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "reason" && key !== "anchors" && key !== "resolved_by") return null;
+      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "reason" && key !== "anchors" && key !== "resolved_by" && key !== "settled_by") return null;
     }
     if (typeof row.id !== "string" || row.id === "") return null;
     if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
@@ -1198,6 +1252,20 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
       if (typeof provenance.head_sha !== "string" || !CI_EVIDENCE_HEAD_SHA_RE.test(provenance.head_sha)) return null;
       resolvedBy = { kind: "ci-evidence", check: provenance.check, headSha: provenance.head_sha };
     }
+    // #1659: the loop-settlement deferral receipt validates strictly too —
+    // closed kind and the shared `call-<n>` id scheme, or the whole
+    // artifact refuses (the same half-trusted-provenance rule).
+    let settledBy: ReviewObligation["settledBy"];
+    if (row.settled_by !== undefined) {
+      if (row.settled_by === null || typeof row.settled_by !== "object" || Array.isArray(row.settled_by)) return null;
+      const receipt = row.settled_by as Record<string, unknown>;
+      for (const key of Object.keys(receipt)) {
+        if (key !== "kind" && key !== "call") return null;
+      }
+      if (receipt.kind !== "loop-settlement") return null;
+      if (typeof receipt.call !== "string" || !/^call-\d+$/.test(receipt.call)) return null;
+      settledBy = { kind: "loop-settlement", call: receipt.call };
+    }
     const entry: ReviewObligation = {
       id: row.id,
       source: row.source as ReviewObligationSource,
@@ -1208,6 +1276,7 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (typeof row.reason === "string") entry.reason = row.reason as ReviewObligationReason;
     if (row.anchors !== undefined) entry.anchors = row.anchors as string[];
     if (resolvedBy !== undefined) entry.resolvedBy = resolvedBy;
+    if (settledBy !== undefined) entry.settledBy = settledBy;
     rows.push(entry);
   }
   return rows;

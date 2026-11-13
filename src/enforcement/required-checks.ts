@@ -1,5 +1,6 @@
 import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "../model/types.js";
 import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } from "./executed-calls.js";
+import type { LoopEvidenceSettlement } from "./settlement.js";
 
 /**
  * #750: deterministic required-check coverage evaluation.
@@ -63,6 +64,14 @@ export interface RequiredCheckRow {
   status: RequiredCheckStatus;
   rationale: string | null;
   reason: string;
+  /**
+   * #1659: the loop-settlement receipt — set ONLY by this fold's deferral to
+   * the canonical settlement record (the loop reported the row `discharged`
+   * with a successful admitted executed call and the citation allocator
+   * would otherwise have flipped the row unresolved). Objective provenance
+   * only, mirroring the obligation fold's receipt of the same name.
+   */
+  settledBy?: { kind: "loop-settlement"; call: string };
 }
 
 export interface RequiredCheckCoverage {
@@ -124,6 +133,11 @@ export function evaluateRequiredCheckCoverage(
   checks: readonly string[],
   dispositions: readonly NormalizedRequiredCheckDisposition[] | null,
   executedCalls?: ExecutedCallEvidenceIndex,
+  // #1659: the canonical settlement record, keyed by the SAME normalized
+  // check identity this fold matches dispositions on (the engine builds it
+  // from the candidates rows' id↔text pair). Absent/empty ⇒ byte-identical
+  // pre-#1659 behavior, and the two folds stay in agreement.
+  settlements?: ReadonlyMap<string, LoopEvidenceSettlement>,
 ): RequiredCheckCoverage {
   if (checks.length === 0) {
     return { version: 1, structured: dispositions !== null, status: "none", checks: [], droppedUnknown: [] };
@@ -187,6 +201,8 @@ export function evaluateRequiredCheckCoverage(
   // same row set to keep every OTHER row's outcome in agreement).
   if (citationGate) {
     const settled = gated.filter(({ row }) => row.reason === "ok" && row.status === "satisfied");
+    // #1659: the per-pass deferral receipt bound (see the obligation fold).
+    const deferredCalls = new Set<string>();
     if (settled.length > 0) {
       const index = executedCalls!;
       const outcomes = index.refused
@@ -198,6 +214,22 @@ export function evaluateRequiredCheckCoverage(
       settled.forEach(({ row }, allocation) => {
         const outcome = outcomes === null ? "uncited" : outcomes[allocation] ?? "uncited";
         if (outcome === "assigned") return;
+        // #1659: the deferral to the loop's own settlement — the same
+        // ALLOCATION-only rule the #1381 obligation fold applies, keyed by
+        // check identity: the model cited a successful executed call the
+        // loop's admission tied to this row, but the allocator assigned it
+        // elsewhere. The real objection shapes (uncited, unrelated, refused
+        // trace) and cap-released/open/absent records keep failing closed
+        // exactly as pre-#1659 — see the obligation fold. The one-to-one
+        // receipt bound matches the obligation fold: a receipt call id
+        // backs at most ONE deferred row per fold pass.
+        const settlement = settlements?.get(row.check);
+        const receiptCall = settlement?.settledVia === "discharged" ? settlement.successfulBy[0] : undefined;
+        if (outcome === "shared" && receiptCall !== undefined && !deferredCalls.has(receiptCall)) {
+          deferredCalls.add(receiptCall);
+          row.settledBy = { kind: "loop-settlement", call: receiptCall };
+          return;
+        }
         row.status = "unresolved";
         row.reason = outcomes === null
           ? "malformed-executed-trace"
@@ -235,6 +267,9 @@ export function requiredCheckCoverageToArtifact(coverage: RequiredCheckCoverage)
       status: row.status,
       rationale: row.rationale,
       reason: row.reason,
+      // #1659: the deferral receipt rides the artifact — the explainable
+      // "why is this row satisfied" provenance (absent on every other row).
+      ...(row.settledBy !== undefined ? { settled_by: row.settledBy } : {}),
     })),
     dropped_unknown: coverage.droppedUnknown,
   };

@@ -44,6 +44,7 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
     requiredEvidenceSettledStop: false,
+    requiredEvidenceSettlements: [],
     ...overrides,
   };
 }

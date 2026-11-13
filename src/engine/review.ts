@@ -19,7 +19,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits, resolveLoopLimits, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
+import { insertProofIndexSection, loopContextLimits, resolveLoopLimits, standardCorpusProofIndexSection, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
 import { harnessGatheredNoEvidence } from "../tools/execution-counts.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
@@ -113,6 +113,7 @@ import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enf
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, dispositionReceiptFromArtifact, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { parseLoopSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
@@ -564,7 +565,7 @@ function resolveReviewObligations(
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex } {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex; settlementsByCheck: ReadonlyMap<string, LoopEvidenceSettlement>; settlementRows: readonly LoopEvidenceSettlement[] } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -649,7 +650,27 @@ function resolveReviewObligations(
   // only when the artifact is absent (fresh standard-call and fork paths)
   // or carries no executed calls; a PRESENT-but-malformed trace REFUSES the
   // index, which keeps the gate active with nothing citable (#1634 review).
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_loop_meta?: unknown } | null;
+  // #1659: the canonical per-row evidence-settlement record the loop
+  // persisted — parsed fail-closed (malformed/absent = no provenance, the
+  // byte-identical pre-#1659 behavior). Keyed two ways: by row id for the
+  // #1381 obligation fold, and by the deterministic check text for the #750
+  // completeness fold (the candidates rows carry the id↔text pair both
+  // folds key on, so the two folds always defer on the SAME rows).
+  const harnessMeta = (harness?.tool_loop_meta ?? null) as { required_evidence_settlements?: unknown } | null;
+  const settlementRows = parseLoopSettlements(harnessMeta?.required_evidence_settlements);
+  const settlementsById = new Map(settlementRows.map((row) => [row.id, row]));
+  const settlementsByCheck = new Map<string, LoopEvidenceSettlement>();
+  if (settlementRows.length > 0) {
+    for (const row of candidateRows) {
+      const record = (row ?? null) as { id?: unknown; text?: unknown } | null;
+      if (record === null || typeof record.id !== "string" || typeof record.text !== "string") continue;
+      const settlement = settlementsById.get(record.id);
+      if (settlement !== undefined && !settlementsByCheck.has(record.text)) {
+        settlementsByCheck.set(record.text, settlement);
+      }
+    }
+  }
   const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
@@ -679,7 +700,7 @@ function resolveReviewObligations(
     ].filter((payload): payload is string => payload !== null && payload !== ""),
     candidatePaths,
   });
-  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths });
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths }, settlementsById);
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
@@ -725,6 +746,12 @@ function resolveReviewObligations(
     // #750 completeness fold (applied later, over the same artifact) can
     // gate the very same satisfied answers — the two folds agree.
     executedCalls,
+    // #1659: the canonical per-row settlement record the loop persisted —
+    // keyed for the #750 completeness fold by check text (an empty map for
+    // legacy/absent records keeps that fold byte-identical), and exposed as
+    // rows for the #1656 disposition evidence seam.
+    settlementsByCheck,
+    settlementRows,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
@@ -2786,6 +2813,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const completenessOptions = {
     ...completenessBaseOptions,
     ...(resolvedObligations.executedCalls.gate ? { executedCalls: resolvedObligations.executedCalls } : {}),
+    // #1659: the #750 fold defers to the loop's settlement record on the
+    // same rows the #1381 fold does (keyed by check text). Absent/empty ⇒
+    // byte-identical pre-#1659 behavior.
+    ...(resolvedObligations.settlementsByCheck.size > 0 ? { settlements: resolvedObligations.settlementsByCheck } : {}),
   };
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, resolvedObligations.dispositionReceipt, log);
@@ -3174,6 +3205,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // required (#1656 audit delta). No new forge call.
     ciConclusion: traceCiState,
     ciEvidenceContractActive: ciGateEvidence !== null,
+    // #1659: the loop's canonical per-row settlement record, parsed from the
+    // enforcement harness ACTUALLY used (the same artifact
+    // `resolveReviewObligations` folded — one parse, one vocabulary). A
+    // cap-released material question becomes a material unknown here —
+    // never "settled clean" — and a cap-released advisory question never
+    // vetoes.
+    loopSettlements: resolvedObligations.settlementRows,
   });
   // The objective approval scope gates (fork policy, publish mode): the
   // same fail-closed rule `evaluateApprovalGuardrails` applies (an unknown
@@ -4623,6 +4661,28 @@ export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): s
  * the same cap. */
 export { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES } from "../corpus/budgets.js";
 
+/** #1659 (review): the standard-corpus verdict path's proof-index wiring —
+ * shared by the primary, fallback, and smart standard `callTier` sites. Reads
+ * the same harness-authored candidates artifact the verdict turn reads, picks
+ * the executed-call trace the enforcement folds read for this tier (the
+ * tier's own harness artifact when present, the primary artifact otherwise),
+ * and rewrites the corpus file with the injected section. No-op when the
+ * citation gate is inert (no executed calls or no must_check rows): the
+ * corpus stays byte-identical. */
+function injectStandardCorpusProofIndex(
+  ws: RunWorkspace,
+  corpusName: string,
+  harnessArtifactName: string,
+  log: (message: string) => void,
+): void {
+  const corpusText = ws.readText(corpusName);
+  if (corpusText === null || corpusText === "") return;
+  const section = standardCorpusProofIndexSection(ws.readText("review-obligations-candidates.json"), safeJson(ws.read(harnessArtifactName)));
+  if (section === "") return;
+  ws.write(corpusName, Buffer.from(insertProofIndexSection(corpusText, section), "utf8"));
+  log(`review: injected the #1627 required-check proof index into ${corpusName} (this standard verdict is citation-gated on the loop's executed calls)`);
+}
+
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
 async function producePrimaryReview(input: ReviewCallInput & {
@@ -4714,6 +4774,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
   // The *.primary.json names are the first-pass slot, not the model. Read
   // the model from the request body or the analysis-engine line, never from
   // the filename.
+  injectStandardCorpusProofIndex(ws, "review-corpus.truncated.md", "tool-harness.json", log);
   const primary = await callTier(firstTier, firstProfile, input, "review-corpus.truncated.md", "ai-request.primary.json", "ai-response.primary.json");
   if (primary.ok) {
     log(`${firstProfile.label} model succeeded`);
@@ -4825,6 +4886,16 @@ async function producePrimaryReview(input: ReviewCallInput & {
     ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
   }
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
+  // #1659 (review): the enforcement folds read the fallback harness's trace
+  // when the evidence failover ran, the primary loop's otherwise — inject the
+  // proof index from the same surface the fallback standard verdict is gated
+  // on. Inert whenever the gate is.
+  injectStandardCorpusProofIndex(
+    ws,
+    "review-corpus.fallback.truncated.md",
+    ws.isFile("tool-harness.fallback.json") ? "tool-harness.fallback.json" : "tool-harness.json",
+    log,
+  );
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");
   if (fallback.ok) {
     log("Fallback model succeeded");
@@ -5101,6 +5172,11 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
   const build = assembleCorpus(ws, input.env as StageEnv, input.budgets, "smart", "smart", input.generatedPaths, input.standards);
   if (build.overBudget) errorLog("ERROR: assembled smart corpus exceeds its context budget");
   const smartProfile = tierProfileFrom(profiles, "smart", env);
+  // #1659 (review): the smart standard verdict is gated on the smart loop's
+  // executed calls (the escalation folds read tool-harness.smart.json) —
+  // inject the proof index the smart corpus never carries otherwise. Inert
+  // whenever the gate is.
+  injectStandardCorpusProofIndex(ws, "review-corpus.smart.truncated.md", "tool-harness.smart.json", log);
   const call = await callTier("smart", smartProfile, input, "review-corpus.smart.truncated.md", "ai-request.smart.json", "ai-response.smart.json");
   return { ok: call.ok };
 }

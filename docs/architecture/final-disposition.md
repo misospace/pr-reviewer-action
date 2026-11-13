@@ -102,6 +102,14 @@ settle a state:
   the #1634 safety contract), the requirement trace's remaining
   incompleteness and the #810 loop-stopped-early record are MATERIAL
   unknowns;
+- #1659's canonical settlement record (`tool_loop_meta.
+  required_evidence_settlements`) feeds the seam: the native loop's
+  per-row terminal state is the ONE settlement vocabulary, so a
+  loop-settled row's receipts defer in the enforcement folds instead of
+  being re-derived by a second citation vocabulary, a CAP-RELEASED
+  material question becomes a MATERIAL `investigation_unavailable`
+  unknown (never "settled clean"), and a cap-released advisory question
+  never vetoes;
 - a tool CAPABILITY failure (planning/execution error, every call failed)
   and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
   lane-independent — never a route/tier name) are MATERIAL;

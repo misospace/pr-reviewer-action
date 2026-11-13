@@ -70,6 +70,7 @@ import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import { executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/executed-calls.js";
+import { settlementsToArtifact } from "../enforcement/settlement.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
@@ -1462,7 +1463,9 @@ export function derivedAdmissionRows(rows: readonly DerivedObligationRow[]): Req
   for (const row of rows) {
     const tokens = anchorAdmissionTokens(row.anchors);
     if (tokens === null) continue;
-    admission.push({ id: row.id, tokens });
+    // #1659: the derived source rides the admission row so the settlement
+    // record's materiality derives from it.
+    admission.push({ id: row.id, tokens, source: "derived" });
   }
   return admission;
 }
@@ -2304,6 +2307,41 @@ export function insertProofIndexSection(corpus: string, section: string): string
   return `${section}\n\n${corpus}`;
 }
 
+/** #1659 (review): the standard-corpus verdict path's proof-index section —
+ * the same Required-Check Proof Index the in-conversation verdict turn
+ * injects, built from the SAME persisted surfaces the enforcement folds
+ * verify: the harness-authored candidates artifact (the must_check identity
+ * rows) and the harness artifact's `tool_calls` trace (the `call-<n>` ids
+ * the citation gate parses back). A standard `callTier` verdict reached
+ * after a loop ran (the native-loop verdict fell back to the standard call,
+ * or the fallback/smart evidence harness ran) is gated on those ids exactly
+ * like the in-conversation verdict, so its corpus must carry the same
+ * identifier contract — a producer is never rejected for citing identifiers
+ * it was never shown. "" when the gate is inert (no executed calls or no
+ * must_check rows), so the corpus stays byte-identical on every path where
+ * the folds stay inert too. */
+export function standardCorpusProofIndexSection(
+  candidatesText: string | null,
+  harnessArtifact: unknown,
+): string {
+  const trace = harnessArtifact !== null && typeof harnessArtifact === "object" && !Array.isArray(harnessArtifact)
+    ? (harnessArtifact as Record<string, unknown>).tool_calls
+    : null;
+  if (!Array.isArray(trace) || trace.length === 0) return "";
+  // The persisted trace rows are exactly `{tool, args, status}` (the
+  // artifact shape `executedCallEvidenceIndex` parses); lift them back into
+  // the executed-call shape the section renders.
+  const executed = trace.map((row) => {
+    const record = (row ?? null) as { tool?: unknown; args?: unknown; status?: unknown } | null;
+    return {
+      tool: typeof record?.tool === "string" ? record.tool : "",
+      args: (record?.args ?? {}) as Record<string, unknown>,
+      result: { status: typeof record?.status === "string" ? record.status : "error" },
+    };
+  });
+  return verdictProofIndexSection(proofIndexMustCheckRows(candidatesText), { executed } as unknown as LoopOutcome);
+}
+
 /** #1627: the must_check rows the planner was actually SHOWN, parsed from
  * the harness-authored candidates artifact (the same artifact the engine's
  * enforcement contract folds — one row set end to end). Defensive like
@@ -2543,6 +2581,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         // #1627: the deterministic obligations-settled early stop, mirrored
         // from the raw meta when it carries it.
         ...(meta.required_evidence_settled_stop !== undefined ? { required_evidence_settled_stop: meta.required_evidence_settled_stop } : {}),
+        // #1659: the canonical per-row evidence-settlement record, mirrored
+        // from the raw meta when it carries it.
+        ...(meta.required_evidence_settlements !== undefined ? { required_evidence_settlements: meta.required_evidence_settlements } : {}),
         // #1595 (review): the scoped plan's first claim, mirrored from the raw
         // meta when it carries it (absent for every tail-only/full-set run).
         ...(meta.required_evidence_lead_claim !== undefined ? { required_evidence_lead_claim: meta.required_evidence_lead_claim } : {}),
@@ -3923,6 +3964,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // the loop stopped exploring because every tracked row had settled with
     // budget still unspent.
     required_evidence_settled_stop: outcome.requiredEvidenceSettledStop,
+    // #1659: the canonical per-row evidence-settlement record — the loop's
+    // own terminal state per tracked question, the ONE settlement vocabulary
+    // final publication completeness consumes (finalization defers to a
+    // loop-settled row's receipts; a cap-released material question becomes
+    // a material unknown downstream, never "settled clean"). The #1145
+    // repair continuation's own calls append to the trace but do NOT
+    // rewrite this record: a row the continuation settles still reads
+    // `open` — conservative disclosure, never a fabricated receipt.
+    required_evidence_settlements: settlementsToArtifact(outcome.requiredEvidenceSettlements),
     // #1595 (review): the scoped plan's first claim — the obligation window
     // was enforced from the loop's first request, not only the reserved tail.
     ...(input.requiredEvidenceLeadClaim === true ? { required_evidence_lead_claim: true } : {}),
@@ -5222,13 +5272,21 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
       for (const row of parsed.obligations) {
         const record = (row ?? {}) as { id?: unknown; source?: unknown; text?: unknown };
         if (typeof record.id !== "string" || typeof record.text !== "string") continue;
+        // #1659: the row's obligation source rides the admission row so the
+        // settlement record's materiality derives from it (must_check/
+        // derived/risk material, trusted_base_guidance advisory). An unknown
+        // source is dropped from the record — the admission vocabulary is
+        // unchanged either way.
+        const rowSource = (["must_check", "trusted_base_guidance", "derived", "risk"] as const).includes(record.source as never)
+          ? record.source as "must_check" | "trusted_base_guidance" | "derived" | "risk"
+          : undefined;
         if (dependencyReserve > 0 && record.source === "must_check") {
           // A dependency-evidence obligation row: it re-enters below once,
           // as a shape row, so it must not also gate on its prose tokens.
           if (dependencyObligationForCheckText(record.text) !== null) continue;
         }
         const tokens = obligationAdmissionTokens(record.text);
-        if (tokens !== null) requiredEvidence.push({ id: record.id, tokens });
+        if (tokens !== null) requiredEvidence.push({ id: record.id, tokens, ...(rowSource !== undefined ? { source: rowSource } : {}) });
       }
     }
   } catch {
