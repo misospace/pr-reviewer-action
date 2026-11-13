@@ -55,6 +55,16 @@ export const STOP_BUDGET = "tool-call-budget-exhausted";
 export const STOP_WALL_CLOCK = "wall-clock-exceeded";
 export const STOP_WALL_CLOCK_RESERVE = "wall-clock-verdict-reserve";
 export const STOP_REQUEST_ERROR = "request-error";
+/**
+ * #1627: the deterministic early stop. When the run carried an obligation
+ * surface that was ACTIVE at some point and every tracked row has since
+ * settled (discharged by an admitted call, or cap-released as unprovable),
+ * further rounds can only be optional exploration — the loop stops here and
+ * the caller proceeds to the verdict from the warm conversation. A normal,
+ * verdict-producing stop by design: never a harness error, never a fallback
+ * trigger, and deliberately NOT a budget stop (no rounds were exhausted —
+ * the mandatory work is done). */
+export const STOP_OBLIGATIONS_SETTLED = "obligations-settled";
 
 // Synthetic result bodies. These are model-facing: they must explain the
 // refusal in one sentence so a self-correcting model has something to act on.
@@ -1221,6 +1231,12 @@ export interface LoopOutcome {
    * released at loop end — reserve 0 (always open), or every tracked row
    * discharged or cap-released. */
   requiredEvidenceReleased: boolean;
+  /** #1627: whether the deterministic `obligations-settled` early stop
+   * fired — the obligation surface was active at some point this run and
+   * every tracked row settled (discharged or cap-released) with budget
+   * still unspent. False for a run with no obligation surface, a run whose
+   * rows never all settled, and every other stop reason. */
+  requiredEvidenceSettledStop: boolean;
 }
 
 /**
@@ -1486,6 +1502,7 @@ export async function driveToolLoop(
     requiredEvidenceAttempts: 0,
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
+    requiredEvidenceSettledStop: false,
   };
   // #1396: hoisted unified reserve; 0 disables the whole mechanism (notes and
   // enforcement alike) so a loop with nothing reserved keeps byte-identical
@@ -1524,6 +1541,11 @@ export async function driveToolLoop(
       if (pendingRows.some((row) => row.id === id)) discharged.add(id);
     }
   }
+  // #1627 (M1): snapshot AFTER the seed — rows the repair seam closed before
+  // this loop ever ran are "otherwise discharged" for the settled-stop
+  // suppression below (their settlement is the prior loop's doing, not this
+  // run's bookkeeping).
+  const seededDischarged = new Set(discharged);
   // Attempted upstream evidence-channel calls over the WHOLE RUN, pre-window
   // included. An executor error still counts as an attempt — see
   // DEPENDENCY_EVIDENCE_TOOLS. #1396 (review): the count is run-wide across
@@ -1586,6 +1608,28 @@ export async function driveToolLoop(
   const started = timeFn();
   const telemetryStart = nowFn();
   let callsExecuted = 0;
+  // #1627: whether the obligation surface was ever ACTIVE this run — at
+  // least one tracked row still owed its evidence at the top of some round.
+  // Only a run with such a surface may stop early on settlement: a
+  // continuation whose every row was seeded discharged (#1145) never had an
+  // active obligation to settle, and a run with no reservation never had
+  // rows at all.
+  let obligationsSeenActive = false;
+  // #1627 (M1): settlement-success bookkeeping. A row settled (discharged by
+  // an admitted call, or cap-released by the attempts cap) whose attempts
+  // never saw a SUCCESSFUL execution cannot back a citable verdict
+  // disposition — the fold's citation gate (required-checks /
+  // review-obligations) requires a cited SUCCESSFUL call, and a single
+  // transient fetch failure would otherwise strand the model: early stop →
+  // no retry opportunity → `uncited-satisfaction` → partial. Per row, track
+  // whether any admitted executed call returned ok; for the cap-release path
+  // (a row released by the window's attempt cap rather than a discharge),
+  // track whether ANY in-window evidence execution succeeded. When a would-be
+  // settled stop finds any settled row lacking that success, it does NOT
+  // fire: the loop continues under the pre-existing budget/round/no-calls
+  // stops (pre-#1627 exploration freedom in exactly the stranding case).
+  const rowSuccessfulAttempt = new Set<string>();
+  let anySuccessfulWindowEvidence = false;
   const seenKeys = new Set<string>();
 
   // #1199: emit one bounded telemetry record per model turn. Called from both
@@ -1701,6 +1745,11 @@ export async function driveToolLoop(
         break;
       }
     }
+
+    // #1627: remember that the obligation surface was ACTIVE this run. Read
+    // BEFORE this round's dispositions can settle rows, so a row discharged
+    // later in this very round still counts as having been active.
+    if (!obligationsSeenActive && hasActiveRow()) obligationsSeenActive = true;
 
     // Keep the next request within the advisory context budget by compacting
     // the oldest tool results. #1635: the newest `summarizeKeepNewest` results
@@ -1995,6 +2044,12 @@ export async function driveToolLoop(
     type Disposition = { callId: string; kind: "error" | "dup" | "budget" | "reserve"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
+    // #1627 (M1): per EXECUTED call this round — the rows its admission
+    // targeted (discharged or partially credited; an attempt is an attempt),
+    // and whether it counts as an in-window evidence attempt (the cap's
+    // attempt pool). Filled in the disposition pass, consumed once this
+    // round's results settle, for the settled-success bookkeeping.
+    const execRowTargets = new Map<number, { rows: string[]; windowEvidence: boolean }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
     // executed + refused + deduplicated === requested). Refusals cover the
     // invalid-argument error, the over-budget note, and the #1379
@@ -2148,6 +2203,14 @@ export async function driveToolLoop(
           discharged.add(row.id);
           rowsDischargedThisRound++;
         }
+        // #1627 (M1): remember which rows this call targeted (discharged or
+        // partially credited — an attempt is an attempt) and whether it is an
+        // in-window evidence attempt, so the settled-success bookkeeping can
+        // consume the call's executor status once results settle below.
+        execRowTargets.set(idx, {
+          rows: targets.map((target) => target.row.id),
+          windowEvidence: countsTowardAttemptsCap && DEPENDENCY_EVIDENCE_TOOLS.has(call.name),
+        });
       }
       seenKeys.add(key);
       callsExecuted++;
@@ -2188,7 +2251,19 @@ export async function driveToolLoop(
           }
         }),
       );
-      for (const [idx, result] of settled) resultsByIdx.set(idx, result);
+      for (const [idx, result] of settled) {
+        resultsByIdx.set(idx, result);
+        // #1627 (M1): the settlement-success bookkeeping. A SUCCESSFUL
+        // execution credits every row the call targeted, and (for in-window
+        // evidence attempts) the cap-release path's success pool. A failed or
+        // errored execution credits nothing — a row settled only by such
+        // calls stays stranded for the settled-stop suppression below.
+        const targets = execRowTargets.get(idx);
+        if (targets !== undefined && result.status === "ok") {
+          for (const rowId of targets.rows) rowSuccessfulAttempt.add(rowId);
+          if (targets.windowEvidence) anySuccessfulWindowEvidence = true;
+        }
+      }
       toolElapsedSec = Math.max(0, nowFn() - toolStart);
     }
 
@@ -2274,6 +2349,49 @@ export async function driveToolLoop(
       outcome.stopReason = STOP_BUDGET;
       broke = true;
       break loop;
+    }
+
+    // #1627: the deterministic early stop. Once the obligation surface was
+    // active this run and NO active row remains — every row discharged by an
+    // admitted call or cap-released as unprovable (the loop's own discharge
+    // bookkeeping; unprovable rows are settled too) — continuing to the
+    // round ceiling would only spend budget on optional exploration. Stop
+    // here and let the caller proceed to the verdict from the warm
+    // conversation. Guards: the check sits at the loop body's end, so it can
+    // never fire before the first round or while this round's
+    // admission/refusal decisions are pending; the surface flag only sets
+    // when a row was actually active, so surface-less and fully-seeded
+    // continuations never fire it. A budget exhausted in the SAME round that
+    // settled the rows keeps the pre-existing `STOP_BUDGET` classification
+    // above — the settled stop only ever preempts rounds that would be
+    // spent on optional work.
+    //
+    // #1627 (M1): the stranding guard. A row settled by attempts that never
+    // saw a SUCCESSFUL execution cannot back the fold's citation gate (which
+    // requires a cited successful call), so stopping here would hand the
+    // verdict an `uncited-satisfaction` it cannot avoid — a single transient
+    // fetch failure must not strand the model. In that shape the early stop
+    // does NOT fire: the loop continues under the pre-existing budget/round/
+    // no-calls stops, restoring exactly the pre-#1627 exploration freedom.
+    // The stop still fires when every settled row had a successful attempt
+    // among its admitting calls, was seeded discharged by the repair seam
+    // (the prior loop's settlement), or was cap-released with a successful
+    // in-window evidence execution on record.
+    if (obligationsSeenActive && !hasActiveRow()) {
+      const strandedSettlement = pendingRows.some((row) => {
+        if (discharged.has(row.id)) {
+          return !seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id);
+        }
+        // Cap-released (not discharged): the attempts that released it are
+        // the in-window evidence executions.
+        return !anySuccessfulWindowEvidence;
+      });
+      if (!strandedSettlement) {
+        outcome.stopReason = STOP_OBLIGATIONS_SETTLED;
+        outcome.requiredEvidenceSettledStop = true;
+        broke = true;
+        break loop;
+      }
     }
   }
   if (!broke) {

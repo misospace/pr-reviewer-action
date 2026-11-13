@@ -1720,6 +1720,11 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
             "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations — and risk evidence obligation rows by their row id ('risk-<n>') — a satisfied risk row's rationale must name one of that row's listed locations and state the risk-specific counterexample considered with its source or test evidence.",
           items: {
             type: "object",
+            // #1627: description-only annotation (no shape change) — when the
+            // proof index is present, a satisfied must_check rationale must
+            // cite one of its executed successful call ids. Kept in lockstep
+            // with the request.ts copy.
+            description: "When the Required-Check Proof Index section is present and status is 'satisfied' for a must_check check, the rationale must cite at least one executed successful call id from that index (for example 'call-7') whose tool and arguments actually bear on the check's subject (the repository, release, version, head, or file the check names). A successful call about an unrelated target does not discharge the check. Each call id can back at most one 'satisfied' disposition.",
             properties: {
               check: { type: "string" },
               status: {

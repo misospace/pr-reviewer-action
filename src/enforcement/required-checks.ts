@@ -1,4 +1,5 @@
 import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "../model/types.js";
+import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } from "./executed-calls.js";
 
 /**
  * #750: deterministic required-check coverage evaluation.
@@ -27,6 +28,29 @@ import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "..
  *   `not_applicable` it needs a usable rationale (else malformed);
  * - missing/malformed coverage fails conservatively (unresolved), and this
  *   module never produces or flips a verdict.
+ *
+ * #1627: when the caller supplies an ACTIVE executed-call evidence index
+ * (the native tool-loop surface — see `src/enforcement/executed-calls.ts`),
+ * a `satisfied` disposition is a positive evidence claim and is credited
+ * only when its rationale wins the shared CHECK-SPECIFIC one-to-one
+ * citation allocation (`allocateCallCitations`: one executed successful
+ * call backs at most one discharge, and the call's bounded target must
+ * carry the exact identity the check names — a successful call about an
+ * unrelated target never discharges); otherwise the check is
+ * conservatively `unresolved` with reason `uncited-satisfaction` (no
+ * successful call cited), `citation-already-used` (every cited successful
+ * call another row already took), `unrelated-executed-call` (the cited
+ * call does not bear on this row's evidence identity — wrong
+ * target/package/version/head, a non-repository tool, a suite/CI ask
+ * those reconcile only through the #1612 head-bound CI matcher — or an
+ * absence ask), or `malformed-executed-trace` (the trace is present but
+ * this runtime cannot parse it, so nothing is citable and nothing
+ * discharges — fail closed). These are the same rule, reasons, and inputs
+ * the #1381 obligation fold applies (`foldObligationDispositions`), and
+ * both folds run the SAME allocation over the SAME canonical row keys, so
+ * they agree on every row. `not_applicable` and `unmet` are never
+ * citation-gated. Without a trace (fresh standard-call and fork paths) the
+ * fold is byte-identical to the pre-#1627 semantics.
  *
  * This is a faithful mirror of `pr_reviewer/completeness.py::
  * evaluate_structured_coverage`; its serialized artifact stays byte-identical
@@ -99,6 +123,7 @@ function validateDisposition(
 export function evaluateRequiredCheckCoverage(
   checks: readonly string[],
   dispositions: readonly NormalizedRequiredCheckDisposition[] | null,
+  executedCalls?: ExecutedCallEvidenceIndex,
 ): RequiredCheckCoverage {
   if (checks.length === 0) {
     return { version: 1, structured: dispositions !== null, status: "none", checks: [], droppedUnknown: [] };
@@ -112,6 +137,12 @@ export function evaluateRequiredCheckCoverage(
   }
 
   const droppedUnknown: string[] = [];
+  // #1627/#1634: rows the citation gate must settle with the SHARED
+  // allocation pass (see the module docstring). One entry per row: a second
+  // answer for the same check is invalidated as `duplicate-dispositions`
+  // above and never reaches this list.
+  const citationGate = executedCalls !== undefined && executedCalls.gate;
+  const gated: { row: RequiredCheckRow; rationale: string | null }[] = [];
   if (dispositions !== null) {
     for (const disposition of dispositions) {
       const validated = validateDisposition(disposition);
@@ -134,9 +165,48 @@ export function evaluateRequiredCheckCoverage(
         row.reason = "duplicate-dispositions";
         continue;
       }
+      // #1627: the evidence citation gate (see module docstring) — only a
+      // `satisfied` answer is a positive evidence claim, and only when the
+      // citation gate is ACTIVE. The row is settled by the shared
+      // allocation pass below; the rationale is kept verbatim as
+      // disclosure (it is what the model answered, never credit).
       row.status = validated.status;
       row.rationale = validated.rationale;
       row.reason = "ok";
+      if (citationGate && validated.status === "satisfied") gated.push({ row, rationale: validated.rationale });
+    }
+  }
+  // The shared allocation pass (same allocator, keys, and index the #1381
+  // obligation fold runs): an unassigned satisfied row never discharges,
+  // and a refused trace has NOTHING citable — every gated row fails closed.
+  // #1634 (review): only rows STILL holding provisional credit at this point
+  // enter the allocation — a row whose later disposition made it
+  // `duplicate-dispositions`/`malformed-disposition` earns no credit and
+  // must not consume a call (the obligation fold invalidates those rows
+  // before ever gating them, and both folds must hand the allocator the
+  // same row set to keep every OTHER row's outcome in agreement).
+  if (citationGate) {
+    const settled = gated.filter(({ row }) => row.reason === "ok" && row.status === "satisfied");
+    if (settled.length > 0) {
+      const index = executedCalls!;
+      const outcomes = index.refused
+        ? null
+        : allocateCallCitations(
+          settled.map(({ row, rationale }) => ({ key: citationKey(row.check), rationale: rationale ?? "" })),
+          index.entries,
+        );
+      settled.forEach(({ row }, allocation) => {
+        const outcome = outcomes === null ? "uncited" : outcomes[allocation] ?? "uncited";
+        if (outcome === "assigned") return;
+        row.status = "unresolved";
+        row.reason = outcomes === null
+          ? "malformed-executed-trace"
+          : outcome === "shared"
+          ? "citation-already-used"
+          : outcome === "unrelated"
+          ? "unrelated-executed-call"
+          : "uncited-satisfaction";
+      });
     }
   }
 

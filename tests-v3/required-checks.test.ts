@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
+import type { ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
 import { strictReviewResult } from "../src/enforcement/verdict-policy.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 
@@ -331,4 +332,106 @@ test("#1379: missing release notes do not block the delta obligation — compare
   assert.equal(coverage.checks[0]!.status, "satisfied");
   // Complete coverage keeps a strict approve clean (never demoted).
   assert.equal(strictReviewResult("approve", [], "complete"), "clean");
+});
+
+// ---------------------------------------------------------------------------
+// #1627: the #750 side of the evidence citation gate. When the executed-call
+// evidence index is present AND non-empty, a `satisfied` disposition is
+// credited only when its rationale cites an executed successful call id;
+// without an index the fold is byte-identical to pre-#1627.
+// ---------------------------------------------------------------------------
+
+const INDEX: ExecutedCallEvidenceIndex = {
+  gate: true,
+  refused: false,
+  entries: [
+    { id: "call-1", ok: true, tool: "read_file", target: "src/paths.ts" },
+    { id: "call-2", ok: false, tool: "git_grep", target: "traversal src" },
+    { id: "call-3", ok: true, tool: "read_file", target: "src/paths.ts" },
+  ],
+};
+
+test("#1627: a satisfied check with an identity-matched successful-call citation stays ok; uncited, failed-cited, phantom-cited, and unrelated-cited become unresolved", () => {
+  const checks = ["review the path resolution in src/paths.ts"];
+  const cases: Array<[string, string, string]> = [
+    ["the read of src/paths.ts at call-1 shows the resolution", "satisfied", "ok"],
+    ["verified by reading the diff carefully — 5/5 checks pass", "unresolved", "uncited-satisfaction"],
+    ["the fetch ran as call-2 and came back clean", "unresolved", "uncited-satisfaction"],
+    ["confirmed via call-99 at head", "unresolved", "uncited-satisfaction"],
+  ];
+  for (const [rationale, status, reason] of cases) {
+    const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied", rationale)], INDEX);
+    assert.equal(coverage.status, status === "satisfied" ? "complete" : "incomplete", rationale);
+    assert.equal(coverage.checks[0]!.status, status, rationale);
+    assert.equal(coverage.checks[0]!.reason, reason, rationale);
+    // The rationale is disclosure, never credit — it is kept verbatim.
+    assert.equal(coverage.checks[0]!.rationale, rationale);
+  }
+  // A successful call whose target does not carry the check's identity is
+  // cited-but-unrelated (#1634 human review): the row stays unresolved with
+  // its own receipt.
+  const unrelated = evaluateRequiredCheckCoverage(
+    checks,
+    [d(checks[0]!, "satisfied", "the successful call-4 read confirms it")],
+    { gate: true, refused: false, entries: [{ id: "call-4", ok: true, tool: "read_file", target: "README.md" }] },
+  );
+  assert.deepEqual(unrelated.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]]);
+});
+
+test("#1627: not_applicable and unmet rows are never citation-gated", () => {
+  const checks = PATH_CHECKS;
+  const coverage = evaluateRequiredCheckCoverage(
+    checks,
+    [
+      d(checks[0]!, "not_applicable", "no path handling in the changed surface"),
+      d(checks[1]!, "unmet", "the null-byte test is absent and the risk surface exists"),
+    ],
+    INDEX,
+  );
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["not_applicable", "ok"], ["unmet", "ok"]]);
+  // An unmet row is performed-and-failed — never clean coverage.
+  assert.equal(coverage.status, "incomplete");
+});
+
+test("#1627: without an active gate (no trace at all) a bare satisfied still discharges — fresh-call regression", () => {
+  const checks = ["review auth flow for regression"];
+  for (const absent of [undefined, { gate: false, refused: false, entries: [] }]) {
+    const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied")], absent as never);
+    assert.equal(coverage.status, "complete");
+    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  }
+});
+
+test("#1634 (review): one successful call backs at most one satisfied disposition; a refused trace fails every satisfaction closed", () => {
+  const checks = ["review the path resolution in src/paths.ts", "review the path tests in src/paths.ts"];
+  const shared = evaluateRequiredCheckCoverage(
+    checks,
+    [
+      d(checks[0]!, "satisfied", "the resolution read at call-1"),
+      d(checks[1]!, "satisfied", "the path tests read at call-1"),
+    ],
+    INDEX,
+  );
+  // Deterministic canonical-key allocation: the lexicographically first
+  // check takes call-1; the second fails closed as already-claimed, never
+  // silently credited by a call another row used.
+  assert.deepEqual(shared.checks.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["unresolved", "citation-already-used"],
+  ]);
+  assert.equal(shared.status, "incomplete");
+  const refused: ExecutedCallEvidenceIndex = { gate: true, refused: true, entries: [] };
+  const failedTrace = evaluateRequiredCheckCoverage(
+    checks,
+    [
+      d(checks[0]!, "satisfied", "the resolution read at call-1"),
+      d(checks[1]!, "satisfied", "the path tests read at call-2"),
+    ],
+    refused,
+  );
+  assert.deepEqual(failedTrace.checks.map((row) => [row.status, row.reason]), [
+    ["unresolved", "malformed-executed-trace"],
+    ["unresolved", "malformed-executed-trace"],
+  ]);
+  assert.equal(failedTrace.status, "incomplete");
 });

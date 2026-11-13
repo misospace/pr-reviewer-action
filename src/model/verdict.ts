@@ -1,4 +1,4 @@
-import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckDispositionDrop, RequiredCheckDispositionDropReason, RequiredCheckDispositionReceipt, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
 import { resolveReviewTriageDecision } from "./triage.js";
 import { normalizeDependencyCoverage } from "./dependency-coverage.js";
 import { VerdictParseFailure } from "./types.js";
@@ -107,27 +107,59 @@ const MAX_HUMAN_REVIEW_EVIDENCE_CHARS = 1000;
  * precedent as requirement_coverage normalizing unusable claims to
  * `unknown`). Dropping a malformed duplicate must never turn a
  * valid+malformed double answer into a single valid disposition.
+ *
+ * #1627: every drop is recorded — content-free, bounded — in the returned
+ * receipt, and `capReached` is set only when the MAX_REQUIRED_CHECKS
+ * truncation actually left entries unprocessed. A preserved `invalid`
+ * entry is NOT a drop. Normalization itself is byte-identical to the
+ * pre-#1627 behavior: duplicates are still preserved, and the receipt
+ * never changes what the dispositions array contains.
  */
 function normalizeRequiredCheckDispositions(
   value: unknown,
   present: boolean,
-): { present: boolean; dispositions: NormalizedRequiredCheckDisposition[] | null } {
-  if (!present) return { present: false, dispositions: null };
-  if (!Array.isArray(value)) return { present: true, dispositions: null };
+): {
+  present: boolean;
+  dispositions: NormalizedRequiredCheckDisposition[] | null;
+  receipt: RequiredCheckDispositionReceipt | null;
+} {
+  if (!present) return { present: false, dispositions: null, receipt: null };
+  if (!Array.isArray(value)) return { present: true, dispositions: null, receipt: null };
   const dispositions: NormalizedRequiredCheckDisposition[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) continue;
+  const dropped: RequiredCheckDispositionDrop[] = [];
+  let capReached = false;
+  // #1627: the receipt list is bounded by the same ceiling as the
+  // dispositions array — a pathological answer cannot grow it without
+  // bound. Beyond the cap the drop is still a drop, just unrecorded.
+  const recordDrop = (reason: RequiredCheckDispositionDropReason): void => {
+    if (dropped.length < MAX_REQUIRED_CHECKS) dropped.push({ reason });
+  };
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index];
+    if (!isRecord(item)) {
+      recordDrop("non-object-entry");
+      continue;
+    }
 
     const rawCheck = item.check;
-    if (typeof rawCheck !== "string") continue;
+    if (typeof rawCheck !== "string") {
+      recordDrop("unattributable-check");
+      continue;
+    }
     const check = rawCheck.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
-    if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) continue;
+    if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) {
+      recordDrop("unattributable-check");
+      continue;
+    }
 
     const rawStatus = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
     const status = REQUIRED_CHECK_STATUS_ALIASES[rawStatus];
     if (status === undefined) {
       dispositions.push({ check, status: "invalid", rationale: null });
-      if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+      if (dispositions.length >= MAX_REQUIRED_CHECKS) {
+        capReached = index < value.length - 1;
+        break;
+      }
       continue;
     }
 
@@ -137,14 +169,21 @@ function normalizeRequiredCheckDispositions(
     }
     if ((status === "not_applicable" || status === "unmet") && rationale === null) {
       dispositions.push({ check, status: "invalid", rationale: null });
-      if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+      if (dispositions.length >= MAX_REQUIRED_CHECKS) {
+        capReached = index < value.length - 1;
+        break;
+      }
       continue;
     }
 
     dispositions.push({ check, status, rationale });
-    if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+    if (dispositions.length >= MAX_REQUIRED_CHECKS) {
+      capReached = index < value.length - 1;
+      break;
+    }
   }
-  return { present: true, dispositions };
+  const receipt = dropped.length > 0 || capReached ? { dropped, capReached } : null;
+  return { present: true, dispositions, receipt };
 }
 
 function codepointLength(text: string): number {
@@ -835,6 +874,9 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     requirementCoverage: parsed.requirement_coverage,
     requiredCheckDispositions: dispositions.dispositions,
     requiredCheckDispositionsEmitted: dispositions.present,
+    // #1627: content-free drop receipt — absent (null) for a clean answer,
+    // so nothing about the artifact changes for well-formed output.
+    requiredCheckDispositionReceipt: dispositions.receipt,
     threadDispositions: threadDispositions.dispositions,
     threadDispositionsEmitted: threadDispositions.present,
     humanReviewDispositions: humanReviewDispositions.dispositions,

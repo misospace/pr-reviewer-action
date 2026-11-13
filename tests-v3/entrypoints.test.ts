@@ -1436,6 +1436,51 @@ test("#1537: required-check ids are recomputed only when the fold itself was inc
   });
 });
 
+test("#1627: the publish-side required-check recompute folds the executed-call index — #1388 parity with the engine fold", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+    });
+    // The native loop's executed-call trace: call-1 ok, call-2 FAILED — the
+    // shape that separates a cited successful call from a cited failure.
+    writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
+      stop_reason: "obligations-settled",
+      tool_calls: [
+        { tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" },
+        { tool: "web_fetch", args: { url: "https://blocked.test/x" }, status: "error" },
+      ],
+    }));
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
+    // Satisfied citing the FAILED call (call-2): the engine's fold reads
+    // uncited-satisfaction → unresolved; the publish-side recompute must
+    // agree (without the index it would silently mark the row satisfied and
+    // drop it from the handoff).
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the fetch ran as call-2 and confirmed it" },
+      ],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path in src/auth.ts"]);
+    // Paired positive: citing the SUCCESSFUL call (call-1) discharges — the
+    // publish side agrees with the engine fold in the positive direction too.
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the read of src/auth.ts at head confirmed it — call-1" },
+      ],
+    }));
+    const cited = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(cited.unresolvedRequiredChecks, []);
+  });
+});
+
 test("#1537: a model-unavailable notice run names no merge-gating members", () => {
   withRunDir((dir) => {
     // The notice path runs none of the folds but still persists its FALLBACK

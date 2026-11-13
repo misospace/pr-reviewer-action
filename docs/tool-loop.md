@@ -264,6 +264,7 @@ unresolved blocker hypotheses and verdict evidence.
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
 | `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
+| `obligations-settled` | The deterministic early stop (#1627): the run carried an active required-evidence obligation surface and every tracked row settled — discharged by an admitted call or cap-released as unprovable — with budget still unspent, so further rounds could only be optional exploration. A normal, verdict-producing completion: never a harness error, never a fallback trigger, and deliberately not a budget stop (no Partial Coverage Notice, no `coverage_stop_reason`). |
 
 `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and
 `wall-clock-verdict-reserve` are budget stops — the investigation was cut

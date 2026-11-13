@@ -43,6 +43,7 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     requiredEvidenceAttempts: 0,
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
+    requiredEvidenceSettledStop: false,
     ...overrides,
   };
 }
