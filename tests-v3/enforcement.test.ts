@@ -900,6 +900,46 @@ test("#1645: without a reconciliation input the enforcement view stays authorita
   assert.equal(a.verdict, "request_changes");
 });
 
+test("#1645: incomplete reconciliation is disclosed even when nothing changed", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open" }, { thread_id: "PRRT_stale2", disposition: "open" }],
+  });
+  const settlement = applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: false,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "e".repeat(40),
+  });
+  assert.equal(settlement.applied, false, "no settlement change is not a forcing action");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the disclosure renders regardless");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+});
+
+test("#1645: a model finding anchored to a ghost thread is demoted, never blocking", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [
+      { severity: "major", category: "bug", file: "src/a.ts", line: 3, message: "carried defect (review thread PRRT_stale1: open)", thread_id: "PRRT_stale1" },
+      { severity: "minor", category: "tests", file: "src/a.ts", line: 9, message: "fresh nit" },
+    ],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "f".repeat(40),
+  });
+  const carried = a.findings.find((f) => f.thread_id === "PRRT_stale1")!;
+  assert.equal(carried.severity, "minor", "the ghost-thread anchor cannot block");
+  assert.equal(carried.capped_from, "major");
+  assert.equal(carried.thread_reconciliation, "absent");
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve", "strict mapping derives approve from the reconciled set");
+});
+
 // ---------------------------------------------------------------------------
 // #812: the publish path records the folded external-CI conclusion in the
 // managed marker so the next diff-unchanged skip can compare it.

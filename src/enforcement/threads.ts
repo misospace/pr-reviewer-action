@@ -139,8 +139,6 @@ export function applyReviewThreadEnforcement(
     absent: 0,
     unknown: 0,
   };
-  const states = new Map<string, ThreadReconciliationState>();
-
   const given = new Map<string, Record<string, unknown>>();
   for (const entry of (artifact.thread_dispositions ?? []) as Array<Record<string, unknown>>) {
     if (entry && typeof entry.thread_id === "string" && !given.has(entry.thread_id)) {
@@ -155,12 +153,19 @@ export function applyReviewThreadEnforcement(
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
   let settledWithdrawn = 0;
+  let demoted = 0;
+  const counted = new Set<string>();
   const reemitted: ArtifactFinding[] = [];
   for (const thread of threads) {
     if (!thread || typeof thread.thread_id !== "string") continue;
     const threadId = thread.thread_id;
     const state = reconcileThreadState(threadId, reconciliation);
-    counts[state] += 1;
+    // Provenance counts each listed thread once, even if a duplicate id
+    // appears in the view (re-emission keeps the historical first-wins skip).
+    if (!counted.has(threadId)) {
+      counted.add(threadId);
+      counts[state] += 1;
+    }
     const entry = given.get(threadId) ?? {};
     // #1645: a thread the live listing no longer reports as open cannot be
     // settled into the finding set — record why it was dropped and move on.
@@ -224,10 +229,29 @@ export function applyReviewThreadEnforcement(
         line: thread.line,
         message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
         thread_id: threadId,
-        thread_reconciliation: "live_unresolved",
+        ...(reconciliation !== null && reconciliation !== undefined ? { thread_reconciliation: "live_unresolved" as const } : {}),
       };
       findings.push(finding);
       reemitted.push(finding);
+    }
+  }
+
+  // #1645: a model-authored finding anchored to a carried thread inherits the
+  // thread's reconciliation — the model echoed carried state, so a ghost
+  // thread (resolved/absent from the live listing) cannot lend the finding
+  // blocking force. The claim itself stays, demoted to non-blocking like an
+  // unverified claim; under `unknown` nothing is demoted (fail open).
+  if (reconciliation !== null && reconciliation !== undefined && reconciliation.available) {
+    for (const finding of findings) {
+      if (typeof finding.thread_id !== "string" || finding.thread_reconciliation !== undefined) continue;
+      const state = reconcileThreadState(finding.thread_id, reconciliation);
+      if (state !== "resolved" && state !== "absent") continue;
+      if (isBlockingSeverity(finding.severity)) {
+        finding.capped_from = finding.severity;
+        finding.severity = "minor";
+        demoted += 1;
+      }
+      finding.thread_reconciliation = state;
     }
   }
 
@@ -249,8 +273,13 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
-  if (changed) {
+  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0 || demoted > 0;
+  // #1645: the incompleteness disclosure must not hinge on a settlement
+  // change — when every carried thread was already dispositioned, the human
+  // review still has to say the live listing could not be proven.
+  const discloseIncomplete = reconciliation !== null && reconciliation !== undefined
+    && !reconciliation.available && counts.unknown > 0;
+  if (changed || discloseIncomplete) {
     const lines = ["", "", "## Unresolved Review Threads", ""];
     for (const record of settled) {
       // #1645: threads the live listing dropped are not unresolved review
@@ -259,7 +288,7 @@ export function applyReviewThreadEnforcement(
       const suffix = record.enforced ? ` — ${record.enforced}` : "";
       lines.push(`- \`${record.thread_id}\`: ${record.disposition}${suffix}`);
     }
-    if (reconciliation !== null && reconciliation !== undefined && !reconciliation.available) {
+    if (discloseIncomplete) {
       lines.push(
         "",
         "_Review-thread reconciliation incomplete: the live thread listing could not be read at settlement time, so carried threads were recorded but not treated as blocking._",

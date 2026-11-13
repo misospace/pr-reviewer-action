@@ -951,7 +951,11 @@ export function claimsPrepassGate(
 async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: string): Promise<ThreadReconciliationInput> {
   const empty: ThreadReconciliationInput = { available: false, unresolvedIds: new Set(), resolvedIds: new Set(), headSha };
   try {
-    const fetched = await adapter.listReviewThreads();
+    let fetched = await adapter.listReviewThreads();
+    // One bounded retry: a transient blip on this read must not silently
+    // fail open every carried thread; a genuinely dead or unsupported read
+    // still lands on `available: false` (disclosed unknown, never a blocker).
+    if (!fetched.ok) fetched = await adapter.listReviewThreads();
     if (!fetched.ok) return empty;
     const unresolvedIds = new Set<string>();
     const resolvedIds = new Set<string>();
