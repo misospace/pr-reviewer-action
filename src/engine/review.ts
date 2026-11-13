@@ -119,7 +119,7 @@ import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obl
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
-import { buildEvidenceLedger, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -571,7 +571,11 @@ function resolveReviewObligations(
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
     ? candidates.obligations as unknown[]
     : []).filter((row) => includeMustCheck || (row as { source?: unknown } | null)?.source !== "must_check");
-  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : []);
+  // #1657 (review): the producer's trusted evidence tags flow from the
+  // classification artifact into the obligation rows — row class is this
+  // metadata, never inferred from wording. Rows without a tag are `legacy`.
+  const mustCheckEvidenceTags = checkEvidenceTagsFromArtifact(classification.must_check_evidence);
+  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : [], mustCheckEvidenceTags);
   // #1449: the derived rows join the contract before the fold. The feature
   // gate is the operator-only `derived-obligations` input — off means no
   // rows, no coverage claim, and byte-identical behavior.
@@ -2786,6 +2790,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     enabled: env.VALIDATE_REQUIRED_CHECKS ?? "auto",
     mode: env.REQUIRED_CHECK_VALIDATION_MODE ?? "warn",
     mustCheck: stringList(classificationArtifact.must_check),
+    // #1657 (review): the #750 fold resolves row classes from the same
+    // trusted producer tags the #1381 fold carries — never from prose.
+    mustCheckEvidence: checkEvidenceTagsFromArtifact(classificationArtifact.must_check_evidence),
     ciEvidence: ciGateEvidence,
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };

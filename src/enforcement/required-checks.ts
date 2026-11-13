@@ -1,13 +1,18 @@
 import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "../model/types.js";
 import {
-  classifyCheckEvidence,
-  evaluateCheckEvidence,
+  evidenceTagFor,
+  evidenceTagIndex,
+  evaluateRowEvidence,
   receiptRefusalReason,
   rowEvidenceStateToArtifact,
+  type CheckEvidenceTag,
+  type CheckEvidenceTagWithText,
   type EvidenceLedger,
+  type EvidenceGateKind,
   type RequiredEvidenceRowClass,
   type RowEvidenceState,
 } from "./evidence-receipts.js";
+import type { DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
 
 /**
  * #750: deterministic required-check coverage evaluation.
@@ -148,26 +153,38 @@ function validateDisposition(
  * `ledger` (optional) is the #1657 evidence-receipt ledger — present only on
  * the native tool-loop surface. With no ledger the fold is byte-identical to
  * pre-#1627.
+ *
+ * `tags` (optional) carries the PRODUCER's trusted evidence tags
+ * (`must_check_evidence` from the classification artifact — never inferred
+ * from prose). A row without a tag is `legacy`: it keeps pre-#1657
+ * semantics — it gates completeness, folds on the presence-and-shape rule,
+ * and an `unmet` one forces. Only an explicitly-tagged `objective` row is
+ * receipt-gated; explicitly-tagged `attention` and `review-prompt` rows are
+ * disclosed but never merge-affecting.
  */
 export function evaluateRequiredCheckCoverage(
   checks: readonly string[],
   dispositions: readonly NormalizedRequiredCheckDisposition[] | null,
   ledger?: EvidenceLedger,
+  tags?: readonly CheckEvidenceTagWithText[],
 ): RequiredCheckCoverage {
   if (checks.length === 0) {
     return { version: 1, structured: dispositions !== null, status: "none", checks: [], droppedUnknown: [] };
   }
 
+  const tagIndex = evidenceTagIndex(tags);
   const rows = new Map<string, RequiredCheckRow>();
   for (const check of checks) {
     const identity = checkIdentity(check);
     if (identity === "" || rows.has(identity)) continue;
+    // The row class is the PRODUCER's tag, never inferred from the text:
+    // an untagged row is `legacy` (gating) no matter how its wording reads.
     rows.set(identity, {
       check,
       status: "unresolved",
       rationale: null,
       reason: dispositions === null ? "no-structured-dispositions" : "no-disposition",
-      rowClass: classifyCheckEvidence(check).rowClass,
+      rowClass: evidenceTagFor(check, tagIndex)?.rowClass ?? "legacy",
     });
   }
 
@@ -200,19 +217,22 @@ export function evaluateRequiredCheckCoverage(
     }
   }
 
-  // #1657: the objective-evidence gate. Only a `satisfied` answer on an
-  // `objective` row is a positive evidence claim, and only on an ACTIVE
-  // ledger (a trace was present). The row's credit comes from validated
-  // receipts (`receipt-backed`) — never from a cited call id, never from
-  // argument overlap, and never from prose. `no-ledger` (no trace) keeps
-  // the pre-#1627 semantics; a refused trace fails every objective
-  // satisfaction closed. `not_applicable` and `unmet` are never gated
-  // (applicability and confirmed negatives are not positive evidence
-  // claims). Attention and review-prompt rows are never gated.
+  // #1657 (review): the objective-evidence gate binds ONLY rows the
+  // PRODUCER tagged objective with an explicit gate — never a row whose
+  // wording merely looks material. Only a `satisfied` answer on such a row
+  // is a positive evidence claim, and only on an ACTIVE ledger (a trace was
+  // present). The row's credit comes from validated receipts
+  // (`receipt-backed`) — never from a cited call id, never from argument
+  // overlap, and never from prose. `no-ledger` (no trace) keeps the
+  // pre-#1627 semantics; a refused trace fails every objective satisfaction
+  // closed. `not_applicable` and `unmet` are never gated (applicability and
+  // confirmed negatives are not positive evidence claims). Legacy,
+  // attention, and review-prompt rows are never gated.
   if (ledger !== undefined && ledger.state !== "unavailable") {
     for (const row of rows.values()) {
       if (row.status !== "satisfied" || row.reason !== "ok" || row.rowClass !== "objective") continue;
-      const state = evaluateCheckEvidence(row.check, ledger);
+      const tag = evidenceTagFor(row.check, tagIndex);
+      const state = evaluateRowEvidence(tag, row.check, ledger);
       row.evidence = state;
       if (state.state !== "receipt-backed") {
         row.status = "unresolved";
@@ -221,30 +241,32 @@ export function evaluateRequiredCheckCoverage(
       }
     }
   }
-  // Reason-coded provenance disclosure for every row (attention,
-  // review-prompt, objective alike) whenever a ledger was supplied — the
-  // #1656 disposition surface reads it; no policy branch does.
+  // Reason-coded provenance disclosure for every row whenever a valid
+  // ledger was supplied — the #1656 disposition surface reads it; no policy
+  // branch does. (Legacy rows project `not-required`: no receipt gate
+  // applies to them.)
   if (ledger !== undefined && ledger.state === "valid") {
     for (const row of rows.values()) {
-      if (row.evidence === undefined) row.evidence = evaluateCheckEvidence(row.check, ledger);
+      if (row.evidence === undefined) {
+        row.evidence = evaluateRowEvidence(evidenceTagFor(row.check, tagIndex), row.check, ledger);
+      }
     }
   }
 
   const checkRows = checks
     .map((check) => rows.get(checkIdentity(check)))
     .filter((row): row is RequiredCheckRow => row !== undefined);
-  // #1657 (audit delta): only OBJECTIVE rows — rows mapped to a concrete
-  // deterministic gate — are merge-affecting. Attention rows (P0/P1
-  // "verify … thoroughly/carefully") are attention signals and generic
-  // review-prompt rows (auth/path/security/scrutiny and absence asks) are
-  // review questions: an unresolved one is disclosed with its reason code,
+  // #1657 (review): merge-affecting rows are exactly the ones the PRODUCER
+  // tagged as gating — explicitly `objective` rows (validated against
+  // receipts) and `legacy` rows (no trusted metadata: pre-#1657 semantics
+  // preserved, so a dynamic/hand-written check can never become
+  // non-gating because its wording happens to look like a review prompt).
+  // Explicitly-tagged attention rows and review-prompt rows are review
+  // signals/questions: an unresolved one is disclosed with its reason code,
   // but neither can independently make an otherwise adequate review
-  // incomplete. The rule is UNIFORM across disposition states — a skipped
-  // disposition contract on an all-generic checklist is disclosed
-  // (`structured: false` stays on the artifact) but is not itself a
-  // merge-affecting gap; only an unvalidated objective row is.
+  // incomplete. Uniform across disposition states.
   const complete = checkRows.length > 0
-    && checkRows.every((row) => row.rowClass !== "objective"
+    && checkRows.every((row) => !isMergeAffectingRowClass(row.rowClass)
       || (row.reason === "ok" && (row.status === "satisfied" || row.status === "not_applicable")));
   return {
     version: 1,
@@ -253,6 +275,14 @@ export function evaluateRequiredCheckCoverage(
     checks: checkRows,
     droppedUnknown,
   };
+}
+
+/** The row classes that gate merge-affecting completeness: explicitly
+ * `objective` rows (receipt-validated) and `legacy` rows (no trusted
+ * producer metadata — pre-#1657 semantics preserved). Explicitly-tagged
+ * attention and review-prompt rows never gate. */
+export function isMergeAffectingRowClass(rowClass: RequiredEvidenceRowClass): boolean {
+  return rowClass === "objective" || rowClass === "legacy";
 }
 
 /** Snake_case artifact serializer for the v2-identical persisted shape

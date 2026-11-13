@@ -74,10 +74,15 @@ import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
 import {
-  classifyCheckEvidence,
-  evaluateCheckEvidence,
+  REQUIRED_EVIDENCE_ROW_CLASSES,
+  evidenceTagFor,
+  evidenceTagIndex,
+  evaluateRowEvidence,
   receiptRefusalReason,
   rowEvidenceStateToArtifact,
+  type CheckEvidenceTagWithText,
+  type DependencyEvidenceObligation,
+  type EvidenceGateKind,
   type EvidenceLedger,
   type RequiredEvidenceRowClass,
   type RowEvidenceState,
@@ -167,10 +172,19 @@ export interface ReviewObligation {
    * head-bound test-execution evidence discharged. Set only by
    * `reconcileObligationsWithCiEvidence`; absent on every other row. */
   resolvedBy?: { kind: "ci-evidence"; check: string; headSha: string };
-  /** #1657: the deterministic evidence class of a `must_check` row (see
-   * `src/enforcement/evidence-receipts.ts`). Absent on the other sources —
-   * the class vocabulary classifies must_check texts only. */
+  /** #1657 (review): the deterministic evidence class of a `must_check`
+   * row — TRUSTED PRODUCER METADATA carried from the classification
+   * artifact's `must_check_evidence` through the candidates rows, never
+   * inferred from the row's wording. Absent on untagged rows (which are
+   * `legacy` by default at the fold) and on the other sources. */
   rowClass?: RequiredEvidenceRowClass;
+  /** #1657 (review): the explicit gate kind a tagged-objective row carries
+   * (which deterministic satisfier validates its satisfaction). Absent on
+   * every other class. */
+  gate?: EvidenceGateKind | null;
+  /** #1657 (review): the dependency-evidence obligation kinds an
+   * explicitly-objective `dependency-evidence` row asks to acquire. */
+  obligations?: DependencyEvidenceObligation[];
   /** #1657: the reason-coded provenance state of a `must_check` row against
    * the evidence ledger, present only on runs with an active ledger. Never
    * model text; the #1656 disposition surface reads it. */
@@ -418,12 +432,16 @@ export function mustCheckObligationsEnabled(validateRequiredChecks: string | und
  * wrote exactly what the model was shown; the engine never re-derives the
  * text, so disposition identity cannot drift between the two layers. A row
  * without a usable id, source, or text is skipped, never repaired.
- * #1657: an ATTENTION row (the P0/P1 "treat as … verify …
- * thoroughly/carefully" classifier sentences) is skipped here too — it is
- * an attention/routing signal, not a proposition with evidence identities:
- * it never enters the obligation contract (no withhold, no force, no
- * required-evidence section). Its disposition is still folded and disclosed
- * on the #750 coverage artifact, which classifies the same text. */
+ * #1657 (review): the row's evidence class is its TRUSTED PRODUCER
+ * METADATA (`row_class`/`gate`/`obligations`, carried from the
+ * classification artifact through the candidates rows) — never inferred
+ * from the wording. An ATTENTION-tagged must_check row is skipped here —
+ * it is an attention/routing signal, not a proposition with evidence
+ * identities: it never enters the obligation contract (no withhold, no
+ * force, no required-evidence section). Its disposition is still folded
+ * and disclosed on the #750 coverage artifact. An UNRELATED or untagged
+ * row is never dropped here: untagged must_check rows are `legacy` and
+ * keep pre-#1657 gating semantics. */
 function candidateToObligation(row: unknown): ReviewObligation | null {
   if (row === null || typeof row !== "object" || Array.isArray(row)) return null;
   const record = row as Record<string, unknown>;
@@ -431,10 +449,37 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
   const text = typeof record.text === "string" ? record.text : null;
   const id = typeof record.id === "string" ? record.id : null;
   if (source === null || text === null || !text.trim() || id === null || !id.trim()) return null;
-  if (source === "must_check" && classifyCheckEvidence(text).rowClass === "attention") return null;
+  // Trusted metadata, validated against the closed vocabularies: an
+  // unparseable tag is DROPPED (the row falls back to `legacy`), never
+  // half-trusted.
+  let metadata: { rowClass: RequiredEvidenceRowClass; gate?: EvidenceGateKind | null; obligations?: DependencyEvidenceObligation[] } | null = null;
+  if (source === "must_check"
+    && typeof record.row_class === "string"
+    && REQUIRED_EVIDENCE_ROW_CLASSES.has(record.row_class)
+    && record.row_class !== "legacy") {
+    const rowClass = record.row_class as Exclude<RequiredEvidenceRowClass, "legacy">;
+    const gate = (record.gate ?? null) as EvidenceGateKind | null;
+    const obligations = Array.isArray(record.obligations)
+      ? (record.obligations as DependencyEvidenceObligation[])
+      : [];
+    if (rowClass === "objective" && gate !== null) {
+      metadata = { rowClass, gate, obligations };
+    } else if (rowClass !== "objective" && gate === null && obligations.length === 0) {
+      metadata = { rowClass, gate: null, obligations: [] };
+    }
+  }
+  if (metadata?.rowClass === "attention") return null;
   // #1627: a pre-fold row has no matched disposition yet — the same state
   // the fold's `no-disposition` path describes, and the fold overwrites it.
-  return { id, source, text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" };
+  return {
+    id,
+    source,
+    text: text.trim(),
+    status: "unresolved",
+    cause: null,
+    reason: "no-disposition",
+    ...(metadata !== null ? metadata : {}),
+  };
 }
 
 /**
@@ -447,6 +492,7 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
 export function candidateRowsToObligations(
   rows: readonly unknown[],
   mustCheck: readonly string[],
+  tags?: readonly CheckEvidenceTagWithText[],
 ): ReviewObligation[] {
   const obligations: ReviewObligation[] = [];
   for (const row of rows) {
@@ -455,12 +501,23 @@ export function candidateRowsToObligations(
     obligations.push(obligation);
   }
   if (obligations.length === 0) {
+    // #1657 (review): the fallback applies the producer's trusted tags by
+    // exact text; untagged rows are `legacy`. Attention-tagged rows never
+    // enter the obligation contract.
+    const tagIndex = evidenceTagIndex(tags);
     for (const text of mustCheck) {
       if (typeof text !== "string" || !text.trim()) continue;
-      // #1657: attention rows never enter the obligation contract (see
-      // `candidateToObligation`).
-      if (classifyCheckEvidence(text).rowClass === "attention") continue;
-      obligations.push({ id: `obligation-${obligations.length + 1}`, source: "must_check", text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" });
+      const tag = evidenceTagFor(text, tagIndex);
+      if (tag?.rowClass === "attention") continue;
+      obligations.push({
+        id: `obligation-${obligations.length + 1}`,
+        source: "must_check",
+        text: text.trim(),
+        status: "unresolved",
+        cause: null,
+        reason: "no-disposition",
+        ...(tag !== null ? { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations } : {}),
+      });
     }
   }
   return obligations;
@@ -571,7 +628,7 @@ export function foldObligationDispositions(
   // executed call never backed at most one discharge and no rationale
   // citation is proof of anything. A must_check `satisfied` answer on an
   // `objective` row is credited only when the run's own evidence ledger
-  // holds validated receipts that support it (see `evaluateCheckEvidence`);
+  // holds validated receipts that support it (see `evaluateRowEvidence`);
   // the SAME evaluation, reasons, and row classes run in the #750
   // completeness fold, so both folds agree on every row. Review-prompt rows
   // are never receipt-gated (the deterministic layer never could judge
@@ -741,8 +798,10 @@ export function foldObligationDispositions(
     // pre-#1627; a PRESENT-but-malformed trace (`refused`) fails every
     // objective satisfaction closed.
     if (ledgerActive && status === "satisfied" && obligation.source === "must_check"
-      && classifyCheckEvidence(obligation.text).rowClass === "objective") {
-      const evidenceState = evaluateCheckEvidence(obligation.text, ledger);
+      && obligation.rowClass === "objective") {
+      const tag = obligation.gate === undefined ? null
+        : { rowClass: obligation.rowClass, gate: obligation.gate, obligations: obligation.obligations ?? [] };
+      const evidenceState = evaluateRowEvidence(tag, obligation.text, ledger);
       if (evidenceState.state !== "receipt-backed") {
         return {
           ...obligation,
@@ -775,10 +834,15 @@ export function foldObligationDispositions(
    // #1656 disposition layer consumes them.
   const disclosed = folded.map((obligation) => {
     if (obligation.source !== "must_check") return obligation;
-    const cls = classifyCheckEvidence(obligation.text);
-    const withClass: ReviewObligation = { ...obligation, rowClass: cls.rowClass };
+    // Untagged rows are `legacy` (pre-#1657 gating semantics; no prose
+    // classification); the tag comes from the producer metadata the row
+    // already carries.
+    const withClass: ReviewObligation = { ...obligation, rowClass: obligation.rowClass ?? "legacy" };
     if (ledger !== undefined && withClass.evidence === undefined) {
-      withClass.evidence = evaluateCheckEvidence(obligation.text, ledger);
+      const tag = withClass.rowClass === "objective"
+        ? { rowClass: withClass.rowClass, gate: withClass.gate ?? null, obligations: withClass.obligations ?? [] }
+        : null;
+      withClass.evidence = evaluateRowEvidence(tag, obligation.text, ledger);
     }
     return withClass;
   });
@@ -874,11 +938,15 @@ function riskObligationAttribution(ids: string[]): string {
  * is reported as an ordinary evidence-backed finding.
  */
 export function isForcingObligation(obligation: ReviewObligation): boolean {
-  // #1657 (defense in depth): an attention row is an attention/routing
-  // signal, never a proposition — the candidate boundary normally drops it
-  // before it can reach this gate, but a hand-built row set must not force
-  // on one either.
-  if (obligation.rowClass === "attention") return false;
+  // #1657 (review): a review PROMPT (an explicitly-tagged semantic review
+  // question) never independently forces a blocking verdict — its `unmet`
+  // disposition records the semantic negative for accounting, and a
+  // reviewer-determined defect belongs in an ordinary grounded
+  // blocker/major finding. Only an explicitly OBJECTIVE mandatory
+  // requirement (whose falsity the deterministic gates can mechanically
+  // establish) and legacy rows (no trusted metadata: pre-#1657 semantics
+  // preserved) may force on `unmet`.
+  if (obligation.rowClass === "attention" || obligation.rowClass === "review-prompt") return false;
   return obligation.source !== "derived" && obligation.source !== "risk" && obligation.status === "unmet";
 }
 
@@ -1161,8 +1229,9 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   // Retired #1627/#1634 vocabulary — accepted for backward compatibility only.
   "uncited-satisfaction", "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
 ]);
-/** #1657: the closed must_check evidence-class vocabulary. */
-const OBLIGATION_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt"]);
+/** #1657 (review): the closed must_check evidence-class vocabulary
+ * (`legacy` = the producer did not tag the row; pre-#1657 semantics). */
+const OBLIGATION_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt", "legacy"]);
 /** #1657: the closed per-row evidence-gate vocabulary. */
 const EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-evidence", "source-identity"]);
 /** #1657: the closed per-row evidence-state vocabulary (see

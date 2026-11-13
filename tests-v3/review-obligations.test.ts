@@ -843,8 +843,9 @@ test("#1627: the fold artifact carries the parser drop receipt; the reader parse
 // suites (allocator, citation outcomes, one-call-per-row) are deleted.
 // ---------------------------------------------------------------------------
 
-import { buildEvidenceLedger, type EvidenceLedger } from "../src/enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, type CheckEvidenceTagWithText, type EvidenceLedger } from "../src/enforcement/evidence-receipts.js";
 import { isForcingObligation } from "../src/enforcement/review-obligations.js";
+import { hasBlockingOpenFinding } from "../src/enforcement/verdict-policy.js";
 
 /** A minimal valid trace ledger: one successful read of src/paths.ts. */
 function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
@@ -854,9 +855,17 @@ function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>
   });
 }
 
+
+/** A trusted producer tag for one check text (#1657 review: row class is
+ * producer metadata, never inferred from wording). */
+function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[]): CheckEvidenceTagWithText {
+  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"] };
+}
+
 test("#1657: an objective satisfied claim folds identically in BOTH folds against the same ledger — receipt-backed, prose-uncited, and refused shapes agree", () => {
   const row = "review the path resolution in src/paths.ts";
-  const obligations = candidateRowsToObligations([], [row]);
+  const rowTag = etag(row, "objective", "source-identity");
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
   const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
 
   const backed = [
@@ -866,7 +875,7 @@ test("#1657: an objective satisfied claim folds identically in BOTH folds agains
   assert.deepEqual(foldedBacked.map((row2) => [row2.status, row2.reason, row2.rowClass, row2.evidence?.state]), [
     ["satisfied", "ok", "objective", "receipt-backed"],
   ]);
-  const coverageBacked = evaluateRequiredCheckCoverage([row], backed, ledger);
+  const coverageBacked = evaluateRequiredCheckCoverage([row], backed, ledger, [rowTag]);
   assert.deepEqual(coverageBacked.checks.map((row2) => [row2.status, row2.reason, row2.evidence?.state]),
     [["satisfied", "ok", "receipt-backed"]]);
 
@@ -880,7 +889,7 @@ test("#1657: an objective satisfied claim folds identically in BOTH folds agains
   const foldedProse = foldObligationDispositions(obligations, prose, unrelatedLedger);
   assert.deepEqual(foldedProse.map((row2) => [row2.status, row2.reason, row2.evidence?.state]),
     [["unresolved", "receipt-absent", "receipt-absent"]]);
-  const coverageProse = evaluateRequiredCheckCoverage([row], prose, unrelatedLedger);
+  const coverageProse = evaluateRequiredCheckCoverage([row], prose, unrelatedLedger, [rowTag]);
   assert.deepEqual(coverageProse.checks.map((row2) => [row2.status, row2.reason]),
     [["unresolved", "receipt-absent"]]);
 
@@ -889,7 +898,7 @@ test("#1657: an objective satisfied claim folds identically in BOTH folds agains
   const foldedRefused = foldObligationDispositions(obligations, prose, refused);
   assert.deepEqual(foldedRefused.map((row2) => [row2.status, row2.reason]),
     [["unresolved", "trace-refused"]]);
-  const coverageRefused = evaluateRequiredCheckCoverage([row], prose, refused);
+  const coverageRefused = evaluateRequiredCheckCoverage([row], prose, refused, [rowTag]);
   assert.deepEqual(coverageRefused.checks.map((row2) => [row2.status, row2.reason]),
     [["unresolved", "trace-refused"]]);
 });
@@ -899,7 +908,7 @@ test("#1657: one validated receipt supports several conclusions in the obligatio
     "review the path resolution in src/paths.ts",
     "review the path tests in src/paths.ts",
   ];
-  const obligations = candidateRowsToObligations([], texts);
+  const obligations = candidateRowsToObligations([], texts, texts.map((text) => etag(text, "objective", "source-identity")));
   const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
   const folded = foldObligationDispositions(
     obligations,
@@ -958,17 +967,25 @@ test("#1657: generic review prompts and attention rows never create merge-affect
     "treat as high priority — verify correctness carefully",
     "treat as critical — verify all changes thoroughly",
     "review auth flow for regression",
+  ], [
+    etag("treat as high priority — verify correctness carefully", "attention"),
+    etag("treat as critical — verify all changes thoroughly", "attention"),
   ]);
   assert.deepEqual(dropped.map((row) => row.text), ["review auth flow for regression"]);
 
   // A generic prompt answered unresolved stays disclosed but is neither
   // forcing nor rendered as unresolved REQUIRED evidence, and the
   // required-evidence fold result carries no enforcement section for it.
-  const obligations = candidateRowsToObligations([], ["review auth flow for regression"]);
+  const obligations = candidateRowsToObligations(
+    [],
+    ["review auth flow for regression"],
+    [etag("review auth flow for regression", "review-prompt")],
+  );
+  const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }]);
   const folded = foldObligationDispositions(
     obligations,
     [{ check: "review auth flow for regression", status: "unresolved", rationale: "could not fully verify the flow" }] as never,
-    ledgerWith([{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }]),
+    ledger,
   );
   assert.deepEqual(folded.map((row) => [row.status, row.rowClass, row.evidence?.state]),
     [["unresolved", "review-prompt", "not-required"]]);
@@ -976,26 +993,53 @@ test("#1657: generic review prompts and attention rows never create merge-affect
   assert.deepEqual(blockingReviewObligations(folded), []);
 
   const artifact = { verdict: "approve", review_markdown: "body", findings: [] } as unknown as ReviewArtifact;
-  const result = applyReviewObligationEnforcement(artifact, folded);
-  assert.deepEqual(result, { applied: false, reason: "" });
+  const foldResult = applyReviewObligationEnforcement(artifact, folded);
+  assert.deepEqual(foldResult, { applied: false, reason: "" });
   // The unresolved prompt is disclosed nowhere as required evidence.
   assert.equal(artifact.review_markdown, "body");
 
-  // An UNMET generic row is a confirmed negative and still forces
-  // (status-based #1505 semantics unchanged).
+  // #1657 (review, issue 3): an UNMET semantic review prompt records the
+  // negative for accounting but never independently forces a blocking
+  // verdict — a reviewer-determined semantic defect belongs in an ordinary
+  // grounded blocker/major finding, which still blocks normally. Only an
+  // explicitly OBJECTIVE mandatory requirement (falsity mechanically
+  // establishable) may act as a proven unmet requirement.
   const unmet = foldObligationDispositions(
-    candidateRowsToObligations([], ["review auth flow for regression"]),
+    obligations,
     [{ check: "review auth flow for regression", status: "unmet", rationale: "the token check is missing and exploitable" }] as never,
-    ledgerWith([{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }]),
+    ledger,
   );
-  assert.equal(isForcingObligation(unmet[0]!), true);
-  assert.deepEqual(blockingReviewObligations(unmet).map((row) => row.status), ["unmet"]);
+  assert.equal(unmet[0]!.status, "unmet");
+  assert.equal(isForcingObligation(unmet[0]!), false);
+  assert.deepEqual(blockingReviewObligations(unmet), []);
+  const unmetArtifact = { verdict: "approve", review_markdown: "body", findings: [] } as unknown as ReviewArtifact;
+  const unmetResult = applyReviewObligationEnforcement(unmetArtifact, unmet);
+  assert.deepEqual(unmetResult, { applied: false, reason: "" });
+  assert.equal(unmetArtifact.verdict, "approve");
+  assert.ok(!unmetArtifact.review_markdown.includes("Unmet Required Review Evidence"));
+
+  // An UNMET row on an explicitly-OBJECTIVE mandatory requirement still
+  // forces.
+  const objectiveUnmet = foldObligationDispositions(
+    candidateRowsToObligations([], ["review the path resolution in src/paths.ts"],
+      [etag("review the path resolution in src/paths.ts", "objective", "source-identity")]),
+    [{ check: "review the path resolution in src/paths.ts", status: "unmet", rationale: "the boundary check is absent" }] as never,
+    ledger,
+  );
+  assert.equal(isForcingObligation(objectiveUnmet[0]!), true);
+  assert.deepEqual(blockingReviewObligations(objectiveUnmet).map((row) => row.status), ["unmet"]);
+
+  // A grounded ordinary major finding still blocks normally (unchanged).
+  assert.equal(hasBlockingOpenFinding([
+    { severity: "major", category: "correctness", path: "src/auth.ts", message: "broken", own_finding: true },
+  ] as never), true);
 });
 
 test("#1657: stale or wrong-head provenance is objectively invalid for a row that names the reviewed head — the receipt's own freshness refuses it", () => {
   const head = "3f9c8a1b2d4e5f6071728394a5b6c7d8e9f0a1b2";
   const row = `verify the config surface at head ${head} in src/config.yaml`;
-  const obligations = candidateRowsToObligations([], [row]);
+  const rowTag = etag(row, "objective", "source-identity");
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
 
   // The forge read carries the path but pins a DIFFERENT (stale) head:
   // relevant, unverified — an attempt at another revision is not evidence

@@ -30,26 +30,25 @@
  *    one-call-per-row rule (#1657 removes the #1634 allocator): receipts are
  *    shareable evidence, not consumable tokens.
  *
- * Deterministic row classification (closed vocabularies over the static
- * check texts):
- * - `attention` — the classifier's P0/P1 "treat as critical/high priority —
- *   verify … thoroughly/carefully" rows. They are attention/routing signals,
- *   not propositions with evidence identities: their disposition is recorded
- *   and disclosed, but they never gate completeness, never withhold, and
- *   never force (#1657 rule 7).
- * - `objective` — rows mapping to a concrete deterministic gate:
- *   `ci-evidence` (test-run asks — settled ONLY by the #1594/#1612 head-bound
- *   CI reconciliation), `dependency-evidence` (upstream provenance /
- *   release-delta / security-advisory acquisition asks — the row text names
- *   no package identity by design (#1595), so the receipt's own validated
- *   target identity is what is checked), and `source-identity` (rows that
- *   name exact paths/versions/head shas/slugs — supported only by
- *   head-bound content receipts carrying those exact identities).
- * - `review-prompt` — generic auth/path/security/scrutiny and absence asks.
- *   They remain review questions (#1657 rule 8): the reviewer's disposition
- *   is honored without a receipt demand (the deterministic layer never could
- *   judge their groundedness), and their unresolved state is disclosed with
- *   a reason code instead of independently making an adequate review partial.
+ * Row classes are TRUSTED PRODUCER METADATA, never inferred from prose
+ * (#1657 review): the classifier tags each row it emits — `attention`
+ * (the P0/P1 "treat as critical/high priority — verify …
+ * thoroughly/carefully" rows: attention/routing signals, never gating),
+ * `objective` (rows mapping to a concrete deterministic gate, tagged WITH
+ * an explicit gate kind: `ci-evidence` for test-run asks — settled ONLY by
+ * the #1594/#1612 head-bound CI reconciliation; `dependency-evidence` for
+ * upstream provenance/release-delta/security-advisory acquisition asks;
+ * `source-identity` for rows the producer binds to exact
+ * path/version/head/slug identities), and `review-prompt` (ordinary
+ * semantic review questions: honored without a receipt demand, disclosed
+ * with reason codes, never independently making an adequate review
+ * partial or forcing a verdict). Rows the producer did not tag are
+ * `legacy` and keep pre-#1657 semantics: they gate completeness, fold on
+ * the presence-and-shape rule, and an `unmet` one still forces — a
+ * dynamic/hand-written check can never become non-gating because its
+ * wording happens to look like a review prompt. Identity extraction from
+ * text runs only AFTER a row is explicitly objective, solely to validate
+ * the tagged identity against receipts.
  *
  * Fail-closed rules carried over from #1627/#1634 where they still guard an
  * objective claim: a trace PRESENT but malformed refuses the whole ledger
@@ -62,9 +61,11 @@
  * only by VALIDATED RECEIPTS — never by a cited call id, and never repaired
  * from model prose. Malformed or stale provenance stays reason-coded.
  */
-import { isTestExecutionObligation, type HeadBoundCiEvidence } from "./required-check-ci.js";
+import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+
+export type { DependencyEvidenceObligation };
 
 /** The single source of the stable short-id scheme: `call-<n>`, 1-based
  * execution order — the exact tokens the verdict corpus renders (#1627's
@@ -197,31 +198,12 @@ function boundedPath(value: unknown): string {
   return boundedField(normRelPath(value));
 }
 
-/**
- * The identity args each trace tool carries, extracted in priority order —
- * the argument names the executors actually read (`src/tools/executors.ts`).
- * Carried over from #1627: an unknown extra arg binds nothing.
- */
-const TARGET_ARG_KEYS: readonly string[] = ["endpoint", "path", "ref", "repo", "pattern", "url", "query", "command"];
-
-function traceTargetArg(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  return typeof value === "string" && value !== "" ? value : "";
-}
-
 // ---------------------------------------------------------------------------
 // Identity extraction and boundary matching (moved verbatim from the
 // #1627/#1634 `executed-calls.ts` — six review rounds of hardened exact-
 // identity semantics, re-used by #1657 against receipt subject fields
 // instead of raw argument digests).
 // ---------------------------------------------------------------------------
-
-/** #1627: security/breaking-change ABSENCE asks are never discharged by
- * evidence identity. A successful search/fetch proves the search ran, never
- * its result, so no acquisition establishes "no vulnerability / no breaking
- * change". Closed, documented vocabulary; matching errs toward NOT
- * discharging. */
-const ABSENCE_EVIDENCE_RE = /\b(?:security|advisories|advisory|vulnerabilit\w*|cves?|breaking|exploit\w*|malware|backdoor|malicious|traversal|ssrf|xss|csrf|inject\w*)\b/i;
 
 /** `owner/repo` slug in a check text: both segments GitHub-name-shaped,
  * neither purely numeric/version-like, neither a stopword. */
@@ -263,18 +245,18 @@ export function checkIdentityKey(check: string): string {
 }
 
 /**
- * The deterministic evidence identity a check text requires: the exact
- * tokens (package slugs, versions, head shas, named files) supporting
- * receipts must carry for the receipt to bear on the row. Lowercase;
- * deduplicated. `null` means the row is of a class identity can never prove
- * (suite/CI asks, absence asks); an empty list means a version-shaped run
- * the layer cannot represent exactly — an identity the layer must not
- * approximate (the row is then review-prompt: the deterministic layer never
- * claims it can prove what it cannot represent).
+ * The exact identity tokens (package slugs, versions, head shas, named
+ * files) an explicitly-objective row's supporting receipts must carry for
+ * the receipt to bear on the row (#1657 review: this extraction runs ONLY
+ * after the producer has tagged the row objective — it validates an
+ * objective identity against receipts, it never decides whether the row is
+ * material). Lowercase; deduplicated. `null`/`[]` are not produced here
+ * anymore — callers only invoke this for `source-identity` rows, and a
+ * version-shaped run the extractor cannot represent exactly yields no token
+ * rather than a truncating prefix (the deterministic layer never
+ * approximates an identity it cannot represent).
  */
 function requirementIdentityTokens(checkKey: string): string[] | null {
-  if (isTestExecutionObligation(checkKey)) return null;
-  if (ABSENCE_EVIDENCE_RE.test(checkKey)) return null;
   const stripped = checkKey.replace(URL_PREFIX_RE, " ");
   const tokens = new Set<string>();
   for (const match of stripped.matchAll(REPO_SLUG_RE)) {
@@ -349,53 +331,54 @@ function identityCarriesToken(identity: string, token: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Row classification (#1657): closed vocabularies over the static check
-// texts. ONE implementation — both folds classify through it.
+// Row evidence metadata (#1657 review): row class is TRUSTED PRODUCER
+// METADATA, never inferred from prose. The classifier tags each row it
+// emits (attention / objective-with-gate / review-prompt); rows without
+// trustworthy metadata are `legacy` and keep pre-#1657 gating semantics.
+// Identity extraction from text runs only AFTER a row is explicitly
+// objective, solely to validate an objective identity against receipts —
+// it never decides whether the row is material.
 // ---------------------------------------------------------------------------
 
-/** Attention/routing rows (#1657 rule 7): the classifier's linked-P0/P1
- * checklist sentences, matched as exact normalized texts — a closed
- * vocabulary, never a keyword scan. They are attention signals, not
- * propositions with evidence identities. */
-const ATTENTION_CHECK_TEXTS: ReadonlySet<string> = new Set([
-  "treat as critical — verify all changes thoroughly",
-  "treat as high priority — verify correctness carefully",
-]);
-
-export type RequiredEvidenceRowClass = "attention" | "objective" | "review-prompt";
+export type RequiredEvidenceRowClass = "attention" | "objective" | "review-prompt" | "legacy";
 export type EvidenceGateKind = "ci-evidence" | "dependency-evidence" | "source-identity";
 
-export interface CheckEvidenceClass {
-  rowClass: RequiredEvidenceRowClass;
+/** The trusted evidence tag a check producer declares for one row at
+ * emission time. Attention rows carry no gate (they are attention signals,
+ * not propositions); review-prompt rows carry no gate (semantic review
+ * questions); objective rows carry an explicit gate kind, and — for
+ * `dependency-evidence` — the obligation kinds the row asks to acquire. */
+export interface CheckEvidenceTag {
+  rowClass: "attention" | "objective" | "review-prompt";
   gate: EvidenceGateKind | null;
-  /** The dependency-evidence obligation kinds the row text names (for the
-   * dependency-evidence gate's per-kind support check). */
+  /** The dependency-evidence obligation kinds an objective
+   * `dependency-evidence` row asks to acquire (validated per kind against
+   * the ledger's attributed acquisition receipts). */
   obligations: DependencyEvidenceObligation[];
 }
 
-/** The dependency-evidence obligation KINDS a row text names. The static
- * classifier sentences carry no package identity (#1595), so the gate binds
- * the row to evidence ACQUISITION kinds, never to a lexical package token. */
-function dependencyKindsForCheckText(checkKey: string): DependencyEvidenceObligation[] {
-  const kinds = new Set<DependencyEvidenceObligation>();
-  if (/provenance|publisher|canonical source/.test(checkKey)) kinds.add("provenance");
-  if (/release delta/.test(checkKey)) kinds.add("release_delta");
-  if (/advisor(?:y|ies)/.test(checkKey)) kinds.add("security_advisory");
-  return [...kinds];
+export interface CheckEvidenceTagWithText extends CheckEvidenceTag {
+  /** The exact deterministic check text the tag belongs to (matched by the
+   * same identity normalization the folds use). */
+  text: string;
 }
 
-/** Deterministic classification of one check text (exact normalized text in,
- * closed-vocabulary class out; total, never throws). */
-export function classifyCheckEvidence(check: string): CheckEvidenceClass {
-  const key = checkIdentityKey(check);
-  if (ATTENTION_CHECK_TEXTS.has(key)) return { rowClass: "attention", gate: null, obligations: [] };
-  const obligations = dependencyKindsForCheckText(key);
-  if (obligations.length > 0) return { rowClass: "objective", gate: "dependency-evidence", obligations };
-  if (isTestExecutionObligation(key)) return { rowClass: "objective", gate: "ci-evidence", obligations: [] };
-  if (ABSENCE_EVIDENCE_RE.test(key)) return { rowClass: "review-prompt", gate: null, obligations: [] };
-  const tokens = requirementIdentityTokens(key);
-  if (tokens !== null && tokens.length > 0) return { rowClass: "objective", gate: "source-identity", obligations: [] };
-  return { rowClass: "review-prompt", gate: null, obligations: [] };
+/** Build the tag index both folds resolve row classes through: exact
+ * normalized check text → tag. Rows the producer did not tag are ABSENT
+ * from the index — absence means `legacy`, never a prose guess. */
+export function evidenceTagIndex(tags: readonly CheckEvidenceTagWithText[] | undefined): Map<string, CheckEvidenceTag> {
+  const index = new Map<string, CheckEvidenceTag>();
+  for (const tag of tags ?? []) {
+    if (typeof tag?.text !== "string") continue;
+    index.set(checkIdentityKey(tag.text), { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations });
+  }
+  return index;
+}
+
+/** The tag for one check text, or `null` when the producer did not tag it
+ * (the row is `legacy`). */
+export function evidenceTagFor(check: string, index: Map<string, CheckEvidenceTag> | undefined): CheckEvidenceTag | null {
+  return index?.get(checkIdentityKey(check)) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -739,27 +722,41 @@ function supportedIdentityReceipts(
   return { verified, relevant };
 }
 
-/** Validate one row's requirement against the ledger. For an objective row a
- * `receipt-backed` outcome is the ONLY crediting path for a claimed
- * `satisfied`; every other outcome keeps the row unresolved with its reason
- * code. `ci-evidence` rows return `receipt-absent` here by design: their
- * settlement is owned by the #1594/#1612 head-bound CI reconciliation, which
- * runs after the fold and writes its own `resolvedBy` provenance. (Exact-head
- * freshness is validated at receipt-build time — workspace reads and corpus
- * chunks are head-bound by construction, forge reads only when they carry the
- * reviewed sha — so the row evaluation needs no head parameter.) */
-export function evaluateCheckEvidence(
+/** Validate one row's requirement against the ledger, from the row's TRUSTED
+ * tag (producer metadata — `null` means the row is `legacy`, i.e. the
+ * producer did not tag it, and it keeps pre-#1657 gating semantics with no
+ * receipt demand). For an explicitly-objective row a `receipt-backed`
+ * outcome is the ONLY crediting path for a claimed `satisfied`; every other
+ * outcome keeps the row unresolved with its reason code. `ci-evidence` rows
+ * return `receipt-absent` here by design: their settlement is owned by the
+ * #1594/#1612 head-bound CI reconciliation, which runs after the fold and
+ * writes its own `resolvedBy` provenance. (Exact-head freshness is validated
+ * at receipt-build time — workspace reads and corpus chunks are head-bound
+ * by construction, forge reads only when they carry the reviewed sha — so
+ * the row evaluation needs no head parameter.) Identity extraction from the
+ * check text happens ONLY here, for an explicitly-objective
+ * `source-identity` row: it validates the tagged objective identity against
+ * receipts and never decides whether the row is material. */
+export function evaluateRowEvidence(
+  tag: CheckEvidenceTag | null,
   check: string,
   ledger: EvidenceLedger | undefined,
 ): RowEvidenceState {
-  const cls = classifyCheckEvidence(check);
-  const base: RowEvidenceState = { rowClass: cls.rowClass, gate: cls.gate, state: "not-required", receipts: [] };
-  if (cls.rowClass !== "objective") return base;
+  const base: RowEvidenceState = {
+    rowClass: tag?.rowClass ?? "legacy",
+    gate: tag?.gate ?? null,
+    state: "not-required",
+    receipts: [],
+  };
+  // Only an explicitly-objective row has a receipt gate at all: attention
+  // rows, review prompts, and legacy rows fold on the presence-and-shape
+  // rule with no provenance demand.
+  if (tag?.rowClass !== "objective") return base;
   if (ledger === undefined || ledger.state === "unavailable") return { ...base, state: "no-ledger" };
   if (ledger.state === "refused") return { ...base, state: "trace-refused" };
-  if (cls.gate === "ci-evidence") return { ...base, state: "receipt-absent" };
-  if (cls.gate === "dependency-evidence") {
-    const { verified, relevantUnverified } = supportedDependencyReceipts(ledger, cls.obligations);
+  if (tag.gate === "ci-evidence") return { ...base, state: "receipt-absent" };
+  if (tag.gate === "dependency-evidence") {
+    const { verified, relevantUnverified } = supportedDependencyReceipts(ledger, tag.obligations);
     if (verified.length > 0) {
       return { ...base, state: "receipt-backed", receipts: verified.slice(0, MAX_ROW_RECEIPT_IDS).map((receipt) => receipt.id) };
     }
@@ -769,8 +766,7 @@ export function evaluateCheckEvidence(
   // covered JOINTLY by validated head-bound content receipts — one receipt
   // may carry several tokens, several receipts may share the cover, and a
   // receipt that carries none of the row's identity never contributes.
-  const key = checkIdentityKey(check);
-  const tokens = requirementIdentityTokens(key) ?? [];
+  const tokens = requirementIdentityTokens(checkIdentityKey(check)) ?? [];
   const { verified, relevant } = supportedIdentityReceipts(ledger, tokens);
   if (verified.length > 0) {
     const covered = tokens.every((token) => verified.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), token)));
@@ -788,6 +784,53 @@ export function evaluateCheckEvidence(
 // Artifact surface for the #1656 disposition layer: the bounded ledger file
 // (strict round-trip) and the per-row evidence projection.
 // ---------------------------------------------------------------------------
+
+/** The closed row-class vocabulary (`legacy` = the producer did not tag the
+ * row; it keeps pre-#1657 gating semantics). */
+export const REQUIRED_EVIDENCE_ROW_CLASSES: ReadonlySet<string> = new Set([
+  "attention", "objective", "review-prompt", "legacy",
+]);
+
+/**
+ * Strict parser for the producer's `must_check_evidence` rows
+ * (classification artifact) and the candidate-row tag fields: an
+ * unparseable ROW is DROPPED (that check falls back to `legacy` — gating,
+ * pre-#1657 semantics — which is the fail-safe direction for coverage),
+ * never guessed and never promoted to objective by its wording.
+ */
+export function checkEvidenceTagsFromArtifact(value: unknown): CheckEvidenceTagWithText[] {
+  const tags: CheckEvidenceTagWithText[] = [];
+  if (!Array.isArray(value)) return tags;
+  for (const raw of value.slice(0, 100)) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "text" && key !== "row_class" && key !== "gate" && key !== "obligations") continue;
+    }
+    if (typeof record.text !== "string" || record.text.trim() === "" || record.text.length > 1000) continue;
+    if (typeof record.row_class !== "string" || !REQUIRED_EVIDENCE_ROW_CLASSES.has(record.row_class) || record.row_class === "legacy") continue;
+    if (record.gate !== undefined && record.gate !== null
+      && !(typeof record.gate === "string" && ["ci-evidence", "dependency-evidence", "source-identity"].includes(record.gate))) continue;
+    const obligations: DependencyEvidenceObligation[] = [];
+    if (record.obligations !== undefined) {
+      if (!Array.isArray(record.obligations)) continue;
+      let ok = true;
+      for (const kind of record.obligations) {
+        if (typeof kind !== "string" || !["provenance", "release_delta", "security_advisory"].includes(kind)) { ok = false; break; }
+        obligations.push(kind as DependencyEvidenceObligation);
+      }
+      if (!ok) continue;
+    }
+    const rowClass = record.row_class as Exclude<RequiredEvidenceRowClass, "legacy">;
+    // A tag claiming objective MUST carry its explicit gate kind; other
+    // classes carry none.
+    const gate = (record.gate ?? null) as EvidenceGateKind | null;
+    if (rowClass === "objective" && gate === null) continue;
+    if (rowClass !== "objective" && gate !== null) continue;
+    tags.push({ text: record.text, rowClass, gate, obligations });
+  }
+  return tags;
+}
 
 /** Snake_case artifact projection of one receipt (the persisted
  * `evidence-receipts.json` shape; subject fields omit empties). */

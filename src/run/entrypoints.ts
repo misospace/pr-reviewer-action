@@ -29,7 +29,7 @@ import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../co
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
-import { buildEvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../enforcement/evidence-receipts.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
@@ -435,7 +435,7 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
 }
 
 /** #1657: the closed `row_class` vocabulary the coverage artifact carries. */
-const REQUIRED_CHECK_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt"]);
+const REQUIRED_CHECK_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt", "legacy"]);
 /** #1657: the closed per-row evidence-state vocabulary. */
 const ROW_EVIDENCE_STATES: ReadonlySet<string> = new Set([
   "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
@@ -597,6 +597,10 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
         const mustCheck = Array.isArray(classification.must_check)
           ? classification.must_check.filter((item): item is string => typeof item === "string")
           : [];
+        // #1657 (review): the producer's trusted evidence tags ride the same
+        // classification artifact — the recompute resolves row classes from
+        // this metadata, never from prose; untagged rows are `legacy`.
+        const mustCheckEvidence = checkEvidenceTagsFromArtifact(classification.must_check_evidence);
         // #1657 (M2 parity): the engine folds the objective-evidence gate WITH
         // the evidence-receipt ledger derived from the enforcement harness
         // artifact's `tool_calls`/`tool_results` traces — the recompute here
@@ -616,7 +620,7 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
           toolCalls: harness?.tool_calls,
           toolResults: harness?.tool_results,
         });
-        const checkCoverage = structuredCoverage(mustCheck, output as never, ledger);
+        const checkCoverage = structuredCoverage(mustCheck, output as never, ledger, mustCheckEvidence);
         fields.unresolvedRequiredChecks = boundedIdList(
           checkCoverage.checks
             .filter((row) => row.status === "unresolved" || row.status === "unmet")

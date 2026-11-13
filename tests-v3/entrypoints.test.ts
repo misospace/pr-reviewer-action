@@ -1457,7 +1457,13 @@ test("#1657: the publish-side required-check recompute folds the evidence ledger
       ],
       tool_results: [{ status: "ok" }, { status: "error" }],
     }));
-    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: ["Check the auth path in src/auth.ts"],
+      // #1657 (review): the producer tags the row explicitly objective —
+      // the recompute gates it on the ledger's receipts, exactly like the
+      // engine fold.
+      must_check_evidence: [{ text: "Check the auth path in src/auth.ts", row_class: "objective", gate: "source-identity" }],
+    }));
     // Satisfied with NO supporting acquisition (the successful read was of
     // src/other.ts, not the named src/auth.ts): the engine's fold keeps the
     // row receipt-absent → unresolved; the publish-side recompute must

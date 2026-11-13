@@ -2408,8 +2408,18 @@ test("artifact serializers emit the v2 snake_case schema and round-trip", () => 
   const artifact = classificationToArtifact(classification);
   assert.deepEqual(
     Object.keys(artifact),
-    ["pr_kind", "risk_flags", "risk_flags_with_files", "route_signals", "changed_files_summary", "linked_issue_labels", "must_check", "linked_metadata_uncertain", "linked_metadata_uncertainty", "path_handling_provenance"],
+    ["pr_kind", "risk_flags", "risk_flags_with_files", "route_signals", "changed_files_summary", "linked_issue_labels", "must_check", "must_check_evidence", "linked_metadata_uncertain", "linked_metadata_uncertainty", "path_handling_provenance"],
   );
+  // #1657 (review): every emitted must_check row carries its trusted
+  // evidence tag — attention/objective-with-gate/review-prompt, keyed by
+  // the exact deterministic text.
+  const mustCheckEvidence = artifact.must_check_evidence as Array<{ text: string; row_class: string }>;
+  const mustCheckRows = artifact.must_check as string[];
+  assert.equal(mustCheckEvidence.length, mustCheckRows.length);
+  for (const tag of mustCheckEvidence) {
+    assert.ok(["attention", "objective", "review-prompt"].includes(tag.row_class), JSON.stringify(tag));
+    assert.ok(typeof tag.text === "string" && tag.text.length > 0);
+  }
   // The deserializer rebuilds an equivalent internal classification from the
   // serialized artifact (camelCase round trip over the snake_case boundary).
   const rebuilt = classificationFromArtifact(JSON.parse(JSON.stringify(artifact)));

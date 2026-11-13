@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
-import { buildEvidenceLedger, type EvidenceLedger } from "../src/enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, type CheckEvidenceTagWithText, type EvidenceLedger } from "../src/enforcement/evidence-receipts.js";
 import { strictReviewResult } from "../src/enforcement/verdict-policy.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 
@@ -57,86 +57,111 @@ test("#750: a grounded not_applicable is a completed disposition (PR #748 regres
   assert.ok(coverage.checks.every((row) => row.status === "not_applicable" && row.reason === "ok"));
 });
 
-test("#750: an unresolved OBJECTIVE check keeps coverage incomplete and visible; an unresolved review prompt is disclosed without gating (#1657)", () => {
+test("#750: an unresolved OBJECTIVE check keeps coverage incomplete and visible; an unresolved tagged review prompt is disclosed without gating (#1657)", () => {
   const objective = evaluateRequiredCheckCoverage(
     ["review the path resolution in src/paths.ts"],
     [d("review the path resolution in src/paths.ts", "unresolved", "cannot see the runtime path")],
+    undefined,
+    [etag("review the path resolution in src/paths.ts", "objective", "source-identity")],
   );
   assert.equal(objective.status, "incomplete");
   assert.equal(objective.checks[0]!.status, "unresolved");
   assert.equal(objective.checks[0]!.reason, "ok");
-  // A generic review prompt answered unresolved is disclosed (status,
-  // reason, row class) but never merge-affecting (#1657 audit delta).
+  // A producer-tagged review prompt answered unresolved is disclosed
+  // (status, reason, row class) but never merge-affecting (#1657).
   const prompt = evaluateRequiredCheckCoverage(
     ["check secret rotation impact"],
     [d("check secret rotation impact", "unresolved", "cannot see the runtime path")],
+    undefined,
+    [etag("check secret rotation impact", "review-prompt")],
   );
   assert.equal(prompt.status, "complete");
   assert.equal(prompt.checks[0]!.status, "unresolved");
   assert.equal(prompt.checks[0]!.rowClass, "review-prompt");
+  // #1657 (review) regression: an arbitrary LEGACY/dynamic check — no
+  // trusted metadata — can never become non-gating just because its text
+  // happens to look like a review prompt. Untagged rows keep pre-#1657
+  // semantics: they gate.
+  const legacy = evaluateRequiredCheckCoverage(
+    ["review auth flow for regression"],
+    [d("review auth flow for regression", "unresolved", "cannot see the runtime path")],
+  );
+  assert.equal(legacy.status, "incomplete");
+  assert.equal(legacy.checks[0]!.rowClass, "legacy");
 });
 
-test("#750: mixed statuses across multiple checks — per-row statuses preserved, generic prompts non-gating (#1657)", () => {
+test("#750: mixed statuses across multiple checks — per-row statuses preserved, producer-tagged prompts non-gating (#1657)", () => {
+  const rows = [
+    "review auth flow for regression",
+    "verify session token handling is correct",
+    "check secret rotation impact",
+  ];
   const coverage = evaluateRequiredCheckCoverage(
-    ["review auth flow for regression", "verify session token handling is correct", "check secret rotation impact"],
+    rows,
     [
-      d("review auth flow for regression", "satisfied", "untouched"),
-      d("verify session token handling is correct", "not_applicable", "no session code in the diff"),
-      d("check secret rotation impact", "unresolved"),
+      d(rows[0]!, "satisfied", "untouched"),
+      d(rows[1]!, "not_applicable", "no session code in the diff"),
+      d(rows[2]!, "unresolved"),
     ],
+    undefined,
+    rows.map((text) => etag(text, "review-prompt")),
   );
-  // Every row here is a generic review prompt: their dispositions are
-  // recorded verbatim, and the unresolved one is disclosed — but none of
-  // them is merge-affecting (#1657 audit delta).
+  // Every row here is a producer-tagged review prompt: their dispositions
+  // are recorded verbatim, and the unresolved one is disclosed — but none
+  // of them is merge-affecting (#1657).
   assert.equal(coverage.status, "complete");
   assert.deepEqual(coverage.checks.map((row) => row.status), ["satisfied", "not_applicable", "unresolved"]);
-  // An unresolved OBJECTIVE row in the same mix keeps the fold incomplete.
+  // An unresolved objective row in the same mix keeps the fold incomplete.
   const withObjective = evaluateRequiredCheckCoverage(
-    ["review the path resolution in src/paths.ts", "check secret rotation impact"],
+    ["review the path resolution in src/paths.ts", rows[2]!],
     [
       d("review the path resolution in src/paths.ts", "unresolved"),
-      d("check secret rotation impact", "satisfied", "r"),
+      d(rows[2]!, "satisfied", "r"),
     ],
+    undefined,
+    [etag("review the path resolution in src/paths.ts", "objective", "source-identity"), etag(rows[2]!, "review-prompt")],
   );
   assert.equal(withObjective.status, "incomplete");
 });
 
-test("#750: a missing disposition is unresolved — omission cannot pass an objective check", () => {
-  const checks = ["review the path resolution in src/paths.ts", "review for path traversal vulnerabilities"];
+test("#750: a missing disposition is unresolved — omission cannot pass", () => {
   const coverage = evaluateRequiredCheckCoverage(
-    checks,
-    [d(checks[0]!, "satisfied", "bounded")],
+    PATH_CHECKS,
+    [d("review for path traversal vulnerabilities", "satisfied", "bounded")],
   );
-  // The objective row is answered; the review-prompt row is not — the
-  // omission is disclosed (no-disposition) but the objective row governs
-  // the merge-affecting status, and here the fold is complete (#1657: the
-  // unanswered prompt does not gate).
-  assert.equal(coverage.status, "complete");
+  // Untagged (legacy) rows keep pre-#1657 semantics: an unanswered row is
+  // no-disposition unresolved and the fold is incomplete.
+  assert.equal(coverage.status, "incomplete");
   assert.equal(coverage.checks[1]!.reason, "no-disposition");
-  // An UNANSWERED objective row keeps the conservative fail-closed.
-  const omission = evaluateRequiredCheckCoverage(
-    [checks[0]!, checks[1]!],
-    [d(checks[1]!, "satisfied", "bounded")],
+  // A producer-tagged review prompt omitted from the answers does not gate
+  // (#1657) — its omission is disclosed on the row.
+  const tagged = evaluateRequiredCheckCoverage(
+    PATH_CHECKS,
+    [d("review for path traversal vulnerabilities", "satisfied", "bounded")],
+    undefined,
+    [etag(PATH_CHECKS[1]!, "review-prompt")],
   );
-  assert.equal(omission.status, "incomplete");
-  assert.equal(omission.checks[0]!.reason, "no-disposition");
+  assert.equal(tagged.status, "complete");
+  assert.equal(tagged.checks[1]!.reason, "no-disposition");
 });
 
-test("#750: no structured dispositions at all is structured=false; only objective rows keep it merge-affecting (#1657 re-scope)", () => {
-  // An all-review-prompt checklist (absence asks, generic scrutiny) with no
-  // dispositions: the skipped contract is disclosed (structured: false,
-  // every row reason-coded) but is not itself a merge-affecting gap —
-  // generic rows never gate completeness (#1657 audit delta).
-  const prompts = evaluateRequiredCheckCoverage(PATH_CHECKS, null);
-  assert.equal(prompts.structured, false);
-  assert.equal(prompts.status, "complete");
-  assert.ok(prompts.checks.every((row) => row.reason === "no-structured-dispositions" && row.rowClass === "review-prompt"));
+test("#750: no structured dispositions at all is structured=false; UNTAGGED (legacy) rows keep the conservative fail-closed (#1657 review)", () => {
+  // A run dir predating the producer tags: the rows are `legacy` and keep
+  // pre-#1657 semantics — no structured dispositions at all stays
+  // conservatively incomplete (key-absence fail-closed, #750).
+  const legacy = evaluateRequiredCheckCoverage(PATH_CHECKS, null);
+  assert.equal(legacy.structured, false);
+  assert.equal(legacy.status, "incomplete");
+  assert.ok(legacy.checks.every((row) => row.reason === "no-structured-dispositions" && row.rowClass === "legacy"));
 
-  // An OBJECTIVE row (a concrete identity the gate can bind) with no
-  // dispositions stays conservatively unresolved and incomplete.
-  const objective = evaluateRequiredCheckCoverage(["review the path resolution in src/paths.ts"], null);
-  assert.equal(objective.status, "incomplete");
-  assert.equal(objective.checks[0]!.rowClass, "objective");
+  // Producer-tagged review prompts answered by nobody are disclosed but
+  // non-gating; a tagged-objective row with no dispositions gates.
+  const tagged = evaluateRequiredCheckCoverage(PATH_CHECKS, null, undefined, [
+    etag(PATH_CHECKS[0]!, "review-prompt"),
+    etag(PATH_CHECKS[1]!, "review-prompt"),
+  ]);
+  assert.equal(tagged.status, "complete");
+  assert.ok(tagged.checks.every((row) => row.rowClass === "review-prompt"));
 });
 
 test("#750: duplicate dispositions deterministically invalidate the check", () => {
@@ -243,7 +268,7 @@ test("#750: the snake_case artifact serializer matches the v2 shape (plus the ad
     version: 1,
     status: "complete",
     structured: true,
-    checks: [{ check: "check a", status: "not_applicable", rationale: "grounded", reason: "ok", row_class: "review-prompt" }],
+    checks: [{ check: "check a", status: "not_applicable", rationale: "grounded", reason: "ok", row_class: "legacy" }],
     dropped_unknown: [],
   });
 });
@@ -270,21 +295,20 @@ test("#750 end-to-end: parser output with a preserved malformed duplicate folds 
   assert.equal(coverage.checks[0]!.status, "unresolved");
 
   // Tri-state end to end: an explicitly emitted null is conservative
-  // structured-incomplete disclosure; with #1657's objective-only
-  // merge-affectingness an all-review-prompt checklist reads complete while
-  // every row still carries its reason code.
+  // structured-incomplete, and the UNTAGGED (legacy) rows keep the
+  // pre-#1657 fail-closed: the fold is incomplete.
   const emittedNull = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve", review_markdown: "x", required_check_dispositions: null,
   })));
   assert.equal(emittedNull.requiredCheckDispositionsEmitted, true);
   const nullCoverage = evaluateRequiredCheckCoverage(PATH_CHECKS, emittedNull.requiredCheckDispositions);
   assert.equal(nullCoverage.structured, false);
-  assert.equal(nullCoverage.status, "complete");
+  assert.equal(nullCoverage.status, "incomplete");
   assert.ok(nullCoverage.checks.every((row) => row.reason === "no-structured-dispositions"));
 });
 
 test("#1388: unmet (alias failed) is a completed-but-failed disposition recorded verbatim, never clean coverage", () => {
-  const row = "review the path resolution in src/paths.ts";
+  const row = "check secret rotation impact";
   // Direct fold: an unmet row is recorded with reason ok…
   const coverage = evaluateRequiredCheckCoverage(
     [row],
@@ -314,7 +338,7 @@ test("#1388: unmet (alias failed) is a completed-but-failed disposition recorded
   // The serializer round-trips the unmet row (with the additive #1657
   // `row_class`).
   assert.deepEqual(requiredCheckCoverageToArtifact(coverage).checks, [
-    { check: row, status: "unmet", rationale: "the secrets file is read and logged verbatim", reason: "ok", row_class: "objective" },
+    { check: row, status: "unmet", rationale: "the secrets file is read and logged verbatim", reason: "ok", row_class: "legacy" },
   ]);
 });
 
@@ -390,6 +414,12 @@ test("#1379: missing release notes do not block the delta obligation — compare
 // attention rows never gate completeness.
 // ---------------------------------------------------------------------------
 
+/** A trusted producer tag for one check text (#1657 review: row class is
+ * producer metadata, never inferred from wording). */
+function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[]): CheckEvidenceTagWithText {
+  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"] };
+}
+
 /** A minimal valid trace: one successful read of src/paths.ts. */
 function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
   return buildEvidenceLedger({
@@ -400,12 +430,15 @@ function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>
 
 const PATH_ROW = "review the path resolution in src/paths.ts";
 
+const PATH_ROW_TAG = etag(PATH_ROW, "objective", "source-identity");
+
 test("#1657: an objective satisfied claim is receipt-backed by a validated head-bound source read; the rationale is disclosure, never credit", () => {
   const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
   const coverage = evaluateRequiredCheckCoverage(
     [PATH_ROW],
     [d(PATH_ROW, "satisfied", "read the resolution at call-1 and reviewed the boundary checks")],
     ledger,
+    [PATH_ROW_TAG],
   );
   assert.equal(coverage.status, "complete");
   assert.equal(coverage.checks[0]!.status, "satisfied");
@@ -426,6 +459,7 @@ test("#1657: one validated source read legitimately supports two independent con
       d(checks[1]!, "satisfied", "the same call-1 read covered the test surface"),
     ],
     ledger,
+    checks.map((text) => etag(text, "objective", "source-identity")),
   );
   // The old one-call-per-row allocation kept one of these unresolved; both
   // rows now read from the SAME receipt.
@@ -436,15 +470,21 @@ test("#1657: one validated source read legitimately supports two independent con
 
 test("#1657: claimed satisfactions with no receipts, failed acquisitions, or truncated bodies fail closed with their own reason code", () => {
   const checks = [PATH_ROW];
-  const noEvidence = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied", "verified by reading the diff carefully")]);
+  const noEvidence = evaluateRequiredCheckCoverage(
+    checks, [d(checks[0]!, "satisfied", "verified by reading the diff carefully")],
+    undefined,
+    [PATH_ROW_TAG],
+  );
   // No ledger at all (no trace): the gate is inert — pre-#1627 semantics on
-  // the fresh-call/fork paths.
+  // the fresh-call/fork paths. An explicitly-objective row CLAIMS satisfied
+  // here; without a ledger the receipt gate is inert (pre-#1627 bytes).
   assert.deepEqual(noEvidence.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
 
   // An active ledger with NO relevant receipt: receipt-absent.
   const absent = evaluateRequiredCheckCoverage(
     checks, [d(checks[0]!, "satisfied", "confirmed")],
     ledgerWith([{ tool: "read_file", args: { path: "README.md" }, status: "ok" }]),
+    [PATH_ROW_TAG],
   );
   assert.deepEqual(absent.checks.map((row) => [row.status, row.reason, row.evidence?.state]),
     [["unresolved", "receipt-absent", "receipt-absent"]]);
@@ -454,6 +494,7 @@ test("#1657: claimed satisfactions with no receipts, failed acquisitions, or tru
   const failed = evaluateRequiredCheckCoverage(
     checks, [d(checks[0]!, "satisfied", "tried to read it")],
     ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "error" }]),
+    [PATH_ROW_TAG],
   );
   assert.deepEqual(failed.checks.map((row) => [row.status, row.reason, row.evidence?.state]),
     [["unresolved", "receipt-unverified", "receipt-unverified"]]);
@@ -462,6 +503,7 @@ test("#1657: claimed satisfactions with no receipts, failed acquisitions, or tru
   const truncated = evaluateRequiredCheckCoverage(
     checks, [d(checks[0]!, "satisfied", "read part of it")],
     ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok", truncated: true }]),
+    [PATH_ROW_TAG],
   );
   assert.deepEqual(truncated.checks.map((row) => [row.status, row.reason, row.evidence?.state]),
     [["unresolved", "receipt-unverified", "receipt-unverified"]]);
@@ -476,6 +518,7 @@ test("#1657: an unrelated successful call can never satisfy a named path/version
     [versionedRow],
     [d(versionedRow, "satisfied", "call-1 read confirms it")],
     ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]),
+    [etag(versionedRow, "objective", "source-identity")],
   );
   // Hmm: src/paths.ts IS carried, so the receipt is relevant-but-not-covering
   // → receipt-mismatch.
@@ -488,22 +531,29 @@ test("#1657: an unrelated successful call can never satisfy a named path/version
     [slugRow],
     [d(slugRow, "satisfied", "call-1 read confirms it")],
     ledgerWith([{ tool: "read_file", args: { path: "owner/repository.json" }, status: "ok" }]),
+    [etag(slugRow, "objective", "source-identity")],
   );
   assert.equal(slugish.checks[0]!.status, "unresolved");
 });
 
-test("#1657: a version-shaped run the layer cannot represent exactly is a review question, never an approximation", () => {
+test("#1657 (review): a version-shaped run the layer cannot represent exactly is never certified from a partial identity", () => {
   // `1.2.3.4x` yields NO exact token — the deterministic layer refuses to
-  // bind it, so the row folds as a review prompt (no receipt demand) instead
-  // of certifying from a partial identity.
+  // bind it. The PRODUCER tagged this row objective, so the claimed
+  // satisfaction has no exact-identity support and stays unresolved
+  // (receipt-absent): the layer never approximates what it cannot
+  // represent. (#1657 review: the OLD text-derived shape — "the row is a
+  // review prompt because of its wording" — is gone; materiality is
+  // metadata.)
   const row = "verify the vendored version 1.2.3.4x wiring in src/paths.ts";
   const coverage = evaluateRequiredCheckCoverage(
     [row],
     [d(row, "satisfied", "checked")],
     ledgerWith([{ tool: "read_file", args: { path: "README.md" }, status: "ok" }]),
+    [etag(row, "objective", "source-identity")],
   );
-  assert.equal(coverage.checks[0]!.rowClass, "review-prompt");
-  assert.equal(coverage.checks[0]!.status, "satisfied");
+  assert.equal(coverage.checks[0]!.rowClass, "objective");
+  assert.equal(coverage.checks[0]!.status, "unresolved");
+  assert.equal(coverage.checks[0]!.reason, "receipt-absent");
 });
 
 test("#1657: attention rows never gate completeness — a #1654-shaped row cannot make an otherwise adequate review partial", () => {
@@ -520,11 +570,24 @@ test("#1657: attention rows never gate completeness — a #1654-shaped row canno
       d(checks[2]!, "unresolved", "the run ended before a full pass"),
     ],
     ledgerWith([{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }]),
+    [
+      etag(checks[0]!, "review-prompt"),
+      etag(checks[1]!, "attention"),
+      etag(checks[2]!, "attention"),
+    ],
   );
   // The unresolved attention rows are disclosed but never merge-affecting.
   assert.equal(coverage.status, "complete");
   assert.deepEqual(coverage.checks.map((row) => row.rowClass), ["review-prompt", "attention", "attention"]);
   assert.deepEqual(coverage.checks.map((row) => row.evidence?.state), ["not-required", "not-required", "not-required"]);
+  // The SAME rows UNRELATED (no producer tags) are legacy: they gate —
+  // non-gating is a property of trusted metadata, never of wording.
+  const untagged = evaluateRequiredCheckCoverage(
+    [checks[1]!],
+    [d(checks[1]!, "unresolved", "could not fully verify every change")],
+  );
+  assert.equal(untagged.status, "incomplete");
+  assert.equal(untagged.checks[0]!.rowClass, "legacy");
 });
 
 test("#1657: not_applicable and unmet rows are never evidence-gated", () => {
@@ -537,6 +600,11 @@ test("#1657: not_applicable and unmet rows are never evidence-gated", () => {
       d(checks[2]!, "unmet", "the resolution does not hold"),
     ],
     ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]),
+    [
+      etag(PATH_CHECKS[0]!, "review-prompt"),
+      etag(PATH_CHECKS[1]!, "review-prompt"),
+      etag(checks[2]!, "objective", "source-identity"),
+    ],
   );
   // Neither the review-prompt answers nor the objective unmet claim is
   // receipt-gated — applicability and confirmed negatives are not positive
@@ -554,8 +622,8 @@ test("#1657: without a ledger at all (no trace) a bare satisfied still discharge
     const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied")], absent as never);
     assert.equal(coverage.status, "complete");
     assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-    // Fork-path rows carry the additive class but no evidence projection.
-    assert.equal(coverage.checks[0]!.rowClass, "review-prompt");
+    // No-ledger rows are untagged here: `legacy`, with no evidence projection.
+    assert.equal(coverage.checks[0]!.rowClass, "legacy");
     assert.equal(coverage.checks[0]!.evidence, undefined);
   }
 });
@@ -567,6 +635,7 @@ test("#1657: a trace present but unparseable refuses the ledger — every object
     [PATH_ROW],
     [d(PATH_ROW, "satisfied", "the resolution read at call-1")],
     refused,
+    [PATH_ROW_TAG],
   );
   assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason, row.evidence?.state]),
     [["unresolved", "trace-refused", "trace-refused"]]);
@@ -586,10 +655,16 @@ test("#1657: dependency-evidence rows are receipt-gated acquisition asks — pro
     { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
     { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
   ]);
+  const depTags = checks.map((text) => {
+    if (text.includes("provenance")) return etag(text, "objective", "dependency-evidence", ["provenance"]);
+    if (text.includes("release delta")) return etag(text, "objective", "dependency-evidence", ["release_delta"]);
+    return etag(text, "objective", "dependency-evidence", ["security_advisory"]);
+  });
   const coverage = evaluateRequiredCheckCoverage(
     checks,
     checks.map((check) => d(check, "satisfied", "the fetch at call-1 returned the upstream document")),
     supported,
+    depTags,
   );
   assert.equal(coverage.status, "complete");
   assert.deepEqual(coverage.checks.map((row) => [row.rowClass, row.evidence?.gate, row.evidence?.state]), [
@@ -606,6 +681,7 @@ test("#1657: dependency-evidence rows are receipt-gated acquisition asks — pro
     checks,
     checks.map((check) => d(check, "satisfied", "fetched the blog post")),
     ledgerWith([{ tool: "web_fetch", args: { url: "https://example.com/blog" }, status: "ok" }]),
+    depTags,
   );
   assert.equal(unrelated.status, "incomplete");
   assert.deepEqual(unrelated.checks.map((row) => row.reason), ["receipt-absent", "receipt-absent"]);
@@ -617,6 +693,7 @@ test("#1657: the dependency advisory row keeps its not-performed escape and stay
     [check],
     [d(check, "satisfied", "the advisory database search at call-1")],
     ledgerWith([{ tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" }]),
+    [etag(check, "objective", "dependency-evidence", ["security_advisory"])],
   );
   assert.deepEqual(satisfied.checks.map((row) => [row.status, row.evidence?.state]), [["satisfied", "receipt-backed"]]);
   const notPerformed = evaluateRequiredCheckCoverage(

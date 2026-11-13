@@ -28,7 +28,8 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
-import type { EvidenceLedger } from "./evidence-receipts.js";
+import { evidenceTagIndex, type CheckEvidenceTagWithText, type EvidenceLedger } from "./evidence-receipts.js";
+import { isMergeAffectingRowClass } from "./required-checks.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
 
@@ -50,13 +51,14 @@ export function structuredCoverage(
   mustCheck: readonly string[],
   artifact: ReviewArtifact,
   ledger?: EvidenceLedger,
+  tags?: readonly CheckEvidenceTagWithText[],
 ): RequiredCheckCoverage {
   const emitted = Object.prototype.hasOwnProperty.call(artifact, "required_check_dispositions");
   const raw = artifact.required_check_dispositions;
   const dispositions: NormalizedRequiredCheckDisposition[] | null = emitted && Array.isArray(raw)
     ? (raw as unknown as NormalizedRequiredCheckDisposition[])
     : null;
-  return evaluateRequiredCheckCoverage(mustCheck, dispositions, ledger);
+  return evaluateRequiredCheckCoverage(mustCheck, dispositions, ledger, tags);
 }
 
 /**
@@ -86,6 +88,10 @@ export function applyRequiredCheckValidation(
     /** #1657: the evidence-receipt ledger (native tool-loop surface).
      * Optional; with no ledger the fold is byte-identical to pre-#1627. */
     ledger?: EvidenceLedger;
+    /** #1657 (review): the PRODUCER's trusted evidence tags
+     * (`must_check_evidence`) — row classes come from this metadata, never
+     * from prose. Rows without a tag are `legacy` (gating). */
+    mustCheckEvidence?: readonly CheckEvidenceTagWithText[];
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();
@@ -113,7 +119,7 @@ export function applyRequiredCheckValidation(
     // unresolved, and a validated failed one still contradicts a model
     // `satisfied`. With no evidence nothing runs; with no ledger the
     // coverage fold is byte-identical to pre-#1627.
-    let coverage = structuredCoverage(mustCheck, artifact, options.ledger);
+    let coverage = structuredCoverage(mustCheck, artifact, options.ledger, options.mustCheckEvidence);
     // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
     // derivation: a validated head-bound green test-execution check
     // discharges a test-run ask; a validated failed one contradicts a
@@ -130,7 +136,7 @@ export function applyRequiredCheckValidation(
       // the #1594 no-dispositions CI discharge stays a discharge).
       const recomputed = coverage.status === "none" || reconciled.rows.length === 0
         ? coverage.status
-        : reconciled.rows.every((row) => row.rowClass !== "objective"
+        : reconciled.rows.every((row) => !isMergeAffectingRowClass(row.rowClass)
             || ((row.status === "satisfied" || row.status === "not_applicable")
               && (row.reason === "ok" || row.reason === "ci-evidence")))
           ? "complete"
@@ -140,16 +146,17 @@ export function applyRequiredCheckValidation(
     status = coverage.status === "none" ? "none" : coverage.status;
     // Not clean = unresolved, or dispositioned `unmet` (#1381: performed
     // and failed — never clean coverage, so it is listed, never crash or
-    // silently counted as addressed). #1657 (audit delta): only OBJECTIVE
-    // rows are merge-affecting gaps — attention rows and generic
-    // review-prompt rows are disclosed on their own rows, never in
-    // `missing`.
+    // silently counted as addressed). #1657 (review): the merge-affecting
+    // set is the PRODUCER-tagged set — explicitly-objective rows plus
+    // legacy rows (no trusted metadata; pre-#1657 semantics preserved).
+    // Tagged attention and review-prompt rows are disclosed on their own
+    // rows, never in `missing`.
     const notClean = coverage.checks
-      .filter((row) => row.rowClass === "objective"
+      .filter((row) => isMergeAffectingRowClass(row.rowClass)
         && (row.status === "unresolved" || row.status === "unmet"))
       .map((row) => row.check);
     const resolved = coverage.checks
-      .filter((row) => row.rowClass === "objective"
+      .filter((row) => isMergeAffectingRowClass(row.rowClass)
         && row.status !== "unresolved" && row.status !== "unmet")
       .map((row) => row.check);
     result = {

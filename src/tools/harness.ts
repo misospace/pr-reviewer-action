@@ -69,7 +69,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
-import { executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/evidence-receipts.js";
+import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/evidence-receipts.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
@@ -1733,19 +1733,42 @@ export function buildPlanningContext(
   const regions = extractCorpusRegions(corpusText);
   const classifications = deps.readText("classification.json");
   let mustCheck: string[] = [];
+  // #1657 (review): the producer's trusted evidence tags ride the
+  // classification artifact next to the rows they belong to; candidate rows
+  // carry them verbatim into the obligation contract. Unparseable rows are
+  // dropped (those checks stay `legacy`/gating), never guessed.
+  let mustCheckEvidence: ReturnType<typeof checkEvidenceTagsFromArtifact> = [];
   try {
-    const parsed = classifications ? JSON.parse(classifications) as { must_check?: unknown } : null;
+    const parsed = classifications ? JSON.parse(classifications) as { must_check?: unknown; must_check_evidence?: unknown } : null;
     if (Array.isArray(parsed?.must_check)) mustCheck = parsed.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+    mustCheckEvidence = checkEvidenceTagsFromArtifact(parsed?.must_check_evidence);
   } catch {
     mustCheck = [];
+    mustCheckEvidence = [];
   }
   const guidance = extractApprovalPrerequisites(regions.standards ?? "");
   // VALIDATE_REQUIRED_CHECKS=false keeps deterministic must_check items out
   // of the obligation contract at BOTH layers (#1381): the model is not
   // shown rows the engine has agreed not to enforce.
   const includeMustCheck = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS);
-  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string }> = [
-    ...(includeMustCheck ? mustCheck.map((text) => ({ source: "must_check" as const, text })) : []),
+  // #1657 (review): each must_check row carries its producer's trusted
+  // evidence tag (`row_class`/`gate`/`obligations`, snake_case — the same
+  // shape classification.json persists); untagged rows carry none and stay
+  // `legacy` downstream.
+  const mustCheckTags = new Map(mustCheckEvidence.map((tag) => [tag.text, tag]));
+  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string; row_class?: string; gate?: string; obligations?: string[] }> = [
+    ...(includeMustCheck
+      ? mustCheck.map((text) => {
+          const tag = mustCheckTags.get(text);
+          return {
+            source: "must_check" as const,
+            text,
+            ...(tag !== undefined
+              ? { row_class: tag.rowClass, ...(tag.gate !== null ? { gate: tag.gate } : {}), ...(tag.obligations.length > 0 ? { obligations: tag.obligations } : {}) }
+              : {}),
+          };
+        })
+      : []),
     ...guidance.map((text) => ({ source: "trusted_base_guidance" as const, text })),
   ].map((item, index) => ({ ...item, id: `obligation-${index + 1}` }));
   // #1449: the derived obligations ride the SAME planning section. The rows
@@ -1767,7 +1790,15 @@ export function buildPlanningContext(
       deps.writeArtifact("review-obligations-candidates.json", JSON.stringify({
         version: 1,
         injected,
-        obligations: candidates.map(({ id, source, text }) => ({ id, source, text })),
+        // #1657 (review): the producer's trusted evidence tags ride the
+        // candidates rows into the obligation contract — row class is this
+        // metadata, never inferred from wording downstream.
+        obligations: candidates.map(({ id, source, text, row_class, gate, obligations: rowObligations }) => ({
+          id, source, text,
+          ...(row_class !== undefined ? { row_class } : {}),
+          ...(gate !== undefined ? { gate } : {}),
+          ...(rowObligations !== undefined && rowObligations.length > 0 ? { obligations: rowObligations } : {}),
+        })),
       }, null, 2) + "\n");
     }
   };

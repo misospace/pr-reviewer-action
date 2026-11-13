@@ -2,75 +2,61 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildEvidenceLedger,
-  classifyCheckEvidence,
-  evaluateCheckEvidence,
+  checkEvidenceTagsFromArtifact,
+  evaluateRowEvidence,
   evidenceLedgerFromArtifact,
   evidenceLedgerToArtifact,
   executedCallId,
   MAX_EXECUTED_CALL_INDEX,
   rowEvidenceStateToArtifact,
+  type CheckEvidenceTag,
+  type CheckEvidenceTagWithText,
+  type EvidenceLedger,
 } from "../src/enforcement/evidence-receipts.js";
+
+/** A trusted producer tag for one check text (#1657 review: row class is
+ * producer metadata, never inferred from wording). */
+function tag(text: string, rowClass: CheckEvidenceTag["rowClass"], gate?: CheckEvidenceTag["gate"], obligations?: string[]): CheckEvidenceTagWithText {
+  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTag["obligations"] };
+}
 
 // ---------------------------------------------------------------------------
 // Classification (#1657): closed vocabularies over the static check texts.
 // ---------------------------------------------------------------------------
 
-test("#1657: the P0/P1 classifier sentences classify as attention rows — exact texts, never a keyword scan", () => {
-  assert.deepEqual(classifyCheckEvidence("treat as critical — verify all changes thoroughly"), {
-    rowClass: "attention", gate: null, obligations: [],
-  });
-  assert.deepEqual(classifyCheckEvidence("  Treat as High Priority — Verify Correctness Carefully  "), {
-    rowClass: "attention", gate: null, obligations: [],
-  });
-  // Case/whitespace drift still matches the closed texts; added words do not.
-  assert.equal(classifyCheckEvidence("  Treat as High Priority — Verify Correctness Carefully  ").rowClass, "attention");
-  assert.equal(classifyCheckEvidence("treat as critical — verify all changes thoroughly and carefully").rowClass, "review-prompt");
+test("#1657 (review): row class is trusted PRODUCER metadata — no prose classification exists to promote a dynamic row", () => {
+  // The tag the producer declared is what the row is; the wording is never
+  // consulted for materiality.
+  assert.deepEqual(evaluateRowEvidence(tag("verify the vendored version 1.2.3 wiring in src/paths.ts", "objective", "source-identity"),
+    "verify the vendored version 1.2.3 wiring in src/paths.ts", { state: "valid", receipts: [] }),
+  { rowClass: "objective", gate: "source-identity", state: "receipt-absent", receipts: [] });
+  // The SAME wording, tagged review-prompt by its producer, is a non-gating
+  // review question — the text does not re-classify it.
+  assert.deepEqual(evaluateRowEvidence(tag("verify the vendored version 1.2.3 wiring in src/paths.ts", "review-prompt"),
+    "verify the vendored version 1.2.3 wiring in src/paths.ts", { state: "valid", receipts: [] }),
+  { rowClass: "review-prompt", gate: null, state: "not-required", receipts: [] });
+  // Untagged rows are LEGACY: pre-#1657 gating semantics, no receipt demand.
+  assert.deepEqual(evaluateRowEvidence(null, "review auth flow for regression", { state: "valid", receipts: [] }),
+  { rowClass: "legacy", gate: null, state: "not-required", receipts: [] });
 });
 
-test("#1657: test-run asks classify objective with the ci-evidence gate; dependency-evidence shapes classify with their named kinds", () => {
-  assert.deepEqual(classifyCheckEvidence("run full test suite after upgrade"), {
-    rowClass: "objective", gate: "ci-evidence", obligations: [],
-  });
-  assert.deepEqual(classifyCheckEvidence("establish upstream provenance for the updated dependency: publisher and canonical source repository"), {
-    rowClass: "objective", gate: "dependency-evidence", obligations: ["provenance"],
-  });
-  assert.deepEqual(classifyCheckEvidence("inspect the exact old→new upstream release delta for the updated dependency"), {
-    rowClass: "objective", gate: "dependency-evidence", obligations: ["release_delta"],
-  });
-  assert.deepEqual(classifyCheckEvidence(
-    "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
-  ), { rowClass: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] });
-  // The security-sensitive flag row names TWO acquisition kinds.
-  assert.deepEqual(classifyCheckEvidence("verify the update provenance and any referenced security advisory"), {
-    rowClass: "objective", gate: "dependency-evidence", obligations: ["provenance", "security_advisory"],
-  });
-});
-
-test("#1657: absence asks and generic scrutiny classify review-prompt — no gate, no provenance choreography", () => {
-  for (const text of [
-    "review for path traversal vulnerabilities",
-    "check for breaking API changes in updated dependencies",
-    "review auth flow for regression",
-    "verify session token handling is correct",
-    "check for unintended public endpoints",
-    "validate manifest against target cluster version",
-    "test with edge-case paths (null bytes, symlinks)",
-  ]) {
-    assert.deepEqual(classifyCheckEvidence(text), { rowClass: "review-prompt", gate: null, obligations: [] }, text);
-  }
-});
-
-test("#1657: rows naming exact identities classify objective with the source-identity gate; unrepresentable runs refuse to approximate", () => {
-  assert.deepEqual(classifyCheckEvidence("review the path resolution in src/paths.ts"), {
-    rowClass: "objective", gate: "source-identity", obligations: [],
-  });
-  assert.deepEqual(classifyCheckEvidence("verify the owner/repo fixture wiring"), {
-    rowClass: "objective", gate: "source-identity", obligations: [],
-  });
-  // A version-shaped run the extractor cannot represent exactly yields NO
-  // token: the deterministic layer never claims it can bind it (#1634
-  // round 6 atomization, carried over) — the row is a review prompt.
-  assert.equal(classifyCheckEvidence("verify the vendored version 1.2.3.4x wiring in src/paths.ts").rowClass, "review-prompt");
+test("#1657 (review): the strict tag parser drops unparseable rows (those checks stay legacy/gating) and never promotes a gateless objective tag", () => {
+  const parsed = checkEvidenceTagsFromArtifact([
+    { text: "run full test suite after upgrade", row_class: "objective", gate: "ci-evidence" },
+    { text: "no gate", row_class: "objective" },
+    { text: "wrong gate", row_class: "objective", gate: "vibes" },
+    { text: "prompt with a stray gate", row_class: "review-prompt", gate: "ci-evidence" },
+    { text: "legacy row", row_class: "legacy" },
+    { text: 42, row_class: "objective", gate: "ci-evidence" },
+    "not an object",
+  ]);
+  assert.deepEqual(parsed, [
+    { text: "run full test suite after upgrade", rowClass: "objective", gate: "ci-evidence", obligations: [] },
+  ]);
+  // A gateless non-objective tag is valid.
+  assert.deepEqual(checkEvidenceTagsFromArtifact([{ text: "review auth flow for regression", row_class: "review-prompt" }]), [
+    { text: "review auth flow for regression", rowClass: "review-prompt", gate: null, obligations: [] },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -184,6 +170,8 @@ test("#1657: an over-cap trace is bounded by PREFIX truncation — the 1-based p
 // contribute; only validated objective fields credit a claim.
 // ---------------------------------------------------------------------------
 
+const CONFIG_TAG = tag("verify the config surface in src/config.yaml", "objective", "source-identity");
+
 test("#1657: requirement evaluation is shareable — the same receipt backs every row that legitimately names its identity", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
@@ -193,10 +181,14 @@ test("#1657: requirement evaluation is shareable — the same receipt backs ever
     "verify the config surface in src/config.yaml",
     "check the schema handling in src/config.yaml",
   ]) {
-    const state = evaluateCheckEvidence(row, ledger);
+    const state = evaluateRowEvidence(CONFIG_TAG, row, ledger);
     assert.deepEqual([state.state, state.gate, state.receipts], ["receipt-backed", "source-identity", ["call-1"]], row);
   }
 });
+
+const VERSION_TAG = tag("verify the published version 1.2.3 notes", "objective", "source-identity");
+const SLUG_TAG = tag("verify the owner/repo manifest wiring", "objective", "source-identity");
+const DELTA_RANGE_TAG = tag("inspect the exact 1.2.3...4.5.6 upstream delta identity", "objective", "source-identity");
 
 test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused as EXACT-identity mismatches (#1634 regressions, receipts edition)", () => {
   const ledger = buildEvidenceLedger({
@@ -205,18 +197,18 @@ test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused
     toolResults: [{ status: "ok" }],
     reviewedHeadSha: HEAD,
   });
-  const wrong = evaluateCheckEvidence("verify the published version 1.2.3 notes", ledger);
+  const wrong = evaluateRowEvidence(VERSION_TAG, "verify the published version 1.2.3 notes", ledger);
   assert.equal(wrong.state, "receipt-absent");
 
-  // The exact version (inside a longer subject) carries under its kind
-  // boundary; the compare RANGE separator stays admissible.
+  // The compare RANGE separator stays admissible under the kind boundary;
+  // an unpinned forge read is not head-bound: relevant but unverified.
   const range = buildEvidenceLedger({
     toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/compare/1.2.3...4.5.6` }, status: "ok" }],
     toolResults: [{ status: "ok" }],
     reviewedHeadSha: HEAD,
   });
   assert.equal(range.receipts[0]!.freshness, "unbound");
-  const rangeState = evaluateCheckEvidence("inspect the exact 1.2.3...4.5.6 upstream delta identity", range);
+  const rangeState = evaluateRowEvidence(DELTA_RANGE_TAG, "inspect the exact 1.2.3...4.5.6 upstream delta identity", range);
   // Head-bound is required for source-identity support, and an unpinned
   // forge read is not head-bound: relevant but unverified.
   assert.equal(rangeState.state, "receipt-unverified");
@@ -226,8 +218,10 @@ test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused
     toolCalls: [{ tool: "read_file", args: { path: "owner/repository.json" }, status: "ok" }],
     toolResults: [{ status: "ok" }],
   });
-  assert.equal(evaluateCheckEvidence("verify the owner/repo manifest wiring", slug).state, "receipt-absent");
+  assert.equal(evaluateRowEvidence(SLUG_TAG, "verify the owner/repo manifest wiring", slug).state, "receipt-absent");
 });
+
+const HEAD_TAG = tag(`verify the config surface at head ${HEAD} in src/config.yaml`, "objective", "source-identity");
 
 test("#1657: stale/wrong-head provenance is objectively invalid — a relevant-but-unbound receipt is receipt-unverified, never credited", () => {
   const row = `verify the config surface at head ${HEAD} in src/config.yaml`;
@@ -236,20 +230,26 @@ test("#1657: stale/wrong-head provenance is objectively invalid — a relevant-b
     toolResults: [{ status: "ok" }],
     reviewedHeadSha: HEAD,
   });
-  assert.deepEqual(evaluateCheckEvidence(row, staleLedger), {
+  assert.deepEqual(evaluateRowEvidence(HEAD_TAG, row, staleLedger), {
     rowClass: "objective", gate: "source-identity", state: "receipt-unverified", receipts: [],
   });
 });
 
+const CONFIG_ROW = "verify the config surface in src/config.yaml";
+
 test("#1657: malformed provenance is visible and reason-coded — trace-refused, never silently repaired", () => {
   const refused = buildEvidenceLedger({ toolCalls: [{ tool: "read_file" }], toolResults: [{ status: "ok" }] });
   assert.equal(refused.state, "refused");
-  assert.deepEqual(evaluateCheckEvidence("verify the config surface in src/config.yaml", refused), {
+  assert.deepEqual(evaluateRowEvidence(tag(CONFIG_ROW, "objective", "source-identity"), CONFIG_ROW, refused), {
     rowClass: "objective", gate: "source-identity", state: "trace-refused", receipts: [],
   });
   // Review prompts are not-required even behind a refused ledger.
-  assert.equal(evaluateCheckEvidence("review auth flow for regression", refused).state, "not-required");
+  assert.equal(evaluateRowEvidence(tag("review auth flow for regression", "review-prompt"), "review auth flow for regression", refused).state, "not-required");
 });
+
+const PROVENANCE_ROW = "establish upstream provenance for the updated dependency: publisher and canonical source repository";
+const DELTA_ROW = "inspect the exact old→new upstream release delta for the updated dependency";
+const ADVISORY_ROW = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
 
 test("#1657: dependency-evidence rows are validated per named acquisition kind — one verified web acquisition per kind, unrelated targets never credit", () => {
   const ledger = buildEvidenceLedger({
@@ -259,26 +259,26 @@ test("#1657: dependency-evidence rows are validated per named acquisition kind �
     ],
     toolResults: [{ status: "ok" }, { status: "ok" }],
   });
-  const provenanceRow = "establish upstream provenance for the updated dependency: publisher and canonical source repository";
-  const deltaRow = "inspect the exact old→new upstream release delta for the updated dependency";
-  const advisoryRow = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+  const provenanceTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"]);
+  const deltaTag = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"]);
+  const advisoryTag = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"]);
   assert.deepEqual(
-    [evaluateCheckEvidence(deltaRow, ledger).state, evaluateCheckEvidence(deltaRow, ledger).receipts],
+    [evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).state, evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).receipts],
     ["receipt-backed", ["call-1"]],
   );
   assert.deepEqual(
-    [evaluateCheckEvidence(advisoryRow, ledger).state, evaluateCheckEvidence(advisoryRow, ledger).receipts],
+    [evaluateRowEvidence(advisoryTag, ADVISORY_ROW, ledger).state, evaluateRowEvidence(advisoryTag, ADVISORY_ROW, ledger).receipts],
     ["receipt-backed", ["call-2"]],
   );
   // The provenance row names an acquisition no executed call made (no
   // registry/publisher/source-repo target ran) → receipt-absent.
-  assert.equal(evaluateCheckEvidence(provenanceRow, ledger).state, "receipt-absent");
+  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, ledger).state, "receipt-absent");
   // A failed acquisition of the right kind is receipt-unverified.
   const failed = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "error" }],
     toolResults: [{ status: "error" }],
   });
-  assert.equal(evaluateCheckEvidence(deltaRow, failed).state, "receipt-unverified");
+  assert.equal(evaluateRowEvidence(deltaTag, DELTA_ROW, failed).state, "receipt-unverified");
 });
 
 // ---------------------------------------------------------------------------

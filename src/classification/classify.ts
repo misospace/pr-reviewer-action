@@ -2326,6 +2326,11 @@ export interface PRClassification {
   changedFilesSummary: string[];
   linkedIssueLabels: string[];
   mustCheck: string[];
+  /** #1657 (review): the producer's trusted evidence tags for the must_check
+   * rows (see `MUST_CHECK_EVIDENCE_TAGS`) — row class is this metadata, never
+   * inferred from wording downstream. Rows without a tag are absent here and
+   * stay `legacy` (gating) at every consumer. */
+  mustCheckEvidence: MustCheckEvidenceTag[];
   /** #633: true when a selection-relevant metadata source (GitHub
    * linked-issue labels, configured Linear priority/labels) was EXPECTED but
    * could not be determined — missing signals must not be read as absent
@@ -2405,6 +2410,10 @@ export function classificationToArtifact(classification: PRClassification): Reco
     changed_files_summary: classification.changedFilesSummary,
     linked_issue_labels: classification.linkedIssueLabels,
     must_check: classification.mustCheck,
+    // #1657 (review): trusted per-row evidence tags — additive; a pre-#1657
+    // consumer ignores the field, and a row missing from it stays `legacy`
+    // (gating) at every fold.
+    must_check_evidence: classification.mustCheckEvidence,
     linked_metadata_uncertain: classification.linkedMetadataUncertain,
     linked_metadata_uncertainty: classification.linkedMetadataUncertainty,
     path_handling_provenance: {
@@ -3976,6 +3985,93 @@ const PLATFORM_EVIDENCE_CHECKS: readonly string[] = [
 // issue thread: the spec names no dedicated family for action_update).
 const ACTION_EVIDENCE_CHECKS = DEPENDENCY_EVIDENCE_CHECKS;
 
+// #1657 (review): TRUSTED EVIDENCE-CLASS TAGS — the producer declares, next
+// to the rows it emits, whether a check is an attention signal, an
+// explicitly-objective mechanical gate (with its gate kind and acquisition
+// obligations), or an ordinary semantic review question. Row class is THIS
+// metadata, never inferred from the row's wording downstream: an untagged
+// row is `legacy` and keeps pre-#1657 gating semantics, so a newly added
+// sentence without a tag fails safe (gating), and a dynamic/hand-written
+// check can never become non-gating because its text happens to look like
+// a review prompt. Keys are the exact static sentences above.
+type MustCheckEvidenceTag = {
+  text: string;
+  row_class: "attention" | "objective" | "review-prompt";
+  gate?: "ci-evidence" | "dependency-evidence" | "source-identity";
+  obligations?: ("provenance" | "release_delta" | "security_advisory")[];
+};
+
+const REVIEW_PROMPT_TAG: MustCheckEvidenceTag["row_class"] = "review-prompt";
+
+const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> = Object.assign(
+  Object.fromEntries([
+    // Attention/routing rows: attention signals, not propositions.
+    ["treat as critical — verify all changes thoroughly", { text: "treat as critical — verify all changes thoroughly", row_class: "attention" }],
+    ["treat as high priority — verify correctness carefully", { text: "treat as high priority — verify correctness carefully", row_class: "attention" }],
+  ] as Array<[string, MustCheckEvidenceTag]>),
+  // The upstream-evidence families: explicitly-objective acquisition gates,
+  // one row per obligation kind (positional — the family arrays are const).
+  Object.fromEntries(
+    [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS, DEPENDENCY_EVIDENCE_CHECKS, PLATFORM_EVIDENCE_CHECKS].flatMap(
+      ([provenanceRow, deltaRow, advisoryRow]) => [
+        [provenanceRow, { text: provenanceRow, row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"] }],
+        [deltaRow, { text: deltaRow, row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"] }],
+        [advisoryRow, { text: advisoryRow, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
+      ] as Array<[string, MustCheckEvidenceTag]>,
+    ),
+  ),
+  Object.fromEntries([
+    // The security-sensitive flag row names two acquisition kinds.
+    ["verify the update provenance and any referenced security advisory",
+      { text: "verify the update provenance and any referenced security advisory", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance", "security_advisory"] }],
+    // The #1595 lockfile-refresh aggregate advisory row.
+    ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+      { text: "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
+    // Objective CI ask: the test-run requirement settles from exact-head CI.
+    ["run full test suite after upgrade", { text: "run full test suite after upgrade", row_class: "objective", gate: "ci-evidence" }],
+  ] as Array<[string, MustCheckEvidenceTag]>),
+  // Every remaining static sentence is an ordinary semantic review question:
+  // tagged review-prompt by the producer (never left to a downstream guess).
+  Object.fromEntries(
+    [
+      "verify no functional changes beyond lockfile hashes",
+      "verify only image digests changed; repository and tag unchanged",
+      "verify only image tags/digests changed; repository unchanged",
+      "verify only chart/version values changed",
+      "check for breaking API changes in updated dependencies",
+      "validate manifest against target cluster version",
+      "check for resource quota / limit changes",
+      "review auth flow for regression",
+      "verify session token handling is correct",
+      "verify route access controls are in place",
+      "check for unintended public endpoints",
+      "verify file path sanitization",
+      "check for directory traversal vulnerabilities",
+      "review for path traversal vulnerabilities",
+      "test with edge-case paths (null bytes, symlinks)",
+      "verify secrets are not logged or exposed in diffs",
+      "check secret rotation impact",
+      "review migration for data loss risk",
+      "test migration on a copy of production schema",
+      "explicitly address the linked security issue",
+      "verify audit findings are addressed",
+    ].map((text) => [text, { text, row_class: REVIEW_PROMPT_TAG }] as [string, MustCheckEvidenceTag]),
+  ),
+) as Readonly<Record<string, MustCheckEvidenceTag>>;
+
+/** The trusted evidence tags for the emitted must_check rows, in emission
+ * order. Every static sentence above is tabled; an untabled row (a future
+ * sentence someone added without a tag) contributes NO tag — it stays
+ * `legacy` downstream, which fails safe (gating), never non-gating. */
+export function mustCheckEvidenceTags(checks: readonly string[]): MustCheckEvidenceTag[] {
+  const tags: MustCheckEvidenceTag[] = [];
+  for (const text of checks) {
+    const tag = MUST_CHECK_EVIDENCE_TAGS[text];
+    if (tag !== undefined) tags.push(tag);
+  }
+  return tags;
+}
+
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
   image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
@@ -4260,6 +4356,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
       : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles, lockfileOnlyRefresh);
+  const mustCheckEvidence = mustCheckEvidenceTags(mustCheck);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);
@@ -4284,6 +4381,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     changedFilesSummary,
     linkedIssueLabels,
     mustCheck,
+    mustCheckEvidence,
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,

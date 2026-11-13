@@ -552,15 +552,17 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
   // dependency_upgrade classifies with five must_check rows — the two
   // family checks plus the three #1379 dependency-evidence obligations; the
   // scripted verdict dispositions one `unmet` (exact text echo, grounded
-  // rationale) and leaves the other four undisposed.
-  const unmetCheck = "check for breaking API changes in updated dependencies";
+  // rationale) and leaves the other four undisposed. #1657 (review): the
+  // unmet row is the explicitly-OBJECTIVE test-run ask — a tagged
+  // review-prompt row's unmet no longer forces (issue 3).
+  const unmetCheck = "run full test suite after upgrade";
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: "c1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
       verdict: "approve", review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
       // #1627: one junk entry rides along — unattributable, dropped by the
       // parser, receipted end to end without touching any row's fold.
-      required_check_dispositions: ["bare string", { check: unmetCheck, status: "unmet", rationale: "the dependency removed a exported symbol; breaking change confirmed" }],
+      required_check_dispositions: ["bare string", { check: unmetCheck, status: "unmet", rationale: "no test evidence exists in this run and the suite never ran" }],
     }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
   });
   const f = fixture();
@@ -587,15 +589,15 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
       required_check_disposition_receipt?: { dropped: Array<{ reason: string }>; cap_reached: boolean };
     };
     assert.deepEqual(persisted.obligations.map((row) => [row.text, row.status, row.cause]), [
+      ["check for breaking API changes in updated dependencies", "unresolved", "tool-capability"],
       [unmetCheck, "unmet", null],
-      ["run full test suite after upgrade", "unresolved", "tool-capability"],
       ["establish upstream provenance for the updated dependency: publisher and canonical source repository", "unresolved", "tool-capability"],
       ["inspect the exact old→new upstream release delta for the updated dependency", "unresolved", "tool-capability"],
       ["check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "unresolved", "tool-capability"],
     ]);
     // #1627: every folded row carries its content-free reason — the unmet
     // row resolved (ok), the four undisposed rows never matched an answer.
-    assert.deepEqual(persisted.obligations.map((row) => row.reason), ["ok", "no-disposition", "no-disposition", "no-disposition", "no-disposition"]);
+    assert.deepEqual(persisted.obligations.map((row) => row.reason), ["no-disposition", "ok", "no-disposition", "no-disposition", "no-disposition"]);
     // #1627: the parser's drop receipt rides the fold artifact — the junk
     // entry is unattributable, so it can never be a per-row reason.
     assert.deepEqual(persisted.required_check_disposition_receipt, { dropped: [{ reason: "non-object-entry" }], cap_reached: false });

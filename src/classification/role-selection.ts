@@ -200,6 +200,12 @@ export function classificationFromArtifact(raw: unknown): PRClassification | nul
     changedFilesSummary: Array.isArray(rec.changed_files_summary) ? (rec.changed_files_summary as string[]) : [],
     linkedIssueLabels: cleanStrList(rec.linked_issue_labels),
     mustCheck: cleanStrList(rec.must_check),
+    // #1657 (review): the role-selection rebuild is a selection-side view of
+    // the persisted artifact — the evidence tags ride the FULL classification
+    // artifact (classification.json), not this env-fed projection. No tags
+    // here means the rebuilt rows stay `legacy` (gating) downstream, which
+    // fails safe.
+    mustCheckEvidence: [],
     linkedMetadataUncertain: rec.linked_metadata_uncertain === true,
     linkedMetadataUncertainty: uncertainty,
     // #749 provenance is a diagnostic, not a selection input: the persisted
