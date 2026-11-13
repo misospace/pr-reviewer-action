@@ -90,7 +90,10 @@ export interface AnthropicWireBody {
   model: string;
   max_tokens: number;
   stream: boolean;
-  system: string;
+  /** #1655: the one-shot request carries the system prompt as a single
+   * cache-checkpointed text block (mirroring the Conversation renderer's
+   * stable breakpoint); an empty system passes through as the plain string. */
+  system: string | [{ type: "text"; text: string; cache_control: { type: "ephemeral" } }];
   messages: [{ role: "user"; content: string }];
   temperature?: number;
   /** #998/#1047: Anthropic's own container for output controls; `effort` is
