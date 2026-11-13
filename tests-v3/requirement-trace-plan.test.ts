@@ -7,14 +7,9 @@ import { buildPlanningContext, type HarnessDeps } from "../src/tools/harness.js"
 import {
   buildTracePlan,
   readTracePlan,
-  traceAdmissionTokens,
   tracePlanSection,
-  traceReadTargetPaths,
-  traceSeamSlotForTarget,
-  traceTargetIsTestRead,
   MAX_TRACE_PLAN_ROW_TEXT_CHARS,
   TRACE_PLAN_ARTIFACT,
-  TRACE_PLAN_CANDIDATES_ARTIFACT,
   TRACE_PLAN_SECTION_MAX_BYTES,
   TRACE_PLAN_VERSION,
 } from "../src/requirements/trace-plan.js";
@@ -77,7 +72,8 @@ const PLAN_ROW = {
   ],
   code_verifiable: true,
   proof_shape: "distributed",
-  required_attempts: 4,
+  // #1658: one enforcement read per declared seam.
+  required_attempts: 2,
 };
 
 function writePlan(root: string, rows: unknown[]): void {
@@ -102,10 +98,10 @@ test("the trace plan leads the first planning turn with the requirement rows and
   // and on the row's single collapsed line.
   assert.match(text, /seam control-plane: enforcement src\/control\/\*; tests tests\/control\/\*/);
   assert.match(text, /seam lease-worker: enforcement src\/worker\/\*; tests tests\/worker\/\*/);
-  assert.match(text, /in-scope requirements whose repository evidence gates a trusted approval/);
-  assert.match(text, /A runtime row needs BOTH an enforcement location AND a matching regression test/);
-  assert.match(text, /it needs a regression test only when its own text demands one/);
-  assert.match(text, /enforcement \+ matching test in each of 2 seams/);
+  assert.match(text, /in-scope requirements to gather repository evidence for before writing the review/);
+  assert.match(text, /A runtime row needs the enforcement location it cites read/);
+  assert.match(text, /A structural-state row is proven by reading the repository state it names/);
+  assert.match(text, /enforcement location in each of 2 seams/);
   assert.ok(text.indexOf("# Requirement Trace Plan") < text.indexOf("# Claims to Falsify"));
 });
 
@@ -156,15 +152,17 @@ test("buildTracePlan maps the ledger, the scope and the distributed hints onto p
   assert.equal(plan.rows[1]!.code_verifiable, true);
   assert.equal(plan.rows[2]!.code_verifiable, false);
   assert.equal(plan.rows[3]!.code_verifiable, false);
-  // #1519: each row carries the evidence shape and admitted-read demand the
-  // validator's own proof classification implies — a distributed row needs
-  // enforcement AND test per seam, a runtime row both, a structural-state
-  // row the checkout state (a test only when its text demands one), and a
-  // non-code row nothing.
+  // #1658: each row carries the evidence demand the validator's own proof
+  // classification implies — a distributed row one enforcement read per
+  // seam, a runtime row the enforcement location (a test only when its text
+  // demands one), a structural-state row the checkout state, and a non-code
+  // row nothing.
   assert.deepEqual(
     plan.rows.map((row) => [row.proof_shape, row.required_attempts]),
     [
-      ["distributed", 4],
+      ["distributed", 2],
+      // req-test explicitly demands a regression test, so its runtime row
+      // owes the test read too.
       ["runtime", 2],
       ["non-code", 0],
       ["non-code", 0],
@@ -219,7 +217,7 @@ test("#1519 (review): an overflow-topology requirement plans as distributed, not
   assert.equal(plan.rows[0]!.proof_shape, "distributed");
   // The demand is the validator's capped per-seam bound, not the raw seam
   // count and not the two-attempt runtime shape.
-  assert.equal(plan.rows[0]!.required_attempts, 2 * Math.min(groups.length, 4));
+  assert.equal(plan.rows[0]!.required_attempts, Math.min(groups.length, 4));
   assert.equal(plan.rows[0]!.code_verifiable, true);
   // The row round-trips its own reader — the persisted artifact is accepted.
   assert.deepEqual(readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows: plan.rows })).rows, plan.rows);
@@ -253,7 +251,7 @@ test("readTracePlan refuses a malformed artifact and the plan section is bounded
   assert.deepEqual(readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows: [{ id: 7 }] })).rows, []);
   // #1519: a row that does not carry a coherent evidence demand is refused
   // whole — the artifact is never partially trusted.
-  const valid = { ...PLAN_ROW, seams: [], proof_shape: "runtime", required_attempts: 2 };
+  const valid = { ...PLAN_ROW, seams: [], proof_shape: "runtime", required_attempts: 1 };
   for (const broken of [
     { ...valid, proof_shape: "bogus" },
     { ...valid, required_attempts: "2" },
@@ -328,7 +326,7 @@ test("readTracePlan refuses a malformed artifact and the plan section is bounded
     seams: [],
     code_verifiable: true,
     proof_shape: "runtime",
-    required_attempts: 2,
+    required_attempts: 1,
   }));
   const plan = readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows }));
   const section = tracePlanSection(plan, []);
@@ -341,39 +339,14 @@ test("readTracePlan refuses a malformed artifact and the plan section is bounded
   assert.deepEqual(tracePlanSection(readTracePlan(null), []), { text: "", rows: [] });
 });
 
-test("the candidates artifact carries exactly the plan rows and records whether the section was injected", () => {
-  const { root, writes, deps } = workspace();
-  writePr(root, ["## Traceability", "", "req-abc123def456 is covered by `src/app.py`.", ""].join("\n"));
-  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
-  writePlan(root, [PLAN_ROW]);
-  buildPlanningContext(50000, deps());
-  const written = writes.find((write) => write.name === TRACE_PLAN_CANDIDATES_ARTIFACT);
-  assert.ok(written !== undefined, "the candidates artifact is written");
-  const artifact = JSON.parse(written!.text) as {
-    version: number;
-    injected: boolean;
-    rows: Array<{ id: string; text: string; kind: string; seams: string[]; code_verifiable: boolean }>;
-  };
-  assert.equal(artifact.version, TRACE_PLAN_VERSION);
-  assert.equal(artifact.injected, true);
-  assert.equal(artifact.rows.length, 1);
-  assert.deepEqual(artifact.rows[0], PLAN_ROW);
-});
-
 test("a PR body claiming a requirement is covered adds no row — the claim is a navigation hint only", () => {
   const { root, writes, deps } = workspace();
   writePr(root, ["## Traceability", "", "| Requirement | File |", "| --- | --- |", "| req-abc123def456 | `src/app.py` |", ""].join("\n"));
   fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
   writePlan(root, [PLAN_ROW]);
   const { text } = buildPlanningContext(50000, deps());
-  const artifact = JSON.parse(writes.find((write) => write.name === TRACE_PLAN_CANDIDATES_ARTIFACT)!.text) as {
-    injected: boolean;
-    rows: Array<{ id: string; text: string }>;
-  };
-  assert.equal(artifact.rows.length, 1);
-  assert.equal(artifact.rows[0]!.text, PLAN_ROW.text);
   assert.match(text, /navigation only — never evidence/);
-  assert.match(text, /never discharge a row/);
+  assert.match(text, /never evidence/);
   assert.match(text, /src\/app\.py/);
   const lines = text.split("\n");
   const inside = linesInsideCodeFences(text);
@@ -465,32 +438,6 @@ test("hostile requirement text and PR body cannot escape the untrusted fence", (
   assert.ok(!inside.has(traceIndex), "the trusted heading is not inside a fence");
 });
 
-test("the candidates artifact carries only the rows the section actually shows", () => {
-  const { root, writes, deps } = workspace();
-  writePr(root, "Handles empty input.");
-  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
-  // More rows than the section cap can carry: the dropped rows never reach
-  // the planner, so they may never gate the budget reservation.
-  const rows = Array.from({ length: 60 }, (_, index) => ({
-    ...PLAN_ROW,
-    id: `req-${String(index).padStart(12, "0")}`,
-    text: `${"y".repeat(MAX_TRACE_PLAN_ROW_TEXT_CHARS)} ${index}`,
-  }));
-  writePlan(root, rows);
-  const { text } = buildPlanningContext(50000, deps());
-  const artifact = JSON.parse(writes.find((write) => write.name === TRACE_PLAN_CANDIDATES_ARTIFACT)!.text) as {
-    injected: boolean;
-    rows: Array<{ id: string }>;
-  };
-  assert.equal(artifact.injected, true);
-  assert.ok(artifact.rows.length > 0);
-  assert.ok(artifact.rows.length < rows.length, "the dropped rows are not candidates");
-  // Every candidate row is a row the section shows.
-  const shown = text.split("\n").filter((line) => line.startsWith("- req-"));
-  assert.equal(artifact.rows.length, shown.length);
-  for (const row of artifact.rows) assert.ok(text.includes(`- ${row.id} (`), row.id);
-});
-
 test("the declared author intent reaches the first-turn planning context", () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "classification.json"), '{"pr_kind": "app_code", "risk_flags": []}');
@@ -521,55 +468,4 @@ test("the declared author intent reaches the first-turn planning context", () =>
   const quotedIndex = lines.findIndex((line) => line.includes("The scheduler is out of scope"));
   assert.ok(quotedIndex >= 0);
   assert.ok(inside.has(quotedIndex), "the quoted intent stays inside the untrusted fence");
-});
-
-test("the trace admission vocabulary carries the path tokens and the shared prose tokens", () => {
-  const tokens = traceAdmissionTokens("The `src/tools/harness.ts` guard must verify the account identity.");
-  assert.ok(tokens !== null);
-  assert.ok(tokens!.includes("src/tools/harness.ts"));
-  assert.ok(tokens!.includes("harness.ts"));
-  assert.ok(tokens!.includes("harness"));
-  assert.ok(tokens!.includes("verify"));
-  assert.ok(!tokens!.includes("must"));
-  assert.equal(traceAdmissionTokens(""), null);
-});
-
-test("#1519 (review): the target helpers classify evidence categories like the validator does", () => {
-  // The path tokens are the same token class the admission vocabulary uses.
-  assert.deepEqual(
-    traceReadTargetPaths("read src/control/plane.ts and docs/notes.md"),
-    ["src/control/plane.ts", "docs/notes.md"],
-  );
-  assert.deepEqual(traceReadTargetPaths(""), []);
-  assert.deepEqual(traceReadTargetPaths("no paths here at all"), []);
-  // A TEST read: any extracted path token classifying as a test path via the
-  // SAME `isTestPath` classifier the validator applies to test citations.
-  assert.equal(traceTargetIsTestRead("tests/lease-renewal.test.ts"), true);
-  assert.equal(traceTargetIsTestRead("lease-renewal.test.ts"), true);
-  assert.equal(traceTargetIsTestRead("src/control/plane.ts"), false);
-  assert.equal(traceTargetIsTestRead("docs/lease-renewal-notes.md"), false);
-});
-
-test("#1519 (review): the per-seam slot helper mirrors the validator's citation matching", () => {
-  const seam = { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] };
-  assert.equal(traceSeamSlotForTarget(seam, "src/control/plane.ts", false), "enforcement");
-  assert.equal(traceSeamSlotForTarget(seam, "src/control/nested/plane.ts", false), null);
-  assert.equal(traceSeamSlotForTarget(seam, "docs/claims.md", false), null);
-  assert.equal(traceSeamSlotForTarget(seam, "tests/control/control.test.ts", true), "test");
-  assert.equal(traceSeamSlotForTarget(seam, "tests/other/other.test.ts", true), null);
-  // A test read can never credit an enforcement slot and vice versa.
-  assert.equal(traceSeamSlotForTarget(seam, "tests/control/control.test.ts", false), null);
-  assert.equal(traceSeamSlotForTarget(seam, "src/control/plane.ts", true), null);
-  // Empty pattern lists fall back to the seam name (the validator's
-  // empty-list tolerance), by word boundary.
-  const bare = { name: "worker", owners: [], tests: [] };
-  assert.equal(traceSeamSlotForTarget(bare, "src/worker/gate.ts", false), "enforcement");
-  assert.equal(traceSeamSlotForTarget(bare, "docs/notes.md", false), null);
-  assert.equal(traceSeamSlotForTarget(bare, "tests/worker-renewal.test.ts", true), "test");
-  assert.equal(traceSeamSlotForTarget(bare, "tests/unrelated.test.ts", true), null);
-  // Empty tests with declared owners: the test slot falls back to the name.
-  const half = { name: "ingest", owners: ["src/ingest/*"], tests: [] };
-  assert.equal(traceSeamSlotForTarget(half, "src/ingest/parse.ts", false), "enforcement");
-  assert.equal(traceSeamSlotForTarget(half, "tests/ingest-parse.test.ts", true), "test");
-  assert.equal(traceSeamSlotForTarget(half, "tests/other.test.ts", true), null);
 });
