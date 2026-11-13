@@ -111,9 +111,9 @@ function reconcileThread(
   threadId: string,
 ): ThreadReconciliationState {
   if (reconciliation === null || !reconciliation.listingComplete) return "unknown";
-  const resolved = reconciliation.unresolvedById.get(threadId);
-  if (resolved === undefined) return "absent";
-  return resolved ? "live-unresolved" : "resolved";
+  const unresolved = reconciliation.unresolvedById.get(threadId);
+  if (unresolved === undefined) return "absent";
+  return unresolved ? "live-unresolved" : "resolved";
 }
 
 /**

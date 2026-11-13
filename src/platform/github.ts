@@ -423,11 +423,29 @@ export class GitHubAdapter implements PlatformReadAdapter {
    * threads, so fewer than 100 nodes PROVES the listing is the full set;
    * exactly 100 cannot distinguish "full" from "capped" and honestly reports
    * `complete: false` (reconciliation then treats carried threads as
-   * unknown — never absent — on the rare 100+-thread PR). */
+   * unknown — never absent — on the rare 100+-thread PR). The completeness
+   * claim is made only after the response document is validated to actually
+   * carry the `reviewThreads` connection: a 200 whose payload omits the path
+   * is a FAILED read, never a provably-complete empty listing — absence may
+   * be reasoned only from an enumeration that demonstrably ran. */
   async listReviewThreadsLiveListing(): Promise<ThreadListingReadResult> {
-    const fetched = await this.listReviewThreads();
-    if (!fetched.ok) return { ok: false, error: fetched.error };
-    return { ok: true, data: fetched.data, complete: fetched.data.length < REVIEW_THREADS_QUERY_WINDOW };
+    const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY);
+    if (!response.ok) return { ok: false, error: response.error };
+    // `graphql()` hands back the full response envelope (the shape
+    // `normalizeGithubReviewThreads` consumes), so the connection lives under
+    // `.data`.
+    const connection = (response.data as { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: unknown } } } } | null } | null)
+      ?.data?.repository?.pullRequest?.reviewThreads;
+    if (!connection || !Array.isArray(connection.nodes)) {
+      return { ok: false, error: "live review-thread listing response carries no reviewThreads connection" };
+    }
+    let data: unknown[];
+    try {
+      data = normalizeGithubReviewThreads(response.data);
+    } catch (error) {
+      return { ok: false, error: errorText(error) };
+    }
+    return { ok: true, data, complete: connection.nodes.length < REVIEW_THREADS_QUERY_WINDOW };
   }
 
   /** `gh api repos/R/pulls/N/reviews --paginate`: gh requests

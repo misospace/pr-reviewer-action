@@ -36,8 +36,9 @@ export interface ThreadLiveReconciliation {
   /** Whether the CURRENT authoritative listing is complete. Only a complete
    * listing can prove ABSENCE; a partial one leaves unknowns unknown. */
   listingComplete: boolean;
-  /** thread id -> currently resolved. Ids absent from the map are absent
-   * from the listing (meaningful only when `listingComplete`). */
+  /** thread id -> currently UNRESOLVED (`true` unresolved, `false`
+   * resolved). Ids absent from the map are absent from the listing
+   * (meaningful only when `listingComplete`). */
   unresolvedById: Map<string, boolean>;
 }
 
@@ -89,9 +90,11 @@ export async function readLiveReviewThreadListing(
   const unresolvedById = new Map<string, boolean>();
   for (const thread of prepareThreads(fetched.data)) {
     // Duplicate ids (should not happen on conforming forges): an unresolved
-    // sighting wins — fail-open toward keeping the thread live.
+    // sighting wins — fail-open toward keeping the thread live, so a hostile
+    // or malformed listing cannot pair an unresolved entry with a resolved
+    // one to get the blocker dropped as resolved.
     const previous = unresolvedById.get(thread.threadId);
-    unresolvedById.set(thread.threadId, previous === false ? false : !thread.resolved);
+    unresolvedById.set(thread.threadId, previous === true ? true : !thread.resolved);
   }
   return { state: "complete", reconciliation: { listingComplete: true, unresolvedById } };
 }

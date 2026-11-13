@@ -23,12 +23,12 @@ function artifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact {
   } as ReviewArtifact;
 }
 
-function carriedMajor(threadId: string) {
+function carriedMajor(threadId: string, severity = "major") {
   return {
     thread_id: threadId,
     path: "src/old.ts",
     line: 12,
-    severity: "major",
+    severity,
     message: "old major from a previous head",
     own_finding: true,
     replies: 0,
@@ -189,6 +189,28 @@ test("#1645 a model finding that already carries the thread id is never dropped"
   assert.equal(a.verdict, "request_changes", "an independently re-found blocker keeps blocking");
 });
 
+test("#1645 findings_severity_gated: a resolved/absent carried blocker never escalates", () => {
+  const a = artifact({ verdict: "approve" });
+  applyAllEnforcement(a, inputs({
+    threads: [carriedMajor(GHOST_ONE, "blocker"), carriedMajor(GHOST_TWO)],
+    threadReconciliation: liveListing([[GHOST_ONE, false]]),
+    verdictPolicy: "findings_severity_gated",
+  }));
+  assert.equal(a.verdict, "approve", "the gated escalation only sees re-emitted (live) threads");
+  assert.equal(a.findings.length, 2);
+  assert.doesNotMatch(String(a.review_markdown), /Verdict escalated from unresolved review threads/);
+});
+
+test("#1645 findings_severity_gated: a live-unresolved carried blocker still escalates", () => {
+  const a = artifact({ verdict: "approve" });
+  applyAllEnforcement(a, inputs({
+    threads: [carriedMajor(GHOST_ONE, "blocker")],
+    threadReconciliation: liveListing([[GHOST_ONE, true]]),
+    verdictPolicy: "findings_severity_gated",
+  }));
+  assert.equal(a.verdict, "request_changes");
+});
+
 // ── the live-listing reader ──────────────────────────────────────────────
 
 function adapterWith(partial: Partial<PlatformReadAdapter>): PlatformReadAdapter {
@@ -243,6 +265,22 @@ test("#1645 a complete listing maps resolved and unresolved thread ids", async (
   assert.equal(listing.reconciliation!.unresolvedById.get(GHOST_ONE), true);
   assert.equal(listing.reconciliation!.unresolvedById.get(GHOST_TWO), false);
   assert.equal(listing.reconciliation!.unresolvedById.has("PRRT_missing"), false);
+});
+
+test("#1645 a live-listing duplicate id keeps the unresolved sighting (never dropped as resolved)", async () => {
+  const thread = (id: string, resolved: boolean) => ({
+    thread_id: id,
+    resolved,
+    comments: [{ id: 1, body: "finding body", created_at: "2026-01-01T00:00:00Z", user: "bot" }],
+  });
+  const listing = await readLiveReviewThreadListing(adapterWith({
+    listReviewThreadsLiveListing: async () => ({
+      ok: true,
+      complete: true,
+      data: [thread("t-dup", true), thread("t-dup", false)],
+    }),
+  }));
+  assert.equal(listing.reconciliation!.unresolvedById.get("t-dup"), true, "unresolved wins over a paired resolved entry");
 });
 
 test("#1645 a thread whose comments were all stripped never counts as live", async () => {

@@ -362,6 +362,43 @@ test("github GraphQL targets <host>/api/graphql on a GHES /api/v3 base, and Grap
   assert.equal(seen[0]!.url, "https://ghe.example/api/graphql");
 });
 
+// #1645: the live-listing completeness verdict — absence may be reasoned only
+// from an enumeration that demonstrably covered the full set.
+const ghThreadNode = (id: string) => ({
+  id,
+  isResolved: false,
+  isOutdated: false,
+  path: "a.ts",
+  line: 1,
+  originalLine: 1,
+  comments: { nodes: [{ databaseId: 1, body: "x", createdAt: "", updatedAt: "", author: { login: "u" } }] },
+});
+
+test("#1645 github live listing: a short window is complete, a full window is not", async () => {
+  const { fetchImpl } = recorder(() => json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [ghThreadNode("PRRT_1"), ghThreadNode("PRRT_2")] } } } } }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl });
+  const listing = await adapter.listReviewThreadsLiveListing!();
+  assert.equal(listing.ok, true);
+  assert.equal((listing as { complete?: boolean }).complete, true);
+  assert.equal(((listing as { data: unknown[] }).data as unknown[]).length, 2);
+});
+
+test("#1645 github live listing: exactly 100 nodes cannot prove completeness", async () => {
+  const nodes = Array.from({ length: 100 }, (_unused, index) => ghThreadNode(`PRRT_${index}`));
+  const { fetchImpl } = recorder(() => json({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl });
+  const listing = await adapter.listReviewThreadsLiveListing!();
+  assert.equal(listing.ok, true);
+  assert.equal((listing as { complete?: boolean }).complete, false);
+});
+
+test("#1645 github live listing: a 200 without the reviewThreads connection fails the read (never a complete-empty)", async () => {
+  const { fetchImpl } = recorder(() => json({ data: { repository: null } }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl });
+  const listing = await adapter.listReviewThreadsLiveListing!();
+  assert.equal(listing.ok, false);
+});
+
 test("github paginated reviews follow Link rel=next and merge pages in order", async () => {
   const { fetchImpl, seen } = recorder((url) => {
     const page = Number(url.searchParams.get("page") ?? "1");
@@ -643,6 +680,45 @@ test("forgejo ghApi joins the translated /api/v1 path to the bare base exactly o
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
   assert.deepEqual(await adapter.ghApi("repos/o/r/pulls/5"), { data: { number: 1 } });
   assert.equal(seen[0]!.url, "https://git.example/api/v1/repos/o/r/pulls/5");
+});
+
+// #1645: the live-listing completeness verdict on Forgejo — a fully-read
+// enumeration is complete; any failed page fails the read (never a
+// windowed/partial list laundered into an absence proof).
+test("#1645 forgejo live listing enumerates every reviews and comments page and claims complete", async () => {
+  const fullReviewPage = Array.from({ length: 50 }, (_, i) => ({ id: i + 1 }));
+  const { fetchImpl, seen } = recorder((url) => {
+    const path = url.pathname;
+    if (path.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "2" ? json([{ id: 51 }]) : json(fullReviewPage);
+    }
+    // One review carries a full first comments page; its page 2 is short.
+    if (path.endsWith("/comments")) {
+      if (path.includes("/reviews/51/")) return json([]);
+      return url.searchParams.get("page") === "2"
+        ? json([{ id: 2, path: "a.ts", position: 3 }])
+        : json(Array.from({ length: 50 }, (_, i) => ({ id: 1000 + i, path: "a.ts", position: 3 })));
+    }
+    return json({}, 404);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const listing = await adapter.listReviewThreadsLiveListing!();
+  assert.equal(listing.ok, true);
+  assert.equal((listing as { complete?: boolean }).complete, true);
+  const urls = seen.map((s) => s.url);
+  assert.ok(urls.includes("https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50"), "reviews page 2 followed");
+  assert.ok(urls.some((u) => u.includes("/reviews/1/comments?page=2&limit=50")), "the full comments page was continued");
+});
+
+test("#1645 forgejo live listing: a failed comments page fails the whole read", async () => {
+  const { fetchImpl } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 1 }]);
+    if (url.pathname.endsWith("/comments")) return json({}, 500);
+    return json({}, 404);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const listing = await adapter.listReviewThreadsLiveListing!();
+  assert.equal(listing.ok, false);
 });
 
 test("forgejo ghApi honors the per-call timeout override (#1210)", async () => {

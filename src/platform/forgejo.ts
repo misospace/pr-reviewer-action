@@ -659,24 +659,44 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   /** #1645: the same grouping as `listReviewThreads` plus an explicit
    * completeness verdict for carried-thread reconciliation. Unlike the
-   * parity-shaped read above, ANY failed page fails the whole read: a
-   * partial thread list cannot prove a thread ABSENT, and reporting it
-   * complete would let a live carried blocker be dropped as historical. A
-   * fully-read enumeration reports `complete: true`. */
+   * parity-shaped read above, this read enumerates EVERY page of both
+   * endpoints (the same 50-per-page walk `listPrConversationComments` uses)
+   * and ANY failed or malformed page fails the whole read: a partial thread
+   * list cannot prove a thread ABSENT, and reporting it complete would let a
+   * live carried blocker be dropped as historical — or a real absence be
+   * laundered by a windowed read. A fully-read enumeration reports
+   * `complete: true`; a review comment list that fills the server page cap
+   * cannot distinguish "all comments" from "truncated" and honestly reports
+   * `complete: false`. */
   async listReviewThreadsLiveListing(): Promise<ThreadListingReadResult> {
+    const FORGEJO_PAGE_LIMIT = 50;
     const read = await this.read(async (at) => {
-      const reviews = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
-      if (reviews.status !== 200) throw new Error(`forgejo reviews read failed with status ${reviews.status}`);
-      const reviewList = pyJsonDecode(reviews.text);
-      if (!Array.isArray(reviewList)) throw new Error("forgejo reviews read returned a non-list body");
+      const reviews: unknown[] = [];
+      for (let page = 1; ; page += 1) {
+        const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews?page=${page}&limit=${FORGEJO_PAGE_LIMIT}`));
+        if (response.status !== 200) throw new Error(`forgejo reviews page ${page} failed with status ${response.status}`);
+        const decoded = pyJsonDecode(response.text);
+        if (!Array.isArray(decoded)) throw new Error("forgejo reviews read returned a non-list body");
+        reviews.push(...decoded);
+        if (decoded.length < FORGEJO_PAGE_LIMIT) break;
+      }
       const commentLists: unknown[][] = [];
-      for (const review of reviewList) {
+      for (const review of reviews) {
         const reviewId = forgejoReviewCommentId(review);
         if (reviewId === null) continue;
-        const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
-        if (response.status !== 200) throw new Error(`forgejo review ${reviewId} comments read failed with status ${response.status}`);
-        const comments = pyJsonDecode(response.text);
-        if (!Array.isArray(comments)) throw new Error(`forgejo review ${reviewId} comments read returned a non-list body`);
+        const comments: unknown[] = [];
+        for (let page = 1; ; page += 1) {
+          const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments?page=${page}&limit=${FORGEJO_PAGE_LIMIT}`));
+          if (response.status !== 200) throw new Error(`forgejo review ${reviewId} comments page ${page} failed with status ${response.status}`);
+          const decoded = pyJsonDecode(response.text);
+          if (!Array.isArray(decoded)) throw new Error(`forgejo review ${reviewId} comments read returned a non-list body`);
+          comments.push(...decoded);
+          if (decoded.length < FORGEJO_PAGE_LIMIT) break;
+          // A page exactly at the server cap cannot prove the comment list
+          // ended; keep fetching until a short page, so `complete: true` is
+          // only ever claimed over a fully-read enumeration.
+          if (page >= 40) throw new Error(`forgejo review ${reviewId} comments exceeded the enumeration cap`);
+        }
         commentLists.push(comments);
       }
       return groupForgejoReviewThreads(commentLists);
