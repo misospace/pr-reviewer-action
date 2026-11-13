@@ -2424,6 +2424,12 @@ function resolveLowRiskBudgetEnvelope(
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
+  // #1648 review: a PRESENT-but-malformed `risk_flags` is an unshaped
+  // classification — fail open (retain the full envelope), never read as
+  // "no risk flags". Only an array (possibly empty) is a shaped signal.
+  if ("risk_flags" in record && !Array.isArray(record.risk_flags)) {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: 0 };
+  }
   const riskFlags = Array.isArray(record.risk_flags) ? record.risk_flags : [];
   const lockfileOnly =
     record.lockfile_only_refresh !== null && typeof record.lockfile_only_refresh === "object" && !Array.isArray(record.lockfile_only_refresh)

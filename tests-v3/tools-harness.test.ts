@@ -5077,6 +5077,10 @@ test("#1629: any risk flag, a material lockfile bump, or an unparseable triage r
       { envelope: "retained", basis: "unparseable-triage", mandatory_rows: 0 }],
     [{ pr_kind: "renovate_image_update", risk_flags: [], must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
       { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: 1 }],
+    // #1648 review: a PRESENT-but-malformed risk_flags is an unshaped
+    // classification — fail open, never read as "no risk flags".
+    [{ pr_kind: "image_digest_only", risk_flags: "none", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
   ];
   for (const [classification, receipt] of cases) {
     const { root, deps } = workspace();
