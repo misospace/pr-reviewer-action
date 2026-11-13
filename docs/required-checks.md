@@ -273,6 +273,82 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   CI-discharged row as unresolved and omit a contradicted one. A run dir
   without the artifact keeps the pre-#1594 recompute exactly.
 
+## Evidence classes and objective provenance (#1657)
+
+#1657 replaces the #1627/#1634 call-ID citation gate (a cited `call-<n>` plus
+argument-token overlap was treated as consumable proof, one executed call
+backed at most one discharge). That machinery is deleted. In its place every
+`must_check` row carries a deterministic **evidence class** — a pure function
+of the check text (`classifyCheckEvidence` in
+`src/enforcement/evidence-receipts.ts`) over closed vocabularies:
+
+| class          | which rows                                                                 | merge-affecting? |
+|----------------|----------------------------------------------------------------------------|------------------|
+| `objective`    | rows mapping to a concrete deterministic gate: test-run asks (exact-head CI), upstream provenance / release-delta / security-advisory acquisition asks, and rows naming exact path/version/head/slug identities | **yes** — an unresolved objective row is the merge-affecting incompleteness |
+| `review-prompt`| generic auth/path/security/scrutiny questions and absence asks ("no vulnerability", "no breaking change") | no — disclosed with reason codes, never independently incomplete |
+| `attention`    | the P0/P1 linked-issue sentences ("treat as critical — verify all changes thoroughly", "treat as high priority — verify correctness carefully") | no — attention/routing signals, not propositions |
+
+The rules this buys, and their limits:
+
+- **A receipt never certifies a semantic conclusion.** The deterministic
+  layer validates objective acquisition facts only — what was acquired,
+  source/path/span or CI/upstream identity, exact head/version/revision,
+  acquisition success/failure, complete/truncated, freshness/trust scope —
+  from records the run itself wrote (the `tool_calls`/`tool_results` trace,
+  the assembler-certified corpus diff payloads, the CI gate's head-bound
+  evidence). One implementation, `buildEvidenceLedger`, feeds both folds; a
+  trace present but unparseable REFUSES the whole ledger (fail closed, never
+  a silent no-op), and a trace without its aligned results is refused too.
+- **Receipts are shareable evidence, not consumable tokens.** One genuine
+  acquisition may support any number of conclusions; there is no allocation
+  and no per-row consumption. A receipt that carries none of a row's
+  required identity never contributes to it.
+- **Objective `satisfied` claims are validated, never manufactured.** The
+  reviewer's disposition stands or falls with the ledger: a claimed
+  `satisfied` on an objective row is credited only when validated receipts
+  cover the requirement (jointly — one receipt may carry several identities),
+  and stays unresolved with a reason code otherwise: `receipt-absent`
+  (nothing relevant was acquired), `receipt-unverified` (relevant attempts
+  failed, were truncated, or are outside the requirement's freshness/trust
+  scope — an attempt is not evidence, and a stale/wrong-head read is
+  objectively invalid), `receipt-mismatch` (relevant receipts exist but none
+  carries the exact identity — kind-appropriate boundaries, never
+  substrings), or `trace-refused`. The deterministic layer never flips an
+  unresolved row to satisfied from receipts alone — that remains the
+  reviewer's judgment, and #1656/#1659 own the final disposition.
+- **Review prompts and attention rows carry no provenance choreography.**
+  Their dispositions fold on the presence-and-shape rule exactly as before
+  the citation gate existed; an unanswered or unresolved one is disclosed
+  (row `status`/`reason`/`row_class`/`evidence`) but never gates
+  completeness, never withholds by itself, and never forces. The ONE
+  conservative exception to non-gating is structural: a run that emits no
+  structured dispositions at all still records `structured: false` — the
+  skipped contract is visible, but only an unresolved OBJECTIVE row makes it
+  merge-affecting. Generic questions affect the merge only through a
+  concrete objective gate or the reviewer's own material unknown/finding
+  (a confirmed negative `unmet` still forces, status-based #1505 semantics
+  unchanged).
+- **Narrow deterministic reconciliation stays where truth is mechanical.**
+  The #1594 exact-head CI discharge/contradiction above is unchanged — it
+  remains the only auto-satisfaction reconciler, and only when the CI
+  identity/scope genuinely proves the ask. Upstream-evidence rows
+  (provenance/release-delta/advisory) are acquisition asks: their satisfaction
+  is validated against acquisition receipts attributed by the shared #1379
+  URL/query-shape rules — the static classifier sentence still embeds no
+  package identity (#1595), and the receipts carry the objective identity.
+- **No repair from prose.** Malformed or stale provenance is visible and
+  reason-coded; nothing rewrites a disposition.
+- **Surfaces for #1656/#1659**: every coverage and obligation row carries
+  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`); the
+  bounded ledger rides the run dir as `evidence-receipts.json` (strict
+  round-trip reader, `unavailable` explicit rather than inferred); the
+  required-evidence sentinel rows carry `row_class`. Nothing here decides
+  APPROVE/INCOMPLETE — the disposition layer consumes the reason-coded state.
+- **Compatibility**: without a ledger (fresh standard-call and fork paths)
+  both folds are byte-identical to pre-#1627 semantics; the retired
+  #1627/#1634 reason strings remain readable in persisted artifacts but are
+  no longer written.
+
 ## Regression coverage
 
 - PR #748-shaped deterministic case (path checks over a change with no

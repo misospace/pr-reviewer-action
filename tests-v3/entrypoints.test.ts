@@ -1436,48 +1436,52 @@ test("#1537: required-check ids are recomputed only when the fold itself was inc
   });
 });
 
-test("#1627: the publish-side required-check recompute folds the executed-call index — #1388 parity with the engine fold", () => {
+test("#1657: the publish-side required-check recompute folds the evidence ledger — #1388 parity with the engine fold", () => {
   withRunDir((dir) => {
     writeEngineRecord(dir);
     writeCoverageArtifact(dir, {
-      tool_loop_ran: true,
-      enforcement_harness: "tool-harness.json",
       required_checks: "incomplete",
       required_check_fold_status: "incomplete",
       partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
     });
-    // The native loop's executed-call trace: call-1 ok, call-2 FAILED — the
-    // shape that separates a cited successful call from a cited failure.
+    // The native loop's executed-call trace WITH its aligned results: the
+    // ledger builder validates acquisition state against the executor's own
+    // records (a trace without aligned results is refused, fail closed).
     writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
       stop_reason: "obligations-settled",
       tool_calls: [
-        { tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" },
+        { tool: "read_file", args: { path: "src/other.ts" }, status: "ok" },
         { tool: "web_fetch", args: { url: "https://blocked.test/x" }, status: "error" },
       ],
+      tool_results: [{ status: "ok" }, { status: "error" }],
     }));
     writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
-    // Satisfied citing the FAILED call (call-2): the engine's fold reads
-    // uncited-satisfaction → unresolved; the publish-side recompute must
-    // agree (without the index it would silently mark the row satisfied and
-    // drop it from the handoff).
+    // Satisfied with NO supporting acquisition (the successful read was of
+    // src/other.ts, not the named src/auth.ts): the engine's fold keeps the
+    // row receipt-absent → unresolved; the publish-side recompute must
+    // agree (without the ledger it would silently mark the row satisfied
+    // and drop it from the handoff). The rationale's words are disclosure,
+    // never credit.
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
       verdict: "request_changes",
       required_check_dispositions: [
-        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the fetch ran as call-2 and confirmed it" },
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "verified by reading the source" },
       ],
     }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path in src/auth.ts"]);
-    // Paired positive: citing the SUCCESSFUL call (call-1) discharges — the
-    // publish side agrees with the engine fold in the positive direction too.
-    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
-      verdict: "request_changes",
-      required_check_dispositions: [
-        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the read of src/auth.ts at head confirmed it — call-1" },
-      ],
+    // Paired positive: the run's OWN records hold a successful head-bound
+    // read of the named path — the claim is receipt-backed and the row
+    // drops from the handoff, exactly as the engine fold decided.
+    writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
+      stop_reason: "obligations-settled",
+      tool_calls: [{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }],
+      tool_results: [{ status: "ok" }],
     }));
-    const cited = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
-    assert.deepEqual(cited.unresolvedRequiredChecks, []);
+    const backed = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(backed.unresolvedRequiredChecks, []);
   });
 });
 

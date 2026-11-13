@@ -73,12 +73,20 @@ import { forceRequestChanges } from "./enforce.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
-import { allocateCallCitations, citationKey, type ExecutedCallEvidenceIndex } from "./executed-calls.js";
+import {
+  classifyCheckEvidence,
+  evaluateCheckEvidence,
+  receiptRefusalReason,
+  rowEvidenceStateToArtifact,
+  type EvidenceLedger,
+  type RequiredEvidenceRowClass,
+  type RowEvidenceState,
+} from "./evidence-receipts.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
 /**
- * #1627: content-free per-row rejection reason — WHY a row ended in the
+ * #1627/#1657: content-free per-row rejection reason — WHY a row ended in the
  * status it carries. Kebab-case, mirroring the #750 reason vocabulary in
  * `required-checks.ts`:
  * - `ok` — the row RESOLVED (satisfied/unmet); no rejection happened.
@@ -99,29 +107,26 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  * - `unresolved-disposition` — the model answered, with the literal status
  *   `unresolved` (a well-formed answer that is not a discharge; #750's
  *   completeness fold records the same shape as reason `ok`).
- * - `uncited-satisfaction` — #1627: the model answered `satisfied` for a
- *   must_check row while the run executed tool calls, but the rationale
- *   cites no executed successful call id from the proof index (see
- *   `src/enforcement/executed-calls.ts`); #750's completeness fold records
- *   the same shape under the same reason.
- * - `citation-already-used` — #1634 (review): the rationale cites a
- *   successful call that another satisfied row's disposition already took.
- *   One executed call backs at most ONE discharge (`allocateCallCitations`);
- *   both folds run the same allocator over the same rows, so they still
- *   agree on every row.
- * - `unrelated-executed-call` — the human review on #1634: the rationale
- *   cites a successful call, but the deterministic evidence identity
- *   (`allocateCallCitations` in `src/enforcement/executed-calls.ts`)
- *   cannot establish that the call bears on THIS row — a different
- *   target/package/version/head than the check names, a non-repository
- *   tool, a suite/CI ask (those reconcile only through the #1612 head-bound
- *   CI matcher), a security/breaking-change absence ask, or a check that
- *   names no bindable identity at all. The row stays unresolved.
- * - `malformed-executed-trace` — #1634 (review): the harness artifact's
- *   executed-call trace is present but this runtime cannot parse it, so no
- *   citation is verifiable and no `satisfied` must_check answer can
- *   discharge (fail closed — the refusal never degrades into the inert
- *   no-index case).
+ * - `receipt-absent` — #1657 (supersedes #1627's `uncited-satisfaction`): the
+ *   model answered `satisfied` for an objective must_check row while the run
+ *   executed tool calls, but the evidence ledger holds NO receipt carrying
+ *   any of the row's required identity/kind — no acquisition the run made
+ *   bears on the row, so the satisfaction is unproven.
+ * - `receipt-unverified` — #1657: receipts relevant to the row exist but are
+ *   unacquired, incomplete (truncated), or outside the requirement's
+ *   freshness/trust scope — acquisition attempts are not evidence.
+ * - `receipt-mismatch` — #1657 (supersedes #1634's
+ *   `unrelated-executed-call`): relevant receipts exist, but none covers the
+ *   row's exact identity — a wrong path/version/head/kind never satisfies a
+ *   named objective requirement, whatever the model cites.
+ * - `trace-refused` — #1657 (carries over #1634's fail-closed rule, renamed):
+ *   the harness artifact's executed-call trace is present but this runtime
+ *   cannot parse it (or its aligned results), so nothing is verifiable and no
+ *   `satisfied` objective answer can discharge.
+ * The retired #1627/#1634 citation-gate reasons (`uncited-satisfaction`,
+ * `citation-already-used`, `unrelated-executed-call`,
+ * `malformed-executed-trace`) are no longer written; the strict artifact
+ * reader still accepts them so pre-#1657 run dirs round-trip.
  */
 export type ReviewObligationReason =
   | "ok"
@@ -133,10 +138,10 @@ export type ReviewObligationReason =
   | "ungrounded-derived"
   | "derivation-incomplete"
   | "unresolved-disposition"
-  | "uncited-satisfaction"
-  | "citation-already-used"
-  | "unrelated-executed-call"
-  | "malformed-executed-trace";
+  | "receipt-absent"
+  | "receipt-unverified"
+  | "receipt-mismatch"
+  | "trace-refused";
 
 export interface ReviewObligation {
   id: string;
@@ -162,6 +167,14 @@ export interface ReviewObligation {
    * head-bound test-execution evidence discharged. Set only by
    * `reconcileObligationsWithCiEvidence`; absent on every other row. */
   resolvedBy?: { kind: "ci-evidence"; check: string; headSha: string };
+  /** #1657: the deterministic evidence class of a `must_check` row (see
+   * `src/enforcement/evidence-receipts.ts`). Absent on the other sources —
+   * the class vocabulary classifies must_check texts only. */
+  rowClass?: RequiredEvidenceRowClass;
+  /** #1657: the reason-coded provenance state of a `must_check` row against
+   * the evidence ledger, present only on runs with an active ledger. Never
+   * model text; the #1656 disposition surface reads it. */
+  evidence?: RowEvidenceState;
 }
 
 /** One row of the harness-authored candidates artifact, verbatim. */
@@ -404,7 +417,13 @@ export function mustCheckObligationsEnabled(validateRequiredChecks: string | und
 /** Validate one persisted candidates row and use it VERBATIM. The harness
  * wrote exactly what the model was shown; the engine never re-derives the
  * text, so disposition identity cannot drift between the two layers. A row
- * without a usable id, source, or text is skipped, never repaired. */
+ * without a usable id, source, or text is skipped, never repaired.
+ * #1657: an ATTENTION row (the P0/P1 "treat as … verify …
+ * thoroughly/carefully" classifier sentences) is skipped here too — it is
+ * an attention/routing signal, not a proposition with evidence identities:
+ * it never enters the obligation contract (no withhold, no force, no
+ * required-evidence section). Its disposition is still folded and disclosed
+ * on the #750 coverage artifact, which classifies the same text. */
 function candidateToObligation(row: unknown): ReviewObligation | null {
   if (row === null || typeof row !== "object" || Array.isArray(row)) return null;
   const record = row as Record<string, unknown>;
@@ -412,6 +431,7 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
   const text = typeof record.text === "string" ? record.text : null;
   const id = typeof record.id === "string" ? record.id : null;
   if (source === null || text === null || !text.trim() || id === null || !id.trim()) return null;
+  if (source === "must_check" && classifyCheckEvidence(text).rowClass === "attention") return null;
   // #1627: a pre-fold row has no matched disposition yet — the same state
   // the fold's `no-disposition` path describes, and the fold overwrites it.
   return { id, source, text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" };
@@ -437,6 +457,9 @@ export function candidateRowsToObligations(
   if (obligations.length === 0) {
     for (const text of mustCheck) {
       if (typeof text !== "string" || !text.trim()) continue;
+      // #1657: attention rows never enter the obligation contract (see
+      // `candidateToObligation`).
+      if (classifyCheckEvidence(text).rowClass === "attention") continue;
       obligations.push({ id: `obligation-${obligations.length + 1}`, source: "must_check", text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" });
     }
   }
@@ -541,19 +564,26 @@ export function riskEvidenceReadPaths(input: {
 export function foldObligationDispositions(
   obligations: readonly ReviewObligation[],
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
-  executedCalls?: ExecutedCallEvidenceIndex,
+  ledger?: EvidenceLedger,
   evidence?: RiskEvidenceReceipt,
 ): ReviewObligation[] {
-  // #1627/#1634: the citation gate runs as a SHARED ALLOCATION pass after
-  // the per-row shape fold (see `allocateCallCitations`) — one executed
-  // successful call backs at most one discharge, and both folds key rows
-  // through `citationKey`, so the #1381 and #750 folds make the identical
-  // assignment. The gate is collected only when it is ACTIVE (a trace was
-  // present, valid or refused); with no trace the fold below is
-  // byte-identical to the pre-#1627 semantics.
-  const citationGate = executedCalls !== undefined && executedCalls.gate;
-  const gated: { position: number; key: string; rationale: string; cause: ReviewObligation["cause"] }[] = [];
-  const folded: ReviewObligation[] = obligations.map((obligation, position) => {
+  // #1657: the #1627/#1634 citation-gate allocation pass is GONE — one
+  // executed call never backed at most one discharge and no rationale
+  // citation is proof of anything. A must_check `satisfied` answer on an
+  // `objective` row is credited only when the run's own evidence ledger
+  // holds validated receipts that support it (see `evaluateCheckEvidence`);
+  // the SAME evaluation, reasons, and row classes run in the #750
+  // completeness fold, so both folds agree on every row. Review-prompt rows
+  // are never receipt-gated (the deterministic layer never could judge
+  // their groundedness — the reviewer's disposition folds on the
+  // presence-and-shape rule), and attention rows never reach this fold at
+  // all (dropped at the candidate boundary).
+  // The gate is ACTIVE only when a trace was present: `refused` fails every
+  // objective satisfaction closed; `unavailable` (no trace) and a missing
+  // ledger keep the pre-#1627 semantics byte-for-byte (fresh standard-call
+  // and fork paths).
+  const ledgerActive = ledger !== undefined && ledger.state !== "unavailable";
+  const folded: ReviewObligation[] = obligations.map((obligation) => {
     const idAlias = normalized(obligation.id);
     const textAlias = normalized(obligation.text);
     // Alias-echo rules (#1388): `must_check` rows fold ONLY on the exact
@@ -696,23 +726,31 @@ export function foldObligationDispositions(
     // never disagree on the same disposition; trusted_base_guidance rows
     // require a non-empty rationale for any discharge, as their section
     // preamble tells the model.
-    // #1627: the evidence citation gate. When the run EXECUTED tool calls
-    // (an active citation gate — the native-loop surface), a must_check
-    // `satisfied` answer is a positive evidence claim and is discharged
-    // only by a rationale whose citation of an executed successful call id
-    // wins the shared one-to-one allocation (see `allocateCallCitations`):
-    // one call backs at most one discharge. Prose-only "verified" claims
-    // can no longer produce a false native approval. `not_applicable` and
-    // `unmet` are NOT citation-gated (applicability and confirmed negatives
-    // are not positive evidence claims; a negative counterexample surfaces
-    // as a finding), and the gate is inert whenever no trace was present
-    // (fresh standard-call and fork paths keep today's behavior
-    // byte-identical). A PRESENT-but-malformed trace keeps the gate active
-    // with nothing citable — the post-pass fails every gated row closed
-    // (#1634 review). trusted_base_guidance and derived rows keep their
-    // existing rules.
-    if (citationGate && status === "satisfied" && obligation.source === "must_check") {
-      gated.push({ position, key: citationKey(obligation.text), rationale, cause: unresolvedCause });
+    // #1657: the objective-evidence gate. When the run EXECUTED tool calls
+    // (an active ledger — the native-loop surface), a must_check `satisfied`
+    // answer on an OBJECTIVE row is a positive evidence claim and is
+    // discharged only when the run's own validated evidence receipts support
+    // it (`receipt-backed`): a tool call id or argument overlap is never
+    // itself proof, receipts are shareable across conclusions, and an
+    // unrelated receipt never satisfies a named objective requirement.
+    // `not_applicable` and `unmet` are NOT gated (applicability and
+    // confirmed negatives are not positive evidence claims; a negative
+    // counterexample surfaces as a finding). Review-prompt rows are never
+    // gated; attention rows never reach this fold. With no ledger (fresh
+    // standard-call and fork paths) the fold is byte-identical to
+    // pre-#1627; a PRESENT-but-malformed trace (`refused`) fails every
+    // objective satisfaction closed.
+    if (ledgerActive && status === "satisfied" && obligation.source === "must_check"
+      && classifyCheckEvidence(obligation.text).rowClass === "objective") {
+      const evidenceState = evaluateCheckEvidence(obligation.text, ledger);
+      if (evidenceState.state !== "receipt-backed") {
+        return {
+          ...obligation,
+          status: "unresolved",
+          cause: unresolvedCause,
+          reason: receiptRefusalReason(evidenceState),
+        };
+      }
     }
     const discharges = status === "satisfied"
       ? obligation.source === "must_check" || rationale !== ""
@@ -727,32 +765,24 @@ export function foldObligationDispositions(
     if (status === "unresolved") return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "unresolved-disposition" };
     return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "missing-rationale" };
   });
-  // The shared allocation pass: an unassigned gated row never discharges.
-  // A refused trace has NOTHING citable, so no allocation is attempted and
-  // every gated row fails closed with its own reason.
-  if (citationGate && gated.length > 0) {
-    const index = executedCalls!;
-    const outcomes = index.refused
-      ? null
-      : allocateCallCitations(gated.map(({ key, rationale }) => ({ key, rationale })), index.entries);
-    gated.forEach(({ position, cause }, allocation) => {
-      const outcome = outcomes === null ? "uncited" : outcomes[allocation] ?? "uncited";
-      if (outcome === "assigned") return;
-      folded[position] = {
-        ...folded[position]!,
-        status: "unresolved",
-        cause,
-        reason: outcomes === null
-          ? "malformed-executed-trace"
-          : outcome === "shared"
-          ? "citation-already-used"
-          : outcome === "unrelated"
-          ? "unrelated-executed-call"
-          : "uncited-satisfaction",
-      };
-    });
-  }
-  return folded;
+  // #1657: the reason-coded provenance disclosure, attached uniformly AFTER
+  // the per-row shape fold. Every `must_check` row carries its deterministic
+  // `rowClass` (a pure function of the check text — attention rows are
+  // disclosed here too when a caller hands one in, though the candidate
+  // boundary normally drops them), and on ledger-active runs every
+  // `must_check` row carries its validated `evidence` state. Disclosure
+   // only: no policy branch reads these fields to change a status — the
+   // #1656 disposition layer consumes them.
+  const disclosed = folded.map((obligation) => {
+    if (obligation.source !== "must_check") return obligation;
+    const cls = classifyCheckEvidence(obligation.text);
+    const withClass: ReviewObligation = { ...obligation, rowClass: cls.rowClass };
+    if (ledger !== undefined && withClass.evidence === undefined) {
+      withClass.evidence = evaluateCheckEvidence(obligation.text, ledger);
+    }
+    return withClass;
+  });
+  return disclosed;
 }
 
 export type UnresolvedReviewObligationCause = ReviewObligation["cause"];
@@ -844,6 +874,11 @@ function riskObligationAttribution(ids: string[]): string {
  * is reported as an ordinary evidence-backed finding.
  */
 export function isForcingObligation(obligation: ReviewObligation): boolean {
+  // #1657 (defense in depth): an attention row is an attention/routing
+  // signal, never a proposition — the candidate boundary normally drops it
+  // before it can reach this gate, but a hand-built row set must not force
+  // on one either.
+  if (obligation.rowClass === "attention") return false;
   return obligation.source !== "derived" && obligation.source !== "risk" && obligation.status === "unmet";
 }
 
@@ -916,7 +951,18 @@ export function applyReviewObligationEnforcement(
   // a blocking request; an `unresolved` row is disclosed as coverage and
   // withholds the trusted approval at the publish boundary instead.
   const unmet = unresolved.filter((obligation) => isForcingObligation(obligation));
-  const ungathered = unresolved.filter((obligation) => obligation.source !== "derived" && obligation.source !== "risk" && obligation.status === "unresolved");
+  // #1657: a must_check row the evidence layer classified as a REVIEW
+  // PROMPT (generic auth/path/security/scrutiny and absence asks) is not
+  // required evidence: its unresolved disposition is disclosed (the
+  // coverage artifact and the row's own reason code carry it) but it never
+  // renders as unresolved REQUIRED evidence and never withholds on its own
+  // — the generic question affects the merge only through a concrete
+  // objective gate or the reviewer's material unknown/finding (#1656).
+  const ungathered = unresolved.filter((obligation) =>
+    obligation.source !== "derived"
+    && obligation.source !== "risk"
+    && obligation.status === "unresolved"
+    && !(obligation.source === "must_check" && obligation.rowClass === "review-prompt"));
   // #1449: the reason is the BLOCKING reason, so it names the FORCING rows
   // only. A derived row or an unresolved required row is a coverage gap, not
   // a block: naming either here would tell the reader the PR was blocked by
@@ -1067,12 +1113,16 @@ export function reviewObligationsToArtifact(
     // artifact byte-identical.
     // #1627: `reason` rides on every row the #1627 fold produced (a
     // pre-#1627 caller may pass rows without one; the field is then
-    // omitted, exactly like the pre-#1449 shape).
-    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy }) => {
+    // omitted, exactly like the pre-#1449 shape). #1657: `row_class` and
+    // `evidence` ride on every must_check row the #1657 fold produced —
+    // additive, absent on the other sources and on pre-#1657 callers.
+    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy, rowClass, evidence }) => {
       const row: Record<string, unknown> = { id, source, text, status, cause };
       if (reason !== undefined) row.reason = reason;
       if (anchors !== undefined) row.anchors = anchors;
       if (resolvedBy !== undefined) row.resolved_by = { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha };
+      if (rowClass !== undefined) row.row_class = rowClass;
+      if (evidence !== undefined) row.evidence = rowEvidenceStateToArtifact(evidence);
       return row;
     }),
   };
@@ -1099,13 +1149,51 @@ const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
 /** #1594: the head-SHA shape `reconcileObligationsWithCiEvidence` writes. */
 const CI_EVIDENCE_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
 /** #1627: the closed per-row rejection-reason vocabulary (see
- * `ReviewObligationReason`). */
+ * `ReviewObligationReason`). #1657: the retired #1627/#1634 citation-gate
+ * reasons stay READABLE (pre-#1657 run dirs round-trip) but are no longer
+ * written. */
 const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   "ok", "no-structured-dispositions", "no-disposition", "conflicting-dispositions",
   "malformed-disposition", "missing-rationale", "ungrounded-derived", "derivation-incomplete",
-  "unresolved-disposition", "uncited-satisfaction",
-  "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
+  "unresolved-disposition",
+  // #1657 vocabulary.
+  "receipt-absent", "receipt-unverified", "receipt-mismatch", "trace-refused",
+  // Retired #1627/#1634 vocabulary — accepted for backward compatibility only.
+  "uncited-satisfaction", "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
 ]);
+/** #1657: the closed must_check evidence-class vocabulary. */
+const OBLIGATION_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt"]);
+/** #1657: the closed per-row evidence-gate vocabulary. */
+const EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-evidence", "source-identity"]);
+/** #1657: the closed per-row evidence-state vocabulary (see
+ * `RowEvidenceStateValue` in `evidence-receipts.ts`). */
+const EVIDENCE_STATES: ReadonlySet<string> = new Set([
+  "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
+]);
+/** #1657: read the per-row evidence projection back strictly (the shape
+ * `rowEvidenceStateToArtifact` writes). `rowClass` comes from the row's own
+ * `row_class` field. Anything else refuses the artifact. */
+function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidenceRowClass): RowEvidenceState | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "gate" && key !== "state" && key !== "receipt_ids") return null;
+  }
+  if (record.gate !== null && !(typeof record.gate === "string" && EVIDENCE_GATES.has(record.gate))) return null;
+  if (typeof record.state !== "string" || !EVIDENCE_STATES.has(record.state)) return null;
+  let receipts: string[] = [];
+  if (record.receipt_ids !== undefined) {
+    if (!Array.isArray(record.receipt_ids) || record.receipt_ids.length > 20
+      || !record.receipt_ids.every((id) => typeof id === "string" && id !== "")) return null;
+    receipts = record.receipt_ids as string[];
+  }
+  return {
+    rowClass,
+    gate: (record.gate === null ? null : record.gate) as RowEvidenceState["gate"],
+    state: record.state as RowEvidenceState["state"],
+    receipts,
+  };
+}
 
 /**
  * #1627: read the disposition parser's drop receipt back from a persisted
@@ -1171,7 +1259,8 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "reason" && key !== "anchors" && key !== "resolved_by") return null;
+      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "reason"
+        && key !== "anchors" && key !== "resolved_by" && key !== "row_class" && key !== "evidence") return null;
     }
     if (typeof row.id !== "string" || row.id === "") return null;
     if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
@@ -1208,6 +1297,22 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (typeof row.reason === "string") entry.reason = row.reason as ReviewObligationReason;
     if (row.anchors !== undefined) entry.anchors = row.anchors as string[];
     if (resolvedBy !== undefined) entry.resolvedBy = resolvedBy;
+    // #1657: the must_check evidence class and its reason-coded provenance
+    // state round-trip strictly — a present `row_class` must be in the
+    // closed vocabulary, and a present `evidence` must match the projection
+    // shape (its rowClass comes from the row's own field). A pre-#1657 row
+    // carries neither and is accepted without them.
+    let evidence: RowEvidenceState | undefined;
+    if (row.row_class !== undefined) {
+      if (typeof row.row_class !== "string" || !OBLIGATION_ROW_CLASSES.has(row.row_class)) return null;
+      entry.rowClass = row.row_class as RequiredEvidenceRowClass;
+    }
+    if (row.evidence !== undefined) {
+      const state = rowEvidenceStateFromArtifact(row.evidence, entry.rowClass ?? "objective");
+      if (state === null) return null;
+      evidence = state;
+    }
+    if (evidence !== undefined) entry.evidence = evidence;
     rows.push(entry);
   }
   return rows;

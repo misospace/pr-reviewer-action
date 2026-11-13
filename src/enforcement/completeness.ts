@@ -28,7 +28,7 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
-import type { ExecutedCallEvidenceIndex } from "./executed-calls.js";
+import type { EvidenceLedger } from "./evidence-receipts.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
 
@@ -49,14 +49,14 @@ export interface RequiredCheckValidationResult {
 export function structuredCoverage(
   mustCheck: readonly string[],
   artifact: ReviewArtifact,
-  executedCalls?: ExecutedCallEvidenceIndex,
+  ledger?: EvidenceLedger,
 ): RequiredCheckCoverage {
   const emitted = Object.prototype.hasOwnProperty.call(artifact, "required_check_dispositions");
   const raw = artifact.required_check_dispositions;
   const dispositions: NormalizedRequiredCheckDisposition[] | null = emitted && Array.isArray(raw)
     ? (raw as unknown as NormalizedRequiredCheckDisposition[])
     : null;
-  return evaluateRequiredCheckCoverage(mustCheck, dispositions, executedCalls);
+  return evaluateRequiredCheckCoverage(mustCheck, dispositions, ledger);
 }
 
 /**
@@ -83,10 +83,9 @@ export function applyRequiredCheckValidation(
     ciEvidence?: HeadBoundCiEvidence | null;
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
-    /** #1627: the executed-call evidence index (native tool-loop surface).
-     * Optional; an index without an active gate keeps the fold
-     * byte-identical to pre-#1627. */
-    executedCalls?: ExecutedCallEvidenceIndex;
+    /** #1657: the evidence-receipt ledger (native tool-loop surface).
+     * Optional; with no ledger the fold is byte-identical to pre-#1627. */
+    ledger?: EvidenceLedger;
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();
@@ -106,15 +105,15 @@ export function applyRequiredCheckValidation(
     // #750: the structured disposition contract is authoritative. Key
     // absence is no longer a bridge to the legacy keyword match (module
     // docstring): every check is conservatively unresolved.
-    // #1627: the citation gate folds FIRST (inside structuredCoverage — the
-    // executed-call evidence index gates the model's satisfied answers), and
-    // the #1594 CI reconciliation runs on the gated rows: a validated
-    // head-bound green test-execution check still discharges a test-run ask
-    // the gate left unresolved (citations never prove a test-run ask), and a
-    // validated failed one still contradicts a model `satisfied`. With no
-    // evidence nothing runs; with no trace the coverage fold is
-    // byte-identical to pre-#1627.
-    let coverage = structuredCoverage(mustCheck, artifact, options.executedCalls);
+    // #1657: the objective-evidence gate folds FIRST (inside
+    // structuredCoverage — the evidence-receipt ledger gates a model's
+    // `satisfied` answer on an objective row), and the #1594 CI
+    // reconciliation runs on the gated rows: a validated head-bound green
+    // test-execution check still discharges a test-run ask the gate left
+    // unresolved, and a validated failed one still contradicts a model
+    // `satisfied`. With no evidence nothing runs; with no ledger the
+    // coverage fold is byte-identical to pre-#1627.
+    let coverage = structuredCoverage(mustCheck, artifact, options.ledger);
     // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
     // derivation: a validated head-bound green test-execution check
     // discharges a test-run ask; a validated failed one contradicts a
@@ -124,12 +123,16 @@ export function applyRequiredCheckValidation(
       const reconciled = reconcileRequiredCheckRows(coverage.checks, options.ciEvidence, options.reviewedHeadSha ?? "");
       // The `none` status means the fold never ran (zero checks) and stays
       // preserved; otherwise the status recomputes over the reconciled
-      // rows: clean iff every row is satisfied/not_applicable with an `ok`
-      // or CI-discharged `ci-evidence` reason.
+      // rows: clean iff every OBJECTIVE row is satisfied/not_applicable
+      // with an `ok` or CI-discharged `ci-evidence` reason (#1657: only
+      // objective rows are merge-affecting — attention and review-prompt
+      // rows never gate completeness, uniformly across disposition states;
+      // the #1594 no-dispositions CI discharge stays a discharge).
       const recomputed = coverage.status === "none" || reconciled.rows.length === 0
         ? coverage.status
-        : reconciled.rows.every((row) => (row.status === "satisfied" || row.status === "not_applicable")
-            && (row.reason === "ok" || row.reason === "ci-evidence"))
+        : reconciled.rows.every((row) => row.rowClass !== "objective"
+            || ((row.status === "satisfied" || row.status === "not_applicable")
+              && (row.reason === "ok" || row.reason === "ci-evidence")))
           ? "complete"
           : "incomplete";
       coverage = { ...coverage, checks: reconciled.rows, status: recomputed };
@@ -137,12 +140,17 @@ export function applyRequiredCheckValidation(
     status = coverage.status === "none" ? "none" : coverage.status;
     // Not clean = unresolved, or dispositioned `unmet` (#1381: performed
     // and failed — never clean coverage, so it is listed, never crash or
-    // silently counted as addressed).
+    // silently counted as addressed). #1657 (audit delta): only OBJECTIVE
+    // rows are merge-affecting gaps — attention rows and generic
+    // review-prompt rows are disclosed on their own rows, never in
+    // `missing`.
     const notClean = coverage.checks
-      .filter((row) => row.status === "unresolved" || row.status === "unmet")
+      .filter((row) => row.rowClass === "objective"
+        && (row.status === "unresolved" || row.status === "unmet"))
       .map((row) => row.check);
     const resolved = coverage.checks
-      .filter((row) => row.status !== "unresolved" && row.status !== "unmet")
+      .filter((row) => row.rowClass === "objective"
+        && row.status !== "unresolved" && row.status !== "unmet")
       .map((row) => row.check);
     result = {
       status,
@@ -155,6 +163,14 @@ export function applyRequiredCheckValidation(
         status: row.status,
         rationale: row.rationale,
         reason: row.reason,
+        row_class: row.rowClass,
+        ...(row.evidence !== undefined
+          ? {
+              gate: row.evidence.gate,
+              evidence_state: row.evidence.state,
+              ...(row.evidence.receipts.length > 0 ? { receipt_ids: row.evidence.receipts } : {}),
+            }
+          : {}),
       })),
       dropped_unknown: coverage.droppedUnknown,
     };

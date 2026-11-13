@@ -1649,16 +1649,19 @@ async function citationRun(dispositions: unknown[]): Promise<{
   return { result, runDir: root, serverRequests: server.requests, cleanup: (): void => rmSync(root, { recursive: true, force: true }), close: (): Promise<void> => server.close() };
 }
 
-test("#1627: the engine withholds the native approval when must_check satisfactions cite no check-specific evidence — both folds agree (the #1623 shape)", async () => {
+test("#1657: the engine validates must_check satisfactions against the run's own evidence ledger — prose and citations never credit, both folds agree", async () => {
   const run = await citationRun([
-    // (a) satisfied + cited to the SUCCESSFUL call — but the breaking-change
-    //     ask is an ABSENCE check (#1627: absence is never established by a
-    //     successful call) → unresolved with its own receipt.
+    // (a) satisfied — a generic breaking-change ABSENCE ask: a review
+    //     prompt (#1657), never evidence-gated, so the answer folds on the
+    //     shape rule.
     { check: CITATION_CHECKS[0], status: "satisfied", rationale: "the lockfile read at head shows no breaking API change — call-1" },
-    // (b) satisfied with prose-only credit, NO citation.
+    // (b) satisfied on the test-run ask: an OBJECTIVE ci-evidence row — no
+    //     head-bound CI evidence exists, so the claim stays unresolved.
     { check: CITATION_CHECKS[1], status: "satisfied", rationale: "I read the diff carefully — 5/5 verified with evidence." },
-    // (c) satisfied citing an id the executed-call index does not carry
-    //     (the loop executed exactly one call).
+    // (c) satisfied on the provenance ask: an OBJECTIVE dependency-evidence
+    //     row — the one executed read is a workspace lockfile read, not an
+    //     upstream provenance acquisition (the cited call-2 id is
+    //     irrelevant: rationales are disclosure, never credit).
     { check: CITATION_CHECKS[2], status: "satisfied", rationale: "the provenance read ran as call-2 and confirmed the publisher" },
     // (d) satisfied citing another NONEXISTENT call id.
     { check: CITATION_CHECKS[3], status: "satisfied", rationale: "the release delta was inspected as call-99" },
@@ -1670,17 +1673,17 @@ test("#1627: the engine withholds the native approval when must_check satisfacti
     // untargeted follow-up reads, which is exactly why no call-2 exists).
     const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ status?: string }> };
     assert.deepEqual((harness.tool_calls ?? []).map((call) => call.status), ["ok"]);
-    // (a) cited-but-unrelated (absence ask — no call establishes it);
-    // (b)-(d) unresolved with the #1627 reasons; (e) the pre-#1627
-    // no-disposition reason — every receipt content-free.
+    // (a) the review prompt folds ok; (b)-(d) the objective rows fail
+    // closed with their reason codes (receipt-absent — no acquisition the
+    // run made supports them); (e) the no-disposition reason.
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ status: string; reason?: string }>;
     };
     assert.deepEqual(persisted.obligations.map((row) => [row.status, row.reason]), [
-      ["unresolved", "unrelated-executed-call"],
-      ["unresolved", "uncited-satisfaction"],
-      ["unresolved", "uncited-satisfaction"],
-      ["unresolved", "uncited-satisfaction"],
+      ["satisfied", "ok"],
+      ["unresolved", "receipt-absent"],
+      ["unresolved", "receipt-absent"],
+      ["unresolved", "receipt-absent"],
       ["unresolved", "no-disposition"],
     ]);
     // #750 parity: the completeness fold, over the SAME trace and
@@ -1735,7 +1738,7 @@ test("#1627: paired positive — the non-gated applicability answers discharge, 
   }
 });
 
-test("#1634 (review): one executed successful call cannot discharge five satisfactions — the shared allocation keeps exactly one row clean and the approval withheld", async () => {
+test("#1657: one executed acquisition cannot manufacture five satisfactions — the objective rows keep their own receipt-absent answers and the approval stays withheld", async () => {
   const dispositions = CITATION_CHECKS.map((check) => ({
     check,
     status: "satisfied",
@@ -1746,14 +1749,15 @@ test("#1634 (review): one executed successful call cannot discharge five satisfa
     const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ status: string; reason?: string }>;
     };
-    // Check-specific gate over the ONE executed read: NONE of the organic
-    // rows is citation-citable (absence asks, the #1612 CI suite ask, and
-    // rows with no bindable identity), so every cited satisfaction fails
-    // closed as unrelated and the approval is withheld. Both folds agree
-    // (required_checks incomplete).
+    // The ONE executed read is a workspace lockfile read: the generic
+    // breaking-change ask is a review prompt and folds ok; the four
+    // OBJECTIVE rows (CI suite ask, provenance, release delta, advisories)
+    // have no matching acquisition, so every one of them fails closed as
+    // receipt-absent — an unrelated receipt never satisfies a named
+    // objective requirement. Both folds agree (required_checks incomplete).
     const rows = persisted.obligations.map((row) => [row.status, row.reason]);
-    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 0, JSON.stringify(rows));
-    assert.equal(rows.filter((row) => row[1] === "unrelated-executed-call").length, 5, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 1, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[1] === "receipt-absent").length, 4, JSON.stringify(rows));
     const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
     assert.equal(output.required_checks, "incomplete");
     assert.equal(run.result.outputs.reviewResult, "partial");
