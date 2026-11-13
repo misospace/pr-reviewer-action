@@ -113,6 +113,7 @@ import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enf
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, dispositionReceiptFromArtifact, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { parseLoopSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
@@ -564,7 +565,7 @@ function resolveReviewObligations(
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex } {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex; settlementsByCheck: ReadonlyMap<string, LoopEvidenceSettlement>; settlementRows: readonly LoopEvidenceSettlement[] } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -649,7 +650,27 @@ function resolveReviewObligations(
   // only when the artifact is absent (fresh standard-call and fork paths)
   // or carries no executed calls; a PRESENT-but-malformed trace REFUSES the
   // index, which keeps the gate active with nothing citable (#1634 review).
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_loop_meta?: unknown } | null;
+  // #1659: the canonical per-row evidence-settlement record the loop
+  // persisted — parsed fail-closed (malformed/absent = no provenance, the
+  // byte-identical pre-#1659 behavior). Keyed two ways: by row id for the
+  // #1381 obligation fold, and by the deterministic check text for the #750
+  // completeness fold (the candidates rows carry the id↔text pair both
+  // folds key on, so the two folds always defer on the SAME rows).
+  const harnessMeta = (harness?.tool_loop_meta ?? null) as { required_evidence_settlements?: unknown } | null;
+  const settlementRows = parseLoopSettlements(harnessMeta?.required_evidence_settlements);
+  const settlementsById = new Map(settlementRows.map((row) => [row.id, row]));
+  const settlementsByCheck = new Map<string, LoopEvidenceSettlement>();
+  if (settlementRows.length > 0) {
+    for (const row of candidateRows) {
+      const record = (row ?? null) as { id?: unknown; text?: unknown } | null;
+      if (record === null || typeof record.id !== "string" || typeof record.text !== "string") continue;
+      const settlement = settlementsById.get(record.id);
+      if (settlement !== undefined && !settlementsByCheck.has(record.text)) {
+        settlementsByCheck.set(record.text, settlement);
+      }
+    }
+  }
   const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
@@ -679,7 +700,7 @@ function resolveReviewObligations(
     ].filter((payload): payload is string => payload !== null && payload !== ""),
     candidatePaths,
   });
-  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths });
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths }, settlementsById);
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
@@ -725,6 +746,12 @@ function resolveReviewObligations(
     // #750 completeness fold (applied later, over the same artifact) can
     // gate the very same satisfied answers — the two folds agree.
     executedCalls,
+    // #1659: the canonical per-row settlement record the loop persisted —
+    // keyed for the #750 completeness fold by check text (an empty map for
+    // legacy/absent records keeps that fold byte-identical), and exposed as
+    // rows for the #1656 disposition evidence seam.
+    settlementsByCheck,
+    settlementRows,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
@@ -2786,6 +2813,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const completenessOptions = {
     ...completenessBaseOptions,
     ...(resolvedObligations.executedCalls.gate ? { executedCalls: resolvedObligations.executedCalls } : {}),
+    // #1659: the #750 fold defers to the loop's settlement record on the
+    // same rows the #1381 fold does (keyed by check text). Absent/empty ⇒
+    // byte-identical pre-#1659 behavior.
+    ...(resolvedObligations.settlementsByCheck.size > 0 ? { settlements: resolvedObligations.settlementsByCheck } : {}),
   };
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, resolvedObligations.dispositionReceipt, log);
@@ -3174,6 +3205,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // required (#1656 audit delta). No new forge call.
     ciConclusion: traceCiState,
     ciEvidenceContractActive: ciGateEvidence !== null,
+    // #1659: the loop's canonical per-row settlement record, parsed from the
+    // enforcement harness ACTUALLY used (the same artifact
+    // `resolveReviewObligations` folded — one parse, one vocabulary). A
+    // cap-released material question becomes a material unknown here —
+    // never "settled clean" — and a cap-released advisory question never
+    // vetoes.
+    loopSettlements: resolvedObligations.settlementRows,
   });
   // The objective approval scope gates (fork policy, publish mode): the
   // same fail-closed rule `evaluateApprovalGuardrails` applies (an unknown

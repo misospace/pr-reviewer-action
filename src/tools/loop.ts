@@ -40,6 +40,14 @@ import { type TransportTiming } from "../transport/timing.js";
 // `extractToolCalls` as a value, so the back edge must stay erased at runtime.
 import type { StreamedAttemptFailureRecord } from "./stream-attempt.js";
 import { MAX_GROUP_NAME_CHARS, MAX_GROUPS_PER_RULE } from "../enforcement/requirement-trace.js";
+// #1659: the canonical settlement record — the loop is the single settlement
+// authority for the rows it tracks, and finalization consumes these receipts.
+import { executedCallId } from "../enforcement/executed-calls.js";
+import {
+  settlementsToArtifact,
+  type LoopEvidenceSettlement,
+  type SettlementObligationSource,
+} from "../enforcement/settlement.js";
 import {
   traceSeamSlotForTarget,
   traceTargetIsTestRead,
@@ -528,6 +536,11 @@ export interface RequiredEvidenceRow {
   /** #1506: the row is a merge-gating requirement-trace row, not a
    * review-owned prose row. */
   trace?: boolean;
+  /** #1659: for a prose row, the obligation source from the candidates
+   * artifact — the settlement record's materiality derives from it
+   * (must_check/derived/risk are material, trusted_base_guidance is
+   * advisory). Absent on dependency shape rows and trace rows. */
+  source?: SettlementObligationSource;
   /** #1519: for a requirement-trace row, the distinct admitted repository
    * reads the row needs before it is discharged and its reserved share
    * releases: a runtime row needs BOTH the enforcement location and the
@@ -1237,6 +1250,19 @@ export interface LoopOutcome {
    * still unspent. False for a run with no obligation surface, a run whose
    * rows never all settled, and every other stop reason. */
   requiredEvidenceSettledStop: boolean;
+  /**
+   * #1659: the canonical per-row evidence-settlement record — the ONE
+   * settlement vocabulary shared with final publication completeness. One
+   * row per tracked question: identity, kind/materiality, the loop-side
+   * terminal state (`discharged` is the only state finalization recognizes
+   * as a loop settlement; `cap-released` is a budget release, never a
+   * semantic settlement; `open` means the loop stopped before the row
+   * settled), whether any admitted executed call succeeded, the admitting
+   * call ids (objective provenance, the shared `call-<n>` scheme), and the
+   * evidence acquisition state. Written on EVERY exit path, next to the
+   * run-wide counters above. The harness persists it as
+   * `tool_loop_meta.required_evidence_settlements`. */
+  requiredEvidenceSettlements: LoopEvidenceSettlement[];
 }
 
 /**
@@ -1503,6 +1529,7 @@ export async function driveToolLoop(
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
     requiredEvidenceSettledStop: false,
+    requiredEvidenceSettlements: [],
   };
   // #1396: hoisted unified reserve; 0 disables the whole mechanism (notes and
   // enforcement alike) so a loop with nothing reserved keeps byte-identical
@@ -1629,6 +1656,14 @@ export async function driveToolLoop(
   // fire: the loop continues under the pre-existing budget/round/no-calls
   // stops (pre-#1627 exploration freedom in exactly the stranding case).
   const rowSuccessfulAttempt = new Set<string>();
+  // #1659: the per-row admitting executed-call ids (the shared `call-<n>`
+  // scheme) — the objective provenance receipts the settlement record
+  // carries, so finalization can defer to a loop-settled row without
+  // re-deriving the admission from a different citation allocator. The
+  // successful subset is tracked separately: a FAILED call never backs a
+  // satisfied row, so the deferral receipt cites only calls that succeeded.
+  const rowAdmittingCalls = new Map<string, string[]>();
+  const rowSuccessfulCalls = new Map<string, string[]>();
   let anySuccessfulWindowEvidence = false;
   const seenKeys = new Set<string>();
 
@@ -2275,7 +2310,29 @@ export async function driveToolLoop(
       }
       const exec = toExecute.get(disposition.data)!;
       const result = resultsByIdx.get(disposition.data)!;
+      // #1659: the call's positional id is fixed HERE — by its order in
+      // `outcome.executed`, the exact scheme the proof index renders
+      // (`executedCallId(index + 1)`) and the enforcement-side evidence index
+      // parses back — so the settlement record's receipts always name ids the
+      // folds can verify against the artifact's own trace.
+      const executedCallReceipt = executedCallId(outcome.executed.length + 1);
       outcome.executed.push({ tool: exec.name, args: exec.args, result });
+      // #1659: record the admitting call id for every row this call targeted
+      // (discharged or partially credited — an attempt is provenance too);
+      // the successful subset fills only when the execution finished ok.
+      const admittedRows = execRowTargets.get(disposition.data);
+      if (admittedRows !== undefined) {
+        for (const rowId of admittedRows.rows) {
+          const admitted = rowAdmittingCalls.get(rowId);
+          if (admitted === undefined) rowAdmittingCalls.set(rowId, [executedCallReceipt]);
+          else admitted.push(executedCallReceipt);
+          if (result.status === "ok") {
+            const succeeded = rowSuccessfulCalls.get(rowId);
+            if (succeeded === undefined) rowSuccessfulCalls.set(rowId, [executedCallReceipt]);
+            else succeeded.push(executedCallReceipt);
+          }
+        }
+      }
       try {
         outcome.toolResultBytes += Buffer.byteLength(
           pyDumps((result.result ?? {}) as unknown),
@@ -2409,6 +2466,50 @@ export async function driveToolLoop(
   outcome.requiredEvidenceAttempts = evidenceAttempts;
   outcome.requiredEvidenceWindowAttempts = windowEvidenceAttempts;
   outcome.requiredEvidenceReleased = reserve <= 0 || !hasActiveRow();
+  // #1659: the canonical per-row settlement record — written on every exit
+  // path next to the run-wide counters, so finalization consumes the loop's
+  // own terminal state instead of re-deriving it. `discharged` is the only
+  // state finalization recognizes as a loop settlement; a shape row's
+  // cap-release is recorded as `cap-released` (a budget release, NEVER a
+  // semantic settlement — #1659's acceptance makes a cap-released material
+  // question a material unknown downstream); a row the loop stopped before
+  // settling is `open`. The acquisition state distinguishes evidence the run
+  // actually got (`available`) from attempts that all failed (`failed`) and
+  // evidence the run never got to attempt (`unavailable` — refused or
+  // unattempted), so a provider failure before meaningful evidence is never
+  // misread as a completed review.
+  outcome.requiredEvidenceSettlements = pendingRows.map((row) => {
+    const admittedBy = rowAdmittingCalls.get(row.id) ?? [];
+    const successfulBy = rowSuccessfulCalls.get(row.id) ?? [];
+    const successfulAttempt = rowSuccessfulAttempt.has(row.id);
+    const settledVia = discharged.has(row.id)
+      ? "discharged"
+      : row.obligation !== undefined && windowEvidenceAttempts >= attemptsCap
+      ? "cap-released"
+      : "open";
+    const acquisition = successfulAttempt
+      ? "available"
+      : admittedBy.length > 0
+      ? "failed"
+      : "unavailable";
+    return {
+      id: row.id,
+      kind: row.obligation !== undefined ? "dependency" : row.trace === true ? "trace" : "prose",
+      materiality: row.trace === true
+        ? "material"
+        : row.obligation !== undefined
+        ? "material"
+        : row.source === "trusted_base_guidance"
+        ? "advisory"
+        : "material",
+      ...(row.source !== undefined ? { source: row.source } : {}),
+      settledVia,
+      successfulAttempt,
+      admittedBy,
+      successfulBy,
+      acquisition,
+    };
+  });
   // #702: close out the telemetry on every exit path.
   outcome.requestsRemaining = Math.max(0, budgets.maxToolCalls - callsExecuted);
   outcome.elapsedSec = timeFn() - started;

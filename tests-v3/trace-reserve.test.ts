@@ -276,12 +276,28 @@ test("#1506/#1627: once the trace row is discharged the loop stops settled — t
   // #1627: the discharging read settles the obligation surface, so the loop
   // ends there — the rounds the released window used to leave open for
   // optional exploration are not spent anymore.
-  assert.deepEqual(run.calls.map((call) => call.tool), ["read_file"]);
-  assert.equal(run.result.executed_request_count, 1);
-  assert.equal(run.result.stop_reason, "obligations-settled");
-  assert.equal(run.budget.required_evidence_refusals, 0);
-  assert.equal(run.budget.required_evidence_released, true);
-  assert.equal(run.budget.required_evidence_settled_stop, true);
+assert.deepEqual(run.calls.map((call) => call.tool), ["read_file"]);
+assert.equal(run.result.executed_request_count, 1);
+assert.equal(run.result.stop_reason, "obligations-settled");
+assert.equal(run.budget.required_evidence_refusals, 0);
+assert.equal(run.budget.required_evidence_released, true);
+assert.equal(run.budget.required_evidence_settled_stop, true);
+// #1659: the canonical settlement record rides the telemetry budget block
+// — the trace row's terminal state, its admitting read receipt, and the
+// truthful acquisition state, in the same closed vocabulary final
+// publication completeness consumes.
+assert.deepEqual(run.budget.required_evidence_settlements, [
+  {
+    id: `trace:${rows[0]!.id}`,
+    kind: "trace",
+    materiality: "material",
+    settled_via: "discharged",
+    successful_attempt: true,
+    admitted_by: ["call-1"],
+    successful_by: ["call-1"],
+    acquisition: "available",
+  },
+]);
 });
 
 test("#1519 (review): a runtime row discharges only on its evidence CATEGORIES — enforcement read, then a TEST read", async () => {

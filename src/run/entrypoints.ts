@@ -403,7 +403,8 @@ const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "
  * #1537 style: anything this runtime did not write is `null` (the caller
  * then keeps its pre-#1594 behavior), never a guess — `version: 1`, a status
  * in the status vocabulary, and a `checks` array whose rows carry ONLY
- * `{check, status, rationale, reason}` with a non-empty check text, a status
+ * `{check, status, rationale, reason}` (plus the optional #1659
+ * `settled_by` receipt) with a non-empty check text, a status
  * in the row vocabulary, a `string | null` rationale, and a non-empty
  * reason.
  */
@@ -417,12 +418,24 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "check" && key !== "status" && key !== "rationale" && key !== "reason") return null;
+      if (key !== "check" && key !== "status" && key !== "rationale" && key !== "reason" && key !== "settled_by") return null;
     }
     if (typeof row.check !== "string" || row.check === "") return null;
     if (typeof row.status !== "string" || !REQUIRED_CHECK_ROW_STATUSES.has(row.status)) return null;
     if (!(row.rationale === null || typeof row.rationale === "string")) return null;
     if (typeof row.reason !== "string" || row.reason === "") return null;
+    // #1659: the deferral receipt (when present) validates strictly —
+    // closed kind and the shared `call-<n>` id scheme — or the whole
+    // record refuses (the same half-trusted-provenance rule).
+    if (row.settled_by !== undefined) {
+      if (row.settled_by === null || typeof row.settled_by !== "object" || Array.isArray(row.settled_by)) return null;
+      const receipt = row.settled_by as Record<string, unknown>;
+      for (const key of Object.keys(receipt)) {
+        if (key !== "kind" && key !== "call") return null;
+      }
+      if (receipt.kind !== "loop-settlement") return null;
+      if (typeof receipt.call !== "string" || !/^call-\d+$/.test(receipt.call)) return null;
+    }
     rows.push({ check: row.check, status: row.status });
   }
   return { status: record.status, checks: rows };
@@ -581,6 +594,15 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
           : undefined;
         const harness = harnessName === undefined ? null : readJsonObject(join(runDir, harnessName));
         const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
+        // #1659: this legacy re-fold path (every fresh #1594 run dir carries
+        // the engine's reconciled coverage artifact instead) deliberately
+        // does NOT defer to the loop's settlement record: the settlement
+        // vocabulary and its id↔text join are the ENGINE's fold contract,
+        // and re-implementing the join here — with different candidate-row
+        // filtering — could satisfy a row on this side that the engine left
+        // unresolved (fail-open). A run dir old enough to reach this path
+        // predates the record anyway, so the raw re-fold is exactly the
+        // pre-#1659 behavior.
         const checkCoverage = structuredCoverage(mustCheck, output as never, executedCalls);
         fields.unresolvedRequiredChecks = boundedIdList(
           checkCoverage.checks

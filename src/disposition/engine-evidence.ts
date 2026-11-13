@@ -34,6 +34,7 @@
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
+import type { LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
@@ -76,6 +77,16 @@ export interface DispositionEvidenceParts {
    * the signal that CI is materially required for this run, so a PENDING
    * conclusion withholds (#1656 audit delta: never a blanket rule). */
   ciEvidenceContractActive: boolean;
+  /**
+   * #1659: the canonical per-row evidence-settlement record the native loop
+   * persisted (`tool_loop_meta.required_evidence_settlements`), parsed
+   * fail-closed. Empty for legacy artifacts and every non-native path — the
+   * pre-#1659 behavior. Objective provenance only: the record never
+   * certifies a semantic resolution by itself (the #1657 boundary), it
+   * stops the loop's settlement state from being lost or reinterpreted
+   * between loop → verdict → fallback → finalization.
+   */
+  loopSettlements?: ReadonlyArray<LoopEvidenceSettlement>;
 }
 
 export interface DispositionEvidenceBuild {
@@ -200,6 +211,33 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     evidence.push(dispositionEvidence("required_ci_failing", "deterministic", "material", "ci-status-final=failure"));
   } else if (parts.ciConclusion === "pending" && parts.ciEvidenceContractActive) {
     evidence.push(dispositionEvidence("exact_head_evidence_unavailable", "deterministic", "material", "required ci pending"));
+  }
+
+  // #1659: the loop's own settlement record. A cap/budget release is NOT a
+  // semantic settlement: a cap-released MATERIAL question becomes a named
+  // material unknown (`investigation_unavailable`) — never "settled clean" —
+  // and a cap-released ADVISORY question becomes an advisory entry that
+  // never vetoes the approval. Terminal (`discharged`) and `open` rows
+  // contribute nothing here: a discharged row is the loop's settled terminal
+  // state (the folds defer to its receipts), and an open row is already
+  // covered by the fold/completeness evidence above — one question yields
+  // one evidence entry. Trace-kind rows are skipped: the trace question is
+  // owned by the `requirementTraceIncomplete` evidence above while #1658 is
+  // in flight, and #1658 will replace both with provenance-based settlement.
+  const resolvedSatisfied = new Set(
+    parts.obligations.filter((o) => o.status === "satisfied").map((o) => o.id),
+  );
+  for (const settlement of parts.loopSettlements ?? []) {
+    if (settlement.settledVia !== "cap-released" || settlement.kind === "trace") continue;
+    if (resolvedSatisfied.has(settlement.id)) continue;
+    evidence.push(
+      dispositionEvidence(
+        "investigation_unavailable",
+        "deterministic",
+        settlement.materiality,
+        `cap-released unprovable: ${settlement.id}`,
+      ),
+    );
   }
 
   return { evidence, provenUnmetRequirement };

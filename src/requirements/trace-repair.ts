@@ -34,6 +34,7 @@ import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/p
 import type { SpecialistRequestFn } from "../specialists/runner.js";
 import { extractResponseText } from "../specialists/wire.js";
 import { escapeControlChars, fenced, MAX_FENCE_BYTES, safeFence } from "../context/fence.js";
+import { parseLoopSettlements } from "../enforcement/settlement.js";
 
 /** The ledger's own cap (`MAX_REQUIREMENTS` in `src/requirements/ledger.ts`) —
  * a response can never legitimately carry more claims than the ledger holds,
@@ -305,25 +306,58 @@ export function buildTraceRepairUserMessage(input: {
   return [prefix + fenced("PR diff:", finalDiff || "(empty)") + "\n", clipped];
 }
 
-/** #1504: a bounded digest of the evidence the native loop already gathered,
+/**
+ * #1504: a bounded digest of the evidence the native loop already gathered,
  * from the harness's `tool_calls` record (`{tool, args, status}` entries,
  * args already secret-masked by the harness). One line per call, capped in
  * count and bytes, control-escaped — navigation hints for the standalone
- * fallback, never proof. Empty string when the harness left no calls. */
+ * fallback, never proof. Empty string when the harness left no calls.
+ *
+ * #1659: the digest ALSO carries the loop's canonical per-row settlement
+ * record (`tool_loop_meta.required_evidence_settlements`) — the ONE
+ * settlement vocabulary shared with final publication completeness. The
+ * standalone/final formatting repair can then correct serialization from
+ * the settled state (per-row terminal state, receipts, acquisition) instead
+ * of rediscovering semantic evidence from the weaker call digest alone.
+ * Content-free and deterministic: ids, kinds, states, and call-id receipts
+ * only — never tool result bodies, never model prose. */
 export function harnessEvidenceDigest(harness: unknown): string {
   const calls = harness !== null && typeof harness === "object" && !Array.isArray(harness)
     ? (harness as Record<string, unknown>).tool_calls
     : null;
-  if (!Array.isArray(calls)) return "";
   const lines: string[] = [];
-  for (const call of calls.slice(0, MAX_TRACE_REPAIR_EVIDENCE_CALLS)) {
-    if (!call || typeof call !== "object" || Array.isArray(call)) continue;
-    const record = call as Record<string, unknown>;
-    const tool = typeof record.tool === "string" ? record.tool.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64) : "";
-    if (tool === "") continue;
-    const args = JSON.stringify(record.args ?? null) ?? "null";
-    const status = typeof record.status === "string" ? record.status.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 32) : "";
-    lines.push(`- ${tool} ${escapeControlChars(args.slice(0, 200))} -> ${status}`);
+  // #1659: the settlement rows ride the SAME bounded digest block, FIRST —
+  // the block is head-truncated, and the settled state is the part a
+  // formatting repair must always see (the call digest is the bulk).
+  // Parsed fail-closed: a malformed record contributes nothing. Content-
+  // free and deterministic: ids, kinds, states, and call-id receipts only —
+  // never tool result bodies, never model prose.
+  const meta = harness !== null && typeof harness === "object" && !Array.isArray(harness)
+    ? (harness as Record<string, unknown>).tool_loop_meta
+    : null;
+  const settlements = parseLoopSettlements(
+    meta !== null && typeof meta === "object" && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>).required_evidence_settlements
+      : null,
+  );
+  for (const row of settlements.slice(0, MAX_TRACE_REPAIR_EVIDENCE_CALLS)) {
+    lines.push(
+      `- question ${escapeControlChars(row.id.slice(0, 80))} kind=${row.kind} materiality=${row.materiality}`
+        + ` state=${row.settledVia} evidence=${row.acquisition}`
+        + ` successful_attempt=${row.successfulAttempt ? "yes" : "no"}`
+        + ` calls=${escapeControlChars(row.admittedBy.slice(0, 8).join(",") || "none")}`,
+    );
+  }
+  if (Array.isArray(calls)) {
+    for (const call of calls.slice(0, MAX_TRACE_REPAIR_EVIDENCE_CALLS)) {
+      if (!call || typeof call !== "object" || Array.isArray(call)) continue;
+      const record = call as Record<string, unknown>;
+      const tool = typeof record.tool === "string" ? record.tool.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64) : "";
+      if (tool === "") continue;
+      const args = JSON.stringify(record.args ?? null) ?? "null";
+      const status = typeof record.status === "string" ? record.status.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 32) : "";
+      lines.push(`- ${tool} ${escapeControlChars(args.slice(0, 200))} -> ${status}`);
+    }
   }
   if (lines.length === 0) return "";
   return fitUtf8(lines.join("\n"), MAX_TRACE_REPAIR_EVIDENCE_BYTES)[0];

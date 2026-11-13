@@ -29,6 +29,7 @@ import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
 import type { ExecutedCallEvidenceIndex } from "./executed-calls.js";
+import type { LoopEvidenceSettlement } from "./settlement.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
 
@@ -50,13 +51,16 @@ export function structuredCoverage(
   mustCheck: readonly string[],
   artifact: ReviewArtifact,
   executedCalls?: ExecutedCallEvidenceIndex,
+  // #1659: the loop's canonical settlement record keyed by check text.
+  // Absent/empty ⇒ byte-identical pre-#1659 behavior.
+  settlements?: ReadonlyMap<string, LoopEvidenceSettlement>,
 ): RequiredCheckCoverage {
   const emitted = Object.prototype.hasOwnProperty.call(artifact, "required_check_dispositions");
   const raw = artifact.required_check_dispositions;
   const dispositions: NormalizedRequiredCheckDisposition[] | null = emitted && Array.isArray(raw)
     ? (raw as unknown as NormalizedRequiredCheckDisposition[])
     : null;
-  return evaluateRequiredCheckCoverage(mustCheck, dispositions, executedCalls);
+  return evaluateRequiredCheckCoverage(mustCheck, dispositions, executedCalls, settlements);
 }
 
 /**
@@ -87,6 +91,11 @@ export function applyRequiredCheckValidation(
      * Optional; an index without an active gate keeps the fold
      * byte-identical to pre-#1627. */
     executedCalls?: ExecutedCallEvidenceIndex;
+    /** #1659: the loop's canonical per-row settlement record, keyed by
+     * check text — the fold defers to a loop-settled row's receipts (see
+     * `evaluateRequiredCheckCoverage`). Optional; absent/empty keeps the
+     * fold byte-identical to pre-#1659. */
+    settlements?: ReadonlyMap<string, LoopEvidenceSettlement>;
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();
@@ -114,7 +123,7 @@ export function applyRequiredCheckValidation(
     // validated failed one still contradicts a model `satisfied`. With no
     // evidence nothing runs; with no trace the coverage fold is
     // byte-identical to pre-#1627.
-    let coverage = structuredCoverage(mustCheck, artifact, options.executedCalls);
+    let coverage = structuredCoverage(mustCheck, artifact, options.executedCalls, options.settlements);
     // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
     // derivation: a validated head-bound green test-execution check
     // discharges a test-run ask; a validated failed one contradicts a
@@ -155,6 +164,10 @@ export function applyRequiredCheckValidation(
         status: row.status,
         rationale: row.rationale,
         reason: row.reason,
+        // #1659: the deferral receipt rides the reconciled coverage record —
+        // the explainable provenance for a satisfied row the citation
+        // allocator did not assign (absent on every other row).
+        ...(row.settledBy !== undefined ? { settled_by: row.settledBy } : {}),
       })),
       dropped_unknown: coverage.droppedUnknown,
     };

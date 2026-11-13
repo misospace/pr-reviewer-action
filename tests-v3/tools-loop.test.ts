@@ -2264,6 +2264,23 @@ test("#1595: the scoped lockfile-only advisory row is claimed by one executed fe
   assert.deepEqual(outcome.requiredEvidenceCredits, ["security_advisory"]);
   assert.equal(outcome.requiredEvidenceReleased, true);
   assert.equal(outcome.requestsRemaining, 0);
+  // #1659: the #1629-shaped low-risk early-stop surface carries the
+  // CANONICAL settlement record — the one tracked question, its terminal
+  // state (`discharged` — the only state finalization recognizes), the
+  // admitting call receipt, and the truthful acquisition state. Budget
+  // bookkeeping alone never substitutes for the settlement vocabulary.
+  assert.deepEqual(outcome.requiredEvidenceSettlements, [
+    {
+      id: "security_advisory",
+      kind: "dependency",
+      materiality: "material",
+      settledVia: "discharged",
+      successfulAttempt: true,
+      admittedBy: ["call-6"],
+      successfulBy: ["call-6"],
+      acquisition: "available",
+    },
+  ]);
   // The in-window refusal names the still-outstanding obligation (the
   // aggregate advisory row's own label) and nothing else.
   const refusals = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>)
