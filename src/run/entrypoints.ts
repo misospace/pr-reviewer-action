@@ -591,12 +591,16 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
     }
   }
   // #1656: the run's authoritative final disposition, read back from the
-  // engine's own artifact (never re-derived from ambient env). A missing or
-  // unrecognizable artifact (every pre-#1656 run dir) yields nothing — the
-  // publish boundary then keeps its legacy scalar derivation, which fails
-  // closed on unknown coverage.
-  const finalDisposition = parseFinalDisposition(readJsonObject(join(runDir, "final-disposition.json")));
+  // engine's own artifact (never re-derived from ambient env). #1656 audit
+  // round 2: a run DIRECTORY carrying no readable disposition record is a
+  // REFUSAL, not a legacy fallback — the publish boundary abstains
+  // (unavailable) instead of re-deriving an approval from the scalars.
+  // Only a caller with NO run directory (a direct publish invocation) may
+  // use the legacy scalar derivation.
+  const dispositionRecord = readJsonObject(join(runDir, "final-disposition.json"));
+  const finalDisposition = parseFinalDisposition(dispositionRecord);
   if (finalDisposition !== null) fields.finalDisposition = finalDisposition;
+  else fields.finalDispositionRefused = true;
   return fields;
 }
 

@@ -23,7 +23,7 @@ import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
 import { buildReviewHandoff, renderReviewHandoffBlock } from "./handoff.js";
 import { computeReviewDisposition, normalizePublishedRecommendation } from "./disposition.js";
-import { MATERIAL_CODE_CLAUSES, reviewResultFromDisposition, type FinalDisposition, type MaterialDispositionCode } from "../disposition/final.js";
+import { MATERIAL_CODE_CLAUSES, reviewResultFromDisposition, unreadableFinalDisposition, type FinalDisposition, type MaterialDispositionCode } from "../disposition/final.js";
 import { buildReviewObligations, renderReviewObligationsBlock, REVIEW_OBLIGATIONS_MAX_BYTES, type ReviewObligationsInput } from "./obligations.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
@@ -161,6 +161,13 @@ export interface PublishInput {
    * direct publish invocation) keeps the pre-#1656 scalar derivation
    * byte-for-byte. */
   finalDisposition?: FinalDisposition;
+  /** #1656 audit round 2: a run DIRECTORY was involved but its serialized
+   * disposition record was missing, malformed or incoherent — publication
+   * fails closed to an unavailable abstention instead of re-deriving an
+   * approval from the legacy scalars. Only a caller with NO run-directory
+   * provenance (a direct publish invocation) may use the legacy
+   * derivation. */
+  finalDispositionRefused?: boolean;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -2030,7 +2037,14 @@ export async function publishReview(
   // nothing else. A caller without one (a legacy run directory, or a direct
   // publish invocation) keeps the #1596 scalar derivation, byte-compatible
   // with the pre-#1656 publish behavior.
-  const disposition = input.finalDisposition ?? (() => {
+  // #1656 audit round 2: resolution order — (1) the explicit authoritative
+  // object; (2) a REFUSED record (run dir present, artifact missing/
+  // malformed/incoherent) → the canonical unavailable abstention, never a
+  // legacy approval; (3) the legacy scalar derivation, only for callers
+  // with no run-directory provenance.
+  const disposition = input.finalDisposition ?? (input.finalDispositionRefused === true
+    ? unreadableFinalDisposition()
+    : (() => {
     const legacyReviewResult = markerReviewResult(input);
     const legacyCompleteCoverage = !input.partialCoverage && !input.coverageUnknown
       && legacyReviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
@@ -2051,7 +2065,7 @@ export async function publishReview(
       incompleteReason,
       blockingFindingOpen: hasBlockingOpenFinding(input.findings),
     });
-  })();
+  })());
   // #1656: the marker's review_result is a PROJECTION of the disposition on
   // the authoritative path, so the marker can never disagree with it; the
   // legacy path keeps the pre-#1656 rollup.
@@ -2676,6 +2690,13 @@ export async function publishReview(
         // output is an advisory comment.)
         withheldNotice = "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
         messages.push(`Publishing advisory review for #${input.prNumber} (no valid verdict produced)`);
+      } else if (input.finalDisposition === undefined && input.finalDispositionRefused === true) {
+        // #1656 audit round 2: the disposition record was unreadable — the
+        // publication states the refusal instead of any conclusion.
+        if (!blockingPublication) {
+          withheldNotice = "\n> **Review unavailable**: the run's disposition record could not be read, so no conclusion (approval or block) is certified.\n";
+        }
+        messages.push(`Review unavailable for #${input.prNumber} (disposition record unreadable; no conclusion certified)`);
       } else if (input.finalDisposition !== undefined && input.finalDisposition.kind === "unavailable" && input.finalDisposition.reason === "degraded_no_evidence") {
         // #1656: a degraded no-evidence fallback verdict certifies nothing —
         // the authoritative disposition reads UNAVAILABLE, so the publication

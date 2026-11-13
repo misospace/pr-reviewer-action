@@ -161,6 +161,10 @@ export const FINAL_DISPOSITION_REASONS = [
   "review_failed",
   /** The verdict came from a degraded fallback with no evidence gathered. */
   "degraded_no_evidence",
+  /** The run's serialized disposition artifact was present but unreadable
+   * or incoherent — publication fails closed to an unavailable abstention
+   * instead of a legacy re-derivation (#1656 audit round 2). */
+  "disposition_unreadable",
 ] as const;
 export type FinalDispositionReason = (typeof FINAL_DISPOSITION_REASONS)[number];
 
@@ -360,7 +364,7 @@ function incompleteWording(materialUnknowns: readonly DispositionEvidence[]): {
  * actually gathered was adequate (#1656 audit delta).
  */
 export function computeFinalDisposition(input: FinalDispositionInput): FinalDisposition {
-  const materialUnknowns = input.evidence.filter((entry) => entry.materiality === "material");
+  let materialUnknowns: DispositionEvidence[] = input.evidence.filter((entry) => entry.materiality === "material");
   const advisoryDiagnostics = input.evidence.filter((entry) => entry.materiality === "advisory");
 
   let kind: FinalDispositionKind;
@@ -372,28 +376,43 @@ export function computeFinalDisposition(input: FinalDispositionInput): FinalDisp
     kind = "unavailable";
     reason = "degraded_no_evidence";
   } else {
+    // #1656 audit round 2: the RAW model verdict is not proof of a
+    // blocker. `request_changes` is emitted only from a grounded current-
+    // head blocker/major finding, an objective evidence-provider blocker,
+    // or an objectively proven unmet mandatory requirement. A blocking
+    // conclusion with no grounded/proven claim behind it is an UNVERIFIED
+    // BLOCKING CLAIM — a material unknown (INCOMPLETE/COMMENT), never a
+    // fabricated block and never a silent approve.
     const findingBlocker = input.blockingFindingOpen || input.evidenceProviderBlocker;
-    const verdictBlocker = input.verdict === "request_changes";
-    if (findingBlocker || input.provenUnmetRequirement || verdictBlocker) {
+    if (findingBlocker || input.provenUnmetRequirement) {
       kind = "request_changes";
       reason = findingBlocker || !input.provenUnmetRequirement ? "blocker_proven" : "requirement_unmet";
-    } else if (materialUnknowns.length > 0) {
-      kind = "incomplete";
-      reason = "material_unknown";
-    } else if (
-      input.verdictBearing
-      && input.approvalScopeAllowed
-      && input.exactHead
-      && input.publicationHeadBound
-    ) {
-      kind = "approve";
-      reason = "approval_certified";
     } else {
-      // The review itself completed clean, but the objective certification
-      // gates withheld the native approval. The withholding is part of THIS
-      // disposition — kind `approve` always means a certified APPROVE.
-      kind = "incomplete";
-      reason = "approval_withheld";
+      const evidenceUnknowns = input.verdict === "request_changes"
+        ? [
+            ...materialUnknowns,
+            dispositionEvidence("unverified_blocking_claim", "deterministic", "material", "model-verdict"),
+          ]
+        : materialUnknowns;
+      if (evidenceUnknowns.length > 0) {
+        kind = "incomplete";
+        reason = "material_unknown";
+        materialUnknowns = evidenceUnknowns;
+      } else if (
+        input.verdictBearing
+        && input.approvalScopeAllowed
+        && input.exactHead
+        && input.publicationHeadBound
+      ) {
+        kind = "approve";
+        reason = "approval_certified";
+      } else {
+        // The review itself completed clean, but the objective certification
+        // gates withheld the native approval. The withholding is part of THIS
+        // disposition — kind `approve` always means a certified APPROVE.
+        kind = "incomplete";
+        reason = "approval_withheld";
+      }
     }
   }
 
@@ -459,40 +478,19 @@ export function reviewResultFromDisposition(
   return options.strict && options.openFindings > 0 ? "findings" : "clean";
 }
 
-// ---------------------------------------------------------------------------
-// The deterministic generic-scrutiny shape (#1656): a required check that
-// exhorts scrutiny without naming any behavior, path or artifact of the
-// change. A missing/invalid disposition for such a row is bookkeeping, not
-// a material unknown.
-// ---------------------------------------------------------------------------
-
-/**
- * A scrutiny exhortation: an imperative asking for care/thoroughness. The
- * known classification rows ("treat as critical — verify all changes
- * thoroughly", "treat as high priority — verify correctness carefully")
- * match the first alternative.
- */
-const SCRUTINY_EXHORTATION_RE =
-  /\btreat as (?:critical|high priority)\b|\b(?:verify|check|review|inspect|test)\b[^.\n]*\b(?:carefully|thoroughly)\b/i;
-
-/**
- * A specific anchor: a quoted identifier, a path-like or file-extension
- * token, or a concrete behavior vocabulary (auth, secrets, paths, schema,
- * ...). A row carrying one names something specific about THIS change —
- * an unresolved answer for it stays material.
- */
-const ANCHORED_CHECK_RE =
-  /`[^`]+`|(?:[\w@.-]+\/)?[\w@.-]+\.[a-z]{1,8}\b|\b(?:auth|authenticat|authoriz|token|secret|credential|password|cryptograph|path|traversal|sanitiz|escap|injection|xsrf|csrf|xss|permission|privilege|sandbox|migration|schema|transaction|api|endpoint|route|webhook|download|upload|extract|archive|symlink|dependency|provenance|advisory|license)\b/i;
 
 /**
  * Fail-closed parse for consumers of the `final-disposition.json` run-dir
  * artifact (the standalone `publish` CLI read-back). Exact closed
  * vocabularies for every field, booleans as booleans, and the core
- * coherence invariants the decision table guarantees (a `request_changes`
- * kind proves a blocker; `approval_certified` implies kind `approve`;
- * `incomplete` carries its material unknowns). Anything this refuses is
- * treated as absent — a malformed disposition is never read as any kind,
- * least of all an approval.
+ * coherence invariants the decision table guarantees. #1656 audit round 2:
+ * the certification flag is strictly derived, and the evidence lists are
+ * polarity-checked — a MATERIAL code may only appear in `materialUnknowns`
+ * with materiality "material", an ADVISORY code only in
+ * `advisoryDiagnostics` with materiality "advisory"; any cross-pairing (an
+ * `approve` carrying a material code as advisory, a material code under
+ * `advisoryDiagnostics`, …) is refused. Anything this refuses must be
+ * treated as an unreadable disposition — never re-derived into an approval.
  */
 export function parseFinalDisposition(value: unknown): FinalDisposition | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -505,24 +503,22 @@ export function parseFinalDisposition(value: unknown): FinalDisposition | null {
     || !(record.nativeEvent === "REQUEST_CHANGES" || record.nativeEvent === "COMMENT" || record.nativeEvent === "APPROVE")) return null;
   if (typeof record.blockerProven !== "boolean" || typeof record.approvalCertified !== "boolean") return null;
   if (typeof record.recommendation !== "string" || typeof record.statement !== "string") return null;
-  const evidence = parseEvidenceList(record.materialUnknowns);
-  const advisory = parseEvidenceList(record.advisoryDiagnostics);
+  const evidence = parseEvidenceList(record.materialUnknowns, "material");
+  const advisory = parseEvidenceList(record.advisoryDiagnostics, "advisory");
   if (evidence === null || advisory === null) return null;
-  // Coherence: the pair and the flags must be ones `computeFinalDisposition`
-  // can emit for the kind. Kind `approve` exists only above the full APPROVE
-  // floor (always `approval_certified`, always nativeEvent APPROVE); an
-  // `approval_withheld` abstention carries no material unknowns; a
-  // `material_unknown` abstention carries at least one.
+  // Coherence with the decision table's own outputs.
   if (kind === "request_changes" && (!record.blockerProven || evidence.length > 0)) return null;
   if (kind === "incomplete" && record.blockerProven) return null;
   if (kind === "approve" && record.blockerProven) return null;
   if (kind === "unavailable" && (record.blockerProven || evidence.length > 0)) return null;
   if (reason === "material_unknown" && (kind !== "incomplete" || evidence.length === 0)) return null;
   if (reason === "approval_withheld" && (kind !== "incomplete" || evidence.length > 0)) return null;
+  if (reason === "disposition_unreadable" && kind !== "unavailable") return null;
   if ((reason === "no_verdict" || reason === "review_failed" || reason === "degraded_no_evidence") && kind !== "unavailable") return null;
   if ((reason === "blocker_proven" || reason === "requirement_unmet") && kind !== "request_changes") return null;
-  // The certify flag is DERIVED: kind `approve` always certified, and the
-  // APPROVE event always follows it.
+  // The certification flag is strictly DERIVED: kind `approve` — and only
+  // kind `approve` — is certified, and it always carries the APPROVE event.
+  if (record.approvalCertified !== (kind === "approve")) return null;
   if ((reason === "approval_certified") !== (kind === "approve")) return null;
   if ((record.nativeEvent === "APPROVE") !== (kind === "approve")) return null;
   return {
@@ -546,24 +542,26 @@ function isFinalDispositionReason(value: string): value is FinalDispositionReaso
   return (FINAL_DISPOSITION_REASONS as readonly string[]).includes(value);
 }
 
-function parseEvidenceList(value: unknown): DispositionEvidence[] | null {
+/** Parse one evidence list under a REQUIRED polarity: every entry must
+ * carry the list's own materiality and a code from the matching closed set.
+ * A cross-pairing is a malformed disposition, never a re-labeled one. */
+function parseEvidenceList(value: unknown, polarity: "material" | "advisory"): DispositionEvidence[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value)) return null;
+  const allowedCodes: readonly string[] = polarity === "material" ? MATERIAL_DISPOSITION_CODES : ADVISORY_DISPOSITION_CODES;
   const entries: DispositionEvidence[] = [];
   for (const item of value) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
     const entry = item as Record<string, unknown>;
     const code = entry.code;
-    if (typeof code !== "string"
-      || !(MATERIAL_DISPOSITION_CODES as readonly string[]).includes(code)
-      && !(ADVISORY_DISPOSITION_CODES as readonly string[]).includes(code)) return null;
+    if (typeof code !== "string" || !allowedCodes.includes(code)) return null;
     if (entry.ruledBy !== "deterministic" && entry.ruledBy !== "reviewer") return null;
-    if (entry.materiality !== "material" && entry.materiality !== "advisory") return null;
+    if (entry.materiality !== polarity) return null;
     if (typeof entry.subject !== "string" || entry.subject.length > DISPOSITION_SUBJECT_MAX_CHARS) return null;
     entries.push({
       code: code as DispositionEvidenceCode,
       ruledBy: entry.ruledBy,
-      materiality: entry.materiality,
+      materiality: polarity,
       subject: entry.subject,
     });
   }
@@ -571,18 +569,21 @@ function parseEvidenceList(value: unknown): DispositionEvidence[] | null {
 }
 
 /**
- * True when a required-check row is a generic scrutiny prompt: it exhorts
- * care without anchoring any specific behavior, path or artifact. Such a
- * row's missing/invalid disposition is an advisory bookkeeping diagnostic
- * (`generic_scrutiny_row_missing`), never an automatic material unknown
- * (#1656). Narrow by design — an unanchored row that carries neither the
- * exhortation shape nor a scrutiny adverb stays material, and any anchored
- * token keeps the row material regardless of its wording.
+ * The canonical disposition for a run whose serialized disposition record
+ * was present but UNREADABLE or incoherent (#1656 audit round 2): an
+ * unavailable abstention, never a legacy re-derivation. Publication
+ * proceeds as a non-blocking COMMENT that certifies nothing.
  */
-export function isGenericScrutinyCheckText(text: string): boolean {
-  if (typeof text !== "string") return false;
-  const normalized = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (normalized === "" || normalized.length > 400) return false;
-  if (!SCRUTINY_EXHORTATION_RE.test(normalized)) return false;
-  return !ANCHORED_CHECK_RE.test(normalized);
+export function unreadableFinalDisposition(): FinalDisposition {
+  return {
+    kind: "unavailable",
+    reason: "disposition_unreadable",
+    nativeEvent: "COMMENT",
+    blockerProven: false,
+    approvalCertified: false,
+    materialUnknowns: [],
+    advisoryDiagnostics: [],
+    recommendation: "🟡 **Automated recommendation: REVIEW UNAVAILABLE — the run's disposition record was unreadable; no conclusion is certified**",
+    statement: "Review unavailable — the run's disposition record was unreadable; no conclusion is certified",
+  };
 }

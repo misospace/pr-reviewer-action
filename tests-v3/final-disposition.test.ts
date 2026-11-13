@@ -6,8 +6,8 @@ import {
   MATERIAL_DISPOSITION_CODES,
   computeFinalDisposition,
   dispositionEvidence,
-  isGenericScrutinyCheckText,
   parseFinalDisposition,
+  unreadableFinalDisposition,
   reviewResultFromDisposition,
   type DispositionEvidence,
   type FinalDisposition,
@@ -23,6 +23,7 @@ import {
   type EnforcementInputs,
 } from "../src/enforcement/enforce.js";
 import { computeReviewAttestation, parseReviewAttestation } from "../src/publish/attestation.js";
+import { failOnRequestChanges } from "../src/run/action.js";
 import { publishReview } from "../src/publish/publish.js";
 import type { NativeReviewSurface, PublishPlatformApi } from "../src/platform/publish-api.js";
 
@@ -167,18 +168,14 @@ test("pin: provider failure before meaningful review => UNAVAILABLE, not a fabri
   assert.equal(computeFinalDisposition(input({ degraded: true, verdict: "approve" })).reason, "degraded_no_evidence");
 });
 
-test("pin: a generic scrutiny/checklist bookkeeping failure alone => advisory, does not veto APPROVE", () => {
-  // The classifier's own P0/P1 exhortation rows are generic scrutiny.
-  assert.equal(isGenericScrutinyCheckText("treat as critical — verify all changes thoroughly"), true);
-  assert.equal(isGenericScrutinyCheckText("treat as high priority — verify correctness carefully"), true);
-  // A behavioral row stays material: it names concrete behavior.
-  assert.equal(isGenericScrutinyCheckText("review for path traversal vulnerabilities"), false);
-  assert.equal(isGenericScrutinyCheckText("verify secrets are not logged or exposed in diffs"), false);
-  assert.equal(isGenericScrutinyCheckText("run full test suite after upgrade"), false);
-
+test("pin: bookkeeping identified by TRUSTED reason codes alone => advisory, does not veto APPROVE", () => {
+  // #1656 audit round 2: advisory status comes from trusted deterministic
+  // reason/source codes (the citation-gate family) — never from prose
+  // matching. The seam codes for generic scrutiny and stale-thread
+  // bookkeeping remain available to #1657/#1654 provenance feeds.
   const disposition = computeFinalDisposition(input({
     evidence: [
-      dispositionEvidence("generic_scrutiny_row_missing", "deterministic", "advisory", "linked_priority_p1"),
+      dispositionEvidence("generic_scrutiny_row_missing", "reviewer", "advisory", "linked_priority_p1"),
       dispositionEvidence("citation_allocation_failed", "deterministic", "advisory", "must_check:citation-shared"),
       dispositionEvidence("stale_thread_bookkeeping", "deterministic", "advisory", "thread:88"),
     ],
@@ -360,21 +357,24 @@ test("the engine evidence builder maps the exact-head CI floor per the audit del
   assert.deepEqual(buildDispositionEvidence({ ...base, ciConclusion: null, ciEvidenceContractActive: false }).evidence, []);
 });
 
-test("pin: generic trace/call-ID bookkeeping failure alone => advisory, never an authority", () => {
+test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; trace/coverage rows stay conservative", () => {
   const base = {
+    completenessChecks: [],
     obligations: [],
     findings: [],
     toolCapabilityFailure: null,
     toolFloorUnmet: false,
-    noEvidenceReason: null,
     partialCoverageStopReason: null,
     requirementTraceIncomplete: false,
     ciConclusion: null,
     ciEvidenceContractActive: false,
   };
-  // The whole compatibility family is advisory: trace proof-shape rows,
-  // the citation-gate reasons, the min-successful COUNT floor, the
-  // loop-stopped-early record, and the required-check BIT is never read.
+  // #1656 audit round 2: the configured COUNT floor is the one engine-fed
+  // advisory signal. Unresolved required-check rows — call-ID allocation
+  // refusals included — and the trace's incompleteness stay TRANSITIONAL
+  // CONSERVATIVE material unknowns (#1634/#1488 safety contracts; #1657/
+  // #1658 have not landed), and there is no prose/wording matching
+  // anywhere.
   const bookkeeping = buildDispositionEvidence({
     ...base,
     completenessChecks: [
@@ -384,24 +384,36 @@ test("pin: generic trace/call-ID bookkeeping failure alone => advisory, never an
     ],
     requirementTraceIncomplete: true,
     toolFloorUnmet: true,
-    partialCoverageStopReason: "context-budget",
   });
-  assert.deepEqual(bookkeeping.evidence.map((entry) => entry.materiality), Array(bookkeeping.evidence.length).fill("advisory"));
-  assert.deepEqual(
-    new Set(bookkeeping.evidence.map((entry) => entry.code)),
-    new Set(["citation_allocation_failed", "generic_scrutiny_row_missing", "proof_shape_mismatch", "investigation_floor_unmet", "investigation_partial"]),
-  );
-  // With nothing else standing, the disposition still certifies APPROVE.
+  const byCode = new Map(bookkeeping.evidence.map((entry) => [entry.code, entry.materiality]));
+  assert.equal(byCode.get("investigation_floor_unmet"), "advisory");
+  // Every unresolved row — the allocation refusals included — is a
+  // conservative material unknown; no wording-based matcher downgraded it.
+  assert.equal(byCode.get("mandatory_requirement_unresolved"), "material");
+  assert.equal(bookkeeping.evidence.filter((entry) => entry.code === "mandatory_requirement_unresolved").length, 4);
   const disposition = computeFinalDisposition(input({ evidence: bookkeeping.evidence }));
-  assert.equal(disposition.kind, "approve");
-  assert.equal(disposition.nativeEvent, "APPROVE");
-  // A behavioral unresolved row (not bookkeeping) stays material.
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  // With ONLY the trusted-code advisory entries, APPROVE stands.
+  const advisoryOnly = computeFinalDisposition(input({
+    evidence: [
+      dispositionEvidence("citation_allocation_failed", "deterministic", "advisory", "row"),
+      dispositionEvidence("investigation_floor_unmet", "deterministic", "advisory", "floor"),
+    ],
+  }));
+  assert.equal(advisoryOnly.kind, "approve");
+  assert.equal(advisoryOnly.nativeEvent, "APPROVE");
+  // A behavioral unresolved row (no bookkeeping reason) stays material.
   const behavioral = buildDispositionEvidence({
     ...base,
     completenessChecks: [{ check: "verify secrets are not logged or exposed in diffs", status: "unresolved", reason: "no-disposition" }],
   });
   assert.deepEqual(behavioral.evidence.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
   assert.deepEqual(behavioral.evidence.map((entry) => entry.materiality), ["material"]);
+  // The #810 loop-stopped-early record is a conservative material unknown.
+  const partial = buildDispositionEvidence({ ...base, completenessChecks: [], partialCoverageStopReason: "context-budget" });
+  assert.deepEqual(partial.evidence.map((entry) => entry.code), ["investigation_unavailable"]);
+  assert.deepEqual(partial.evidence.map((entry) => entry.materiality), ["material"]);
 });
 
 test("the engine evidence builder keeps capability failures material and confirmed negatives proven", () => {
@@ -421,9 +433,6 @@ test("the engine evidence builder keeps capability failures material and confirm
   const capability = buildDispositionEvidence({ ...base, toolCapabilityFailure: "all tool requests failed" });
   assert.deepEqual(capability.evidence.map((entry) => entry.code), ["investigation_unavailable"]);
   assert.deepEqual(capability.evidence.map((entry) => entry.materiality), ["material"]);
-  // A recorded no-evidence degradation is material in either lane.
-  const noEvidence = buildDispositionEvidence({ ...base, noEvidenceReason: "native loop degraded: provider exhausted" });
-  assert.deepEqual(noEvidence.evidence.map((entry) => entry.code), ["investigation_unavailable"]);
   // A confirmed-negative obligation stays proven.
   const unmet = buildDispositionEvidence({
     ...base,
@@ -730,6 +739,109 @@ test("same object: a fork-scope withholding publishes the advisory-approve line 
   assert.ok(body.includes("Approval withheld by scope policy"));
   const handoff = handoffPayload(body);
   assert.equal(handoff.review_result, "clean");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 2: the raw model verdict is not proof of a blocker.
+// ---------------------------------------------------------------------------
+
+test("pin: verdict=request_changes with no grounded/proven blocker => INCOMPLETE, never REQUEST_CHANGES, never APPROVE", () => {
+  const disposition = computeFinalDisposition(input({ verdict: "request_changes" }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.notEqual(disposition.kind, "request_changes");
+  assert.notEqual(disposition.kind, "approve");
+  assert.equal(disposition.approvalCertified, false);
+  // The inconsistency is represented as an unverified blocking claim.
+  assert.deepEqual(disposition.materialUnknowns.map((entry) => entry.code), ["unverified_blocking_claim"]);
+  // A model request_changes WITH a grounded finding is still a block.
+  const grounded = computeFinalDisposition(input({ verdict: "request_changes", blockingFindingOpen: true }));
+  assert.equal(grounded.kind, "request_changes");
+  // ...and with an objectively proven unmet mandatory requirement.
+  const proven = computeFinalDisposition(input({ verdict: "request_changes", provenUnmetRequirement: true }));
+  assert.equal(proven.kind, "request_changes");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 2: the serialized disposition record fails closed.
+// ---------------------------------------------------------------------------
+
+test("parseFinalDisposition refuses cross-polarity evidence and a forged certification flag", () => {
+  const certified: FinalDisposition = computeFinalDisposition(input({}));
+  const materialOnly: FinalDisposition = computeFinalDisposition(input({
+    evidence: [dispositionEvidence("unread_affected_path", "deterministic", "material", "src/auth")],
+  }));
+  assert.equal(parseFinalDisposition(JSON.parse(JSON.stringify(materialOnly)))?.kind, "incomplete");
+
+  // An `approve` carrying a MATERIAL code as advisory is refused.
+  const forgedAdvisory = JSON.parse(JSON.stringify(certified));
+  forgedAdvisory.advisoryDiagnostics = [{ code: "unread_affected_path", ruledBy: "deterministic", materiality: "advisory", subject: "src/auth" }];
+  assert.equal(parseFinalDisposition(forgedAdvisory), null);
+
+  // A material code under advisoryDiagnostics with material materiality is
+  // refused (cross-pairing).
+  const crossPaired = JSON.parse(JSON.stringify(certified));
+  crossPaired.advisoryDiagnostics = [{ code: "unread_affected_path", ruledBy: "deterministic", materiality: "material", subject: "src/auth" }];
+  assert.equal(parseFinalDisposition(crossPaired), null);
+
+  // A certification flag that disagrees with the kind is refused.
+  const forgedFlag = JSON.parse(JSON.stringify(certified));
+  forgedFlag.approvalCertified = false;
+  assert.equal(parseFinalDisposition(forgedFlag), null);
+  const forgedFlag2 = JSON.parse(JSON.stringify(materialOnly));
+  forgedFlag2.approvalCertified = true;
+  assert.equal(parseFinalDisposition(forgedFlag2), null);
+
+  // An incomplete abstention carrying materialUnknowns with advisory
+  // polarity is refused.
+  const forgedIncomplete = JSON.parse(JSON.stringify(materialOnly));
+  forgedIncomplete.materialUnknowns = [{ ...forgedIncomplete.materialUnknowns[0], materiality: "advisory" }];
+  assert.equal(parseFinalDisposition(forgedIncomplete), null);
+});
+
+test("unreadableFinalDisposition: the canonical unavailable abstention for a refused record", () => {
+  const disposition = unreadableFinalDisposition();
+  assert.equal(disposition.kind, "unavailable");
+  assert.equal(disposition.reason, "disposition_unreadable");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.equal(disposition.approvalCertified, false);
+  // It round-trips through the parser (the artifact-era contract holds).
+  assert.equal(parseFinalDisposition(JSON.parse(JSON.stringify(disposition)))?.kind, "unavailable");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 2: fail-on-request-changes gates on the FINAL disposition.
+// ---------------------------------------------------------------------------
+
+test("pin: raw verdict request_changes + final disposition INCOMPLETE => the workflow does not fail", () => {
+  const stage = { FAIL_ON_REQUEST_CHANGES: "true", FAIL_ON_DEGRADED_REVIEW: "false" };
+  const disposition = computeFinalDisposition(input({ verdict: "request_changes" }));
+  assert.equal(disposition.kind, "incomplete");
+  // The disposition — not the raw verdict — is the gate's authority on a
+  // #1656 run: an abstention never becomes a blocking workflow failure.
+  assert.equal(
+    failOnRequestChanges(stage as never, "request_changes", false, false, "[]", "", disposition.kind),
+    0,
+  );
+  // A request_changes DISPOSITION still fails the workflow.
+  const blocked = computeFinalDisposition(input({ verdict: "request_changes", blockingFindingOpen: true }));
+  assert.equal(
+    failOnRequestChanges(stage as never, "request_changes", false, false, "[]", "", blocked.kind),
+    1,
+  );
+  // No disposition (the carried/precheck skip path) keeps the legacy
+  // verdict-based behavior.
+  assert.equal(failOnRequestChanges(stage as never, "request_changes", false, false, "", ""), 1);
+  // UNAVAILABLE with the operator's degraded-failure opt-in still fails.
+  assert.equal(
+    failOnRequestChanges(stage as never, "approve", true, true, "", "", "unavailable"),
+    1,
+  );
+  assert.equal(
+    failOnRequestChanges(stage as never, "approve", true, false, "", "", "unavailable"),
+    0,
+  );
 });
 
 // ---------------------------------------------------------------------------

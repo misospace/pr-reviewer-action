@@ -17,27 +17,24 @@
  *   claim, a tool CAPABILITY failure (planning/execution error, every call
  *   failed, a recorded no-evidence degradation), known-failing required
  *   exact-head CI, and materially-required pending CI.
- * - ADVISORY: the citation-gate reason family (call-ID allocation,
- *   uncited/unrelated/parse failures — a compatibility diagnostic while
- *   #1657 is in flight), a generic-scrutiny row, the requirement-trace
- *   proof-shape/coverage rows (a compatibility diagnostic while #1658 is
- *   in flight), the configured min-successful CALL-COUNT floor, and the
- *   #810 loop-stopped-early record — none of them defines investigation
- *   adequacy by itself.
+ * - ADVISORY: ONLY cases identified from trusted deterministic reason
+ *   codes — the citation-gate reason family (`citation-already-used`,
+ *   `uncited-satisfaction`, `unrelated-executed-call`,
+ *   `malformed-executed-trace`; #1657 re-owns the internals) and the
+ *   operator-configured min-successful CALL-COUNT floor. No prose/wording
+ *   matching exists anywhere in this module: lexical materiality inference
+ *   is forbidden (#1656 audit round 2).
+ * - TRANSITIONAL CONSERVATIVE (material): the requirement trace's
+ *   remaining incompleteness, unresolved required-check rows not
+ *   objectively identified as bookkeeping, and the #810 loop-stopped-early
+ *   record stay MATERIAL unknowns inside this disposition while #1657/
+ *   #1658 have not landed — #1656 must not raise native APPROVE merely
+ *   because the old proof machinery could not settle them (#1656 audit
+ *   round 2).
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import { isForcingObligation, type ReviewObligation } from "../enforcement/review-obligations.js";
-import { dispositionEvidence, isGenericScrutinyCheckText, type DispositionEvidence } from "./final.js";
-
-/** The #1627/#1634 citation-gate rejection reasons — the call-ID proof
- * machinery's own shapes. All of them are compatibility diagnostics for the
- * disposition while #1657 re-owns the evidence internals. */
-const CITATION_GATE_REASONS: ReadonlySet<string> = new Set([
-  "citation-already-used",
-  "uncited-satisfaction",
-  "unrelated-executed-call",
-  "malformed-executed-trace",
-]);
+import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
   /** The completeness fold's rows: `{check, status, reason}`. */
@@ -52,10 +49,6 @@ export interface DispositionEvidenceParts {
   /** True when the configured min-successful CALL-COUNT floor was unmet —
    * advisory only (#1656 audit delta). */
   toolFloorUnmet: boolean;
-  /** The harness's recorded no-evidence degradation reason
-   * (`native_loop_degraded`), or null — an evidence-availability fact in
-   * either lane (#1656 audit delta: never a route/tier rule). */
-  noEvidenceReason: string | null;
   /** The #810 partial-coverage stop reason, or null — advisory disclosure
    * only (#1656 audit delta). */
   partialCoverageStopReason: string | null;
@@ -95,14 +88,16 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
       continue;
     }
     if (row.status !== "unresolved" || check === "") continue;
-    if (typeof row.reason === "string" && CITATION_GATE_REASONS.has(row.reason)) {
-      // #1656 audit delta: a call-ID bookkeeping failure alone is advisory.
-      evidence.push(dispositionEvidence("citation_allocation_failed", "deterministic", "advisory", check));
-    } else if (isGenericScrutinyCheckText(check)) {
-      evidence.push(dispositionEvidence("generic_scrutiny_row_missing", "deterministic", "advisory", check));
-    } else {
-      evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
-    }
+    // #1656 audit round 2: an unresolved required-check row whose
+    // satisfaction could not be backed (including the call-ID allocation
+    // refusals) stays a TRANSITIONAL CONSERVATIVE material unknown — the
+    // #1634 safety contract pins that unbacked satisfactions withhold the
+    // approval, and #1656 must not raise native APPROVE merely because the
+    // old proof machinery could not settle the row. The trusted reason
+    // codes stay visible in the completeness artifact; #1657 may feed
+    // proven bookkeeping-only advisory entries through the seam once it
+    // owns the settlement.
+    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
   }
 
   // The obligation fold's rows: forcing rows are confirmed negatives; the
@@ -144,23 +139,23 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   if (parts.toolFloorUnmet) {
     evidence.push(dispositionEvidence("investigation_floor_unmet", "deterministic", "advisory", "min-successful tool requests unmet"));
   }
-  // A recorded no-evidence degradation is an evidence-availability fact in
-  // EITHER lane — never a route/tier rule (#1656 audit delta).
-  if (parts.noEvidenceReason !== null) {
-    evidence.push(dispositionEvidence("investigation_unavailable", "deterministic", "material", parts.noEvidenceReason));
-  }
-  // The loop stopping early is disclosure, not a blanket veto (#1656 audit
-  // delta); whether the affected behavior lacked evidence is a seam
-  // question (#1657).
+  // The loop stopping early is a TRANSITIONAL CONSERVATIVE material
+  // unknown (#1656 audit round 2): while #1657 has not landed, the run
+  // cannot prove the affected behavior had adequate available evidence, so
+  // the approval is withheld inside this disposition — never re-derived by
+  // a downstream guardrail.
   if (parts.partialCoverageStopReason !== null) {
-    evidence.push(dispositionEvidence("investigation_partial", "deterministic", "advisory", parts.partialCoverageStopReason));
+    evidence.push(dispositionEvidence("investigation_unavailable", "deterministic", "material", parts.partialCoverageStopReason));
   }
-  // The requirement trace's remaining incompleteness is proof-shape/
-  // coverage-repair territory — a compatibility diagnostic while #1658 is
-  // in flight (#1656 audit delta); its confirmed-unmet rows already
-  // escalated as synthesized blockers before this builder runs.
+  // The requirement trace's remaining incompleteness is a TRANSITIONAL
+  // CONSERVATIVE material unknown (#1656 audit round 2): #1658 has not
+  // landed, so the disposition must not certify an approve while the trace
+  // could not settle its rows — the refuted rows already escalated as
+  // synthesized blockers before this builder runs. #1658 will replace this
+  // with provenance-based settlement (the seam's `proof_shape_mismatch`
+  // advisory code stands ready for trusted provenance).
   if (parts.requirementTraceIncomplete) {
-    evidence.push(dispositionEvidence("proof_shape_mismatch", "deterministic", "advisory", "requirement-trace"));
+    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace"));
   }
 
   // The exact-head CI floor (#1656 audit delta): a KNOWN failing conclusion

@@ -3148,9 +3148,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       : null,
     toolFloorUnmet: enforcementInputs.toolFailureEnabled
       && toolMinSuccessfulFloorUnmet(enforcementInputs.toolHarness ?? null, enforcementInputs.toolMinSuccessful),
-    // A recorded no-evidence degradation is an evidence-availability fact
-    // in either lane — never a route/tier rule (#1656 audit delta).
-    noEvidenceReason: noEvidenceReason,
     // The loop stopping early is disclosure, not a blanket veto (#1656
     // audit delta).
     partialCoverageStopReason: partialCoverage !== undefined ? partialCoverage.stop_reason : null,
@@ -3192,6 +3189,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     evidence: dispositionBuild.evidence,
   });
   ws.write("final-disposition.json", Buffer.from(`${pyJsonDumps(finalDisposition)}\n`, "utf8"));
+  if (process.env.PR1656_DEBUG === "1") process.stderr.write(`[dbg] disposition=${JSON.stringify(finalDisposition)} evidence=${JSON.stringify(dispositionBuild.evidence)}\n`);
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
