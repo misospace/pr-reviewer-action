@@ -381,24 +381,29 @@ function unverifiedFinding(overrides: Record<string, unknown> = {}): Record<stri
   };
 }
 
-test("#1265: an unverified finding capped from blocker or major forces request_changes under strict", () => {
+test("#1656: an unverified claim demoted from blocker or major no longer forces request_changes — it is disposition evidence", () => {
+  // #1656 (was #1016's forced veto): an unverified blocker/major claim is
+  // unknown evidence, not a refutation AND not a defect. The strict mapping
+  // leaves the verdict approve; the authoritative disposition carries the
+  // `unverified_blocking_claim` MATERIAL unknown (see
+  // final-disposition.test.ts), so an approve can never silently certify
+  // the claim while no code blocker is fabricated either.
   for (const cappedFrom of ["blocker", "major"]) {
     const a = artifact("approve", [unverifiedFinding({ capped_from: cappedFrom })]);
     const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-    assert.equal(a.verdict, "request_changes", cappedFrom);
-    assert.equal(outcome.verdict, "request_changes", cappedFrom);
-    assert.equal(outcome.reviewResult, "issues", cappedFrom);
-    assert.equal(outcome.overridden, true, cappedFrom);
-    // The model said approve; the veto belongs to the enforcement layer.
-    assert.equal(a.verdict_source, "enforcement", cappedFrom);
+    assert.equal(a.verdict, "approve", cappedFrom);
+    assert.equal(outcome.verdict, "approve", cappedFrom);
+    assert.equal(outcome.reviewResult, "findings", cappedFrom);
+    assert.equal(outcome.overridden, false, cappedFrom);
+    assert.equal(a.verdict_source, "model", cappedFrom);
     assert.ok(
-      a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
-      `expected #1016 attribution note for capped_from=${cappedFrom}: ${a.review_markdown}`,
+      !a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
+      `expected no #1016 attribution note for capped_from=${cappedFrom}: ${a.review_markdown}`,
     );
   }
 
   // A live unverified blocker/major finding with no cap recorded (the
-  // pre-#1265 model-authored shape) still forces: the finding is still
+  // pre-#1265 model-authored shape) still blocks: the finding is still
   // severity blocker, so the blocker-count branch owns the verdict.
   const live = artifact("approve", [unverifiedFinding({ severity: "blocker" })]);
   delete (live.findings[0] as unknown as Record<string, unknown>).capped_from;

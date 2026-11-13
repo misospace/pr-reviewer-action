@@ -17,7 +17,7 @@ import {
   harnessGatheredNoEvidence,
   isToolLoopDeadlineError,
 } from "../src/tools/execution-counts.js";
-import { applyToolHarnessFailureEnforcement, type ToolHarnessArtifact } from "../src/enforcement/enforce.js";
+import { applyToolHarnessFailureEnforcement, toolCapabilityFailure, type ToolHarnessArtifact } from "../src/enforcement/enforce.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 
 function artifact(): ReviewArtifact {
@@ -146,10 +146,11 @@ test("#1606: the tool-harness failure overlay fires on the artifact a real faili
   assert.equal((result.tool_results as unknown[]).length, 3);
   assert.ok((result.tool_results as unknown[]).every((entry) => (entry as { status?: string }).status === "error"));
 
-  // The overlay reads THAT artifact and reports the all-failed run.
+  // The overlay reads THAT artifact and discloses the all-failed run
+  // (#1656: a diagnostic with reason-coded evidence, no verdict overlay).
   const outcome = applyToolHarnessFailureEnforcement(artifact(), result as unknown as ToolHarnessArtifact);
   assert.equal(outcome.applied, true);
-  assert.ok(outcome.reason.startsWith("Tool harness failure detected (all tool requests failed)."));
+  assert.equal(toolCapabilityFailure(result as unknown as ToolHarnessArtifact), "all tool requests failed");
 
   // The same artifact reads as "gathered no evidence" for the evidence
   // consumer, and the two counters stay distinct for the summary row.

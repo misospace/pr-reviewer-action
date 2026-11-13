@@ -529,6 +529,9 @@ async function runActionPipeline(
     reviewResult: review.outputs.reviewResult,
     incompleteReason: review.outputs.incompleteReason,
     partialCoverage: review.partialCoverage !== undefined,
+    // #1656: the authoritative disposition — when present it owns the
+    // semantic conclusion and only the publication proof is decided here.
+    ...(review.finalDisposition !== undefined ? { disposition: review.finalDisposition } : {}),
     headSha: reviewedHeadSha,
     ...(publishStatus !== undefined
       ? { publication: { status: publishStatus, ...(publishNative !== undefined ? { native: publishNative } : {}) } }
@@ -552,6 +555,11 @@ async function runActionPipeline(
       reviewResult: review.outputs.reviewResult,
       incompleteReason: review.outputs.incompleteReason,
       degraded: review.outputs.degradedGateBypass === true,
+      // #1656: the authoritative disposition's kind and reason ride the
+      // bundle so the machine surface names WHAT the run concluded in the
+      // shared vocabulary.
+      ...(review.finalDisposition !== undefined ? { dispositionKind: review.finalDisposition.kind } : {}),
+      ...(review.finalDisposition !== undefined ? { dispositionReason: review.finalDisposition.reason } : {}),
     },
     ...(publishStatus !== undefined ? { publication: { status: publishStatus } } : {}),
     findings: review.outputs.findings,
@@ -581,6 +589,9 @@ async function runActionPipeline(
     (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
     review.outputs.findings,
     "",
+    // #1656 audit round 2: the authoritative disposition gates the
+    // workflow, never the raw verdict.
+    review.finalDisposition?.kind,
   );
   return publishFailed ? Math.max(gate, 1) : gate;
 }
@@ -605,13 +616,32 @@ export function failOnRequestChanges(
   failOnDegraded = false,
   findingsJson = "",
   carriedPointer = "",
+  /** #1656 audit round 2: the FINAL disposition kind when the run produced
+   * one. It is the gate's authority on #1656 runs: only a
+   * `request_changes` DISPOSITION fails the workflow — an INCOMPLETE or
+   * UNAVAILABLE review never blocks merely because the raw model verdict
+   * said request_changes. Absent (the carried/precheck skip path, where no
+   * disposition exists) keeps the legacy verdict-based behavior. */
+  dispositionKind?: string,
 ): number {
   if ((stage.FAIL_ON_REQUEST_CHANGES ?? "false").toLowerCase() !== "true") return 0;
-  if (verdict !== "request_changes") {
+  if (dispositionKind !== undefined) {
+    if (dispositionKind !== "request_changes") {
+      if (dispositionKind === "unavailable" && degradedGateBypassEligible && failOnDegraded) {
+        // The operator's explicit degraded-review failure opt-in (#978)
+        // still applies to an UNAVAILABLE review.
+        process.stdout.write("::warning::Final disposition is unavailable (degraded review), and fail-on-degraded-review=true is set.\n");
+        return 1;
+      }
+      process.stdout.write(`Final disposition is '${dispositionKind}'; not blocking (fail-on-request-changes=true).\n`);
+      return 0;
+    }
+    // kind request_changes: fall through to the shared blocking path with
+    // the final verdict.
+  } else if (verdict !== "request_changes") {
     process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
     return 0;
-  }
-  if (degradedGateBypassEligible && !failOnDegraded) {
+  } else if (degradedGateBypassEligible && !failOnDegraded) {
     process.stdout.write("::warning::Final verdict is request_changes, but this review is eligible for the degraded gate bypass (fallback with no evidence, or model-failure notice); not blocking (fail-on-request-changes=true, fail-on-degraded-review=false).\n");
     return 0;
   }

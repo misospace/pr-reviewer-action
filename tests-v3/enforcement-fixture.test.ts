@@ -88,8 +88,11 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
     assert.equal(partialArtifact.verdict, "approve");
     assert.equal(partialArtifact.required_checks, "incomplete");
 
-    // A tool-harness failure forces request_changes after the model verdict;
-    // the strict mapping never relaxes it and adds no note of its own.
+    // A tool-harness CAPABILITY failure is disclosed and never forces the
+    // verdict (#1656): the review's verdict stands and the authoritative
+    // disposition answers the failure with `investigation_unavailable`
+    // MATERIAL evidence (an abstention), so no code blocker is fabricated
+    // and no approval is certified either.
     const forced = runEnforcementFixture(writeJson(dir, "forced.json", {
       ...strictBase,
       artifact: { verdict: "approve", review_markdown: "review", findings: [] },
@@ -98,12 +101,10 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
     }));
     assert.equal(forced.ok, true);
     const forcedArtifact = JSON.parse(forced.values!.artifact!);
-    assert.equal(forcedArtifact.verdict, "request_changes");
-    // Provenance honesty (#811 review): the model said approve; the forced
-    // verdict is the enforcement layer's, never the model's.
-    assert.equal(forcedArtifact.verdict_source, "enforcement");
-    assert.ok(forcedArtifact.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
+    assert.equal(forcedArtifact.verdict, "approve");
+    assert.equal(forcedArtifact.verdict_source, "model");
     assert.ok(forcedArtifact.review_markdown.includes("## Tool Harness Failure"));
+    assert.ok(!forcedArtifact.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
   });
 });
 
@@ -217,15 +218,15 @@ test("enforcement fixture keeps relax-then-force provenance and body honest end 
     }));
     assert.equal(relaxThenForce.ok, true);
     const artifact = JSON.parse(relaxThenForce.values!.artifact!);
-    // Policy relaxes to approve (verdict_source=findings); the tool-failure
-    // overlay forces request_changes back and must own the provenance.
-    assert.equal(artifact.verdict, "request_changes");
-    assert.equal(artifact.verdict_source, "enforcement");
-    assert.match(
-      artifact.review_markdown,
-      /_Verdict relaxation superseded by enforcement: originally relaxed from structured findings \(verdict_policy=findings_severity_gated\)/,
-    );
-    assert.doesNotMatch(artifact.review_markdown, /_Verdict relaxed from/, "the stale relaxed-verdict claim must not stand unqualified");
+    // Policy relaxes to approve (verdict_source=findings). #1656: the
+    // tool-failure overlay no longer forces the verdict back — the
+    // relaxation stands and the failure rides the disposition's
+    // `investigation_unavailable` material unknown, so the provenance and
+    // the body stay honest without a fabricated block.
+    assert.equal(artifact.verdict, "approve");
+    assert.equal(artifact.verdict_source, "findings");
+    assert.doesNotMatch(artifact.review_markdown, /_Verdict relaxation superseded by enforcement/);
+    assert.ok(artifact.review_markdown.includes("## Tool Harness Failure"));
   });
 });
 

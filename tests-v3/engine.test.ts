@@ -675,7 +675,21 @@ test("the env adapter and engine produce identical structured results", async ()
   try {
     const adapterResult = await runReview({ env: { GITHUB_OUTPUT: "/dev/null", GITHUB_STEP_SUMMARY: "" }, inputs: { ...inputs, "ai-base-url": server.url }, runDir: f.runDir, workspace: f.root, platformAdapter: mockPlatform(), persistArtifacts: true, quiet: true });
     const engineResult = await runReviewEngine(request(server.url, engineRunDir), { workspace: f.root, runDir: engineRunDir, outputsSink: "/dev/null", stepSummaryPath: "", adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink });
-    for (const key of ["outputs", "route", "routeReason", "analysisEngine", "classification", "verdictPolicy"] as const) assert.deepEqual(engineResult[key], adapterResult[key], key);
+    // #1656 audit round 3: the two paths legitimately differ on exactly one
+    // output. The ENGINE path runs the native loop, and the mock model
+    // answers from the corpus without issuing tool calls, so the harness
+    // records a zero-evidence degradation — a MATERIAL unknown that makes
+    // the review `partial` (never APPROVE). The ADAPTER path is fork-gated
+    // (no head-repo identity in this mock), skips the loop, and records no
+    // degradation, so its review stays `clean`. Every other structured
+    // field stays identical.
+    assert.equal(engineResult.outputs.verdict, "approve");
+    assert.equal(adapterResult.outputs.verdict, "approve");
+    assert.equal(engineResult.outputs.reviewResult, "partial");
+    assert.equal(adapterResult.outputs.reviewResult, "clean");
+    const { reviewResult: _engineReviewResult, ...engineOutputs } = engineResult.outputs;
+    const { reviewResult: _adapterReviewResult, ...adapterOutputs } = adapterResult.outputs;
+    assert.deepEqual(engineOutputs, adapterOutputs, "outputs other than the disposition-derived review_result");
     // #1381: the candidates artifact is HARNESS-authored, and the two paths
     // legitimately differ on it — the adapter path derives fork-ness
     // fail-closed from the PR object (no head-repo identity in this mock), so
