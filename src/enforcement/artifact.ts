@@ -34,6 +34,10 @@ export interface ArtifactFinding {
   /** Set only on findings re-emitted from unresolved review threads (#766):
    * the publish step skips inlining these — the thread already exists. */
   thread_id?: string;
+  /** #1645: how the re-emitted thread reconciled against the authoritative
+   * live thread listing at settlement time. Only `live_unresolved` threads
+   * are ever re-emitted. */
+  thread_reconciliation?: "live_unresolved" | "resolved" | "absent" | "unknown";
   /** #775: original severity when the non-blocking category cap reduced it. */
   capped_from?: string;
   /** #976: this finding was capped because it relied only on a CI conclusion. */
@@ -127,6 +131,20 @@ export interface ReviewArtifact {
   dependency_coverage_status?: string;
   /** #766: replaced with the settled (enforced) records by thread enforcement. */
   thread_dispositions?: Array<ArtifactThreadDisposition | Record<string, unknown>>;
+  /** #1645: bounded provenance of the settlement-time reconciliation of the
+   * enforcement view against the live forge thread listing. Persisted
+   * whenever reconciliation ran, independent of whether enforcement changed
+   * the artifact, so a future reader can tell a current-head finding from a
+   * carried thread finding and why the latter was allowed to block. */
+  thread_reconciliation?: {
+    /** "complete" when the live listing was read; "incomplete" otherwise. */
+    state: "complete" | "incomplete";
+    head_sha: string;
+    live_unresolved: number;
+    resolved: number;
+    absent: number;
+    unknown: number;
+  };
   /** #774: replaced with the settled records by human-review enforcement. */
   human_review_dispositions?: Array<ArtifactHumanReviewDisposition | Record<string, unknown>>;
   /** #624: the reviewer's raw requirement_coverage claims (untrusted). */

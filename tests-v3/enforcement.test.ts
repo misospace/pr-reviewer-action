@@ -789,6 +789,118 @@ test("#812: an undeterminable re-emission severity defaults to minor and never b
 });
 
 // ---------------------------------------------------------------------------
+// #1645: stale carried thread state must not force REQUEST_CHANGES on the
+// current head. A listed thread may re-enter the finding set only when the
+// authoritative live listing proves it live and unresolved; resolved/absent
+// threads drop, unknown (unreadable listing) fails open with disclosure, and
+// bounded reconciliation provenance persists on the artifact.
+// ---------------------------------------------------------------------------
+
+const staleThreads = [
+  { thread_id: "PRRT_stale1", path: "src/a.ts", line: 3, severity: "major", message: "old defect one", own_finding: true, replies: 0 },
+  { thread_id: "PRRT_stale2", path: "src/b.ts", line: 7, severity: "major", message: "old defect two", own_finding: true, replies: 0 },
+];
+
+test("#1645: stale carried blockers absent from the live listing cannot block an approve", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [
+      { severity: "minor", category: "tests", file: "src/a.ts", line: 9, message: "nit" },
+      { severity: "info", category: "docs", file: "src/b.ts", line: 1, message: "note" },
+    ],
+    thread_dispositions: [],
+  });
+  const settlement = applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "a".repeat(40),
+  });
+  assert.equal(a.findings.length, 2, "historical majors must not re-enter the open finding set");
+  assert.equal(settlement.applied, false, "dropping dead threads is not an enforcement action");
+  const strict = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve", "strict mapping must not force REQUEST_CHANGES from historical rows");
+  assert.equal(strict.reviewResult, "findings");
+  assert.deepEqual(a.thread_reconciliation, {
+    state: "complete",
+    head_sha: "a".repeat(40),
+    live_unresolved: 0,
+    resolved: 0,
+    absent: 2,
+    unknown: 0,
+  });
+  assert.doesNotMatch(String(a.review_markdown), /Unresolved Review Threads/);
+});
+
+test("#1645: live carried blocker still blocks; sibling absent thread drops", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "b".repeat(40),
+  });
+  const reemitted = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(reemitted.length, 1, "a thread proven live-unresolved re-emits");
+  assert.equal(reemitted[0]!.severity, "major");
+  assert.equal(reemitted[0]!.thread_reconciliation, "live_unresolved");
+  assert.ok(!a.findings.some((f) => f.thread_id === "PRRT_stale2"), "the absent sibling never re-emits");
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes", "the live carried blocker still blocks");
+});
+
+test("#1645: historical blocker whose live thread resolved upstream does not block", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "c".repeat(40),
+  });
+  assert.equal(a.findings.length, 0);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.thread_reconciliation?.resolved, 1);
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "resolved");
+});
+
+test("#1645: unreadable live listing fails open — no blocker invented, incompleteness disclosed", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [{ severity: "blocker", category: "bug", file: "src/a.ts", line: 1, message: "fresh current-head defect" }],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: false,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "d".repeat(40),
+  });
+  assert.equal(a.findings.length, 1, "only the current-head finding remains");
+  assert.equal(a.findings[0]!.thread_id, undefined);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes", "a fresh current-head blocker still blocks");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+  assert.equal(a.thread_reconciliation?.unknown, 2);
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the incompleteness is disclosed");
+  assert.match(String(a.review_markdown), /PRRT_stale1/, "carried threads stay visible as bookkeeping");
+});
+
+test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict");
+  assert.equal(a.findings.length, 1, "legacy callers re-emit as before");
+  assert.equal(a.thread_reconciliation, undefined, "no provenance is fabricated for a read that never ran");
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+});
+
+// ---------------------------------------------------------------------------
 // #812: the publish path records the folded external-CI conclusion in the
 // managed marker so the next diff-unchanged skip can compare it.
 // ---------------------------------------------------------------------------

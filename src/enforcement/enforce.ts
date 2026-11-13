@@ -10,7 +10,7 @@
  */
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { applyReviewObligationEnforcement, isForcingObligation, type ReviewObligation } from "./review-obligations.js";
-import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
+import { applyReviewThreadEnforcement, type EnforcementThread, type ThreadReconciliationInput } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
 import { harnessExecutionCounts, harnessFailuresAllDeadlineClamps } from "../tools/execution-counts.js";
 
@@ -256,6 +256,10 @@ export interface EnforcementInputs {
   /** #1381: the folded review-owned obligation rows; null when none were
    * tracked (no must_check items and no injected trusted-base guidance). */
   reviewObligations?: readonly ReviewObligation[] | null;
+  /** #1645: the authoritative live thread listing re-read at settlement
+   * time. Absent when the caller could not serve one (unit callers,
+   * replay) — the enforcement view is then trusted as today. */
+  threadReconciliation?: ThreadReconciliationInput | null;
 }
 
 /**
@@ -357,7 +361,7 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
   }
 
   const verdictBeforeThreads = artifact.verdict;
-  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy);
+  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy, inputs.threadReconciliation);
   if (threads.applied) {
     applied += 1;
     // Settlement is bookkeeping, except under findings_severity_gated where a

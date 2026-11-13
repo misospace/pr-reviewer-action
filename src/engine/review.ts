@@ -108,6 +108,8 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
+import type { ThreadReconciliationInput } from "../enforcement/threads.js";
+import { prepareThreads } from "../context/review-threads.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, dispositionReceiptFromArtifact, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
@@ -939,6 +941,27 @@ export function claimsPrepassGate(
 ): Promise<void> {
   if (!dependencyUpdate) return Promise.resolve();
   return evidencePhase.then(() => undefined, () => undefined);
+}
+
+/** #1645: re-read the authoritative live thread listing at settlement time.
+ * The enforcement view was built once at context time; this fresh read is
+ * what a carried thread must be proven against before it can block. A failed
+ * or unsupported read fails open — every listed thread becomes `unknown`,
+ * disclosed, never promoted into a blocker. */
+async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: string): Promise<ThreadReconciliationInput> {
+  const empty: ThreadReconciliationInput = { available: false, unresolvedIds: new Set(), resolvedIds: new Set(), headSha };
+  try {
+    const fetched = await adapter.listReviewThreads();
+    if (!fetched.ok) return empty;
+    const unresolvedIds = new Set<string>();
+    const resolvedIds = new Set<string>();
+    for (const thread of prepareThreads(fetched.data)) {
+      (thread.resolved ? resolvedIds : unresolvedIds).add(thread.threadId);
+    }
+    return { available: true, unresolvedIds, resolvedIds, headSha };
+  } catch {
+    return empty;
+  }
 }
 
 /** review.sh `run_review`: the pipeline body. Cancellation boundaries are the
@@ -2745,6 +2768,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
+  // #1645: before any listed thread can settle into the finding set, re-read
+  // the authoritative live listing so a carried thread must be proven live
+  // and unresolved — a stale read cannot fabricate a blocker, and an
+  // unreadable listing fails disclosed/unknown instead of fail-blocked.
+  if (Array.isArray(enforcementInputs.threads) && enforcementInputs.threads.length > 0) {
+    enforcementInputs.threadReconciliation = await buildThreadReconciliation(
+      adapter,
+      context.headSha || String(pr.headRefOid ?? ""),
+    );
+  }
   // #1381: the folded review-owned obligation rows ride the enforcement
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.

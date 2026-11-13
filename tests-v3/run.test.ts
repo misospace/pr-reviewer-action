@@ -498,6 +498,99 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
   assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
 });
 
+// #1645: the context-stage thread listing and the settlement-time
+// authoritative re-read are separately controllable — a carried thread must
+// be proven live-unresolved against the SECOND read before it can block.
+async function runStaleThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { secondListing?: unknown[] } = {},
+): Promise<Record<string, unknown>> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const majorThread = {
+      thread_id: "PRRT_stale1",
+      path: "README.md",
+      line: 1,
+      original_line: 1,
+      resolved: false,
+      outdated: false,
+      comments: [{
+        id: 1,
+        user: { login: "bot" },
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
+      }],
+    };
+    const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    let reads = 0;
+    adapter.listReviewThreads = () => {
+      reads += 1;
+      return Promise.resolve({ ok: true, data: reads === 1 ? [majorThread] : (options.secondListing ?? [majorThread]) });
+    };
+    await runReview({
+      env: { VERDICT_POLICY: "strict" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": "strict",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: adapter,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#1645: a carried thread absent from the settlement-time listing cannot force REQUEST_CHANGES", async () => {
+  const artifact = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [] });
+  assert.equal(artifact.verdict, "approve", "the stale major thread must not block the current head");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete");
+  assert.equal(reconciliation.absent, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string }>;
+  assert.ok(!findings.some((f) => f.thread_id === "PRRT_stale1"));
+});
+
+test("#1645: a carried thread proven live-unresolved at settlement still blocks", async () => {
+  const artifact = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { });
+  assert.equal(artifact.verdict, "request_changes", "the live carried major still blocks under strict policy");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.live_unresolved, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string; thread_reconciliation?: string }>;
+  const carried = findings.find((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(carried?.thread_reconciliation, "live_unresolved");
+});
+
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
   const artifact = await runVerificationThreadVerdict({
     verdict: "approve",

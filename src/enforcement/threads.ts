@@ -76,6 +76,35 @@ export interface ThreadEnforcementResult {
   reason: string;
 }
 
+/** #1645: settlement-time reconciliation states for a listed thread against
+ * the authoritative live thread listing. Only a thread proven live and
+ * unresolved may re-enter the finding set; a thread the listing no longer
+ * reports (absent) or reports resolved must never block, and when the live
+ * state cannot be established at all the carried threads fail open —
+ * disclosed, never promoted into blockers. */
+export type ThreadReconciliationState = "live_unresolved" | "resolved" | "absent" | "unknown";
+
+/** The authoritative live listing, re-read at settlement time. `available`
+ * is false when the read failed or the platform cannot serve it — every
+ * listed thread is then `unknown`. When no input is provided at all (unit
+ * callers without a listing), each listed thread is treated as
+ * `live_unresolved`, preserving the historical contract that the
+ * enforcement view IS the live listing. */
+export interface ThreadReconciliationInput {
+  available: boolean;
+  unresolvedIds: ReadonlySet<string>;
+  resolvedIds: ReadonlySet<string>;
+  headSha: string;
+}
+
+function reconcileThreadState(threadId: string, reconciliation: ThreadReconciliationInput | null | undefined): ThreadReconciliationState {
+  if (reconciliation === null || reconciliation === undefined) return "live_unresolved";
+  if (!reconciliation.available) return "unknown";
+  if (reconciliation.unresolvedIds.has(threadId)) return "live_unresolved";
+  if (reconciliation.resolvedIds.has(threadId)) return "resolved";
+  return "absent";
+}
+
 /**
  * Settle every listed thread against the model's dispositions, in place.
  * Mirrors v2 exactly: the first disposition for a thread_id wins; unknown or
@@ -84,15 +113,33 @@ export interface ThreadEnforcementResult {
  * thread's original severity (default minor, never escalating, #812) unless
  * a finding already carries the thread_id; the settled records replace
  * `thread_dispositions` in the artifact.
+ *
+ * #1645: before a listed thread can settle into the finding set it must
+ * reconcile against the authoritative live thread listing. Only a
+ * `live_unresolved` thread is re-emitted; a `resolved`/`absent` thread is
+ * recorded with its reconciliation state and dropped (its disposition is
+ * moot — the thread no longer exists as an open review thread); an
+ * `unknown` thread (live state unreadable) settles bookkeeping but is never
+ * re-emitted, so unverifiable historical state cannot force REQUEST_CHANGES
+ * — the incompleteness is disclosed instead. Bounded per-run provenance is
+ * persisted on the artifact whenever reconciliation ran.
  */
 export function applyReviewThreadEnforcement(
   artifact: ReviewArtifact,
   threads: readonly EnforcementThread[] | null,
   verdictPolicy: string,
+  reconciliation?: ThreadReconciliationInput | null,
 ): ThreadEnforcementResult {
   if (!Array.isArray(threads) || threads.length === 0) {
     return { applied: false, reason: "" };
   }
+  const counts: Record<ThreadReconciliationState, number> = {
+    live_unresolved: 0,
+    resolved: 0,
+    absent: 0,
+    unknown: 0,
+  };
+  const states = new Map<string, ThreadReconciliationState>();
 
   const given = new Map<string, Record<string, unknown>>();
   for (const entry of (artifact.thread_dispositions ?? []) as Array<Record<string, unknown>>) {
@@ -107,11 +154,25 @@ export function applyReviewThreadEnforcement(
 
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
+  let settledWithdrawn = 0;
   const reemitted: ArtifactFinding[] = [];
   for (const thread of threads) {
     if (!thread || typeof thread.thread_id !== "string") continue;
     const threadId = thread.thread_id;
+    const state = reconcileThreadState(threadId, reconciliation);
+    counts[state] += 1;
     const entry = given.get(threadId) ?? {};
+    // #1645: a thread the live listing no longer reports as open cannot be
+    // settled into the finding set — record why it was dropped and move on.
+    if (state === "resolved" || state === "absent") {
+      settled.push({
+        thread_id: threadId,
+        reconciliation: state,
+        disposition: typeof entry.disposition === "string" ? entry.disposition : null,
+        evidence: typeof entry.evidence === "string" ? entry.evidence : null,
+      });
+      continue;
+    }
     let disposition = entry.disposition as string | undefined;
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
     let note: string | null = null;
@@ -136,13 +197,23 @@ export function applyReviewThreadEnforcement(
         note = "withdrawn without evidence from a reply";
       }
     }
+    // #1645: `reconciliation` is stamped only when reconciliation actually
+    // ran — a legacy caller (no input) keeps byte-identical settled records.
     const record: Record<string, unknown> = { thread_id: threadId, disposition, evidence };
+    if (reconciliation !== null && reconciliation !== undefined) record.reconciliation = state;
     if (note) {
       record.enforced = note;
       downgraded += 1;
     }
     settled.push(record);
-    if (disposition !== "fixed" && disposition !== "withdrawn" && !knownThreadIds.has(threadId)) {
+    if (disposition === "withdrawn") settledWithdrawn += 1;
+    // #1645: only a thread proven live and unresolved re-enters the finding
+    // set. An `unknown` thread settles as bookkeeping but never blocks.
+    if (
+      state === "live_unresolved"
+      && disposition !== "fixed" && disposition !== "withdrawn"
+      && !knownThreadIds.has(threadId)
+    ) {
       const finding: ArtifactFinding = {
         severity: reemittedSeverity(thread.severity),
         // #977: carry the non-blocking marker forward so a verification ask
@@ -153,10 +224,24 @@ export function applyReviewThreadEnforcement(
         line: thread.line,
         message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
         thread_id: threadId,
+        thread_reconciliation: "live_unresolved",
       };
       findings.push(finding);
       reemitted.push(finding);
     }
+  }
+
+  // #1645: persist bounded reconciliation provenance whenever reconciliation
+  // ran, independent of whether settlement changed the artifact.
+  if (reconciliation !== null && reconciliation !== undefined) {
+    artifact.thread_reconciliation = {
+      state: reconciliation.available ? "complete" : "incomplete",
+      head_sha: reconciliation.headSha,
+      live_unresolved: counts.live_unresolved,
+      resolved: counts.resolved,
+      absent: counts.absent,
+      unknown: counts.unknown,
+    };
   }
 
   if (settled.length === 0) {
@@ -164,13 +249,21 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const settledWithdrawn = settled.filter((record) => record.disposition === "withdrawn").length;
   const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
   if (changed) {
     const lines = ["", "", "## Unresolved Review Threads", ""];
     for (const record of settled) {
+      // #1645: threads the live listing dropped are not unresolved review
+      // threads anymore — only treated (live/unknown) records render.
+      if (record.reconciliation === "resolved" || record.reconciliation === "absent") continue;
       const suffix = record.enforced ? ` — ${record.enforced}` : "";
       lines.push(`- \`${record.thread_id}\`: ${record.disposition}${suffix}`);
+    }
+    if (reconciliation !== null && reconciliation !== undefined && !reconciliation.available) {
+      lines.push(
+        "",
+        "_Review-thread reconciliation incomplete: the live thread listing could not be read at settlement time, so carried threads were recorded but not treated as blocking._",
+      );
     }
     artifact.review_markdown = (artifact.review_markdown || "") + lines.join("\n");
     const blockers = reemitted.filter((f) => f.severity === "blocker" && !isAlwaysNonBlockingCategory(f.category));
