@@ -21,7 +21,9 @@ import { pyCompareTuples, pyDict, pyGet, pyIsInt, pyOr, PyError, pyStr, pyTruthy
 import type { ExternalCheck } from "./types.js";
 export type { ExternalCheck } from "./types.js";
 
-// ── GraphQL queries (verbatim from scripts/platform_api.sh) ─────────────
+// ── GraphQL queries (ports of the v2 scripts/platform_api.sh programs;
+//    #1662: the review-threads document is forward-paginated and no longer
+//    verbatim) ─────────────
 
 export const GITHUB_CONVERSATION_COMMENTS_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }";
