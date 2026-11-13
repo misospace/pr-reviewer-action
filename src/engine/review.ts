@@ -116,9 +116,7 @@ import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { executedCallEvidenceIndex, type ExecutedCallEvidenceIndex } from "../enforcement/executed-calls.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
-import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
-import { MAX_TRACE_REPAIR_CLAIMS, harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2096,11 +2094,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const traceScopeIds = requirementTraceEnabled
     ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines }).inScope.map((entry) => entry.id)
     : [];
-  // #1145: ledger texts for the in-scope ids, for the confirmed-unmet
-  // escalation's bounded finding messages (untrusted text — sanitized there).
-  const traceRequirementTexts = new Map(
-    ledgerRequirementsById(ledgerValue, traceScopeIds).map((entry) => [entry.id, entry.text] as const),
-  );
   const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
@@ -2140,10 +2133,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
-  // #1145: the harness-owned evidence-repair continuation record (present
-  // only when the probe fired or was skipped) — surfaced on the
-  // requirement-trace repair summary and the review-coverage record.
-  let traceGapContinuation: TraceGapContinuationSummary | null = null;
   if (toolMode === "native_loop") {
     const toolGate = gateForkForForks(env, forkFlag);
     if (toolGate !== null) {
@@ -2154,26 +2143,8 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // The tier names the first-pass artifact slot; the loop limits follow
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
-      const traceGapProbe = requirementTraceEnabled
-        && traceScopeIds.length > 0
-        && promptState.isDefault
-        && profiles.primary.baseUrl !== ""
-        && profiles.primary.model !== ""
-        ? createTraceGapProbe({
-          ledger: ledgerValue,
-          traceScopeIds,
-          workspace,
-          changed: traceChanged,
-          ownership: traceOwnership.rules,
-          paths: tracePaths,
-          fileLines: traceFileLines,
-          prBody: tracePrBody,
-          ciState: traceCiState,
-        })
-        : undefined;
-      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, traceGapProbe, adapter.ghApi.bind(adapter));
+      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, adapter.ghApi.bind(adapter));
       checkpoint();
-      traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.json")));
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     if (corpusResult.overBudget) errorLog(`ERROR: assembled corpus exceeds its context budget`);
@@ -2252,13 +2223,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     artifact = safeJson(ws.read("ai-output.json")) ?? (artifact as Record<string, unknown>);
   }
 
-  // #1598: the fallback native verdict's loop owns the accepted artifact's
-  // conversation, so its trace-only repair record lives in the FALLBACK
-  // harness artifact — the same treatment the primary native verdict gets.
-  // A successful smart escalation keeps the primary/smart handling untouched.
-  if (!escalatedToSmart && primary.fromFallback && primary.nativeLoopVerdict && ws.isFile("tool-harness.fallback.json")) {
-    traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.fallback.json")));
-  }
 
   // ── #959: one bounded trace-repair pass ──────────────────────────────
   // A verdict can carry no trace claim at all for an in-scope requirement
@@ -2279,327 +2243,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // implying enforcement does not exist. A claim that IS present with
   // unusable locations is never repaired, so this cannot become a way to
   // pass an untraceable change.
-  // #1504: when the native loop's own trace-only repair already merged
-  // parseable claims into THIS artifact, the standalone pass is SUPPRESSED —
-  // no second independent repair model fires merely because rows remain
-  // unresolved; the leftover rows fail closed per #1492. The invocation
-  // reason is recorded on the telemetry either way.
-  // #1044: bounded, sanitized summary of what the pass did, attached to the
-  // persisted artifact (`requirement_trace_repair`) and handed to the trace
-  // enforcement so the published section can distinguish "the reviewer never
-  // emitted a claim" from "the bounded repair pass ran and failed".
-  let traceRepairOutcome: RequirementTraceRepairOutcome | null = null;
-  if (requirementTraceEnabled && artifact !== null) {
-    const repairTarget = (artifact ?? {}) as Record<string, unknown>;
-    const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
-    // #1504 route ownership: the repair lane is the tier that produced the
-    // accepted artifact, resolved to the same transport/credentials that tier
-    // reviewed with.
-    const repairRoute = traceRepairRouteForArtifact({ escalated: escalatedToSmart, fromFallback: primary.fromFallback });
-    const repairLane = tierProfileFrom(profiles, repairRoute, env);
-    // #1552: the CURRENT validator view over the standing coverage, so the
-    // pass can target not only ids with NO row but also present-but-
-    // `unverifiable` rows — the #1539 shape where a row exists whose claim
-    // could not be verified. Fail-soft like the pass boundary itself: a
-    // classification failure falls back to the missing-only targeting and
-    // NEVER aborts the review.
-    let rowClassifications: TraceRepairRowClassification[] = [];
-    try {
-      const currentTrace = validateRequirementTrace(repairTarget.requirement_coverage, ledgerValue, workspace, traceChanged, {
-        ownership: traceOwnership.rules,
-        paths: tracePaths,
-        fileLines: traceFileLines,
-        prBody: tracePrBody,
-        ciState: traceCiState,
-      });
-      rowClassifications = classifyTraceRepairRows({
-        coverage: repairTarget.requirement_coverage,
-        trace: currentTrace,
-        scopeIds: traceScopeIds,
-      });
-    } catch (exc) {
-      log(`requirement trace: repair-target classification failed; targeting missing ids only (${maskKnownSecrets(exc instanceof Error ? exc.message : String(exc), [repairLane.apiKey]).slice(0, 160)})`);
-    }
-    // #1552: present-but-`unverifiable` rows join the missing ids as repair
-    // targets (deduped, capped at the shared claim cap; missing ids first so
-    // a cap truncation never demotes a fully-untraced row).
-    const unverifiableIds = rowClassifications
-      .filter((classification) => classification.state !== "missing")
-      .map((classification) => classification.id);
-    const repairTargetIds = [...new Set([...missingTraceIds, ...unverifiableIds])].slice(0, MAX_TRACE_REPAIR_CLAIMS);
-    // #1552: the targeted rows' repair states, persisted on the summary so
-    // the artifact can distinguish a row the reviewer never traced from one
-    // whose claim failed validation from one whose only gap was evidence.
-    // Named "targeted": they carry the PRE-repair state of the rows the pass
-    // was asked about, not the post-merge state (which the trace section and
-    // `missing_ids` already report).
-    const targetedRowStates: Record<string, string> = {};
-    for (const classification of rowClassifications) {
-      if (!repairTargetIds.includes(classification.id)) continue;
-      if (targetedRowStates[classification.id] !== undefined) continue;
-      targetedRowStates[classification.id] = classification.state;
-      if (Object.keys(targetedRowStates).length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
-    }
-    const repairRequirements = repairTargetIds.length > 0 ? ledgerRequirementsById(ledgerValue, repairTargetIds) : [];
-    // #1502 follow-up: deterministic feedback for the pass's returned claims —
-    // the SAME validator the publication path runs, scoped to the targeted
-    // ids. A targeted id whose returned (or omitted) claim still validates
-    // `unverifiable` is reported with its non-environmental note labels so the
-    // pass's single validation retry can fix the citations (the production
-    // #1553 shape: the pass replaced the claim blind and the replacement
-    // failed the same deterministic way with nothing the wiser). The labels
-    // are the validator's own note enums — never model prose — and the retry
-    // stays inside the pass's one-retry budget. Fail-soft: a throwing
-    // validation disables the feedback (behavior as before).
-    const repairTargetIdSet = new Set(repairTargetIds);
-    const validateRepairedClaims = (claims: readonly Record<string, unknown>[]): Record<string, readonly string[]> => {
-      const rejections: Record<string, readonly string[]> = {};
-      try {
-        const trace = validateRequirementTrace(claims, ledgerValue, workspace, traceChanged, {
-          ownership: traceOwnership.rules,
-          paths: tracePaths,
-          fileLines: traceFileLines,
-          prBody: tracePrBody,
-          ciState: traceCiState,
-        });
-        const environmental = (note: string): boolean =>
-          note.startsWith("provenance:")
-          || note.startsWith("external-state-ci")
-          || note.startsWith("external-state-pending")
-          || note.startsWith("documentation-pending");
-        for (const row of trace.rows) {
-          if (!repairTargetIdSet.has(row.requirement_id)) continue;
-          if (row.disposition !== "unverifiable") continue;
-          const labels = (Array.isArray(row.notes) ? row.notes : [])
-            .filter((note): note is string => typeof note === "string" && !environmental(note))
-            .slice(0, 3);
-          rejections[row.requirement_id] = labels.length > 0 ? labels : ["unverifiable"];
-        }
-      } catch {
-        return {};
-      }
-      return rejections;
-    };
-    const repairRequirementsText =
-      missingTraceIds.length > 0 || unverifiableIds.length > 0
-        ? `${missingTraceIds.length} row(s) with no claim and ${unverifiableIds.length} present-but-unverifiable row(s) unresolved`
-        : "";
-    // #1504: suppression/invocation decision — a native-loop trace-only
-    // repair counts only when the accepted artifact IS the loop's verdict
-    // (the conversation its claims were merged into); a continuation record
-    // without merged claims is the serialization-failure shape this pass
-    // exists to recover. #1502 follow-up: a merge that left unresolved
-    // repair targets behind is a FAILED repair, not a completed one — the
-    // production #1559 shape (a parseable claim merged for the row, the row
-    // still validated `unverifiable`, the fallback stood down) — so the
-    // bounded fallback recovers instead of suppressing.
-    const repairInvocation = resolveStandaloneTraceRepairInvocation({
-      nativeLoopVerdictArtifact: !escalatedToSmart && primary.nativeLoopVerdict,
-      continuation: traceGapContinuation,
-      unresolvedTargetsRemain: repairTargetIds.length > 0,
-    });
-    const summaryBase = {
-      missingIds: missingTraceIds,
-      route: repairRoute,
-      secrets: [repairLane.apiKey],
-      // #1552: the targeted rows' repair states ride every branch of the
-      // summary (empty → omitted inside the summary builder).
-      rowStates: targetedRowStates,
-      ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
-    };
-    if (repairTargetIds.length === 0) {
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", ...summaryBase });
-    } else if (!repairInvocation.invoke) {
-      // #1504: the native loop's trace-only repair already merged parseable
-      // claims into this artifact — the standalone pass stands down.
-      log(`requirement trace: ${repairRequirementsText}, but the native-loop trace-only repair already merged claims; suppressing the standalone repair pass (${repairInvocation.reason})`);
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "suppressed_native_loop", invocationReason: repairInvocation.reason, ...summaryBase });
-    } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !repairLane.baseUrl || !repairLane.model || repairRequirements.length === 0) {
-      // The pass exists but its own gates kept it from running at all.
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", invocationReason: repairInvocation.reason, ...summaryBase });
-    } else {
-      const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
-      const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
-      const repairTimeoutSec = Math.min(
-        Number(env.REQUIREMENT_TRACE_REPAIR_TIMEOUT_SEC ?? "180") || 180,
-        Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
-      );
-      log(`requirement trace: ${repairRequirementsText}; attempting one bounded repair pass on the ${repairRoute} lane (${repairInvocation.reason})`);
-      // #1047: the repair pass asks for its own (non-verdict) JSON contract
-      // in the prompt only — an Anthropic-format repair call never carries a
-      // native structured-output parameter, so a configured response_format
-      // must not read as enforced here either. #1504: the warning names the
-      // lane that actually owns the repair.
-      if (repairLane.apiFormat === "anthropic" && repairLane.responseFormat !== "off") {
-        log(`WARNING: ${repairRoute} lane (trace repair pass): ai-response-format resolved to ${repairLane.responseFormat}, which is not sent on the Anthropic wire for the repair contract — the repair JSON is prompt-only`);
-      }
-      // Fail-soft at the boundary too, mirroring the claim-falsification
-      // pre-pass: a throw here must never abort the review.
-      let repairThrow: unknown = null;
-      let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
-      try {
-        // #1037: correlation headers ride the repair pass too; unset config
-        // omits the key. Parsed INSIDE the guarded region (as pre-fix) so a
-        // malformed set can never escape this fail-soft boundary.
-        const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
-        repaired = await runRequirementTraceRepairPass({
-          requirements: repairRequirements.map((entry) => {
-            // #1519: the hints carry full seam objects now; the repair message
-            // still names the seams (the per-seam patterns live in the plan).
-            const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
-            return { id: entry.id, text: entry.text, ...(groups ? { groups: groups.map((group) => group.name) } : {}) };
-          }),
-          title: String(pr.title ?? ""),
-          files: safeJson(ws.read("pr-files.json")),
-          diff: ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",
-          // #1504: the fallback's navigation context — the PR body (bounded/
-          // fenced, untrusted), the review's current coverage rows, and a
-          // bounded digest of the evidence the native loop already gathered.
-          // PR-body claims are navigation hints only; the deterministic
-          // validator still decides whether a citation proves the requirement.
-          prBody: String(pr.body ?? ""),
-          coverageRows: Array.isArray(repairTarget.requirement_coverage) ? repairTarget.requirement_coverage : undefined,
-          // #1504 (review): the digest comes from the authoritative loop's
-          // harness — `tool-harness.smart.json` when the escalated smart
-          // review authored the accepted artifact, never the stale
-          // primary-loop evidence beside it. Tools-off runs have neither
-          // file, so the digest is empty either way.
-          evidenceDigest: harnessEvidenceDigest(safeJson(ws.read(enforcementHarness))),
-          config: {
-            apiFormat: repairLane.apiFormat,
-            model: repairLane.model,
-            baseUrl: repairLane.baseUrl,
-            apiKey: repairLane.apiKey,
-            maxTokens: Number(env.REQUIREMENT_TRACE_REPAIR_MAX_TOKENS ?? "4096") || 4096,
-            temperature,
-            responseFormat: repairLane.responseFormat,
-            tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
-            // #1504 (review): the transport profile belongs to the owning lane
-            // too — a fallback with `ai-fallback-stream` diverging from the
-            // base `ai-stream` must repair on ITS streaming setting, the one
-            // its authoritative review rode, not the globally selected one.
-            stream: repairLane.stream,
-            timeoutSec: repairTimeoutSec,
-            inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
-            // #998: the repair lane's own effort — never another lane's.
-            reasoningEffort: repairLane.reasoningEffort,
-            anthropicEffortSupported: repairLane.anthropicEffortSupported,
-          },
-          requestFn: specialistRequestFn({
-            baseUrl: repairLane.baseUrl,
-            apiKey: repairLane.apiKey,
-            anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
-            // #1037: correlation headers ride specialist/pre-pass calls too;
-            // unset config omits the key.
-            ...(repairExtra !== undefined ? { extraHeaders: repairExtra } : {}),
-            // #1515: the requirement-trace repair is authoritative work
-            // (class 1) — a repair arriving behind advisory specialists takes
-            // the next available slot ahead of them. The run's cancellation
-            // scope bounds the queue wait too.
-            priority: GOVERNOR_PRIORITY_AUTHORITATIVE,
-            signal: cancellation.scope.signal,
-          }),
-          // #1502 follow-up: the deterministic validator-feedback seam — the
-          // pass's returned claims are validated HERE, before the merge, and
-          // a rejected claim gets exactly one bounded fix-the-citation retry.
-          validateClaims: validateRepairedClaims,
-        });
-      } catch (cause) {
-        repairThrow = cause;
-        // Credential-shaped transport/provider text must not reach local
-        // diagnostics either (AGENTS.md security boundaries).
-        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), [repairLane.apiKey])}`);
-      }
-      // #1552: rows the merge appended or replaced (appended + replaced); read
-      // by the summary below even when the pass returned nothing.
-      let mergedRows = 0;
-      if (repaired !== null) {
-        // Per-run record, mirroring claim-falsification.json: the merged
-        // claims land in ai-output.json, but the pass's status is otherwise
-        // unobservable. Error text is provider-controlled, so it passes the
-        // secret-redaction boundary before persistence (#1044 review).
-        if (repaired.claims.length > 0) {
-          // #1552: replacement-aware merge confined to the validator-derived
-          // target set — appended ids fill their missing rows, and a
-          // re-derived claim for a targeted row REPLACES that row in place
-          // (inside the set a stored `met`/`not_applicable` row is one the
-          // validator downgraded; a stored `unmet` row is never touched).
-          const merge = mergeTraceRepairClaims(repairTarget.requirement_coverage, repaired.claims, new Set(repairTargetIds));
-          mergedRows = merge.appended + merge.replaced;
-          repairTarget.requirement_coverage = merge.coverage;
-          log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s) (${merge.appended} appended, ${merge.replaced} replaced)`);
-          if (repaired.validationRetried) {
-            const rejectedIds = Object.keys(repaired.validationRejections ?? {}).join(", ");
-            log(`requirement trace: validator rejected the pass's first-round claim(s) for ${rejectedIds !== "" ? rejectedIds : "unknown ids"}; the bounded validator-feedback retry fired`);
-          }
-        } else {
-          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [repairLane.apiKey]))}` : ""})`);
-        }
-        ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
-          status: repaired.status,
-          error_kind: repaired.errorKind,
-          error: redactText(maskKnownSecrets(repaired.error ?? "", [repairLane.apiKey])) || null,
-          missing_ids: missingTraceIds,
-          // #1552: the full targeting — present-but-`unverifiable` rows are
-          // not "missing" but were still targeted — plus their pre-repair
-          // repair states.
-          targeted_ids: repairTargetIds,
-          targeted_row_states: targetedRowStates,
-          claims: repaired.claims.length,
-          diff_clipped: repaired.diffClipped,
-          route: repairRoute,
-          invocation_reason: repairInvocation.reason,
-          first_failure_class: repaired.firstFailureClass,
-          serialization_retry: repaired.retried,
-          // #1502 follow-up: the validator-feedback retry and the first
-          // round's deterministic rejection labels (already sanitized by the
-          // pass) — how the pass's citations failed on their first try is
-          // otherwise unobservable from the run directory.
-          validation_retried: repaired.validationRetried,
-          ...(repaired.validationRejections !== null && Object.keys(repaired.validationRejections).length > 0
-            ? { validation_rejections: repaired.validationRejections }
-            : {}),
-          // #1552: rows the merge appended or replaced (appended + replaced) —
-          // the parsed-claim count alone can overstate the merge when the
-          // target set and the replacement guard disagree.
-          ...(repaired.claims.length > 0 ? { rows_merged: mergedRows } : {}),
-          // #1145: the loop's own in-conversation continuation (if the probe
-          // fired or was skipped in this run) — the no-tools pass above and
-          // the loop's continuation are distinct attempts and both are
-          // reported.
-          ...(traceGapContinuation !== null ? { trace_gap_continuation: traceGapContinuation } : {}),
-        })}\n`, "utf8"));
-      }
-      // #1044 review follow-up: derive the summary's `missing_ids` from the
-      // POST-merge coverage — an id still missing after the pass is exactly
-      // the id the retry did not fill, so a partial merge (some ids filled,
-      // some not) labels only the genuinely unfilled rows. For "no_claims"/
-      // thrown nothing merged, so this equals the pre-run set; a full merge
-      // leaves it empty.
-      traceRepairOutcome = traceRepairOutcomeSummary({
-        attempted: true,
-        outcome: null,
-        missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
-        result: repaired,
-        thrownError: repaired === null ? repairThrow : undefined,
-        route: repairRoute,
-        invocationReason: repairInvocation.reason,
-        secrets: [repairLane.apiKey],
-        // #1552: the targeted rows' repair states ride the summary too.
-        rowStates: targetedRowStates,
-        // #1552: rows the merge appended or replaced (appended + replaced).
-        ...(mergedRows > 0 ? { rowsMerged: mergedRows } : {}),
-        ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
-      });
-    }
-    if (traceRepairOutcome !== null) {
-      artifact.requirement_trace_repair = traceRepairOutcome;
-    }
-  } else if (!requirementTraceEnabled && artifact !== null) {
-    // #1044 review follow-up: the feature is off, so any model-forged
-    // summary key must not survive into the persisted artifact.
-    delete artifact.requirement_trace_repair;
-  }
 
   // ── Enforcement (review.sh) + requirement coverage ───────────────────
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
@@ -2811,16 +2454,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
-    // #1145: confirmed-unmet escalation — the one case where a synthesized
-    // finding is allowed (#1095's no-synthesis rule covers ledger-only
-    // claims, not a row the validator refuted by re-deriving the
-    // requirement's truth from the repository state at head — #985's
-    // structural proof). Runs before the overlays and the strict mapping so
-    // the synthesized blockers count toward the open-findings set.
-    if (requirementTraceResult.applied) {
-      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
-    }
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #1238: thread settlement (inside the overlays) re-emits prior reviews'
     // findings after the boundary ran; verify them too so a carried-over
@@ -2891,17 +2525,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
-    // #1145: confirmed-unmet escalation (same rationale as the strict
-    // branch above: only a row the validator refuted against the repository
-    // state at head — #985's structural proof — is escalated; a
-    // copies-without-comparing row stays a repairable coverage gap). The
-    // relaxers below all refuse to re-approve once
-    // `requirement_trace_incomplete` is set or an open non-verification
-    // blocker exists, so the flip is stable.
-    if (requirementTraceResult.applied) {
-      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
-    }
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #1238: second boundary pass over findings thread settlement re-emitted
     // (same rationale as the strict branch above); the relaxers below then
@@ -3156,11 +2780,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       required_evidence_state: requiredState,
       required_evidence_reason: requiredState === "complete" ? null : "not-discharged",
     } : {}),
-    // #1145: the native loop's own bounded evidence-repair continuation
-    // record (its outcome enum distinguishes a run continuation — ordinary
-    // or #1552 trace-only — from the skipped_* failure shapes), when the
-    // probe fired or was skipped.
-    ...(traceGapContinuation !== null ? { trace_repair_continuation: traceGapContinuation } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
 
@@ -4905,7 +4524,7 @@ async function runFallbackEvidenceHarness(input: {
     // keys). Re-resolving from env here would hand an inherited fallback
     // lane the primary-override endpoint/key/format while
     // callTier('fallback', ...) still dials the original resolved lane.
-    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi, wallClockRemainingSec, input.profiles.fallback);
+    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, input.ghApi, wallClockRemainingSec, input.profiles.fallback);
   } catch (cause) {
     // #1094: a thrown message can quote a configured credential back — mask
     // like every other diagnostics line in this stage.
@@ -4986,7 +4605,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       env.SMART_REASONING_EFFORT = profiles.smart.reasoningEffort;
       env.TOOL_HARNESS_TIER = "smart";
       try {
-        await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, undefined, input.ghApi);
+        await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, input.ghApi);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       } finally {

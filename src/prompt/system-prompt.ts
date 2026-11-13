@@ -230,7 +230,7 @@ export function applyRequirementTraceFragment(
   if (trace === "") return state;
   if (scopeIds !== undefined) {
     trace = trace.replace(
-      "For every acceptance/normative requirement in the Requirement Ledger,",
+      "For every acceptance/normative requirement in trace scope,",
       `For every requirement in trace scope (${scopeIds.join(", ")}); other ledger requirements need no trace,`,
     );
   }
@@ -240,7 +240,7 @@ export function applyRequirementTraceFragment(
     // renders the seam NAMES only (the rendered plan section is where the
     // per-seam evidence paths live). A hint whose every seam name sanitizes
     // away renders nothing and is dropped, never an empty `id →` tail.
-    const hintLine = `Distributed requirements — cite one enforcement location and one matching test in each declared seam (a single location cannot satisfy them): ${distributedHints
+    const hintLine = `Distributed requirements — cite one enforcement location in each declared seam: ${distributedHints
       .slice(0, MAX_DISTRIBUTED_HINTS)
       .map((hint) => {
         const names = (hint.groups ?? [])

@@ -1,51 +1,97 @@
 /**
- * Requirement-trace enforcement (#874).
+ * Requirement-trace enforcement (#874, narrowed by #1658).
  *
  * PR #854 is the motivating failure: the linked issue required matching a
  * source SHA, the review repeated that requirement, and approved anyway —
  * the cited line existed and even carried the right field name
  * (`sourceSha: ctx.sourceSha,`), but only copied the value; nothing ever
- * compared it. Plain `requirement_coverage` (#624) lets a `satisfied` claim
- * stand on a file/diff glance; this module additionally requires, per
- * acceptance/normative ledger requirement, a bounded trace to BOTH the code
- * that enforces it and the test that would fail if that enforcement broke —
- * and that the cited enforcement location actually contains a predicate
- * (a comparison, guard, assertion, or match call) naming the requirement's
- * concept, not merely an assignment or property copy. All of this is
- * deterministically verified against the checkout at head; nothing here is
- * trusted from the model's say-so.
+ * compared it. #874 answered with a UNIVERSAL proof shape: every ordinary
+ * runtime requirement had to cite an enforcement location AND a regression
+ * test, with a lexical predicate at the citation. #1658 narrows that: the
+ * demanded proof now matches the requirement's own class, because a proof
+ * shape a requirement does not need is not rigor — it is a false
+ * `unverifiable` (the #1643 counter-reporting review: implementation and
+ * regression tests both cited, no unresolved ordinary check, recommendation
+ * to approve — and two rows rejected as
+ * `enforcement-location-copies-without-comparing`).
+ *
+ * The trace is NON-CERTIFYING BY DEFAULT (#1658): a trace row is the
+ * reviewer's semantic requirement state plus cited provenance — never an
+ * independent approval gate. Row count/completeness does not veto APPROVE,
+ * a bare row is not a hidden REQUEST_CHANGES authority, and no
+ * all-trace-rows-must-pass fold exists. Deterministic validation is retained
+ * ONLY where the requirement itself is mechanically decidable from current
+ * state; everything else rests on the reviewer's judgment. The proof
+ * classes, derived from the ledger text (never a model field):
+ *
+ * - `structural_state` — mechanically decidable from current state: a path
+ *   containment/existence/content assertion on a named checkout file,
+ *   including prohibition-by-absence ("must not contain X") and a pinned
+ *   literal ("the lockfile must contain `<sha>`" — the requested-value-
+ *   equals-actual-value shape). The validator re-derives the truth from the
+ *   exact-head checkout: this is the one place a row is positively
+ *   `confirmed` — or deterministically REFUTED (`confirmed_unmet`).
+ * - `distributed` — config-declared security seams (base-ref-trusted owner
+ *   globs). Citations are provenance, not a certification gate: an
+ *   uncovered declared seam leaves the row unresolved for the disposition
+ *   layer; no lexical predicate and no per-seam test demand applies.
+ * - `external_state` / `documentation` (#1062) — non-code proof domains,
+ *   advisory `pending` or positively confirmed from their own source.
+ * - `runtime_behavior` / `test_required` — ordinary semantics (rendering,
+ *   reporting, wiring a counter, copying configuration). `met` is the
+ *   reviewer's semantic judgment; the validator checks only cited
+ *   provenance (the cited locations exist at head) and — where the
+ *   requirement's own text explicitly demands a test — a test-path-valid
+ *   citation. NO lexical predicate rule and NO universal regression-test
+ *   demand: the #874 proof-shape system that rejected the #1643
+ *   counter-reporting review on `enforcement-location-copies-without-comparing`
+ *   is deleted outright, along with its term extraction, code-view
+ *   blanking, and binding-linkage machinery.
+ *
+ * A missing proof shape is never itself a confirmed defect: a row the
+ * validator cannot settle is exposed as `unresolved` (with the deterministic
+ * note codes) for the final-disposition consumer (#1656) to weigh — only a
+ * deterministic refutation re-derived from the head state
+ * (`structural-proof-unconfirmed`) is `confirmed_unmet`. #1095 still holds:
+ * a model-claimed `unmet` is the reviewer's own gap claim, exposed as
+ * `unmet_claimed`, never synthesized into a finding here.
+ *
+ * Materiality distinction (#1658 review): the deleted lexical rules can no
+ * longer make a row material — a valid location without a comparison is
+ * `evidenced`. What IS material for an in-scope mandatory requirement:
+ * invalid OBJECTIVE provenance (the cited enforcement/test location does
+ * not resolve at reviewed head), a malformed/unusable semantic claim, a
+ * missing claim, or a deterministic refutation. Environmental
+ * unavailability on non-code/external/post-merge criteria stays advisory.
+ *
+ * #1658 division of authority: this module STOPS being a publication
+ * authority. It does not touch `required_checks`, does not synthesize
+ * findings, and does not flip the verdict — the final APPROVE /
+ * REQUEST_CHANGES / INCOMPLETE / UNAVAILABLE disposition is #1656's, which
+ * consumes this artifact's reason-coded rows and summary. The one retained
+ * fail-closed guard is `requirement_trace_incomplete`, now set ONLY for
+ * confirmed-unmet rows, so the verdict relaxers can never relax past a
+ * deterministic refutation.
  *
  * Additive to the existing `requirement_coverage` contract (#624): the model
  * emits the same `requirement_coverage` array, and each claim MAY carry
- * `enforcement`/`test` (arrays of `{file, line}`), an optional `symbol`
- * (an identifier name for the enforced concept), a `reason`, and a
+ * `enforcement`/`test` (arrays of `{file, line}`), a `reason`, and a
  * `disposition` (`met`|`unmet`|`not_applicable`|`unverifiable`) alongside the
  * existing `status`/`evidence` fields `normalizeRequirementCoverage` already
  * reads. This module reads those additive fields independently and never
  * mutates `requirement_coverage` normalization — the two folds are siblings
  * over the same untrusted payload.
  *
- * `met` requires: a location-valid enforcement citation, a location-valid
- * AND test-path-classified test citation, and a predicate involving one of
- * the requirement's derived key terms at (or near) the enforcement
- * location — see `extractRequirementTerms`/`enforcementPredicateFound`
- * below for the exact heuristic and its documented limits. #1343: the
- * lexical half is dropped where the subject is established by declaration
- * instead — a citation into a base-ref-trusted declared owner of the
- * requirement (repository config) needs only a real predicate, on the cited
- * line itself, and every distributed seam citation is owner-anchored by
- * construction. `not_applicable`,
- * `unmet`, and an explicit `unverifiable` each require a non-empty, bounded
- * `reason`; a missing one downgrades to `unverifiable`. Any downgrade or
- * missing trace marks the requirement `unverifiable`, and a well-formed
- * `unmet` is itself a known coverage stop; both fold into
- * `required_checks=incomplete` via `applyRequirementTraceEnforcement`, so a
- * known-unmet requirement can never publish a clean approval under any
- * verdict policy. #1095: the enforcement pass never synthesizes a finding
- * from an unmet row — the model's prompt contract obliges it to file the
- * matching finding itself, and a blocking review must rest on a substantiated
- * implementation violation, not on ledger text promoted out of a
- * process/risk note (miso-gallery#543).
+#1044/#1145/#1503 removal (#1658): the trace-only repair machinery — the
+ * standalone repair pass, the in-loop gap probe and its trace-only
+ * continuation turn, and the citation-merge helpers — existed to redraw
+ * citations until the universal lexical validator accepted them. With the
+ * universal validator narrowed to the mechanical classes, that machinery
+ * has no honest purpose and is deleted; the only surviving "repair" is the
+ * deterministic claim hygiene below (malformed entries dropped, bounded
+ * reasons, disposition normalization), which never changes substantive
+ * evidence. No trace-only model pass is required to turn an otherwise
+ * adequate review into complete.
  *
  * Scope: ledger entries of kind `acceptance` or `normative` only — the
  * explicit MUST/acceptance-criteria items. `invariant`-kind entries
@@ -73,7 +119,7 @@
  * path, and the model can never claim `pending` to escape a code proof.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
+import { type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
@@ -111,13 +157,35 @@ export interface TraceLocation {
 export interface RequirementTraceRow {
   requirement_id: string;
   disposition: string;
-  /** #985: the deterministic proof shape this requirement was validated
+  /** #985/#1658: the deterministic proof shape this requirement was validated
     * against — `runtime_behavior` | `structural_state` | `test_required` |
     * `distributed` | `external_state` | `documentation` (#1062), or
-    * `not_applicable` for an out-of-scope row. Derived from the ledger
-    * requirement text by this module, never from a model field, so it is
-    * explainable from the artifact alone. */
+    * `not_applicable` for an out-of-scope row.
+    * Derived from the ledger requirement text by this module, never from a
+    * model field, so it is explainable from the artifact alone. */
   proof: string;
+  /** #1658: the reason-coded outcome of THIS row — the consumption surface
+   * the final-disposition layer (#1656) reads. `confirmed` = the validator
+   * re-derived the requirement's truth from deterministic current-head
+   * evidence; `evidenced` = the reviewer cited a location-valid enforcement
+   * site and the row's class demands no mechanical re-derivation; a
+   * `confirmed_unmet` row is a deterministic refutation; `unmet_claimed` is
+   * the reviewer's own well-formed gap claim (#1095); `unresolved` rows carry
+   * their specific validator note codes; `not_applicable` and `pending` are
+   * the settled advisory shapes. */
+  resolution: string;
+  /** #1658: the row's RELEVANCE class — `material` when its unresolved state
+   * could genuinely withhold certification: a deterministic refutation, the
+   * reviewer's own gap claim, a missing claim, invalid objective provenance
+   * (the cited enforcement/test location does not resolve at reviewed head),
+   * or a malformed/unusable semantic claim — on an in-scope mandatory
+   * requirement, whatever its proof class. `advisory` when the row is
+   * already settled or its unknown is environmental (non-code/external/
+   * post-merge criteria, #1062). The DELETED lexical predicate/test-shape
+   * rules can no longer produce materiality: a valid location with no
+   * comparison is `evidenced`, clean (#1643). This module EXPOSES the
+   * classification; it never decides the final disposition (#1656 does). */
+  materiality: string;
   enforcement: TraceLocation[];
   test: TraceLocation[];
   reason: string;
@@ -126,13 +194,60 @@ export interface RequirementTraceRow {
   notes: string[];
 }
 
+/** #1658: the closed reason-coded row resolutions. */
+export const TRACE_RESOLUTIONS: readonly string[] = [
+  "confirmed", "evidenced", "unmet_claimed", "confirmed_unmet",
+  "unresolved", "not_applicable", "pending",
+];
+
+/** #1658: the closed row relevance classes. Exposure only — the final
+ * disposition (#1656) owns the publication decision. */
+export const TRACE_MATERIALITY: readonly string[] = ["material", "advisory"];
+
+/** #1658: the bounded per-class id summary of the artifact — the aggregate
+ * consumption surface for the final-disposition layer (#1656). Every list is
+ * deduplicated in row order and capped at the shared id cap; `total_rows`
+ * counts ALL rows (settled ones included) so a consumer can never mistake a
+ * capped list for the whole ledger.
+ *
+ * Integration contract (#1656 — this module only EXPOSES the classes, it
+ * never wires publication policy itself):
+ * - `confirmed_unmet` → an objectively proven-unmet mandatory requirement
+ *   (REQUEST_CHANGES territory);
+ * - `unmet_claimed` → a material unknown, unless the reviewer backed it with
+ *   an ordinary grounded blocker/major finding;
+ * - `unresolved_material` → a material unknown / INCOMPLETE;
+ * - `unresolved_advisory` → diagnostic only. */
+export interface RequirementTraceSummary {
+  /** Deterministic refutations: the validator re-derived the requirement's
+   * truth from current-head evidence and found it absent. */
+  confirmed_unmet: string[];
+  /** The reviewer's own well-formed gap claims (#1095) — substantive,
+   * never dismissed as bookkeeping, never confirmed here. */
+  unmet_claimed: string[];
+  /** Unresolved rows whose relevance class is material: missing claims,
+   * invalid objective provenance (citations that do not resolve at reviewed
+   * head, including an explicitly-required test), malformed/unusable
+   * semantic claims, and unresolved mechanically decidable rows. */
+  unresolved_material: string[];
+  /** Unresolved rows whose unknown is environmental — non-code/external/
+   * post-merge criteria (#1062). Diagnostic only for the disposition. */
+  unresolved_advisory: string[];
+  total_rows: number;
+}
+
 export interface RequirementTraceArtifact {
   version: number;
   rows: RequirementTraceRow[];
-  /** True when at least one in-scope requirement has no usable trace
-   * (missing claim, a claim downgraded to `unverifiable`) or is a known
-   * gap (a well-formed `unmet`) — the signal that folds into
-   * `required_checks=incomplete` (review_result=partial). */
+  /** #1658: the bounded aggregate of the rows' reason-coded resolutions
+   * (see {@link RequirementTraceSummary}). */
+  summary: RequirementTraceSummary;
+  /** #1658 (narrowed from #874): true ONLY when at least one row is a
+   * deterministic refutation (`confirmed_unmet`) — the validator re-derived
+   * the requirement's truth from the head state and found it absent. A
+   * missing or mismatched proof shape NEVER sets this: unresolved rows are
+   * exposed in `summary` for the final-disposition consumer (#1656), which
+   * owns the publication decision. */
   incomplete: boolean;
   /** Bounded, field-naming diagnostics for artifact-level parser/validation
    * problems in the model's `requirement_coverage` claim list — entries that
@@ -143,18 +258,17 @@ export interface RequirementTraceArtifact {
   errors: string[];
 }
 
-export const ARTIFACT_VERSION = 1;
+export const ARTIFACT_VERSION = 2;
 
 /** #1575: bounded action-owned final rejection evidence in ordinary job logs.
  * Never include repository text, model reasons, citation paths, or dynamic
  * group names; only fixed validator diagnostic codes and shape-checked IDs. */
 export const MAX_TRACE_FINAL_DIAGNOSTIC_ROWS = 8;
 const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
-  "not-traced-by-reviewer", "trace-repair-ran-no-claims", "disposition-invalid",
+  "not-traced-by-reviewer", "disposition-invalid",
   "missing-reason", "non-code-reported-unmet", "out-of-scope-reported-unmet",
   "distributed-enforcement-group-uncovered",
-  "distributed-test-group-uncovered", "distributed-test-location-uncovered",
-  "distributed-topology-overflow", "enforcement-location-copies-without-comparing",
+  "distributed-topology-overflow",
   "downgraded-no-valid-enforcement-location", "downgraded-no-valid-test-location",
   "structural-citation-line-out-of-range", "structural-proof-unconfirmed",
 ]);
@@ -180,7 +294,11 @@ export function finalTraceFailureLog(trace: RequirementTraceArtifact): string {
 
 function capReason(value: unknown): string {
   if (typeof value !== "string") return "";
-  const text = value.trim();
+  // Control characters (newlines included) never survive into a row: a
+  // hostile reason must not be able to forge headings or bullets in the
+  // rendered trace section (#959 — the boundary the repair payload used to
+  // own is now held at the validator itself, #1658).
+  const text = value.replace(/[\x00-\x1f\x7f]/g, " ").trim();
   if (text.length > MAX_REASON_CHARS) return text.slice(0, MAX_REASON_CHARS - 1) + TRUNCATION_MARKER;
   return text;
 }
@@ -189,8 +307,6 @@ function capReason(value: unknown): string {
  * requirements (or both an enforcement and a test location) is read once. */
 class FileTextCache {
   private readonly linesByFile = new Map<string, string[] | null>();
-  private readonly signalsByFile = new Map<string, boolean[] | null>();
-  private readonly viewsByFile = new Map<string, FileCodeViews | null>();
   constructor(private readonly workspace: string) {}
 
   private load(file: string): string[] | null {
@@ -225,34 +341,6 @@ class FileTextCache {
     return this.load(file);
   }
 
-  /** The file's per-line predicate signal, or `null` when it is not a
-   * readable regular file in the checkout. Computed once per file, so a file
-   * cited by several requirements is scanned once.
-   *
-   * The open-span state is carried across the file's lines, so a shape inside
-   * a multi-line block comment or template literal is prose on EVERY line of
-   * that span, not only on the line that opened it. */
-  predicateSignals(file: string): boolean[] | null {
-    if (this.signalsByFile.has(file)) return this.signalsByFile.get(file) ?? null;
-    const lines = this.load(file);
-    const signals = lines === null ? null : filePredicateSignal(lines);
-    this.signalsByFile.set(file, signals);
-    return signals;
-  }
-
-  /** The file's per-line code views (#1347), or `null` when it is not a
-   * readable regular file in the checkout. Computed once per file with the
-   * SAME production blanking `predicateSignals` uses, so the signal view and
-   * the text view can never disagree about what is code. The #1566 linkage
-   * check reads the blanked view so a bound identifier (or a declaration)
-   * that exists only inside a comment or a string can never count. */
-  codeViews(file: string): FileCodeViews | null {
-    if (this.viewsByFile.has(file)) return this.viewsByFile.get(file) ?? null;
-    const lines = this.load(file);
-    const views = lines === null ? null : computeCodeViews(lines, true);
-    this.viewsByFile.set(file, views);
-    return views;
-  }
 }
 
 /** Parse and bound a claimed location list; each entry must be a
@@ -295,61 +383,11 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
   return locations.some((loc) => isTestPath(loc.file) && locationValid(loc, cache));
 }
 
-// ---------------------------------------------------------------------------
-// Enforcement-predicate check (#874 maintainer follow-up on PR #883).
-//
-// A cited enforcement location that merely EXISTS is not proof of
-// enforcement: PR #854's real defect was a line that existed and even named
-// the right field (`sourceSha: ctx.sourceSha,`) but only copied the value —
-// nothing ever compared it. This check derives the requirement's key terms
-// from its text (plus an optional model-supplied `symbol`), normalizes them
-// to code-ish forms, and requires that at least one cited enforcement
-// location's line (or a small surrounding window) contains one of those
-// terms used inside something predicate-shaped: a comparison, a guard, a
-// throw/assert/expect call, or a string-match call — not just an assignment
-// or object-literal property.
-//
-// This is a bounded heuristic over source text, not a parser: it can miss
-// enforcement spread across multiple lines outside the window, expressed via
-// a helper function whose name doesn't echo the term, or written in a
-// language/style its regexes don't recognize; and on rare occasions a term
-// coincidentally near unrelated comparison syntax could pass. It is
-// deliberately permissive when the requirement text yields no usable terms
-// at all (documented below) rather than fail every odd phrasing closed.
-//
-// #1343: for prose standards the derived terms are generic words the
-// enforcing code never spells, so the lexical half alone made the gate
-// unsatisfiable-by-construction for a reviewer citing the real enforcement.
-// Where the subject is established by declaration — a citation into a
-// base-ref-trusted declared owner of the requirement (repository config,
-// `enforcementPredicateSatisfied`), or any distributed seam citation, whose
-// group owner globs come from the same trusted config — the predicate
-// requirement is kept and only the lexical co-occurrence is dropped. The
-// owner-anchored predicate must sit ON the cited line (the lexical half was
-// what bounded which line could qualify there); every other citation still
-// needs the term and the predicate on the same line.
-//
-// #1347: with the lexical half gone the shape test alone was the anti-copy
-// core, and applied to raw text it accepted copy-only lines — an arrow
-// function, an optional chain, a nullish coalesce, or an assertion-shaped word
-// that survives only inside an identifier, a comment or a string literal. The
-// accepted shape is tightened in `linePredicateSignal`, which all three
-// consumers share, so the legacy and distributed paths move with it rather
-// than diverging. The review follow-ups narrowed the accepted shapes further:
-// only the `throw` KEYWORD counts (never a member property named `throw`),
-// and a non-keyword assertion name counts only in a call shape (never a
-// member read such as `expect.value`).
-// ---------------------------------------------------------------------------
-
-const PREDICATE_WINDOW_RADIUS = 3;
-const MAX_TERMS = 40;
-const MIN_TERM_LENGTH = 3;
-
-/** Generic connective/verb words that do not themselves name a concept the
- * enforcing code would reference by name — filtered out of candidate terms.
- * Domain nouns ("source", "target", "branch", "identity", "context", …) are
- * deliberately kept: they are exactly the words that compose real identifier
- * names like `sourceSha`/`targetBranch`. */
+/** Generic connective/verb words that never name a requirement's subject —
+ * filtered out of candidate subject terms by the scope machinery below
+ * (#957/#1346). Domain nouns ("source", "target", "branch", …) are
+ * deliberately kept: they are exactly the words that compose real
+ * requirement subjects like `sourceSha`/`targetBranch`. */
 const TERM_STOPWORDS: ReadonlySet<string> = new Set([
   "the", "a", "an", "and", "or", "of", "to", "from", "in", "on", "at", "for",
   "with", "by", "must", "shall", "should", "not", "no", "is", "are", "was",
@@ -366,930 +404,29 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Derive candidate code-ish terms from a requirement's text — every
- * surviving unigram and adjacent-word bigram (e.g. "source SHA" from
- * "...match the source SHA and target branch...") in concatenated,
- * snake_case, and camelCase forms — plus the model's own `symbol`, when it
- * supplied one. Bounded and lowercase; `enforcementPredicateFound` matches
- * case-insensitively regardless. */
-export function extractRequirementTerms(text: string, symbol?: string): string[] {
-  const rawWords = text.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
-  const keptIndex = new Set<number>();
-  rawWords.forEach((word, index) => {
-    if (word.length < 2) return;
-    if (TERM_STOPWORDS.has(word.toLowerCase())) return;
-    keptIndex.add(index);
-  });
+export type RequirementProofKind =
+  | "runtime_behavior"
+  | "structural_state"
+  | "test_required"
+  | "distributed"
+  | "external_state"
+  | "documentation";
 
-  const phrases: string[][] = [];
-  rawWords.forEach((word, index) => {
-    if (keptIndex.has(index)) phrases.push([word]);
-  });
-  for (let index = 0; index < rawWords.length - 1; index += 1) {
-    if (keptIndex.has(index) && keptIndex.has(index + 1)) {
-      phrases.push([rawWords[index] as string, rawWords[index + 1] as string]);
-    }
-  }
-  if (symbol && symbol.trim() !== "") phrases.push([symbol.trim()]);
+/** #1658: explicit security/trust-boundary vocabulary. Used ONLY as the
+ * applicability veto that keeps a linked-issue requirement in scope when the
+ * change shows no affected-boundary connection: false positives here are the
+ * safe direction (the row stays in scope and its proof obligation is decided
+ * by its own proof class), so the net is deliberately wider than the guard
+ * classifier. */
+const SECURITY_BOUNDARY_RE =
+  /\b(authoriz|authenticat|credential|secret|permissions?|privileges?|trust\s+boundar|allow-?list|deny-?list|sanitize|sanitiz|injection|xss|csrf|vulnerab|exploit|containment|redact|untrusted|path\s+traversal|symlink|privilege\s+escalation)\b/i;
 
-  const terms = new Set<string>();
-  for (const words of phrases) {
-    const lower = words.map((w) => w.toLowerCase());
-    terms.add(lower.join(""));
-    terms.add(lower.join("_"));
-    terms.add(lower[0] + lower.slice(1).map((w) => w[0]!.toUpperCase() + w.slice(1)).join(""));
-  }
-  return [...terms].filter((t) => t.length >= MIN_TERM_LENGTH).slice(0, MAX_TERMS);
+/** #1658: true when the requirement text carries explicit security/trust-
+ * boundary vocabulary and must never be narrowed out of scope by
+ * applicability. */
+export function securityBoundaryRequirement(text: string): boolean {
+  return typeof text === "string" && SECURITY_BOUNDARY_RE.test(text);
 }
-
-const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
-const GUARD_RE = /\b(if|unless)\b/i;
-const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
-/** `throw` is a keyword wherever the language has it, and a bare `throw` is
- * always a throw — but only as the KEYWORD. `throw` is not a reserved word in
- * every language (Python and Rust have no `throw` statement), so a member
- * property named `throw` (`state.throw`, `state?.throw`) is an ordinary name
- * whose value is copied, not enforcement. The lookbehind refuses a member
- * read; the word-boundary anchor keeps `throwing` from reading as an
- * assertion. The check runs on the UNBLANKED code view (see
- * `throwKeywordSignal`), because the operator blanker erases the `?.` of an
- * optional chain and would leave `state?.throw` looking like a bare keyword. */
-const THROW_KEYWORD_RE = /(?<![.\w$])throw\b/i;
-/** #1347: `reject`, `expect`, `invariant`, `assert` and `must…` are not
- * keywords but library/identifier names, so a bare occurrence is a NAME —
- * `const expect = state.requested;` is a copy, not enforcement. They count
- * only in a call shape, possibly through a suffix (`expect(…)`,
- * `assertEquals(…)`, `mustBePositive(…)`), or as a member CALL reached
- * through the bare name (`Assert.ok(…)`, `assert.deep.equal(…)`,
- * `invariant.call(…)`). A member READ with no call (`expect.value`,
- * `must.not`) copies a value and is refused. The suffix may NOT be followed
- * by a member dot: `expected.ceiling` / `rejected.length` are ordinary
- * English identifiers copying a value, not assertions. */
-const ASSERTION_CALL_RE =
-  /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*)+\()/i;
-const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
-
-/** Index of the quote that closes a span opened at `start`, honoring `\`
- * escapes; `-1` when the span is not closed on this line. */
-function findClosingQuote(line: string, start: number, quote: string): number {
-  for (let index = start + 1; index < line.length; index += 1) {
-    const char = line[index] as string;
-    if (char === "\\") {
-      index += 1;
-      continue;
-    }
-    if (char === quote) return index;
-  }
-  return -1;
-}
-
-/**
- * Cross-line span state for the code view (#1347): whether the previous line
- * left a block comment or a template literal open.
- *
- * A span that is still open on the next line is prose there too. A line-local
- * scan read `if (state.requested > ceiling)` or `mustNotExceed(…)` written
- * INSIDE a multi-line block comment or template literal as enforcement,
- * because only the line that opened the span was scrubbed. The state is
- * carried across the file's lines so an open span is a span on every line it
- * covers.
- */
-interface CodeSpanState {
-  inBlockComment: boolean;
-  inTemplate: boolean;
-  /** Inside a `${ … }` interpolation inside a template literal. */
-  inInterpolation: boolean;
-  /** Brace depth inside that interpolation. */
-  interpolationDepth: number;
-}
-
-function freshSpanState(): CodeSpanState {
-  return { inBlockComment: false, inTemplate: false, inInterpolation: false, interpolationDepth: 0 };
-}
-
-/** How many times `char` occurs in `text`. */
-function countChar(text: string, char: string): number {
-  let count = 0;
-  for (const candidate of text) {
-    if (candidate === char) count += 1;
-  }
-  return count;
-}
-
-/**
- * Scan template-literal content from `start` (just after the opening
- * backtick) to its closing backtick. Returns the index just past the closing
- * backtick, or `-1` when the template does not close on this line — the state
- * then carries the open span (and an open interpolation) onto the next line.
- *
- * The `${ … }` interpolation is skipped as a unit, so a nested template inside
- * it cannot terminate the outer template early, and the interpolation's own
- * braces are counted so a `}` inside it does not close it either. This is not a
- * parser: a `}` inside a NESTED template's text still ends the interpolation
- * early, which is a named residual.
- */
-function scanTemplateContent(line: string, start: number, state: CodeSpanState): number {
-  let index = start;
-  while (index < line.length) {
-    if (state.inInterpolation) {
-      const char = line[index] as string;
-      if (char === "{") {
-        state.interpolationDepth += 1;
-        index += 1;
-        continue;
-      }
-      if (char === "}") {
-        state.interpolationDepth -= 1;
-        index += 1;
-        if (state.interpolationDepth === 0) state.inInterpolation = false;
-        continue;
-      }
-      index += 1;
-      continue;
-    }
-    const char = line[index] as string;
-    if (char === "\\") {
-      index += 2;
-      continue;
-    }
-    if (char === "`") return index + 1;
-    if (char === "$" && line[index + 1] === "{") {
-      state.inInterpolation = true;
-      state.interpolationDepth = 1;
-      index += 2;
-      continue;
-    }
-    index += 1;
-  }
-  return -1;
-}
-
-/** The two code views of one line, produced by ONE scan: the RAW view (spans
- * removed, operators NOT blanked) and the BLANKED view (spans removed,
- * non-predicate operators blanked).
- *
- * One scan, so the two views can never disagree about where a span starts or
- * ends. A disagreement would let one view open a span the other does not, and
- * the span state carries across lines, so the divergence would swallow the
- * rest of the file — a false downgrade the shape check cannot afford. */
-interface LineCodeView {
-  raw: string;
-  blanked: string;
-}
-
-const EMPTY_LINE_VIEW: LineCodeView = { raw: "", blanked: "" };
-
-/**
- * The line with its string literals and comments removed (#1347), carrying the
- * open-span state across lines.
- *
- * An assertion-shaped word that survives only inside
- * `const note = 'must not exceed the ceiling';` or `// must never be exceeded`
- * is prose about the value, not enforcement of it, and a `>` inside a comment
- * is not a comparison. The scan is deliberately language-agnostic: it drops
- * `'…'`/`"…"`/`` `…` `` bodies (honoring `\` escapes; an unterminated quote
- * takes the rest of the line, and an unterminated backtick opens a template
- * span that CONTINUES on the next line), `//` line comments, `/* … *\/` blocks
- * (an unclosed one CONTINUES on the next line), a `#` comment at line start or
- * after whitespace (script languages — a `#` glued to an identifier is a
- * private field, `this.#ceiling > requested`, and must survive), and a
- * doc-comment continuation line whose first non-space character is `*`.
- *
- * Not a tokenizer, and the unmodeled cases are named rather than silently
- * wrong. Permissive (a shape survives that is not one): a regex literal
- * (`const gt = />/;`) and a `//` inside an unquoted URL pass through; a `#`
- * that is glued directly to code is NOT treated as a comment, because
- * `this.#ceiling > requested` is a private field and stripping from the `#`
- * would erase the real comparison — so an inline script-language comment
- * written without its space (`x = 1#if a > b`) still counts; and a template
- * whose opening backtick is preceded by an unpaired `/` in the code before it
- * on that line (a division, or a backtick inside a regex literal such as
- * `/[|;&<>`$]/`) is treated as line-local, because a stray backtick that
- * opened a file-wide template span would swallow the rest of the file — a
- * false downgrade is far worse than the leak this closes.
- * Strict (a real predicate is lost): a quote character inside a regex literal
- * (`if (/[="']/.test(key))`) opens a span that consumes the rest of the line,
- * and content inside a multi-line template literal is prose under the same
- * rule the single-line string literal already follows.
- */
-function scanCodeView(
-  line: string,
-  state: CodeSpanState,
-  blankGenerics: boolean,
-): LineCodeView {
-  let index = 0;
-  let resumed = false;
-  // Resume a block comment opened on an earlier line: everything up to its
-  // terminator is comment text, and the rest of the line is code again. The
-  // terminator is the FIRST `*/`, as the language reads it — a `*/` inside a
-  // string inside the comment ends the comment there, and the code after it
-  // is read as code.
-  if (state.inBlockComment) {
-    const close = line.indexOf("*/");
-    if (close < 0) return EMPTY_LINE_VIEW;
-    index = close + 2;
-    state.inBlockComment = false;
-    resumed = true;
-  }
-  // Resume a template literal opened on an earlier line.
-  if (state.inTemplate) {
-    const close = scanTemplateContent(line, 0, state);
-    if (close < 0) return EMPTY_LINE_VIEW;
-    index = close;
-    state.inTemplate = false;
-    resumed = true;
-  }
-  // A doc-comment continuation line carries no code. It is skipped only when
-  // no span was resumed: a resumed line can be the one that CLOSES the span,
-  // and its trailing code is real.
-  if (!resumed && line.trimStart().startsWith("*")) return EMPTY_LINE_VIEW;
-  let raw = "";
-  let blanked = "";
-  // The code between two spans is a RUN. The operator blanker runs per run,
-  // which is the same as running it over the whole line first: a blanked pair
-  // (`=>`, `->`, `?.`, `??`, `?:`) is two adjacent characters, so it never
-  // straddles a span, and one scan produces both views — they can never
-  // disagree about where a span starts or ends. The generic-argument-list
-  // blanker (#1355) reads the RAW run first, so the operator blanker cannot
-  // turn a span it refused into one it accepts (`x<y??z>w` refuses at the
-  // `??`; after `??` is blanked the `<`/`>` comparison must survive).
-  let run = "";
-  const flush = (): void => {
-    if (run === "") return;
-    raw += run;
-    blanked += blankNonPredicateOperators(
-      blankGenerics ? blankGenericArgumentLists(run) : run,
-    );
-    run = "";
-  };
-  for (; index < line.length; index += 1) {
-    const char = line[index] as string;
-    if (char === "/" && line[index + 1] === "/") break;
-    if (char === "/" && line[index + 1] === "*") {
-      const close = line.indexOf("*/", index + 2);
-      if (close < 0) {
-        state.inBlockComment = true;
-        break;
-      }
-      index = close + 1;
-      flush();
-      continue;
-    }
-    if (char === "#" && (index === 0 || /\s/.test(line[index - 1] as string))) break;
-    if (char === "'" || char === '"') {
-      const close = findClosingQuote(line, index, char);
-      if (close < 0) {
-        // An unterminated quote takes the rest of the line.
-        flush();
-        raw += " ";
-        blanked += " ";
-        break;
-      }
-      index = close;
-      flush();
-      raw += " ";
-      blanked += " ";
-      continue;
-    }
-    if (char === "`") {
-      const close = scanTemplateContent(line, index + 1, state);
-      if (close < 0) {
-        // The template continues onto the next line — unless an unpaired `/`
-        // precedes the backtick in the code before it on this line, which is
-        // the conservative read (a division, or a stray backtick inside a
-        // regex literal). The count covers the pending run too, so the slash
-        // that opens the regex is counted with the rest.
-        if (countChar(raw + run, "/") % 2 === 0) {
-          state.inTemplate = true;
-        } else {
-          state.inTemplate = false;
-          state.inInterpolation = false;
-          state.interpolationDepth = 0;
-        }
-        flush();
-        raw += " ";
-        blanked += " ";
-        break;
-      }
-      index = close - 1;
-      flush();
-      raw += " ";
-      blanked += " ";
-      continue;
-    }
-    run += char;
-  }
-  flush();
-  return { raw, blanked };
-}
-
-/** The code views of a file's lines. */
-interface FileCodeViews {
-  raw: readonly string[];
-  blanked: readonly string[];
-}
-
-function computeCodeViews(
-  lines: readonly string[],
-  blankGenerics: boolean,
-): FileCodeViews {
-  const raw: string[] = [];
-  const blanked: string[] = [];
-  const state = freshSpanState();
-  for (const line of lines) {
-    const view = scanCodeView(line, state, blankGenerics);
-    raw.push(view.raw);
-    blanked.push(view.blanked);
-  }
-  return { raw, blanked };
-}
-
-/**
- * Operator spellings that read as a predicate shape but enforce nothing
- * (#1347): an arrow function (`=>`, and the `->` spelling Ruby/PHP/C++ use),
- * an optional chain (`?.`), a nullish coalesce (`??`), and an optional
- * property/parameter marker (`?:`). None of them is a comparison in any
- * language this gate reads, so removing them cannot lose an enforcement shape.
- *
- * Blanking is ADJACENCY-only: the non-predicate markers `?.`, `??` and `?:`
- * are normally spelled with their follower glued to the `?`, while a ternary
- * `?` is normally separated from its branch by whitespace. Matching a spaced
- * `? .` instead would erase the `?` of a real ternary whose branch starts with
- * a dot — `flag ? .5 : 1`, or the Swift-style contextual case
- * `wide ? .large : .small` — downgrading genuine enforcement to non-predicate.
- * The named cost of this direction: the legal-but-unformatted spaced optional
- * chain `obj ? .value` reads as a ternary and survives (documented residual).
- *
- * It is applied to each CODE RUN — the text between spans — which is the same
- * as running it over the whole line FIRST: a blanked pair (`=>`, `->`, `?.`,
- * `??`, `?:`) is two adjacent characters, so it never straddles a span, and
- * one pair can never be split by a span. Running it before span removal is
- * what keeps a literal span from collapsing a real ternary
- * (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as a
- * marker. Blanking only ever removes operator characters, so it cannot
- * fabricate a quote or a comment for the scan that follows. The
- * generic-argument-list blanker (#1355) runs on the same run, before this one
- * and on the raw text: a complete generic span can never straddle a run
- * either, because its content refuses quote characters and comments are
- * removed before runs are formed.
- */
-function blankNonPredicateOperators(code: string): string {
-  return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
-}
-
-/**
- * #1355: a generic argument list (`Map<string, number>`) used to read as a
- * comparison — its `<`/`>` are the same characters `COMPARISON_RE` matches —
- * so an owner-anchored copy-only citation such as
- * `const ceiling = Map<string, number>;` passed as `met`. The list is blanked
- * before the comparison is read, but ONLY a span that closes as a type list:
- * the opening `<` must be GLUED to a name (`Map<`, never a spaced `a < b`),
- * a matching `>` must exist at angle depth 0, and every character between
- * must be type-like (identifiers, whitespace, commas, dots, `[`/`]`, and
- * single `|`/`&`). Anything else refuses the span and the `<`/`>` survive —
- * which is the direction the issue pins, because a real comparison never
- * closes a type-like span: the unspaced `a<b` has no matching `>`, `a<=b`
- * carries `=`, and `a<b && c>d`, `a<b || c>d`, `a<b ? c>d : e` refuse at the
- * operator, so both comparisons keep firing.
- *
- * What IS blanked is the copy-only citation shape: `Map<string, number>`,
- * nested `Map<string, Array<number>>`, unions `Array<string | number>`,
- * qualified names `Foo.Bar<number>`, array types `Array<T[]>` — type
- * annotations enforce nothing. The named residuals (#1355), all GLUED chains
- * whose span happens to look like a type list and is indistinguishable from
- * one without a parser: `a<b>c` (chained comparison), `a<b, c>d` (comma
- * operator), `a<b|c>d` (single-bar bitwise or — distinct from the `||` that
- * refuses the span), and a generic whose arguments are richer than bare
- * identifiers — object literals `{ a: string }`, string-literal keys,
- * function types, default type parameters — still refuse the span and keep
- * reading as a comparison. A shift chain is refused, not blanked:
- * `a<<b>>c` carries `<<`, which never occurs inside a valid argument list,
- * so the span refuses and both operators survive. A generic list that WRAPS
- * to the next line is not blanked either (the scan is run-scoped): its
- * opening line still passes as enforcement — the pre-existing behavior,
- * left in place because carrying an open-generic span across lines would
- * swallow the comparisons after an unclosed `<`, the same file-wide-span
- * failure the template-literal rule was measured against.
- *
- * Blanking can never add an ACCEPTED shape: it inserts spaces (never
- * juxtaposes characters), and a `<` in a blanked span had already fired
- * `COMPARISON_RE`, so the line was accepted before the blanker ran —
- * `expect<Foo>(x)` even reads as an assertion call after `Foo` is blanked,
- * but it was accepted as a comparison either way. The corpus measurement
- * (`generic_added_total`, pinned 0) and an exhaustive brute force over the
- * blanker's alphabet found no accept-status fabrication.
- */
-function blankGenericArgumentLists(code: string): string {
-  let blanked = "";
-  let index = 0;
-  while (index < code.length) {
-    const char = code[index] as string;
-    if (
-      char === "<" && index > 0
-      && /[A-Za-z0-9_$]/.test(code[index - 1] as string)
-    ) {
-      const close = matchingGenericListClose(code, index);
-      if (close >= 0) {
-        blanked += " ".repeat(close + 1 - index);
-        index = close + 1;
-        continue;
-      }
-    }
-    blanked += char;
-    index += 1;
-  }
-  return blanked;
-}
-
-/** Characters a generic argument list may carry besides its own `<`/`>`:
- * identifier text, whitespace, the argument separator, qualified-name dots,
- * array/index brackets, and the single union/intersection bars. `&&`, `||`
- * and every other operator (`= + - * / % ! ( ) { } ; : ?` quotes) marks the
- * span as an EXPRESSION, not a type list, and refuses the blank. */
-const GENERIC_LIST_CONTENT_RE = /[A-Za-z0-9_$\s,.[\]|&]/;
-
-/** The index of the `>` that closes the generic argument list opened at
- * `open` (a `<` glued to a name), or `-1` when the span is not a type list:
- * no angle-depth-0 close on this run, or a non-type-like character inside. */
-function matchingGenericListClose(code: string, open: number): number {
-  let depth = 0;
-  for (let index = open; index < code.length; index += 1) {
-    const char = code[index] as string;
-    if (char === "<") {
-      // `<<` is a left shift, never part of an argument list (`>>` IS — it
-      // closes nested generics — so only the doubled `<` refuses the span).
-      if (code[index + 1] === "<") return -1;
-      depth += 1;
-      continue;
-    }
-    if (char === ">") {
-      depth -= 1;
-      if (depth === 0) return index;
-      continue;
-    }
-    if (!GENERIC_LIST_CONTENT_RE.test(char)) return -1;
-    if ((char === "&" || char === "|") && code[index + 1] === char) return -1;
-  }
-  return -1;
-}
-
-/**
- * A line is predicate-shaped when its CODE (comments and string literals
- * removed) carries a comparison, a guard/logical operator, an assertion-style
- * call, or a string-match call — the shapes that actually enforce something,
- * as opposed to merely naming a value.
- *
- * #1347: applied to raw text the shape test fired on text that is not a
- * predicate at all — `>`/`<` matched arrow functions and generics, `?` matched
- * `?.` and `??`, and `throw|reject|assert…|expect|invariant|must…` matched
- * inside identifiers, comments and string literals. The owner-anchored path
- * (#1343) dropped the lexical subject half, so there the shape was the whole
- * anti-copy core and a copy-only citation passed as `met`. The artifacts are
- * excluded here, in the helper shared by every consumer (legacy,
- * owner-anchored and distributed), so no path accepts a shape another rejects.
- * Review follow-up: only the `throw` KEYWORD counts, never a member property
- * named `throw`; the non-keyword assertion names need their call shape — a
- * member READ (`expect.value`) copies a value, only a member CALL
- * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
- * exactly the copy this gate exists to refuse. #1355 closed the last artifact
- * #1347 named: a generic argument list (`Map<string, Ceiling>`) is blanked
- * before the comparison is read, while the unspaced real comparison `a<b`
- * survives — the comparisons this gate must keep never close a type-like
- * span, and the glued chains that do (`a<b>c`, `a<b|c>d`, `a<b, c>d`) are the
- * named residual of `blankGenericArgumentLists`.
- */
-/** Exported for the retained corpus measurement (#1347):
- * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
- * the repository's own sources so the false-downgrade measurement cannot
- * drift from the shipped logic. Not part of any action contract.
- *
- * The shape is read per FILE, because a span that is still open on the next
- * line is prose there too: the open block-comment and template-literal state
- * is carried across the file's lines, so a shape inside a multi-line span
- * never counts as enforcement on any line of that span. */
-export function filePredicateSignal(lines: readonly string[]): boolean[] {
-  const views = computeCodeViews(lines, true);
-  return lines.map((_, index) => predicateSignalIn(views, index));
-}
-
-/** Exported for the retained corpus measurement (#1355): the shipped
- * production pipeline with the generic-argument-list blanker disabled, so the
- * refinement's false-downgrade rate is measured against the production logic
- * itself rather than a re-implementation that could drift from it. Not part
- * of any action contract. */
-export function filePredicateSignalIgnoringGenericArgumentLists(
-  lines: readonly string[],
-): boolean[] {
-  const views = computeCodeViews(lines, false);
-  return lines.map((_, index) => predicateSignalIn(views, index));
-}
-
-/** The shipped production shape for one self-contained line — the single-line
- * view of the same file-level scan, so the two cannot disagree. */
-export function linePredicateSignal(rawLine: string): boolean {
-  return filePredicateSignal([rawLine])[0] === true;
-}
-
-/**
- * True when a line's code views carry an enforcement shape (#1347).
- *
- * The `throw` KEYWORD is read on the RAW view: a property named `throw`
- * (`state.throw`, `state?.throw`) is an ordinary name whose value is copied,
- * so a copy-only owner-anchored citation that reads one must not pass as
- * enforcement. The operator blanker erases the `?.` of an optional chain, so
- * on the blanked view `state?.throw` would read as a bare `throw` keyword; the
- * raw view keeps the dot that marks the member access, and the lookbehind in
- * `THROW_KEYWORD_RE` refuses it. The blanked view is used for every other
- * shape, where the erased operators are the artifacts being excluded.
- */
-function predicateSignalIn(views: FileCodeViews, index: number): boolean {
-  const raw = views.raw[index] ?? "";
-  const blanked = views.blanked[index] ?? "";
-  return COMPARISON_RE.test(blanked)
-    || GUARD_RE.test(blanked)
-    || LOGICAL_OR_TERNARY_RE.test(blanked)
-    || THROW_KEYWORD_RE.test(raw)
-    || ASSERTION_CALL_RE.test(blanked)
-    || MATCH_CALL_RE.test(blanked);
-}
-
-function windowLines<T>(lines: readonly T[], line1Based: number, radius: number): readonly T[] {
-  const start = Math.max(0, line1Based - 1 - radius);
-  const end = Math.min(lines.length, line1Based + radius);
-  return lines.slice(start, end);
-}
-
-/** True when a predicate-shaped line occurs near one of the given citations. */
-function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
-  for (const loc of locations) {
-    const signals = cache.predicateSignals(loc.file);
-    if (signals === null || loc.line > signals.length) continue;
-    if (windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS).some((signal) => signal)) return true;
-  }
-  return false;
-}
-
-/** #1343: true when a predicate-shaped line occurs ON the cited line itself
- * — not merely within a window around it. The owner-anchored exception drops
- * the lexical subject check, so the predicate is the whole anti-copy core
- * there: a copy-only cited line standing next to an unrelated comparison
- * must not pass, which is exactly the case the issue's acceptance
- * criterion ("a real predicate on the cited line") rules out. */
-function citedLinePredicateFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
-  for (const loc of locations) {
-    const signals = cache.predicateSignals(loc.file);
-    if (signals === null || loc.line < 1 || loc.line > signals.length) continue;
-    if (signals[loc.line - 1] === true) return true;
-  }
-  return false;
-}
-
-/**
- * True when at least one of the given (already location-valid) enforcement
- * locations has a term from `terms` and a predicate signal near each other,
- * within `PREDICATE_WINDOW_RADIUS` lines of the cited one.
- *
- * Historical rule (pre-#1566): the term and the predicate signal had to sit
- * on the SAME line. Production falsified that as a calibration bug rather
- * than an anti-copy feature: real enforcement routinely splits the two
- * halves across adjacent lines (`const openAt = unclosedFenceStart(text);`
- * carries the requirement's "fence" only inside a camelCase identifier and
- * is not predicate-shaped; the real comparison `if (openAt >= 0)` is the
- * next line and carries no requirement word — the #1562 review row
- * `req-a241097fa88c` at `src/publish/publish.ts:616` failed on exactly this
- * geometry, and no honest citation of the pair could ever pass). Two bounded
- * relaxations, each anchored by the citation:
- *
- * - the term line and the predicate line may differ by at most
- *   `TERM_PREDICATE_MAX_LINE_GAP` lines (both still inside the citation
- *   window) — but ONLY when the two halves are DETERMINISTICALLY LINKED:
- *   the term line must bind a local identifier (a `const`/`let`/`var`
- *   declaration, single-level destructuring included, read on the #1347
- *   BLANKED code view so a declaration in a comment or a string cannot
- *   bind) whose name appears in the predicate line's GOVERNING EXPRESSION
- *   — the parenthesized condition of a conditional/loop/switch keyword,
- *   else the whole blanked line — e.g. `const openAt =
- *   unclosedFenceStart(text);` followed by `if (openAt >= 0)`. A mention in
- *   a string, a comment, or a conditional body is not participation; a term
- *   line that binds nothing (an object-property copy, a comment, a bare
- *   expression) can never link a nearby predicate, so the historical
- *   same-line rule stands for it — fail closed. This is what keeps an
- *   unrelated comparison two lines from a copy line from certifying `met`
- *   (#1566 blocker);
- * - a term also matches as a camelCase/snake_case identifier segment
- *   (`unclosedFenceStart` carries "fence"), via `termMatchRegExp`.
- *
- * The line-level co-occurrence within the citation window is still what
- * rules out a term merely being named somewhere unrelated: a copy-only
- * cited line with no predicate in its window still fails (#854), and a
- * comparison far from any requirement word still fails. The relaxation is
- * strictly wider than same-line but far narrower than file-level search,
- * which would pass #854's own file.
- *
- * When `terms` is empty (the requirement text yielded no usable candidate —
- * e.g. it is all stopwords/short words), the predicate check is skipped and
- * location validity alone stands: a documented limitation, not a silent
- * pass-everything default, since this only fires when term extraction
- * itself found nothing to check.
- *
- * Note the asymmetry the two halves read: the shape test sees the scrubbed
- * code view (#1347) while the term test matches the raw line AND its
- * segmented view, so a genuine predicate followed by `// ceiling` on the
- * same line counts. Pre-#1347 behavior on the term half, kept deliberately:
- * a requirement word a reviewer quotes in a comment beside the real
- * comparison is evidence of the citation, not the copy, this gate exists to
- * refuse.
- */
-export const TERM_PREDICATE_MAX_LINE_GAP = 2;
-
-/** Split camelCase / snake_case identifier boundaries into spaces so a
- * requirement term that surfaces only inside an identifier
- * (`unclosedFenceStart`, `MAX_COMMENT_BYTES`) is visible to the `\b`-bounded
- * term match. Runs on one source line and, with `termMatchRegExp`, on the
- * term list itself. */
-function splitIdentifierSegments(text: string): string {
-  return text
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Za-z0-9])_([A-Za-z0-9])/g, "$1 $2");
-}
-
-/** The term-match alternation for `enforcementPredicateFound`: every term in
- * its raw form (the historical bare-word match on the raw line) plus its
- * segmented form (`sourceSha` → "source Sha") for the segmented line view,
- * so compound identifiers match their spaced segments too. Deduplicated;
- * bounded by the extractor's own term cap. */
-function termMatchRegExp(terms: readonly string[]): RegExp {
-  const alternatives: string[] = [];
-  for (const term of terms) {
-    if (typeof term !== "string" || term === "") continue;
-    const raw = escapeRegExp(term);
-    if (!alternatives.includes(raw)) alternatives.push(raw);
-    const segmented = escapeRegExp(splitIdentifierSegments(term)).replace(/ /g, "\\s+");
-    if (!alternatives.includes(segmented)) alternatives.push(segmented);
-  }
-  return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "i");
-}
-
-/** #1566 blocker: the part of a BLANKED predicate line the linkage check
- * reads. A conditional/loop/switch keyword yields its parenthesized
- * condition (first `if(`/`while(`/`for(`/`switch(` with a balanced close);
- * throw/assert/match/comparison/ternary shapes have no separate body, so
- * the whole blanked line stands. Reading the condition alone is what keeps
- * an identifier that only appears in the conditional BODY — or in a string
- * or comment, which the blanked view has already removed — from certifying
- * a link it does not participate in. */
-function governingPredicateText(blankedLine: string): string {
-  const keyword = /\b(?:if|while|for|switch)\s*\(/.exec(blankedLine);
-  if (keyword === null) return blankedLine;
-  const open = keyword.index + keyword[0].length - 1;
-  let depth = 0;
-  for (let index = open; index < blankedLine.length; index += 1) {
-    const ch = blankedLine[index];
-    if (ch === "(") depth += 1;
-    else if (ch === ")") {
-      depth -= 1;
-      if (depth === 0) return blankedLine.slice(open + 1, index);
-    }
-  }
-  return blankedLine.slice(open + 1);
-}
-
-/** #1566 blocker: the local identifiers one source line BINDS — read on the
- * #1347 BLANKED code view, so a declaration written inside a comment or a
- * string cannot bind — and restricted to the DECLARATIONS THAT CARRY THE
- * REQUIREMENT'S TERM: a line may bind several identifiers
- * (`const sourceSha = ctx.sourceSha; const marker = true;`), and a nearby
- * predicate may only link through the term-bearing declaration's bound
- * name, never through an unrelated sibling's. A declarator is term-bearing
- * when the term matches its LHS (including a destructuring key that is
- * renamed away: `fenceStart: openAt` still carries "fence") or its
- * initializer, on the raw or the segment-split view. In a destructuring
- * list a term riding a SPECIFIC entry (its key or its bound name) anchors
- * only that entry's binding — a sibling binding never links. Binding
- * names: plain `const`/`let`/`var` declarations and single-level
- * destructuring (`const { a, b: c } =`, `const [x, y = 1] =`; rename and
- * default included, so the binding name survives). Everything else binds
- * nothing: an object-property entry (`sourceSha: ctx.sourceSha`), a bare
- * expression. The split-line predicate rule links a predicate to such a
- * declaration whose bound name the predicate's governing expression uses;
- * an unestablishable link fails closed to the historical same-line rule. */
-const MAX_BOUND_IDENTIFIERS = 8;
-const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
-
-function topLevelIndex(text: string, ch: string): number {
-  let depth = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    const current = text[index];
-    if (current === "(" || current === "[" || current === "{") depth += 1;
-    else if (current === ")" || current === "]" || current === "}") depth -= 1;
-    else if (current === ch && depth === 0) return index;
-  }
-  return -1;
-}
-
-function topLevelEqualsIndex(text: string): number {
-  let depth = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    const current = text[index];
-    if (current === "(" || current === "[" || current === "{") depth += 1;
-    else if (current === ")" || current === "]" || current === "}") depth -= 1;
-    else if (current === "=" && depth === 0 && text[index + 1] !== "=" && text[index - 1] !== "="
-      && text[index - 1] !== "<" && text[index - 1] !== ">" && text[index + 1] !== ">") return index;
-  }
-  return -1;
-}
-
-function boundNamesFromLhs(lhs: string): Array<{ key: string | null; name: string }> {
-  const trimmed = lhs.trim();
-  if (BOUND_IDENTIFIER_RE.test(trimmed)) return [{ key: null, name: trimmed }];
-  const list = /^\{([\s\S]*)\}$/.exec(trimmed) ?? /^\[([\s\S]*)\]$/.exec(trimmed);
-  if (list === null) return [];
-  const entries: Array<{ key: string | null; name: string }> = [];
-  for (const part of list[1]!.split(",")) {
-    const name = (part.includes(":") ? part.slice(part.indexOf(":") + 1) : part).split("=")[0]!.trim().replace(/^\.\.\./, "");
-    if (!BOUND_IDENTIFIER_RE.test(name)) continue;
-    const key = part.includes(":") ? part.slice(0, part.indexOf(":")).trim() : null;
-    if (!entries.some((entry) => entry.name === name)) entries.push({ key, name });
-  }
-  return entries;
-}
-
-function boundTermBearingIdentifiers(blankedLine: string, termRe: RegExp): string[] {
-  const out: string[] = [];
-  for (const keyword of blankedLine.matchAll(/\b(?:const|let|var)\b/g)) {
-    if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
-    const statementStart = keyword.index + keyword[0].length;
-    const semi = topLevelIndex(blankedLine.slice(statementStart), ";");
-    const statement = blankedLine.slice(statementStart, semi === -1 ? blankedLine.length : statementStart + semi);
-    // Split the declarator list at top-level commas: destructuring braces
-    // and call parens hold their commas above depth 0, so `const { a, b: c }
-    // = f(x, y)` stays one declarator while `const a = x, b = y` splits.
-    const declarators: string[] = [];
-    let depth = 0;
-    let current = "";
-    for (const ch of statement) {
-      if (ch === "(" || ch === "[" || ch === "{") depth += 1;
-      else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
-      if (ch === "," && depth === 0) {
-        declarators.push(current);
-        current = "";
-        continue;
-      }
-      current += ch;
-    }
-    declarators.push(current);
-    for (const declarator of declarators) {
-      if (out.length >= MAX_BOUND_IDENTIFIERS) break;
-      const eq = topLevelEqualsIndex(declarator);
-      if (eq === -1) continue;
-      const lhs = declarator.slice(0, eq);
-      const init = declarator.slice(eq + 1);
-      const names = boundNamesFromLhs(lhs);
-      if (names.length === 0) continue;
-      // A term that rides a SPECIFIC entry (its destructuring key or its
-      // bound name) anchors only that entry's binding. A term that rides
-      // only the SHARED initializer anchors a binding only when the
-      // declarator is unambiguous — with several sibling bindings the
-      // initializer cannot say which one carries the requirement, so the
-      // declarator links nothing (fail closed, #1566 review).
-      const initTermBearing = termRe.test(init) || termRe.test(splitIdentifierSegments(init));
-      const termBearingEntries = names.filter((entry) =>
-        entry.key !== null
-          ? termRe.test(entry.key) || termRe.test(splitIdentifierSegments(entry.key))
-            || termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name))
-          : termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name)));
-      const linkable = termBearingEntries.length > 0
-        ? termBearingEntries
-        : initTermBearing && names.length === 1
-          ? names
-          : [];
-      for (const entry of linkable) {
-        if (out.length >= MAX_BOUND_IDENTIFIERS) break;
-        if (!out.includes(entry.name)) out.push(entry.name);
-      }
-    }
-  }
-  return out;
-}
-
-export function enforcementPredicateFound(
-  locations: readonly TraceLocation[],
-  terms: readonly string[],
-  cache: FileTextCache,
-): boolean {
-  if (terms.length === 0) return true;
-  const termRe = termMatchRegExp(terms);
-  for (const loc of locations) {
-    const lines = cache.lines(loc.file);
-    const signals = cache.predicateSignals(loc.file);
-    if (lines === null || signals === null || loc.line > lines.length) continue;
-    const views = cache.codeViews(loc.file);
-    if (views === null) continue;
-    const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
-    const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
-    const blankedWindow = windowLines(views.blanked, loc.line, PREDICATE_WINDOW_RADIUS);
-    const termLineIndexes: number[] = [];
-    for (const [index, rawLine] of window.entries()) {
-      if (termRe.test(rawLine) || termRe.test(splitIdentifierSegments(rawLine))) termLineIndexes.push(index);
-    }
-    if (termLineIndexes.length === 0) continue;
-    // Bindings are per term line, read from the BLANKED view (a declaration
-    // in a comment or a string cannot bind) and restricted to the
-    // term-bearing declarations, computed once: the split-line link below is
-    // the only consumer.
-    const boundByTermLine = new Map<number, string[]>();
-    for (const termIndex of termLineIndexes) {
-      const bound = boundTermBearingIdentifiers(blankedWindow[termIndex] ?? "", termRe);
-      if (bound.length > 0) boundByTermLine.set(termIndex, bound);
-    }
-    for (const [index, signal] of windowSignals.entries()) {
-      if (signal !== true) continue;
-      // Historical rule: the term and the predicate on the SAME line.
-      if (termLineIndexes.includes(index)) return true;
-      // #1566 blocker: a NEARBY predicate only counts when the term line
-      // binds a local identifier that the predicate's GOVERNING EXPRESSION
-      // references — read on the blanked view, so a mention in a string, a
-      // comment, or a conditional body cannot certify a link. Co-occurrence
-      // alone proves nothing: an unrelated comparison two lines from a
-      // term-bearing copy line stays `unverifiable` (fail closed).
-      const governing = governingPredicateText(blankedWindow[index] ?? "");
-      const linked = termLineIndexes.some((termIndex) => {
-        if (Math.abs(termIndex - index) > TERM_PREDICATE_MAX_LINE_GAP) return false;
-        const bound = boundByTermLine.get(termIndex);
-        if (bound === undefined) return false;
-        return bound.some((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(governing));
-      });
-      if (linked) return true;
-    }
-  }
-  return false;
-}
-
-/** #1343: the declared owner globs for one requirement — the top-level
- * `owners` of every rule whose `match` tokens all appear in its text. The
- * rules come from the base-ref-trusted repository config (never the PR
- * head), so "this file owns that requirement" is maintainer-declared, not
- * inferred from the model's citation. Deduplicated; bounded by the config's
- * own rule/owner caps. */
-function declaredOwnerGlobsFor(text: string, ownership: readonly RequirementOwnership[] | undefined): string[] {
-  const globs: string[] = [];
-  for (const rule of ownership ?? []) {
-    if (!rule || !ruleMatchesRequirement(rule, text) || !Array.isArray(rule.owners)) continue;
-    for (const pattern of rule.owners) {
-      if (typeof pattern === "string" && pattern !== "" && !globs.includes(pattern)) globs.push(pattern);
-    }
-  }
-  return globs;
-}
-
-/** #1343: the `met` predicate gate for a narrow requirement's enforcement
- * citations. A location-valid citation into a declared owner of this
- * requirement proves the subject by declaration, so the lexical term
- * co-occurrence is dropped there while the predicate requirement is kept:
- * the CITED LINE itself must be predicate-shaped (a copy-only cited line
- * beside an unrelated predicate does not pass — the predicate is the whole
- * anti-copy core once the lexical half is gone). A citation that is neither a
- * declared owner nor carries the requirement's vocabulary still fails, so
- * the boundary does not become fail-open; the lexical check is unchanged for
- * every other shape (including the documented empty-terms skip).
- *
- * #1566: owner-matched citations never fall through to the proximity-
- * relaxed lexical path below — the owner rule's predicate-on-the-cited-line
- * is the whole anti-copy core there, and a neighbouring comparison within
- * the relaxed term/predicate gap must not rescue a copy-only cited line in
- * a declared owner file. Only non-owner citations take the lexical path. */
-function enforcementPredicateSatisfied(
-  validLocations: readonly TraceLocation[],
-  terms: readonly string[],
-  ownerGlobs: readonly string[],
-  cache: FileTextCache,
-): boolean {
-  if (ownerGlobs.length > 0) {
-    const ownerCitations = validLocations.filter((loc) => citationMatchesPatterns(loc, ownerGlobs));
-    if (ownerCitations.length > 0 && citedLinePredicateFound(ownerCitations, cache)) return true;
-    const nonOwnerCitations = validLocations.filter((loc) => !citationMatchesPatterns(loc, ownerGlobs));
-    return enforcementPredicateFound(nonOwnerCitations, terms, cache);
-  }
-  return enforcementPredicateFound(validLocations, terms, cache);
-}
-
-// ---------------------------------------------------------------------------
-// #985: deterministic proof classification.
-//
-// #874/#854 require a `met` to carry a real runtime predicate plus a
-// regression test. That is right for BEHAVIOURAL requirements, but wrong for
-// requirements whose truth is a property of repository STATE: "`.dockerignore`
-// must not exclude `assets/`" is provable by reading the checkout, and
-// withholding approval because it has no dedicated test is a false gap.
-//
-// The classification is derived from the ledger requirement text by THIS
-// module — never from a model-supplied field. The model supplies citations
-// only, so it cannot authorise itself out of the test requirement. The
-// classifier is deliberately narrow and fail-closed: anything it cannot parse
-// unambiguously falls through to `runtime_behavior`, the strict path.
-// ---------------------------------------------------------------------------
-
-export type RequirementProofKind = "runtime_behavior" | "structural_state" | "test_required" | "distributed" | "external_state" | "documentation";
 
 /** Behavioural markers: if the requirement describes what the code DOES (when
  * it fails, what it compares, what it loads), its truth is not a property of
@@ -3025,11 +2162,15 @@ export interface RequirementTraceScope {
  * test classes are decided by path shape only — Markdown/YAML/docs directories
  * are never blanket-exempted: a security runbook stays material without being
  * the exact standards source or a declared owner, and a requirement-named
- * runbook stays in scope through (c). Linked-issue requirements and entries
- * without provenance are untouched (always in scope — fail closed), and so is
- * a mixed-provenance requirement (any non-standards source keeps the old
- * rule). The narrowing also needs changed-path evidence: when `paths` is
- * missing or empty the lexical match keeps its full weight (fail closed).
+ * runbook stays in scope through (c). #1658: linked-issue requirements no
+ * longer sit unconditionally in scope on provenance alone — with attributable
+ * change evidence they narrow out exactly like standards rows (subject terms,
+ * declared owner, requirement-named path, trusted policy file), except when
+ * their text carries explicit security/trust-boundary vocabulary
+ * (`securityBoundaryRequirement`), which never narrows away. Entries without
+ * provenance are untouched (always in scope — fail closed). The narrowing
+ * also needs changed-path evidence: when `paths` is missing or empty the
+ * lexical match keeps its full weight (fail closed).
  * Proof validation, blocker classification, and the approval/attestation
  * gates are unchanged; the out-of-scope reason records which boundary
  * signals the change missed, so the `not_applicable` row is explainable from
@@ -3101,17 +2242,38 @@ export function requirementTraceScope(
         boundaryNarrowed = true;
       }
     }
-    if (
-      changed === undefined || sources === null || sources.includes("linked_issues")
-      || touched || owned || sourceTouched || namedPathTouched || policyTouched
-    ) {
+    // #1658: linked-issue provenance alone no longer pins every acceptance
+    // sentence to a mandatory current-change proof obligation. A linked row
+    // (including a mixed-provenance one) narrows out of scope only when the
+    // change evidence is attributable AND the change shows no affected-
+    // boundary connection for THIS requirement (subject terms in changed
+    // lines, a declared owner path, a requirement-named path, or the trusted
+    // policy file) AND the text carries no explicit security/trust-boundary
+    // vocabulary. Without attributable evidence the row stays in scope —
+    // fail closed. Non-linked rows keep the #1600 rule unchanged.
+    const linked = sources !== null && sources.includes("linked_issues");
+    const boundarySignals = touched || owned || sourceTouched || namedPathTouched || policyTouched;
+    let entryInScope: boolean;
+    if (changed === undefined || sources === null) {
+      entryInScope = true;
+    } else if (linked) {
+      entryInScope = boundarySignals
+        || !attributed
+        || paths.length === 0
+        || securityBoundaryRequirement(entry.text);
+    } else {
+      entryInScope = boundarySignals;
+    }
+    if (entryInScope) {
       scope.inScope.push(entry);
     } else {
       scope.outOfScope.push({
         entry,
-        reason: boundaryNarrowed
-          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
-          : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        reason: linked
+          ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
+          : boundaryNarrowed
+            ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
+            : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
       });
     }
   }
@@ -3124,10 +2286,6 @@ interface RawClaim {
   enforcement?: unknown;
   test?: unknown;
   reason?: unknown;
-  /** Optional model-supplied identifier name for the enforced concept (e.g.
-   * "sourceSha") — folded into the requirement's term set for the
-   * enforcement-predicate check below. */
-  symbol?: unknown;
 }
 
 /** Records an artifact-level parser/validation diagnostic. The final slot of
@@ -3138,128 +2296,6 @@ function recordArtifactError(errors: string[], message: string): boolean {
   if (errors.length >= MAX_ARTIFACT_ERRORS - 1) return false;
   errors.push(message);
   return true;
-}
-
-/** #1044: caps for the bounded `requirement_trace_repair` summary. */
-export const MAX_TRACE_REPAIR_SUMMARY_IDS = 48;
-export const MAX_TRACE_REPAIR_SUMMARY_ID_CHARS = 80;
-export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
-
-/** #1145: bounded summary of the native loop's in-conversation
- * evidence-repair continuation (the harness's own
- * `trace_repair_continuation` record), folded into the #1044 repair summary
- * so the persisted artifact shows whether the loop itself attempted the
- * gap-repair round. Defined here (not in `requirements/trace-gap-probe.ts`)
- * because that module imports from this one — an import in the other
- * direction would cycle. */
-export interface TraceGapContinuationSummary {
-  /** `continued` | `continued_trace_only` | `skipped_no_budget` |
-   * `skipped_probe_error` | `skipped_refresh_failed` | `skipped_wire_unsafe`
-   * (harness-owned enum; `skipped_refresh_failed` names a failed repair round
-   * — the #1503 trace-only turn replaced the full-verdict refresh the name
-   * refers to). #1552: `continued_trace_only` marks a repair round that
-   * executed no tool call but whose trace-only serialization turn still ran
-   * against the conversation's already-gathered evidence (the #1539 shape);
-   * `skipped_wire_unsafe` marks a round whose trace instruction would have
-   * rendered as an adjacent user turn. The historical `skipped_no_evidence`
-   * value can appear only in artifacts written before #1552. */
-  outcome: string;
-  unresolved_ids: string[];
-  /** #1503: the trace-only repair turn merged at least one claim into the
-   * standing verdict artifact (`claims_merged` is the count). */
-  trace_claims_merged: boolean;
-  claims_merged: number;
-  /** #1552: optional bounded fields forwarded from the harness's
-   * `trace_repair_continuation` record when present — the repair round's
-   * sanitized stop reason and executed-call count, the DEDICATED repair
-   * allowance that remained after the round (`repair_requests_remaining`),
-   * and why the trace-only turn was suppressed (`trace_skipped_reason`:
-   * `wire_unsafe`). Absent on records that never carry them (probe errors,
-   * budget skips), so old artifacts keep their shape. */
-  stop_reason?: string;
-  tool_calls?: number;
-  repair_requests_remaining?: number;
-  trace_skipped_reason?: string;
-}
-
-/** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached
- * to the persisted artifact as `requirement_trace_repair` and handed to
- * `validateRequirementTrace` so the published section can distinguish "the
- * reviewer never emitted a claim" from "the bounded repair pass ran and
- * failed". For attempted runs `missing_ids` holds the ids STILL missing after
- * the pass (recomputed from post-merge coverage), so membership there is
- * exactly "the retry did not fill this id". Diagnostics-only: nothing here
- * changes a verdict, and the `error` text never reaches the rendered
- * markdown. Defined here (not in `requirements/trace-repair.ts`) because that
- * module already imports from this one — an import in the other direction
- * would cycle. */
-export interface RequirementTraceRepairOutcome {
-  attempted: boolean;
-  /** #1504: `suppressed_native_loop` records the documented no-op — the
-   * native loop's own trace-only repair already merged parseable claims into
-   * this artifact, so the standalone pass must not fire merely because some
-   * rows remain unresolved. */
-  outcome: "no_missing_ids" | "skipped_by_gate" | "suppressed_native_loop" | "no_claims" | "errored" | "timeout" | "merged";
-  missing_ids: string[];
-  claims: number;
-  status?: string;
-  error_kind?: string | null;
-  error?: string | null;
-  diff_clipped?: boolean;
-  /** #1504: the tier whose profile the repair used (or would have used) —
-   * `primary` | `fallback` | `smart`. The repair lane is the tier that
-   * produced the authoritative accepted review artifact, never a lane already
-   * known terminal for the run; recorded on every outcome so a wrong-lane
-   * routing cannot regress invisibly. Enum-validated, never provider text. */
-  route?: string;
-  /** #1504: why the standalone pass was invoked or suppressed —
-   * `no_native_loop_repair` (tools-off / no native-loop repair attempt for
-   * this artifact), `native_loop_no_trace_claims` (the loop's repair produced
-   * no mergeable trace claims), `native_loop_repair_merged_claims`
-   * (suppressed: the loop's merge completed the repair), or
-   * `native_loop_repair_left_unresolved` (the loop's merge left unresolved
-   * repair targets, so the bounded fallback recovered). Enum-validated, never
-   * provider text. */
-  invocation_reason?: string;
-  /** #1504: the first attempt's serialization-failure class when the single
-   * bounded retry fired — `empty` (HTTP success, no extractable content) or
-   * `malformed` (unparsable JSON/shape); null when no retry was needed. */
-  first_failure_class?: string | null;
-  /** #1504: whether the one bounded serialization retry was used. */
-  serialization_retry?: boolean;
-  /** #1502 follow-up: whether the one bounded validator-feedback retry fired
-   * (the pass's returned claims were deterministically rejected and the model
-   * was asked once to fix the citations). Shares the pass's one-retry budget
-   * with the serialization retry — at most one retry of either class fires. */
-  validation_retried?: boolean;
-  /** #1502 follow-up: the first attempt's per-id deterministic rejection
-   * labels (joined "; ", sanitized and capped) when the validation retry
-   * fired; absent otherwise. Diagnostics only — the labels are the
-   * validator's own note enums, never model prose. */
-  validation_rejections?: Record<string, string>;
-  /** #1145: present when the native loop's own continuation ran or was
-   * skipped (absent for runs where no probe fired at all). */
-  continuation?: TraceGapContinuationSummary;
-  /** #1552: the targeted rows' PRE-repair repair-state classification
-   * (`missing` | `insufficient_claim` | `evidence_unverified`), keyed by
-   * sanitized id and capped like `missing_ids` — present-but-`unverifiable`
-   * rows the pass targeted are visible here even though they can never
-   * appear in `missing_ids` (they carry a row). Named "targeted" because the
-   * states describe the rows as the pass FOUND them, not after the merge
-   * (the post-merge state lives in the trace section and `missing_ids`).
-   * Enum-validated; absent when the caller did not classify rows. */
-  targeted_row_states?: Record<string, string>;
-  /** #1552: rows the merge appended or replaced — the
-   * parsed-claim count alone can overstate the merge. Absent when the pass
-   * returned no claims or changed nothing. */
-  rows_merged?: number;
-}
-
-/** #1044: the summary's `missing_ids` are sanitized (control characters and
- * backticks stripped, length-capped); sanitize a ledger id the same way so
- * membership matching cannot silently diverge. */
-function traceRepairIdKey(id: string): string {
-  return id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
 }
 
 /**
@@ -3292,15 +2328,17 @@ export function validateRequirementTrace(
      * unavailability) so the author sees what the review could and could not
      * observe; it never changes a disposition. */
     ciState?: string | null | undefined;
-    /** #1044: the bounded #959 repair-pass summary, when the pass was in
-     * scope for this run — lets a `claim === undefined` row record that the
-     * repair also ran (and still left this id unclaimed). */
-    traceRepair?: RequirementTraceRepairOutcome | undefined;
   } = {},
 ): RequirementTraceArtifact {
   const { inScope, outOfScope } = requirementTraceScope(ledger, changed, context);
   if (inScope.length === 0 && outOfScope.length === 0) {
-    return { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] };
+    return {
+      version: ARTIFACT_VERSION,
+      rows: [],
+      summary: { confirmed_unmet: [], unmet_claimed: [], unresolved_material: [], unresolved_advisory: [], total_rows: 0 },
+      incomplete: false,
+      errors: [],
+    };
   }
 
   // #1062 review follow-up: provenance lookup so a pending advisory can state
@@ -3341,6 +2379,10 @@ export function validateRequirementTrace(
 
   const rows: RequirementTraceRow[] = [];
   let incomplete = false;
+  const confirmedUnmetIds: string[] = [];
+  const unmetClaimedIds: string[] = [];
+  const unresolvedMaterialIds: string[] = [];
+  const unresolvedAdvisoryIds: string[] = [];
 
   for (const entry of inScope) {
     const claim = claimsById.get(entry.id);
@@ -3348,9 +2390,11 @@ export function validateRequirementTrace(
     const distributedSet = distributedGroupsForText(entry.text, context.ownership);
     const distributedGroups = distributedSet.groups;
     const isDistributed = distributedGroups.length >= MIN_DISTRIBUTED_GROUPS;
-    // #985: the deterministic proof shape for this requirement, derived from
-    // its text (never from a model field) — recorded on the row so the
-    // decision is explainable from the artifact alone.
+    // #985/#1658: the deterministic proof shape for this requirement, derived
+    // from its text (never from a model field) — recorded on the row so the
+    // decision is explainable from the artifact alone. The narrow mechanical
+    // classes (identity comparison, guard) keep the #854 anti-copy predicate
+    // check; ordinary runtime behavior does not (#1658).
     const structural = structuralStateClaim(entry.text);
     const requiresTest = explicitlyRequiresTest(entry.text);
     // #1062: a non-code proof domain only when the row is NOT a distributed
@@ -3366,6 +2410,13 @@ export function validateRequirementTrace(
           : requiresTest
             ? "test_required"
             : "runtime_behavior";
+    // #1658: the mechanically DECIDABLE classes — the requirement's truth is
+    // re-derived from current state or from trusted declaration. Unresolved
+    // rows in these classes are material-relevant; unresolved ordinary
+    // runtime rows are advisory-relevant. `documentation` is decidable too
+    // (a literal positively present in the obligation's own trusted source).
+    const mechanicalProof = proof === "structural_state" || proof === "distributed"
+      || proof === "documentation";
     let disposition: string;
     let enforcement: TraceLocation[];
     let test: TraceLocation[];
@@ -3402,19 +2453,6 @@ export function validateRequirementTrace(
       test = [];
       reason = "";
       notes.push("not-traced-by-reviewer");
-      // #1044: the summary's `missing_ids` are the ids the pass did NOT fill,
-      // recomputed from the POST-merge coverage — an id here (on an attempted
-      // run) is exactly an id the retry also left unclaimed, so the render can
-      // distinguish "the reviewer never emitted a claim" from "the bounded
-      // repair pass ran and failed for this id". Non-attempted summaries
-      // (gate kept the pass off) never carry the note.
-      if (
-        context.traceRepair !== undefined
-        && context.traceRepair.attempted === true
-        && context.traceRepair.missing_ids.includes(traceRepairIdKey(entry.id))
-      ) {
-        notes.push("trace-repair-ran-no-claims");
-      }
     } else {
       const rawDisposition = typeof claim.disposition === "string" ? claim.disposition.toLowerCase() : null;
       disposition = rawDisposition !== null && TRACE_DISPOSITIONS.includes(rawDisposition) ? rawDisposition : "unverifiable";
@@ -3422,7 +2460,6 @@ export function validateRequirementTrace(
       enforcement = parseLocations(claim.enforcement);
       test = parseLocations(claim.test);
       reason = capReason(claim.reason);
-      const symbol = typeof claim.symbol === "string" ? claim.symbol : undefined;
 
       if (disposition === "not_applicable" || disposition === "unmet" || disposition === "unverifiable") {
         // Every disposition other than `met` is a claim the reviewer cannot
@@ -3435,34 +2472,19 @@ export function validateRequirementTrace(
         }
       } else if (disposition === "met") {
         if (isDistributed && !distributedSet.overflow) {
+          // #1658: seam citations are PROVENANCE, not a certification gate —
+          // an uncovered declared seam leaves the row unresolved (exposed to
+          // the final-disposition layer, never a synthesized finding or a
+          // verdict flip). The universal per-seam regression-test demand and
+          // the lexical predicate check are gone with the proof-shape system.
           const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
           const enforcementMatches = matchCitationsToGroups(distributedGroups, validEnforcementLocations, (group) => group.owners);
           const uncoveredEnforcement = distributedGroups.filter((group) => !enforcementMatches.has(group.name));
           for (const group of uncoveredEnforcement) {
             notes.push(`distributed-enforcement-group-uncovered:${group.name}`);
           }
-
-          const validTests = test.filter((loc) => isTestPath(loc.file) && locationValid(loc, cache));
-          const testMatches = matchCitationsToGroups(distributedGroups, validTests, (group) => group.tests);
-          for (const group of distributedGroups) {
-            if (!testMatches.has(group.name)) notes.push(`distributed-test-group-uncovered:${group.name}`);
-          }
-          if (validTests.length === 0) notes.push("distributed-test-location-uncovered");
-          if (uncoveredEnforcement.length > 0 || distributedGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
+          if (uncoveredEnforcement.length > 0) {
             disposition = "unverifiable";
-          } else {
-            // #1343: every matched citation is already anchored to a trusted
-            // declared seam surface (the group owner globs from base-ref
-            // config), so the subject is established by declaration and the
-            // lexical term co-occurrence is dropped — the predicate alone
-            // carries anti-copy. A seam matched only by value-copying lines
-            // still fails (predicate required), and citations outside every
-            // declared seam never count toward coverage at all.
-            const matchedLocations = [...enforcementMatches.values()];
-            if (!predicateSignalFound(matchedLocations, cache)) {
-              disposition = "unverifiable";
-              notes.push("enforcement-location-copies-without-comparing");
-            }
           }
         } else if (!isDistributed) {
           if (structural !== null) {
@@ -3486,25 +2508,22 @@ export function validateRequirementTrace(
               notes.push("downgraded-no-valid-test-location");
             }
           } else {
-            // runtime_behavior / test_required: full narrow trace required — a
-            // valid enforcement location AND a valid test location, then a
-            // predicate near a requirement term (#854).
+            // #1658: ordinary runtime behavior — the proof is the
+            // location-valid enforcement citation itself. The universal
+            // lexical-predicate demand and the universal test citation
+            // demand are REMOVED: rendering/reporting/wiring/counter/
+            // config-copy behavior is adequately evidenced by a real
+            // citation, and demanding an artificial comparison predicate
+            // fabricated false incompletes (#1643). A test citation is
+            // demanded only when the requirement's own text explicitly
+            // demands one (`test_required`).
             if (!anyLocationValid(enforcement, cache)) {
               disposition = "unverifiable";
               notes.push("downgraded-no-valid-enforcement-location");
             }
-            if (!anyTestLocationValid(test, cache)) {
+            if (requiresTest && !anyTestLocationValid(test, cache)) {
               disposition = "unverifiable";
               notes.push("downgraded-no-valid-test-location");
-            }
-            if (disposition === "met") {
-              const terms = extractRequirementTerms(entry.text, symbol);
-              const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
-              const ownerGlobs = declaredOwnerGlobsFor(entry.text, context.ownership);
-              if (!enforcementPredicateSatisfied(validEnforcementLocations, terms, ownerGlobs, cache)) {
-                disposition = "unverifiable";
-                notes.push("enforcement-location-copies-without-comparing");
-              }
             }
           }
         }
@@ -3516,102 +2535,102 @@ export function validateRequirementTrace(
       notes.push("distributed-topology-overflow");
     }
 
-    // #874 maintainer follow-up: a well-formed `unmet` is a KNOWN gap, not
-    // an untraceable one — it must stop coverage too (`required_checks=
-    // incomplete`), so #878's publication guard withholds approval under
-    // every verdict policy. The synthesized major finding alone reaches the
-    // non-strict verdict mapping too late to matter (strict maps after this
-    // pass; findings_severity_gated/model map before it).
-    if (disposition === "unverifiable" || disposition === "unmet") incomplete = true;
+    // #1658: the reason-coded resolution and the relevance class — the
+    // exposure the final-disposition layer (#1656) consumes. A missing or
+    // mismatched proof shape is NEVER a confirmed defect: only the
+    // deterministic head-state refutation (`structural-proof-unconfirmed`,
+    // the CONFIRMED_UNMET_REFUTATION_NOTES set) is `confirmed_unmet`, and
+    // only that sets `incomplete`. A model-claimed `unmet` is the reviewer's
+    // own gap claim (#1095) — exposed as material, never confirmed here.
+    // An untraced in-scope requirement is a genuinely unresolved mandatory
+    // obligation, exposed as material; an unresolved ordinary runtime row
+    // whose claim was present but proof-shape/citation-form failed is
+    // advisory-relevant bookkeeping (#1656: "predicate/test-shape mismatch
+    // where the underlying behavior was adequately assessed" is never a
+    // material unknown by itself).
+    let resolution: string;
+    let materiality: string;
+    if (disposition === "met") {
+      resolution = mechanicalProof ? "confirmed" : "evidenced";
+      materiality = "advisory";
+    } else if (disposition === "unmet") {
+      resolution = "unmet_claimed";
+      materiality = "material";
+      unmetClaimedIds.push(entry.id);
+    } else if (disposition === "not_applicable") {
+      resolution = "not_applicable";
+      materiality = "advisory";
+    } else if (disposition === PENDING_DISPOSITION) {
+      resolution = "pending";
+      materiality = "advisory";
+    } else if (notes.includes("structural-proof-unconfirmed")) {
+      resolution = "confirmed_unmet";
+      materiality = "material";
+      confirmedUnmetIds.push(entry.id);
+      incomplete = true;
+    } else if (notes.includes("not-traced-by-reviewer")) {
+      resolution = "unresolved";
+      materiality = "material";
+      unresolvedMaterialIds.push(entry.id);
+    } else if (mechanicalProof) {
+      resolution = "unresolved";
+      materiality = "material";
+      unresolvedMaterialIds.push(entry.id);
+    } else if (proof === "runtime_behavior" || proof === "test_required") {
+      // #1658 review: invalid OBJECTIVE provenance on an in-scope mandatory
+      // ordinary row is a material unknown, not advisory bookkeeping. Every
+      // claimed-but-unverifiable state left on these proofs is one of: the
+      // enforcement citation does not resolve at reviewed head
+      // (`downgraded-no-valid-enforcement-location`), an explicitly-required
+      // test citation does not resolve (`downgraded-no-valid-test-location`),
+      // or the semantic disposition itself is malformed/unusable
+      // (`disposition-invalid` / `missing-reason`). The deleted lexical
+      // predicate/test-shape rules never reach this ladder, so a valid
+      // location with no comparison is `evidenced` long before here.
+      resolution = "unresolved";
+      materiality = "material";
+      unresolvedMaterialIds.push(entry.id);
+    } else {
+      // Non-code/external/post-merge rows: environmental unavailability is
+      // advisory by design (#1062); the criterion stays pending/advisory.
+      resolution = "unresolved";
+      materiality = "advisory";
+      unresolvedAdvisoryIds.push(entry.id);
+    }
 
-    rows.push({ requirement_id: entry.id, disposition, proof, enforcement, test, reason, notes });
+    rows.push({ requirement_id: entry.id, disposition, proof, resolution, materiality, enforcement, test, reason, notes });
   }
 
   // #935: an out-of-scope requirement is grounded not_applicable and never
-  // makes coverage incomplete, unless the reviewer itself reports it unmet.
+  // makes coverage incomplete. #1658: a well-formed model `unmet` on an
+  // out-of-scope row is still the reviewer's own gap claim — exposed as
+  // `unmet_claimed`/material, but it no longer sets `incomplete` (only a
+  // deterministic refutation does; the final-disposition layer weighs the
+  // claim).
   for (const { entry, reason } of outOfScope) {
     const claim = claimsById.get(entry.id);
     const claimedUnmet = typeof claim?.disposition === "string" && claim.disposition.toLowerCase() === "unmet" && capReason(claim.reason) !== "";
     if (claimedUnmet) {
-      incomplete = true;
-      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
+      unmetClaimedIds.push(entry.id);
+      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
     } else {
-      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
+      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
     }
   }
 
-  return { version: ARTIFACT_VERSION, rows, incomplete, errors };
-}
-
-/** #959: the in-scope ids the coverage payload carried NO claim for — the
- * `claim === undefined` path in `validateRequirementTrace`, distinct from a
- * claim whose locations are unusable. Mirrors the validator's own id
- * extraction (first claim per id wins; malformed entries are skipped) so the
- * two never disagree about what counts as "present". */
-export function missingTraceRequirementIds(coveragePayload: unknown, inScopeIds: readonly string[]): string[] {
-  const present = new Set<string>();
-  if (Array.isArray(coveragePayload)) {
-    for (const claim of coveragePayload) {
-      if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
-      const rid = (claim as { requirement_id?: unknown }).requirement_id;
-      if (typeof rid === "string") present.add(rid);
-    }
-  }
-  return inScopeIds.filter((id) => !present.has(id));
-}
-
-/** #1552: replacement-aware merge for trace-repair claims (supersedes the
- * historical append-only `mergeTraceClaims`, which #1552 removed once both
- * production call sites moved to the replacement-aware rule; same defensive
- * parsing contract — never throws). What happens to an id that ALREADY
- * carries a claim:
- * - no existing row → appended (the historical append-only rule);
- * - an existing row whose id is in `allowedIds` and whose stored
- *   `disposition` is `"unverifiable"`, `"met"` or `"not_applicable"` →
- *   REPLACED in place (same index). The allowed set is always the
- *   validator-derived target set (validator rows still `unverifiable`, plus
- *   missing ids), so a stored `met`/`not_applicable` row inside it is one the
- *   validator DOWNGRADED — the #1539 shape where the model claimed `met` but
- *   the citation did not hold up, and a re-derived claim may legitimately
- *   succeed where the first failed. A stored `unmet` row is the reviewer's
- *   own affirmative known-gap finding (#1095) and is never replaced, nor is
- *   a row with a missing or non-string disposition;
- * - any other id → untouched and the repaired claim is dropped: outside the
- *   validated target set nothing is ever overwritten, and with no
- *   `allowedIds` at all the merge is append-only (the conservative default
- *   for a future caller without a validated target set).
- * Returns the merged array plus `appended`/`replaced` counts — a pure
- * replacement leaves the array length unchanged, so callers must count via
- * these fields (a length delta of 0 is NOT "nothing merged"). */
-export function mergeTraceRepairClaims(
-  coveragePayload: unknown,
-  repaired: readonly unknown[] | undefined,
-  allowedIds?: ReadonlySet<string>,
-): { coverage: unknown[]; appended: number; replaced: number } {
-  const coverage: unknown[] = Array.isArray(coveragePayload) ? [...coveragePayload] : [];
-  let appended = 0;
-  let replaced = 0;
-  for (const claim of Array.isArray(repaired) ? repaired : []) {
-    if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
-    const rid = (claim as { requirement_id?: unknown }).requirement_id;
-    if (typeof rid !== "string") continue;
-    const index = coverage.findIndex((row) => {
-      if (!row || typeof row !== "object" || Array.isArray(row)) return false;
-      return (row as { requirement_id?: unknown }).requirement_id === rid;
-    });
-    if (index === -1) {
-      coverage.push(claim);
-      appended++;
-      continue;
-    }
-    if (allowedIds === undefined || !allowedIds.has(rid)) continue;
-    const disposition = (coverage[index] as { disposition?: unknown }).disposition;
-    if (disposition === "unverifiable" || disposition === "met" || disposition === "not_applicable") {
-      coverage[index] = claim;
-      replaced++;
-    }
-  }
-  return { coverage, appended, replaced };
+  return {
+    version: ARTIFACT_VERSION,
+    rows,
+    summary: {
+      confirmed_unmet: boundedIdListWithTotal(confirmedUnmetIds).ids,
+      unmet_claimed: boundedIdListWithTotal(unmetClaimedIds).ids,
+      unresolved_material: boundedIdListWithTotal(unresolvedMaterialIds).ids,
+      unresolved_advisory: boundedIdListWithTotal(unresolvedAdvisoryIds).ids,
+      total_rows: rows.length,
+    },
+    incomplete,
+    errors,
+  };
 }
 
 const MAX_RENDERED_ROWS = 20;
@@ -3622,10 +2641,11 @@ const COLLAPSE_THRESHOLD = 5;
 
 /**
  * #1518: the requirement ids the trace could not discharge — every row whose
- * disposition is `unmet` or `unverifiable`. Those are exactly the rows that
- * set the trace's `incomplete` flag (the `validateRequirementTrace` rule) and
- * exactly the rows the published markdown reports as notable, so the id list
- * names the same obligations the reviewer was told about.
+ * disposition is `unmet` or `unverifiable`. #1658: these are the rows the
+ * published markdown reports as notable; they are no longer (all) the rows
+ * that set `incomplete` — only deterministic refutations do — but they name
+ * exactly the obligations the reviewer was told about, which is the handoff
+ * contract this list feeds.
  *
  * The list is deduplicated, keeps the trace's order, and is bounded by the
  * shared id cap, so a large ledger cannot flood the published handoff.
@@ -3672,15 +2692,10 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
   )].slice(0, MAX_GROUPS_PER_RULE);
   const lines = notable.slice(0, MAX_RENDERED_ROWS).map((row) => {
     const enforcementMisses = seamNames(row, "distributed-enforcement-group-uncovered:");
-    const testMisses = seamNames(row, "distributed-test-group-uncovered:");
     const loc = row.enforcement[0]
       ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\``
       : row.notes.includes("not-traced-by-reviewer")
-        // #1044: static text only — the pass's error/status text is
-        // diagnostics and must never reach the rendered markdown.
-        ? row.notes.includes("trace-repair-ran-no-claims")
-          ? "the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim"
-          : "the reviewer reported no trace for this requirement"
+        ? "the reviewer reported no trace for this requirement"
         : "no valid enforcement location";
     const details: string[] = [];
     if (row.notes.includes("distributed-topology-overflow")) {
@@ -3692,10 +2707,6 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
       } else {
         details.push(loc);
       }
-      if (testMisses.length > 0) {
-        details.push(`uncovered test seams: ${testMisses.map((name) => `\`${name}\``).join(", ")}`);
-      }
-      if (row.notes.includes("distributed-test-location-uncovered")) details.push("no test location cited");
     }
     // #985: a structural row whose state check failed is otherwise
     // indistinguishable from a missing citation at the rendered level.
@@ -3706,15 +2717,17 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
       details.push("the cited line is outside the cited file");
     }
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
-    return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** (${details.join("; ")})${reason}`;
+    // #1658: the row's relevance class is rendered so a reader can tell a
+    // material unresolved obligation from advisory proof-shape bookkeeping.
+    return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** [${row.materiality}] (${details.join("; ")})${reason}`;
   });
   if (notable.length > MAX_RENDERED_ROWS) lines.push(`- …and ${notable.length - MAX_RENDERED_ROWS} more`);
   // #1062: `pending` (non-code) rows are neither blockers nor code/test-verifiable,
-  // so they must not inflate the "not fully traced to enforcement and a test"
-  // denominator — otherwise a ledger with 9 pending criteria and 1 real gap reads
-  // as "1 unresolved of 10", implying the non-code rows were trace failures.
+  // so they must not inflate the unresolved denominator — otherwise a ledger
+  // with 9 pending criteria and 1 real gap reads as "1 unresolved of 10",
+  // implying the non-code rows were trace failures.
   const codeRows = trace.rows.length - trace.rows.filter((row) => row.disposition === PENDING_DISPOSITION).length;
-  const summary = `${notable.length} of ${codeRows} requirement(s) not fully traced to enforcement and a test:`;
+  const summary = `${notable.length} of ${codeRows} in-scope requirement(s) not fully resolved against their requirement-appropriate proof:`;
   const blockingSection = notable.length === 0
     ? ""
     : (() => {
@@ -3783,25 +2796,23 @@ export interface RequirementTraceEnforcementResult {
 
 /**
  * Apply requirement-trace enforcement to the artifact in place: validate the
- * trace and — when any in-scope requirement is unverifiable or untraced —
- * record that traceability gap separately and escalate `required_checks` to
- * `incomplete` (never relaxing an already-incomplete status from the
- * must_check pass). Run this AFTER `applyRequiredCheckValidation` (whose
- * unconditional write would otherwise clobber the escalation) and BEFORE the
- * verdict mapping (strict or findings_severity_gated) that reads
- * `required_checks`/`findings`. No-op when disabled or the ledger has no
- * in-scope requirements.
+ * trace, record the reason-coded rows and summary on the returned artifact,
+ * and append the advisory trace sections to the review markdown. #1658: this
+ * pass is NOT a publication authority — it never mutates `required_checks`,
+ * never synthesizes findings, and never flips the verdict; the final
+ * disposition is the final-disposition layer's (#1656), which consumes the
+ * artifact's rows/summary. The one retained fail-closed guard: when the
+ * validator deterministically REFUTED a requirement from the head state
+ * (`confirmed_unmet`), `requirement_trace_incomplete` is set so the verdict
+ * relaxers can never relax past a refutation. No-op when disabled or the
+ * ledger has no in-scope requirements.
  *
- * #1095: this pass never SYNTHESIZES findings. A `unmet` row is the model's
- * own violation claim; the model's prompt contract obliges it to file the
- * matching finding itself. Fabricating a blocking major from the ledger text
- * alone promoted process/risk rows the reviewer had declined to flag into
- * CHANGES_REQUESTED on a defect-free PR (miso-gallery#543, review
- * 5549785027): three "requirement not enforced" majors, zero code defects.
- * An unmet the model substantiated with its own finding still blocks through
- * that finding; an unsubstantiated unmet keeps `required_checks=incomplete`
- * (no clean approval — #874) and is disclosed in the rendered trace section
- * instead. */
+ * #1095 still holds: this pass never SYNTHESIZES findings. A `unmet` row is
+ * the model's own violation claim, exposed as `unmet_claimed`; the model's
+ * prompt contract obliges it to file the matching finding itself, and a
+ * blocking review must rest on a substantiated implementation violation, not
+ * on ledger text promoted out of a process/risk note (miso-gallery#543,
+ * review 5549785027). */
 export function applyRequirementTraceEnforcement(
   artifact: ReviewArtifact,
   options: {
@@ -3822,14 +2833,19 @@ export function applyRequirementTraceEnforcement(
     /** #1062 review follow-up: the CI gate's exact-head conclusion, if this run
      * observed one — diagnostic-only text surfaced in the non-code advisory. */
     ciState?: string | null | undefined;
-    /** #1044: the bounded #959 repair-pass summary for this run, when the
-     * trace feature is enabled — threaded through to
-     * `validateRequirementTrace`. */
-    traceRepair?: RequirementTraceRepairOutcome | undefined;
   },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
-    return { applied: false, trace: { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] } };
+    return {
+      applied: false,
+      trace: {
+        version: ARTIFACT_VERSION,
+        rows: [],
+        summary: { confirmed_unmet: [], unmet_claimed: [], unresolved_material: [], unresolved_advisory: [], total_rows: 0 },
+        incomplete: false,
+        errors: [],
+      },
+    };
   }
   const trace = validateRequirementTrace(artifact.requirement_coverage, options.ledger, options.workspace, options.changed, {
     ownership: options.ownership,
@@ -3837,15 +2853,18 @@ export function applyRequirementTraceEnforcement(
     fileLines: options.fileLines,
     prBody: options.prBody,
     ciState: options.ciState,
-    traceRepair: options.traceRepair,
   });
   if (trace.rows.length === 0) {
     return { applied: false, trace };
   }
+  // #1658: the trace is no longer a publication authority — it does not
+  // touch `required_checks`, does not synthesize findings, and does not flip
+  // the verdict. The one retained fail-closed guard: `incomplete` is true
+  // ONLY for confirmed-unmet rows (a deterministic head-state refutation),
+  // and the flag keeps the verdict relaxers from relaxing past it. Every
+  // other unresolved state is exposed on the artifact for the
+  // final-disposition layer (#1656).
   if (trace.incomplete) artifact.requirement_trace_incomplete = true;
-  if (trace.incomplete && artifact.required_checks !== "incomplete") {
-    artifact.required_checks = "incomplete";
-  }
   const rendered = renderRequirementTraceMarkdown(trace);
   if (rendered !== "") {
     artifact.review_markdown = `${String(artifact.review_markdown ?? "")}${rendered}`;
@@ -3875,20 +2894,7 @@ export function applyRequirementTraceEnforcement(
  * `distributed-test-group-uncovered:*` / `distributed-test-location-uncovered`
  * (a seam went unmapped), `distributed-topology-overflow` (config shape).
  *
- * `enforcement-location-copies-without-comparing` (#854) is EXCLUDED too, and
- * deliberately: that predicate searches ONLY the locations the reviewer
- * cited, so it proves that THOSE locations contain no comparison — it does
- * NOT prove that the implementation lacks one anywhere else. A reviewer who
- * cited the copy/assignment while the real comparison lives in a different
- * implementation location would be blocked on a false premise. The note
- * therefore stays a repairable coverage gap: the bounded evidence-repair
- * continuation is precisely the mechanism that can go find the real
- * enforcement location. We do not attempt a deterministic "search the whole
- * scope for the predicate" here — the validator cannot prove absence across
- * the implementation scope, so the row remains a gap to repair rather than a
- * refutation to escalate.
- *
- * Rows outside `unverifiable` are excluded by the disposition filter:
+Rows outside `unverifiable` are excluded by the disposition filter:
  * `met`/`not_applicable` are settled, `pending` is the non-code advisory
  * (#1062), and a model-claimed `unmet` is a known gap the reviewer must
  * substantiate with its own finding (#1095) — it is never escalated from the
@@ -3898,105 +2904,9 @@ export const CONFIRMED_UNMET_REFUTATION_NOTES: readonly string[] = [
   "structural-proof-unconfirmed",
 ];
 
-/** #1145: the deterministic refutation phrase per confirmed-unmet note. The
- * phrase states WHAT the validator proved, so a row's wording can never
- * borrow another note's claim; a note added to
- * `CONFIRMED_UNMET_REFUTATION_NOTES` without a phrase here falls back to the
- * generic wording below rather than asserting another note's proof. */
-const CONFIRMED_UNMET_REFUTATION_TEXT: Readonly<Record<string, string>> = {
-  "structural-proof-unconfirmed": "the cited repository state at head does not satisfy it",
-};
-
 export function confirmedUnmetRows(trace: RequirementTraceArtifact): RequirementTraceRow[] {
   return trace.rows.filter((row) =>
     row.disposition === "unverifiable"
     && row.notes.some((note) => CONFIRMED_UNMET_REFUTATION_NOTES.includes(note)),
   );
-}
-
-/** #1145: cap on the synthesized confirmed-unmet findings (one per refuted
- * requirement, up to this many — beyond that the markdown note carries the
- * total count). */
-export const MAX_CONFIRMED_UNMET_FINDINGS = 5;
-
-/**
- * #1145: confirmed-unmet → request_changes escalation.
- *
- * Where `applyRequirementTraceEnforcement` records the traceability gap
- * (required_checks=incomplete) WITHOUT synthesizing findings (#1095), this
- * pass escalates the one case the validator has positively refuted: a row
- * whose disposition is `unverifiable` and whose notes carry a
- * confirmed-unmet refutation note (#985's structural-state proof, re-derived
- * from the checkout at head). It is allowed to synthesize findings because
- * the refutation is deterministic proof, not a model claim — the #1095
- * prohibition (never fabricate a blocker from the ledger text alone) is what
- * this boundary enforces by construction.
- *
- * The #854 copies-without-comparing note is NOT a refutation (the predicate
- * only searched the cited locations, so it cannot prove the requirement is
- * unenforced anywhere else): such a row is a repairable coverage gap and
- * never reaches this pass.
- *
- * Effects on the artifact (in place):
- * - up to `MAX_CONFIRMED_UNMET_FINDINGS` new `blocker` findings
- *   (category `requirements`), each at the row's first (valid) enforcement
- *   location, whose message never borrows the model-claim wording
- *   "requirement not enforced: " — it states the deterministic refutation;
- * - a single italic one-line disclosure appended to `review_markdown`
- *   (the published body), naming the escalated count;
- * - `verdict` flipped `approve` → `request_changes` with
- *   `verdict_source: "enforcement"` (the deterministic provenance label the
- *   #811/#978 degrade gate reads; a model that already returned
- *   request_changes is left untouched).
- *
- * Ordering contract: run AFTER `applyRequirementTraceEnforcement` and
- * BEFORE the verdict mapping/relaxers and `applyAllEnforcement`. The
- * relaxers all refuse to re-approve once a trace gap exists
- * (`requirement_trace_incomplete` is true by construction here) or an open
- * non-verification blocker exists, so the flip is stable; the strict
- * mapping (#811) independently reaches request_changes through the
- * synthesized blockers, so the same call site works in both policy branches.
- * Returns the number of confirmed-unmet rows (0 = no-op).
- */
-export function applyConfirmedUnmetEscalation(
-  artifact: ReviewArtifact,
-  trace: RequirementTraceArtifact,
-  requirementTexts: ReadonlyMap<string, string>,
-): number {
-  const rows = confirmedUnmetRows(trace);
-  if (rows.length === 0) return 0;
-  const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
-  for (const row of rows.slice(0, MAX_CONFIRMED_UNMET_FINDINGS)) {
-    const id = row.requirement_id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_RENDERED_ID_CHARS);
-    const text = (requirementTexts.get(row.requirement_id) ?? "")
-      .replace(/[\x00-\x1f\x7f]/g, " ").trim()
-      .slice(0, 200);
-    const location = row.enforcement[0];
-    // The phrase is keyed by the note that actually refuted this row, so it
-    // can never assert a proof the validator did not run.
-    const refutationNote = row.notes.find((note) => CONFIRMED_UNMET_REFUTATION_TEXT[note] !== undefined);
-    const refutation = refutationNote !== undefined
-      ? CONFIRMED_UNMET_REFUTATION_TEXT[refutationNote]!
-      : "the requirement is refuted by deterministic proof against the checkout at head";
-    const message = `Confirmed-unmet requirement ${id}: ${refutation}`
-      + (text !== "" ? ` — “${text}”` : "")
-      + ".";
-    findings.push({
-      severity: "blocker",
-      category: "requirements",
-      file: location !== undefined ? location.file : null,
-      line: location !== undefined ? location.line : null,
-      message,
-    });
-  }
-  artifact.findings = findings;
-  artifact.review_markdown = `${String(artifact.review_markdown ?? "")}`
-    + `\n\n_${rows.length} in-scope requirement(s) are confirmed unmet by deterministic repository-state proof; the verdict is escalated to request changes._`;
-  if (artifact.verdict === "approve") {
-    artifact.verdict = "request_changes";
-    artifact.verdict_source = "enforcement";
-    // #1248: retire any earlier relaxation note this flip contradicts.
-    markRelaxationNotesSuperseded(artifact);
-  }
-  return rows.length;
 }

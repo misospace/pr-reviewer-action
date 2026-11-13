@@ -43,8 +43,6 @@ import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFram
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
 import { extractResponseText } from "../specialists/wire.js";
-import { mergeTraceRepairClaims } from "../enforcement/requirement-trace.js";
-import { buildTraceOnlyRepairMessage, parseTraceRepairResponse } from "../requirements/trace-repair.js";
 import { raisedCompletionBudget } from "../model/call.js";
 import { AI_MAX_TOKENS_DEFAULT } from "../config/contract.js";
 import {
@@ -71,7 +69,7 @@ import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } fro
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import { executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/executed-calls.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
-import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
+import { readTracePlan, tracePlanSection, TRACE_PLAN_ARTIFACT, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
 import {
 DEPENDENCY_EVIDENCE_OBLIGATIONS,
@@ -140,12 +138,6 @@ import {
 
 export const TOOL_LOOP_TELEMETRY_VERSION = 1;
 
-/** #1447: requirement-trace gets a small dedicated repair allowance after
- * the normal investigation ceiling. This is runtime review work, not a
- * second reviewer: at most one repair round in the same conversation, under
- * the same whole-run wall-clock deadline. */
-export const TRACE_REPAIR_EXTRA_REQUESTS = 4;
-
 /** Stop reason for runs that aborted before the loop could start (#702):
  * missing corpus or missing required model configuration. The specific kind
  * rides the `failure` field; the flat `planning_error`/`error` keys keep
@@ -208,12 +200,6 @@ export const VERDICT_CLOSING_INSTRUCTION =
   "investigation together with this corpus, produce the final review verdict " +
   "now in the exact output format specified in your instructions. Do not " +
   "issue any further tool calls.\n\n";
-
-// #1503: the #1145/#1447 full-verdict REFRESH instruction was removed here.
-// The post-repair turn is now trace-only (`buildTraceOnlyRepairMessage` in
-// `src/requirements/trace-repair.ts`): re-serializing the whole verdict asked
-// the model to reproduce a large unrelated payload and dropped trace rows on
-// the #1488 shape, exactly the failure the repair round exists to fix.
 
 export const SUMMARIZER_SYSTEM =
   "You compress earlier tool-call results from a PR review into a dense " +
@@ -904,120 +890,6 @@ function joinedCompletionText(content: unknown, topLevel: boolean): string | nul
   return parts.join("");
 }
 
-/** #1503: re-serialize the accepted verdict's completion content with the
- * merged requirement coverage. Strict JSON first; a markdown-fenced body is
- * tolerated exactly as the verdict parser tolerates it. Anything else —
- * non-object payloads, exotic decodes — returns null so the caller leaves
- * the standing artifact byte-for-byte untouched. #1552: the merge is the
- * replacement-aware `mergeTraceRepairClaims` — ids with NO row are appended,
- * and an existing row inside `allowedIds` whose stored disposition is
- * `unverifiable`, `met` or `not_applicable` is replaced in place (inside the
- * validator-derived target set those stored states are exactly the invalid
- * coverage the repair targets; a stored `unmet` row and rows outside the set
- * are never overwritten). The merged count is
- * `appended + replaced`: a pure replacement leaves the coverage length
- * unchanged, so the historical length-delta count would report 0 and refuse
- * the very merge #1539 needed. Every other field of the verdict object is
- * carried through the JSON round-trip unchanged. `allowedIds` (#1552) is the
- * validator-derived target set the claims were requested for: replacement is
- * confined to it (an existing row whose stored disposition is `unverifiable`,
- * `met` or `not_applicable` inside the set is replaced in place — inside the
- * set a `met`/`not_applicable` row is one the validator downgraded); omitted,
- * the merge stays append-only. */
-function mergedVerdictContent(
-  text: string,
-  claims: readonly unknown[],
-  allowedIds?: ReadonlySet<string>,
-): { text: string; merged: number } | null {
-  const decode = (body: string): unknown => {
-    try {
-      return JSON.parse(body);
-    } catch {
-      return null;
-    }
-  };
-  const trimmed = text.trim();
-  let parsed = decode(trimmed);
-  if (parsed === null && trimmed.startsWith("```")) {
-    const lines = trimmed.split("\n");
-    lines.shift();
-    if (lines.length > 0 && lines[lines.length - 1]!.trim() === "```") lines.pop();
-    parsed = decode(lines.join("\n").trim());
-  }
-  if (!isEnvelopeRecord(parsed)) return null;
-  const coverage = parsed.requirement_coverage;
-  const merge = mergeTraceRepairClaims(coverage, claims, allowedIds);
-  const merged = merge.appended + merge.replaced;
-  if (merged <= 0) return { text, merged: 0 };
-  return { text: JSON.stringify({ ...parsed, requirement_coverage: merge.coverage }), merged };
-}
-
-/** #1503: merge trace-only repair claims into the persisted accepted-verdict
- * envelope (`ai-response.<tier>.json`, the contract `runReview` re-parses as
- * the verdict). Mirrors `reusableVerdictEnvelope`'s projection branches:
- * OpenAI `choices[0].message.content` first, then the Anthropic top-level
- * `content`. Returns the rewritten envelope plus the number of ids actually
- * filled (0 = nothing merged, artifact must not be rewritten), or null when
- * the envelope or its completion content is not the shape the reuse parse
- * consumes (fail-soft: the caller keeps the file exactly as the verdict turn
- * wrote it). `secrets` masks the NEWLY spliced claim text only — the
- * standing completion content already passed the fail-closed content gate,
- * so it is carried through unmasked (masking it here could rewrite
- * credential-indistinguishable prose the acceptance gate deliberately kept).
- * The returned `content` is the (new or carried) joined completion text, so
- * the caller can run the reuse-side content gate over the merged envelope
- * before rewriting the artifact. #1552: the merge is replacement-aware —
- * ids with no row are appended and, inside `allowedIds` (the validator-derived
- * target set the claims were requested for), a row the validator left
- * `unverifiable` is replaced in place even when its stored disposition says
- * `met` (a downgrade); outside the set, and with no `allowedIds` at all, the
- * merge is append-only. `merged` counts appended + replaced ids, so a pure
- * replacement reports > 0. */
-export function mergeTraceClaimsIntoVerdictEnvelope(
-  envelope: unknown,
-  claims: readonly unknown[],
-  secrets: readonly (string | null | undefined)[] = [],
-  allowedIds?: ReadonlySet<string>,
-): { envelope: Record<string, unknown>; merged: number; content: string } | null {
-  if (!isEnvelopeRecord(envelope)) return null;
-  const safeClaims = claims.map((claim) => maskKnownSecretsDeep(claim, secrets));
-  const choices = envelope.choices;
-  if (Array.isArray(choices) && choices.length > 0) {
-    const first = isEnvelopeRecord(choices[0]) ? choices[0] : {};
-    const message = isEnvelopeRecord(first.message) ? first.message : {};
-    if (!("content" in message)) return null;
-    const text = joinedCompletionText(message.content, false);
-    if (text === null) return null;
-    const replaced = mergedVerdictContent(text, safeClaims, allowedIds);
-    if (replaced === null) return null;
-    if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
-    // A plain string re-enters `extractContent`'s string branch — parse-
-    // identical to the projected array form for every part order.
-    return {
-      envelope: { ...envelope, choices: [{ ...first, message: { ...message, content: replaced.text } }, ...choices.slice(1)] },
-      merged: replaced.merged,
-      content: replaced.text,
-    };
-  }
-  if (!("content" in envelope)) return null;
-  const content = envelope.content;
-  const text = joinedCompletionText(content, true);
-  if (text === null) return null;
-  const replaced = mergedVerdictContent(text, safeClaims, allowedIds);
-  if (replaced === null) return null;
-  if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
-  const nextContent = typeof content === "string"
-    ? replaced.text
-    : [{ type: "text", text: replaced.text }];
-  return { envelope: { ...envelope, content: nextContent }, merged: replaced.merged, content: replaced.text };
-}
-
-/** #1503: the dedicated trace-repair round may span this many model turns
- * (the pre-#1503 shape forced exactly one). The TOTAL tool-call capacity is
- * unchanged — spreading the same bounded allowance over a few rounds only
- * lets the reviewer read one location, look at it, and follow one reference,
- * which a single round cannot express. */
-export const TRACE_REPAIR_MAX_ROUNDS = 4;
 
 export interface NativeVerdictOutcome {
   response: unknown;
@@ -1506,85 +1378,7 @@ export function computeRequiredEvidenceReservation(unresolvedCount: number, maxR
   return Math.min(Math.max(0, unresolvedCount), Math.floor(Math.max(0, maxRequests) / 2));
 }
 
-/**
- * #1506: the requirement-trace admission rows for the enforced window.
- *
- * The rows come from the harness-authored candidates artifact — the rows the
- * planner was actually SHOWN — so the reservation guards exactly the
- * requirements the model saw. The parse is defensive (the plan module's own
- * row parser, so the artifact can never be read more leniently than it was
- * written): malformed JSON, a wrong version, an artifact that was not
- * injected, a non-array row list, or a non-conforming row contributes
- * NOTHING (never a throw, never a partial trust of a half-read artifact).
- *
- * Only a CODE-VERIFIABLE row becomes an admission row: the evidence that
- * gates a trusted approval lives in the repository, and a documentation-only
- * row must never hold a reserved request. A row whose text names nothing
- * targetable (no admission vocabulary) contributes neither an admission row
- * nor a reservation — a row with no vocabulary must never gate an admission
- * window (the same rule the derived rows follow).
- *
- * Every trace row is admitted only by a repository read/search call that
- * names its target (see TRACE_EVIDENCE_TOOLS), carries the row's
- * admitted-read demand (#1519: one read no longer discharges a row whose
- * proof needs enforcement AND test evidence, or every seam), and its id is
- * prefixed so it can never collide with an `obligation-<n>` or `derived-<n>`
- * row.
- */
-export function traceAdmissionRows(candidatesText: string | null): RequiredEvidenceRow[] {
-  if (typeof candidatesText !== "string" || candidatesText.trim() === "") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(candidatesText) as unknown;
-  } catch {
-    return [];
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const record = parsed as Record<string, unknown>;
-  if (record.version !== TRACE_PLAN_VERSION) return [];
-  if (record.injected !== true) return [];
-  const rawRows = record.rows;
-  if (!Array.isArray(rawRows)) return [];
-  const rows: RequiredEvidenceRow[] = [];
-  for (const raw of rawRows) {
-    const row = parseTracePlanRow(raw);
-    if (row === null) return [];
-    if (row.code_verifiable !== true) continue;
-    const tokens = traceAdmissionTokens(row.text);
-    if (tokens === null) continue;
-    // #1519 (review): the row carries its proof shape and full seam objects,
-    // so the loop's discharge is SLOT-aware — evidence CATEGORIES
-    // (enforcement vs regression test) and per-seam attribution, mirroring
-    // the deterministic validator, not a bare read count.
-    rows.push({
-      id: `trace:${row.id}`,
-      tokens,
-      tools: TRACE_EVIDENCE_TOOLS,
-      trace: true,
-      requiredAttempts: row.required_attempts,
-      proofShape: row.proof_shape,
-      seams: row.seams,
-    });
-  }
-  return rows;
-}
 
-/**
- * #1506: the requirement-trace budget reservation.
- *
- * The reserved tail is sized by the TOTAL admitted-read demand of the
- * in-scope code-verifiable requirements the planner was shown (#1519: a
- * runtime row owes two reads — enforcement and matching test — and a
- * distributed row two per seam, so a reservation of one request per row
- * would open the window while a row still owed attempts it could no longer
- * spend), bounded to half the request budget so optional exploration can
- * never drop to zero. It is the SAME formula the #1381 prose reservation
- * uses — one helper, one formula — and it joins the ONE reservation over the
- * shared tail as the MAX of the resolutions, never their sum (#1396).
- */
-export function computeTraceEvidenceReservation(requiredAttemptsTotal: number, maxRequests: number): number {
-  return computeRequiredEvidenceReservation(requiredAttemptsTotal, maxRequests);
-}
 
 /**
  * Build a compact, high-signal context for tool planning (port of
@@ -1876,24 +1670,6 @@ export function buildPlanningContext(
     }
     return hints;
   };
-  const writeTraceCandidates = (injected: boolean, rows: readonly TracePlanRow[]): void => {
-    if (deps.writeArtifact === undefined) return;
-    deps.writeArtifact(TRACE_PLAN_CANDIDATES_ARTIFACT, JSON.stringify({
-      version: TRACE_PLAN_VERSION,
-      injected,
-      rows: rows.map((row) => ({
-        id: row.id,
-        text: row.text,
-        kind: row.kind,
-        seams: row.seams,
-        code_verifiable: row.code_verifiable,
-        proof_shape: row.proof_shape,
-        required_attempts: row.required_attempts,
-      })),
-    }, null, 2) + "\n");
-  };
-  let traceSectionInjected = false;
-  let shownTraceRows: TracePlanRow[] = [];
   if (tracePlan.rows.length > 0) {
     const prRecord = readPrRecord();
     const hints = traceNavigationHints(prRecord.body, tracePlan.rows.map((row) => row.id));
@@ -1901,12 +1677,6 @@ export function buildPlanningContext(
     const traceRoom = maxBytes - used() - PLANNING_RESERVE;
     if (traceSection.text !== "" && traceRoom >= 400 && Buffer.byteLength(traceSection.text, "utf8") + 2 <= traceRoom) {
       sections.push(traceSection.text);
-      traceSectionInjected = true;
-      // Only the rows the section ACTUALLY shows may gate the budget
-      // reservation: a row the planner never saw can never be discharged, and
-      // reserving for it would keep the reserved window shut for the whole
-      // run.
-      shownTraceRows = traceSection.rows;
       const intentSection = authorIntentSection({
         prTitle: prRecord.title,
         prBody: prRecord.body,
@@ -1918,10 +1688,6 @@ export function buildPlanningContext(
       }
     }
   }
-  // The candidates artifact records the rows the planner was shown, so the
-  // budget reservation reads the SAME rows. `injected` is true only when the
-  // trace section actually reached the planning context.
-  writeTraceCandidates(traceSectionInjected, shownTraceRows);
 
   // ── Claims to Falsify (#785): whole section, ahead of everything else ──
   // The loop is what opens consumers outside the diff, so the claims must be
@@ -2449,40 +2215,6 @@ export type HarnessResult = Record<string, unknown> & {
    * harness artifact and consumed (nulled) by `buildToolLoopTelemetry` into
    * its `unrecorded_usage` object. */
   native_loop_unrecorded_usage?: Record<string, unknown> | null;
-  /** #1145: record of the bounded evidence-repair continuation of the tool
-   * loop (present only when a trace-gap probe was supplied and fired).
-   * snake_case: persisted verbatim in the harness artifact. */
-  trace_repair_continuation?: {
-    attempted: boolean;
-    /** #1552: `continued_trace_only` marks a repair round that executed no
-     * tool call but whose trace-only serialization turn still ran against the
-     * conversation's already-gathered evidence (the #1539 shape);
-     * `skipped_wire_unsafe` marks a round whose trace instruction would have
-     * rendered as an adjacent user turn. The historical `skipped_no_evidence`
-     * value can appear only in artifacts written before #1552. */
-    outcome: "continued" | "continued_trace_only" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed" | "skipped_no_evidence" | "skipped_wire_unsafe";
-    unresolved_ids: string[];
-    stop_reason?: string;
-    rounds?: number;
-    tool_calls?: number;
-    /** #1503: ids the trace-only repair turn actually merged into the
-     * standing verdict artifact (0 whenever the turn was skipped, failed,
-     * or returned nothing usable). Replaces #1145's `verdict_refreshed`:
-     * the repair no longer re-requests the whole verdict. */
-    claims_merged?: number;
-    /** #1503: `claims_merged > 0` — the artifact was rewritten with the
-     * merged trace rows. */
-    trace_claims_merged?: boolean;
-    /** #1552: the DEDICATED repair allowance (base remainder + bounded
-     * trace-closure extra) that remained after the round — present on every
-     * record that describes a completed repair round. */
-    repair_requests_remaining?: number;
-    /** #1552: why the trace-only turn was NOT attempted when targets
-     * existed — `wire_unsafe` (the conversation tail would make the
-     * instruction an adjacent user turn). Absent whenever the turn was
-     * attempted or no targets existed. */
-    trace_skipped_reason?: "wire_unsafe" | "no_new_evidence";
-  };
 };
 
 /**
@@ -2520,7 +2252,6 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         // #1464: the wall-clock slice held for the closing in-conversation
         // verdict, mirrored from the raw meta when it carries it.
         ...(meta.verdict_reserve_sec !== undefined ? { verdict_reserve_sec: meta.verdict_reserve_sec } : {}),
-        ...(meta.trace_repair_extra_requests !== undefined ? { trace_repair_extra_requests: meta.trace_repair_extra_requests } : {}),
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
         // #1635: which window the watermark was derived from (null = the
         // model window was undeclared), and whether the operator overrode it.
@@ -2588,14 +2319,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       // #1145 continuation's turns ride `repair_rounds`, and the turns that
       // carry no round/verdict record at all ride `unrecorded_usage`.
       rounds: Array.isArray(meta.round_telemetry) ? meta.round_telemetry : [],
-      // #1199: the #1145 evidence-repair continuation's own native-loop model
-      // turn(s), in their own array so `rounds` stays exactly the investigation
-      // loop's turns (one per model turn, matching `usage.rounds_used`). Empty
-      // when no continuation ran.
-      repair_rounds: Array.isArray(meta.repair_round_telemetry) ? meta.repair_round_telemetry : [],
       // #1199 (review round 5): the aggregate `usage`'s charges that have no
       // round or verdict record — `context_compaction` (the compaction digest
-      // calls) and `trace_repair_turn` (the #1503 trace-only repair turn).
+      // calls).
       // Categories appear only when actually charged; the object is
       // empty when every aggregate charge already rides a record above, so
       // summing `rounds` + `repair_rounds` + `verdict` +
@@ -2747,7 +2473,7 @@ function unrecordedUsageTotals(result: HarnessResult): Record<string, Record<str
   const projected: Record<string, Record<string, unknown>> = {};
   if (raw === null || typeof raw !== "object") return projected;
   const numOrDefault = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
-  for (const category of ["context_compaction", "trace_repair_turn"] as const) {
+  for (const category of ["context_compaction"] as const) {
     const record = (raw as Record<string, unknown>)[category];
     if (record === null || typeof record !== "object") continue;
     const r = record as Record<string, unknown>;
@@ -2924,10 +2650,6 @@ export interface HarnessDeps {
   /** Raw default system prompt for the defensive fallback path; defaults to
    * the bundled `default_system_prompt.txt` (v2 reads that file). */
   defaultSystemPrompt?: string;
-  /** #1145: optional bounded evidence-repair continuation probe, threaded to
-   * `runNativeLoop` (which invokes it at most once after an accepted
-   * verdict). Absent = the pre-#1145 loop, byte-for-byte. */
-  traceGapProbe?: TraceGapProbe;
   /** #1210: the run's configured forge read capability, threaded to the
    * native loop's gh_api/repo_contents executors (mirrors
    * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
@@ -3001,45 +2723,6 @@ export function defaultWriteArtifact(cwd: string): (name: string, text: string) 
     fs.chmodSync(p, 0o600);
   };
 }
-
-/**
- * #1145: bounded evidence-repair continuation of the native tool loop.
- *
- * When deterministic requirement-trace validation finds an in-scope
- * requirement unresolved after the first in-conversation verdict, the caller
- * (run/review.ts) may supply this probe. The harness invokes it ONCE with the
- * accepted verdict response and the loop's remaining-budget facts; returning
- * a continuation asks the harness to append the (caller-rendered, untrusted
- * data fenced) instruction to the SAME conversation, run one bounded
- * tool-loop round with the reviewer's normal read-only tools, and re-produce
- * the verdict from that conversation before the outputs are written. A
- * returned null (or a thrown probe) leaves the run exactly as before.
- */
-export interface TraceGapContinuation {
-  /** Full user-message text to append to the existing conversation. The
-   * caller owns untrusted-data fencing; the harness never re-wraps it. */
-  instruction: string;
-  /** Requirement ids the probe found unresolved (telemetry only). */
-  unresolvedIds: string[];
-  /** Deterministic validator reason per unresolved id (telemetry only). */
-  reasons?: Record<string, string>;
-}
-
-/** The loop's budget facts handed to the probe; the harness caps the
- * continuation round to these remaining budgets, never beyond the original
- * run's totals. */
-export interface TraceGapLoopState {
-  requestsRemaining: number;
-  elapsedSec: number;
-  wallClockSec: number;
-  maxRounds: number;
-  stopReason: string;
-}
-
-export type TraceGapProbe = (
-  verdictResponse: unknown,
-  loop: TraceGapLoopState,
-) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
 
 /**
  * #1595: the DISTINCT dependency-evidence obligations the classification
@@ -3202,10 +2885,6 @@ export interface RunNativeLoopInput {
    * `tool-loop-wall-clock-sec` (never extends it); unset keeps the
    * configured ceiling byte-for-byte. */
   wallClockSecCap?: number;
-  /** #1145: bounded evidence-repair continuation probe over the verdict
-   * the in-conversation verdict turn produced. Optional; unset preserves
-   * the pre-#1145 flow byte-for-byte. */
-  traceGapProbe?: TraceGapProbe;
 }
 
 /**
@@ -3262,10 +2941,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // its own FALLBACK_MODEL_CONTEXT_TOKENS window.
     maxConversationTokens: contextLimits.maxConversationTokens,
   };
-  const traceRepairExtraRequests =
-    input.tier === "primary" && input.traceGapProbe !== undefined
-      ? TRACE_REPAIR_EXTRA_REQUESTS
-      : 0;
   // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
   // before the MCP chain and every turn — so pre-loop setup and an unclamped
   // closing verdict turn can no longer push the exchange past the configured
@@ -3357,9 +3032,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         : "") +
       `\nTool budget for this investigation: up to ${budgets.maxToolCalls} ` +
       `read-only tool request(s) across up to ${budgets.maxRounds} turn(s); ` +
-      (traceRepairExtraRequests > 0
-        ? `requirement-trace may use up to ${traceRepairExtraRequests} additional targeted request(s) in one post-verdict repair round; `
-        : "") +
       "later turns will state what remains.\n" +
       "\nGather the evidence needed to review this PR corpus:\n\n" + input.corpusText,
   );
@@ -3432,29 +3104,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // construction (see NativeLoopRoundTelemetry).
   const roundTelemetry: NativeLoopRoundTelemetry[] = [];
   // #1199: the #1145 evidence-repair continuation is its OWN native-loop run
-  // over the same conversation, so its model turn(s) get their own records.
-  // They live in a SEPARATE array so the investigation `rounds` stay exactly
-  // the investigation loop's turns (one per model turn, matching
-  // `usage.rounds_used`), and every native-loop model turn is still recorded.
-  const repairRoundTelemetry: NativeLoopRoundTelemetry[] = [];
   // #1199 (review round 5): usage the aggregate folds that has NO round or
   // verdict record, split into the categories `native_loop_unrecorded_usage`
   // persists. Folded at exactly the same sites as `usageAcc`, so a category
   // can never drift from what the aggregate actually received: the compaction
   // digest calls go to `compactionUsage` (rids postFn with no turn signal, so
-  // no round record), and the #1503 trace-only repair turn goes to
-  // `traceTurnUsage` — no verdict record ever describes it (the standing
-  // verdict record stays the FIRST verdict's), so its spend is ALWAYS the
-  // unrecorded category, never a replacement for one.
+  // no round record).
   const compactionUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
-  const traceTurnUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
   // Persisted beside every aggregate snapshot: categories appear only when
   // really charged, and the field is null when every aggregate charge already
   // rides a persisted record.
   const unrecordedUsageRecord = (): Record<string, unknown> | null => {
     const categories: Record<string, unknown> = {};
     if (compactionUsage.requests > 0) categories.context_compaction = usageWithCacheRatio(compactionUsage);
-    if (traceTurnUsage.requests > 0) categories.trace_repair_turn = usageWithCacheRatio(traceTurnUsage);
     return Object.keys(categories).length > 0 ? categories : null;
   };
 
@@ -3789,10 +3451,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     };
   };
   let summarizeFn: ((block: string) => string | Promise<string>) | null = null;
-  let repairSummarizeFn: ((block: string) => string | Promise<string>) | null = null;
   if ((env.TOOL_LOOP_SUMMARIZE ?? "false").trim().toLowerCase() === "true") {
     summarizeFn = makeSummarizeFn(explorationDeadline);
-    repairSummarizeFn = makeSummarizeFn();
   }
 
   // #1464 (review): the MAIN investigation loop's model waits and tool
@@ -3885,16 +3545,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   }
   // #702: raw loop measurements for the artifact's tool_loop_telemetry object.
   input.result.tool_loop_meta = {
-    requests_remaining: outcome.requestsRemaining + traceRepairExtraRequests,
+    requests_remaining: outcome.requestsRemaining,
     required_evidence_requests_hint: outcome.requiredEvidenceRequestsHint,
     required_evidence_refusals: outcome.requiredEvidenceRefusals,
     max_rounds: outcome.maxRounds,
     wall_clock_sec: outcome.wallClockSec,
     // #1464: the wall-clock slice held for the closing in-conversation verdict.
     verdict_reserve_sec: verdictReserveSec,
-    // #1447: bounded post-verdict trace-closure allowance. This is additive
-    // to the ordinary exploration ceiling but shares the same wall clock.
-    trace_repair_extra_requests: traceRepairExtraRequests,
     elapsed_sec: outcome.elapsedSec,
     tool_result_bytes: outcome.toolResultBytes,
     compaction_summarize: outcome.compactionSummarize,
@@ -3929,10 +3586,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
-    // #1199: the #1145 evidence-repair continuation's own per-turn records.
-    // The array reference is captured here and filled by the continuation's
-    // loop further down, so the artifact sees every native-loop model turn.
-    repair_round_telemetry: repairRoundTelemetry,
   };
   // #810/#1338: on any budget stop or provider request error, account from
   // the loop's own call log which changed files and specialist leads were
@@ -4318,471 +3971,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         return null;
       }
     };
-    // #1145: the wall-clock allowance of the repair round is a share of the
-    // ORIGINAL run's total, and the FIRST verdict turn is part of that run —
-    // so the time it consumed is measured here and subtracted from the
-    // allowance below. Without this the continuation could push the run past
-    // its own total wall-clock budget by exactly the verdict turn's duration.
+    // The verdict turn's wall-clock share measurement went with the repair
+    // seam it fed (#1658), but the budget-clock READ SEQUENCE is pinned by
+    // the #1198/#1464 timing tests — keep the two reads around the turn.
     const verdictStartedAt = timeFn();
     const firstVerdictResponse = await runVerdictTurn();
     const verdictElapsedSec = Math.max(0, timeFn() - verdictStartedAt);
+    void verdictElapsedSec;
 
-    // ── #1503: trace-only repair turn ──────────────────────────────────
-    // After the bounded evidence-repair round the loop no longer re-requests
-    // the whole verdict: re-serializing a ~129k-token conversation's entire
-    // review dropped trace rows again on the #1488 shape (8/10 requirement
-    // rows missing even though the evidence had been found). This turn asks
-    // the SAME conversation for a trace-only payload covering exactly the
-    // unresolved ids, normalizes it with the existing #959 repair parser,
-    // and merges it into the ACCEPTED verdict artifact with the #1552
-    // `mergeTraceRepairClaims` semantics: ids with no row are appended, and
-    // a row still marked `unverifiable` is replaced in place — a valid row
-    // is never overwritten. Findings, severities, recommendation/verdict,
-    // escalation state, required-check dispositions and every other artifact
-    // field are unchanged. EVERY failure path — exhausted budget, transport
-    // error, malformed or empty payload, unparsable artifact, zero
-    // mergeable ids — leaves the standing verdict and its artifact intact.
-    // Returns the number of requirement ids actually filled. Never throws.
-    const runTraceOnlyRepairTurn = async (targetIds: readonly string[]): Promise<number> => {
-      try {
-        const traceRemaining = deadline - timeFn();
-        if (traceRemaining <= 0) {
-          log("  native_loop: trace-only repair skipped (wall-clock budget exhausted) — keeping the original verdict");
-          return 0;
-        }
-        // The instruction rides the SAME conversation. Wire safety here is
-        // STRUCTURAL (#1552): the caller gates on
-        // `Conversation.appendingUserWouldBeAdjacent` BEFORE this append —
-        // on the #1539 shape the repair round stopped on `no-tool-calls`,
-        // so the tail is still the OPEN tool_result batch carrying the
-        // verdict + repair instruction as trailing text blocks, and this
-        // user event merges into that same message (no adjacent user turns).
-        // A closed batch whose last rendered message is a standalone user
-        // turn is suppressed by the caller instead.
-        conversation.addUser(buildTraceOnlyRepairMessage({ ids: targetIds }));
-        const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
-        const temperature = tempRaw ? Number(tempRaw) : null;
-        // The trace contract is NOT the verdict schema, so it rides the wire
-        // prompt-only (the #1047 rule for non-verdict JSON): no
-        // `response_format`, no Anthropic structured-output parameter — a
-        // verdict-shaped json_schema would force the full verdict back into
-        // this turn, which is the exact payload #1503 removes. `verdictTurn`
-        // keeps the full transcript and drops the tool declarations.
-        const tracePayload = conversation.toRequestPayload(input.apiFormat, input.model, {
-          stream: false,
-          maxTokens: envIntBounded(env, "AI_MAX_TOKENS", AI_MAX_TOKENS_DEFAULT, 256, 200000),
-          temperature,
-          verdictTurn: true,
-          keepFullHistoryOnVerdict: true,
-          tokensParam,
-          cachePrefix: true,
-          reasoningEffort,
-          anthropicEffortSupported: anthropicEffort,
-        }) as Record<string, unknown>;
-        const traceTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(traceRemaining)));
-        const traceResponse = await deps.transport(input.baseUrl, input.apiFormat, tracePayload, input.apiKey, traceTimeout);
-        // The turn's spend rides the aggregate AND the always-persisted
-        // unrecorded side-car: no verdict record describes it (the standing
-        // verdict record stays the FIRST verdict's), so the records could
-        // never reproduce the aggregate without this category.
-        accumulateUsage(usageAcc, traceResponse, input.apiFormat);
-        accumulateUsage(traceTurnUsage, traceResponse, input.apiFormat);
-        const parsed = parseTraceRepairResponse(extractResponseText(traceResponse), new Set(targetIds));
-        if (parsed.claims.length === 0) {
-          log(
-            "  native_loop: trace-only repair returned no usable claims" +
-              (parsed.errors.length > 0
-                ? ` (${maskKnownSecrets(String(parsed.errors[0] ?? ""), harnessSecrets).slice(0, 160)})`
-                : "") +
-              " — keeping the original verdict",
-          );
-          return 0;
-        }
-        const artifactName = `ai-response.${input.tier}.json`;
-        const artifactText = deps.readText(artifactName);
-        if (artifactText === null || artifactText === "") return 0;
-        let envelope: unknown;
-        try {
-          envelope = JSON.parse(artifactText);
-        } catch {
-          return 0;
-        }
-        const merge = mergeTraceClaimsIntoVerdictEnvelope(envelope, parsed.claims, harnessSecrets, new Set(targetIds));
-        if (merge === null || merge.merged === 0) return 0;
-        // #1503 (review): the reuse parse re-applies the fail-closed content
-        // gate over the WHOLE completion with the lane's full known-secret
-        // list — including the URL-encoded/base64 variants of SUB-floor
-        // secrets, which `harnessSecrets` (floor-filtered, ≥8) does not mask.
-        // Splicing an echoed sub-floor variant in would therefore discard
-        // the standing verdict at reuse time. Run the same gate BEFORE the
-        // rewrite and skip it on a hit: the standing artifact is exactly
-        // what reuse already accepts, so this can only ever decline the
-        // repair, never damage the verdict.
-        const reuseSecrets = callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl));
-        if (containsKnownSecret(merge.content, reuseSecrets)) {
-          log("  native_loop: trace-only repair claims embed a configured credential — skipping the merge, keeping the original verdict");
-          return 0;
-        }
-        deps.writeArtifact(artifactName, JSON.stringify(merge.envelope));
-        log(
-          `  native_loop: trace-only repair merged ${merge.merged} requirement claim(s) into the standing verdict ` +
-            `(unresolved at repair start: ${targetIds.length})`,
-        );
-        return merge.merged;
-      } catch (exc) {
-        const message = exc instanceof Error ? exc.message : String(exc);
-        log(
-          `  native_loop: trace-only repair turn failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`,
-        );
-        return 0;
-      }
-    };
-
-    // ── #1145: bounded evidence-repair continuation ──────────────────────
-    // The probe inspects the ACCEPTED verdict against deterministic
-    // requirement-trace validation and may ask for ONE additional bounded
-    // tool round over the same conversation, then (#1503) a trace-only
-    // repair turn instead of a full-verdict refresh. Every failure path here
-    // leaves the accepted verdict standing; nothing in this block may throw
-    // out of `runNativeLoop`.
-    if (firstVerdictResponse !== null && input.traceGapProbe !== undefined) {
-      let continuation: TraceGapContinuation | null = null;
-      try {
-        continuation = await input.traceGapProbe(firstVerdictResponse, {
-          requestsRemaining: outcome.requestsRemaining,
-          elapsedSec: outcome.elapsedSec,
-          wallClockSec: budgets.wallClockSec,
-          maxRounds: budgets.maxRounds,
-          stopReason: outcome.stopReason,
-        });
-      } catch (exc) {
-        const message = exc instanceof Error ? exc.message : String(exc);
-        log(`  native_loop: trace-gap probe failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
-        input.result.trace_repair_continuation = {
-          attempted: false,
-          outcome: "skipped_probe_error",
-          unresolved_ids: [],
-        };
-      }
-      if (continuation !== null) {
-        // Telemetry-only projection of the unresolved ids: control chars
-        // stripped and length-capped so a hostile id can never forge
-        // artifact structure or log lines.
-        const unresolvedIds = (Array.isArray(continuation.unresolvedIds) ? continuation.unresolvedIds : [])
-          .filter((id): id is string => typeof id === "string")
-          .map((id) => traceGapIdLabel(id));
-        // #1503: the trace-only repair's merge set: the RAW probe ids (the
-        // labeled list above is telemetry-sanitized and must not drive the
-        // merge). Deduplicated, blank-stripped; `normalizeTraceRepairPayload`
-        // refuses any id outside this exact set, so the turn can only ever
-        // fill ids the deterministic validator found unresolved at repair
-        // start.
-        const repairTargetIds = [...new Set(
-          (Array.isArray(continuation.unresolvedIds) ? continuation.unresolvedIds : [])
-            .filter((id): id is string => typeof id === "string" && id.trim() !== ""),
-        )];
-        const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
-        // #1447: trace closure no longer depends on accidental leftovers.
-        // It keeps the original whole-run wall-clock deadline, but receives
-        // one dedicated repair round with the ordinary loop's remaining
-        // requests plus a bounded four-request allowance. Thus exploration
-        // may legitimately stop on its request/round ceiling and still close
-        // a newly discovered trace gap; only exhausted wall-clock (or an
-        // otherwise empty repair allowance) records skipped_no_budget.
-        const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
-        const repairRequestBudget = outcome.requestsRemaining + traceRepairExtraRequests;
-        const deadlineLeft = timeFn() < deadline;
-        if (!instruction) {
-          // A vacuous instruction is treated as a no-op probe: no loop, no
-          // record — the run stays exactly as before.
-        } else if (
-          repairRequestBudget <= 0 ||
-          wallClockLeft <= 0 ||
-          !deadlineLeft
-        ) {
-          input.result.trace_repair_continuation = {
-            attempted: true,
-            outcome: "skipped_no_budget",
-            unresolved_ids: unresolvedIds,
-          };
-          log("  native_loop: trace-gap repair skipped (no loop budget left) — keeping the original verdict");
-        } else {
-          let repair: LoopOutcome | null = null;
-          try {
-            // The instruction rides the SAME conversation (the caller owns
-            // untrusted-data fencing). On the Anthropic format it merges
-            // into the same trailing user message as the verdict turn's
-            // user event — both follow tool_result blocks, so no adjacent
-            // user turns are created.
-            conversation.addUser(continuation.instruction);
-            repair = await driveToolLoop(conversation, postFn, executeFn, {
-              apiFormat: input.apiFormat,
-              model: input.model,
-              budgets: {
-                ...budgets,
-                // #1503: the same bounded call allowance, now spread over a
-                // few rounds so the reviewer can read one location and
-                // follow one reference. Call capacity is unchanged:
-                // `maxToolCalls` stays the base remainder + dedicated
-                // trace-closure allowance, and the ordinary primary ceiling
-                // is untouched.
-                maxRounds: TRACE_REPAIR_MAX_ROUNDS,
-                maxToolCalls: repairRequestBudget,
-                wallClockSec: Math.max(0, wallClockLeft),
-              },
-              maxTokens: input.maxTokensPerTurn,
-              temperature: planningTemp,
-              stream,
-              tokensParam,
-              cachePrefix: true,
-              reasoningEffort,
-              anthropicEffortSupported: anthropicEffort,
-              // #1464 (review): the continuation rides the RAW postFn
-              // (whole-run deadline), so its digest calls ride the raw
-              // summarizer too.
-              summarizeFn: repairSummarizeFn,
-              timeFn,
-              // #1379 (blocker 5728634290); #1396: the obligation state
-              // carries across the repair seam. When the main loop released
-              // the window (every tracked row discharged or cap-released),
-              // the continuation runs unreserved; otherwise its intact
-              // reserved tail IS what this continuation is being handed, so
-              // the enforcement stays on and the repair cannot spend it on
-              // unrelated calls either. The main loop's discharged rows seed
-              // the continuation so an obligation the main loop already
-              // covered is never required twice. The reserve is clamped to
-              // the requests the continuation actually holds (the same
-              // clamp-to-budget rule the reserve resolution applies), so its
-              // no-lockout attempts cap stays reachable and a repair round
-              // handed a short tail is never stuck refusing every call.
-              reserveForRequiredEvidence: outcome.requiredEvidenceReleased
-                ? 0
-                : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
-              ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
-              // #1595 (review): the lead claim rides the seam while the
-              // window is still up — once released, the reserve is 0 and the
-              // flag is inert, so it stays off for clean telemetry.
-              ...(input.requiredEvidenceLeadClaim === true && !outcome.requiredEvidenceReleased
-                ? { requiredEvidenceLeadClaim: true }
-                : {}),
-              requiredEvidenceCredits: outcome.requiredEvidenceCredits,
-              // #1396 (review): the RUN-WIDE evidence-attempt count threads
-              // across the seam so the continuation's telemetry reports the
-              // run total (the fold below is REPLACE, never add).
-              requiredEvidenceAttemptsPrior: outcome.requiredEvidenceAttempts,
-              // #1396 (review blocker): the no-lockout attempts cap is
-              // WINDOW-scoped and RUN-WIDE across the seam. The continuation
-              // starts from the main loop's IN-WINDOW attempt count (no
-              // reset to zero) and the cap threshold stays the ORIGINAL
-              // unclamped reserve, so the seam can never re-impose gating a
-              // run already outspent inside its window nor re-open a cap the
-              // main loop already consumed most of — while evidence calls
-              // spent BEFORE the main loop's window opened drain neither the
-              // main window's nor the continuation's no-lockout allowance.
-              requiredEvidenceWindowAttemptsPrior: outcome.requiredEvidenceWindowAttempts,
-              requiredEvidenceAttemptsCap: Math.max(0, Math.floor(input.reserveForRequiredEvidence ?? 0)),
-              // #1198: the repair round shares the ORIGINAL run's absolute
-              // deadline — the allowance above is a share, never an extension.
-              wallClockDeadline: deadline,
-              // #1199: the continuation is a native-loop run too, so its model
-              // turn(s) are recorded on the same dedicated telemetry clock and
-              // persisted under `repair_rounds` — every native-loop model turn
-              // is measured, not just the investigation loop's.
-              nowFn: telemetryTimeFn,
-              onRound: (rec) => {
-                repairRoundTelemetry.push(rec);
-                for (const line of nativeLoopRoundLogLines(rec, "repair")) log(line);
-              },
-            });
-          } catch (exc) {
-            const message = exc instanceof Error ? exc.message : String(exc);
-            input.result.trace_repair_continuation = {
-              attempted: true,
-              outcome: "skipped_refresh_failed",
-              unresolved_ids: unresolvedIds,
-            };
-            log(`  native_loop: trace-gap repair round failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
-          }
-          if (repair !== null) {
-            // #1379 (blocker 5728634290); #1396: the obligation state is
-            // run-wide. An evidence-channel attempt in the repair counts
-            // toward the run's provenance; its window refusals join the
-            // run's counts, its released flag ORs in, and the credits are
-            // the union in row order, so the telemetry never claims
-            // outstanding obligations the continuation already covered.
-            // `required` describes the rows the run committed to and stays
-            // unchanged; `attempts` rides the seeded run-wide counter.
-            const evidenceMeta = input.result.tool_loop_meta;
-            if (evidenceMeta !== null && evidenceMeta !== undefined) {
-              // #1635: the continuation shares the conversation and can
-              // compact it too — its passes are run-wide compaction facts,
-              // tagged so the artifact keeps them distinguishable from the
-              // investigation loop's own passes.
-              if (repair.compactionEvents.length > 0) {
-                const prior = Array.isArray(evidenceMeta.compaction_events) ? evidenceMeta.compaction_events : [];
-                evidenceMeta.compaction_events = [
-                  ...prior,
-                  ...repair.compactionEvents.map((event) => ({ ...event, phase: "repair" })),
-                ];
-                evidenceMeta.compaction_summarize = Number(evidenceMeta.compaction_summarize ?? 0)
-                  + repair.compactionEvents.filter((event) => event.kind === "summarize").length;
-                evidenceMeta.compaction_truncate = Number(evidenceMeta.compaction_truncate ?? 0)
-                  + repair.compactionEvents.filter((event) => event.kind === "truncate").length;
-              }
-              if (repair.compactionOverflowProtected) evidenceMeta.compaction_overflow_protected = true;
-              evidenceMeta.required_evidence_refusals =
-                Number(evidenceMeta.required_evidence_refusals ?? 0) + repair.requiredEvidenceRefusals;
-              // #1396 (review): the continuation's attempts counter is seeded
-              // with the main loop's (the cap is run-wide), so its outcome
-              // already reports the RUN-WIDE total — REPLACE, never add, or
-              // the seeded prior would double-count here.
-              evidenceMeta.required_evidence_attempts = repair.requiredEvidenceAttempts;
-              if (repair.requiredEvidenceReleased) evidenceMeta.required_evidence_released = true;
-              // #1627: the continuation's own settled early stop counts for
-              // the run too — its rows are the same obligation surface.
-              if (repair.requiredEvidenceSettledStop) evidenceMeta.required_evidence_settled_stop = true;
-              const runCredits = new Set<string>([
-                ...(Array.isArray(evidenceMeta.required_evidence_credits)
-                  ? (evidenceMeta.required_evidence_credits as unknown[]).filter(
-                      (id): id is string => typeof id === "string",
-                    )
-                  : []),
-                ...repair.requiredEvidenceCredits,
-              ]);
-              const rowOrder = (input.requiredEvidence ?? []).map((row) => row.id);
-              evidenceMeta.required_evidence_credits = [
-                ...rowOrder.filter((id) => runCredits.has(id)),
-                ...[...runCredits].filter((id) => !rowOrder.includes(id)),
-              ];
-            }
-            // Fold the repair's executed calls into the harness trace so the
-            // artifact shows everything the reviewer actually read. The
-            // loop-level fields (`rounds`, `stop_reason`, `budget_exhausted`,
-            // `tool_loop_meta`) describe the ORIGINAL loop and stay untouched;
-            // the continuation's own stop/rounds/call counts live on the
-            // record below.
-            const traceCalls: unknown[] = Array.isArray(input.result.tool_calls) ? (input.result.tool_calls as unknown[]) : [];
-            const traceResults: unknown[] = Array.isArray(input.result.tool_results) ? (input.result.tool_results as unknown[]) : [];
-            for (const call of repair.executed) {
-              traceCalls.push({
-                tool: call.tool,
-                args: maskKnownSecretsDeep(call.args, harnessSecrets),
-                status: (call.result.status as string) ?? "error",
-              });
-              traceResults.push(maskKnownSecretsDeep(call.result, harnessSecrets));
-            }
-            input.result.tool_calls = traceCalls;
-            input.result.tool_results = traceResults;
-            // #1597: fold the continuation's distinct counts under the same
-            // invariant as the original loop (issued = executed + refused +
-            // deduplicated), so the post-repair artifact, marker and summary
-            // all describe one consistent execution snapshot.
-            input.result.executed_request_count =
-              Number(input.result.executed_request_count ?? 0) + repair.executed.length;
-            input.result.successful_request_count =
-              Number(input.result.successful_request_count ?? 0) +
-              repair.executed.filter((call) => call.result.status === "ok").length;
-            input.result.refused_request_count =
-              Number(input.result.refused_request_count ?? 0) + repair.toolCallsRefused;
-            input.result.deduplicated_request_count =
-              Number(input.result.deduplicated_request_count ?? 0) + repair.toolCallsDeduplicated;
-            input.result.planned_request_count =
-              Number(input.result.planned_request_count ?? 0) + repair.toolCallsIssued;
-
-            // #1447: a repair round can close deterministic execution coverage
-            // too. Recompute the original budget-stop coverage over the
-            // combined call log so a targeted repair read is credited, while
-            // any still-unread file or specialist lead remains partial.
-            if (coverageInputs !== null) {
-              const combinedOutcome: LoopOutcome = {
-                ...outcome,
-                executed: [...outcome.executed, ...repair.executed],
-                toolCallsIssued: outcome.toolCallsIssued + repair.toolCallsIssued,
-              };
-              const repairedCoverage = computePartialCoverage(combinedOutcome, coverageInputs);
-              if (repairedCoverage === null) delete input.result.partial_coverage;
-              else input.result.partial_coverage = repairedCoverage;
-            }
-
-            // Keep remaining-request telemetry honest against the effective
-            // base + repair allowance.
-            const repairMeta = input.result.tool_loop_meta;
-            if (repairMeta !== null && repairMeta !== undefined) {
-              repairMeta.requests_remaining = Math.max(
-                0,
-                Number(repairMeta.requests_remaining ?? 0) - repair.toolCallsIssued,
-              );
-            }
-            // #1552: classify the repair round FIRST. A round that stopped
-            // on a request error did NOT complete: record it distinctly
-            // instead of calling an errored round "continued" (the
-            // stop_reason keeps the precise cause). A round that issued NO
-            // tool call inspected no NEW evidence — but the evidence the
-            // earlier rounds gathered is ALREADY in the conversation, so the
-            // trace-only turn below is still justified by it regardless of
-            // the round's stop reason (the #1539 shape is
-            // `no-tool-calls`; a round whose only call was refused is the
-            // sibling shape).
-            const repairErrored = repair.stopReason === "request-error" || String(repair.error ?? "") !== "";
-            // #1552: the trace-only turn is gated on STRUCTURAL Anthropic
-            // wire safety — `appendingUserWouldBeAdjacent` mirrors the
-            // renderer's batching without mutating state, so the check
-            // reflects exactly what appending the trace instruction would
-            // do to the wire. The #1539 tail (an OPEN tool_result batch
-            // carrying the verdict + repair instruction as trailing text
-            // blocks) merges the instruction and is wire-safe even when the
-            // repair round itself executed nothing; a standalone-user tail
-            // (or the no-targets case) still suppresses it, and the
-            // standalone repair fallback may then recover the gap. A round
-            // that executed at least one call always left a tool_result
-            // event behind, so the structural check never suppresses a turn
-            // the pre-#1552 executed-call gate allowed.
-            const traceWireSafe = !conversation.appendingUserWouldBeAdjacent();
-            const traceAttemptable =
-              repairTargetIds.length > 0 && !repairErrored && traceWireSafe;
-            const claimsMerged = traceAttemptable ? await runTraceOnlyRepairTurn(repairTargetIds) : 0;
-            const continuationOutcome = repairErrored
-              ? "skipped_refresh_failed"
-              : traceAttemptable
-                ? repair.executed.length === 0
-                  ? "continued_trace_only"
-                  : "continued"
-                : repairTargetIds.length > 0
-                  ? "skipped_wire_unsafe"
-                  : "continued";
-            // #1552: when targets existed but the turn was NOT attempted,
-            // record why. With the structural gate the only suppression
-            // cause is a wire-unsafe (standalone-user) tail — a round that
-            // executed nothing no longer suppresses the turn, because the
-            // justification is the conversation's ALREADY-gathered evidence.
-            const traceSkippedReason =
-              repairTargetIds.length > 0 && !repairErrored && !traceAttemptable
-                ? "wire_unsafe"
-                : undefined;
-            input.result.trace_repair_continuation = {
-              attempted: true,
-              outcome: continuationOutcome,
-              unresolved_ids: unresolvedIds,
-              stop_reason: repair.stopReason,
-              rounds: repair.rounds,
-              tool_calls: repair.executed.length,
-              claims_merged: claimsMerged,
-              trace_claims_merged: claimsMerged > 0,
-              // #1552: the remaining DEDICATED repair allowance after the
-              // round (base remainder + bounded trace-closure extra, minus
-              // what the round issued) — keeps the allowance honest in
-              // telemetry even when the round executed nothing.
-              repair_requests_remaining: Math.max(0, repairRequestBudget - repair.toolCallsIssued),
-              ...(traceSkippedReason !== undefined ? { trace_skipped_reason: traceSkippedReason } : {}),
-            };
-            log(
-              `  native_loop: trace-gap repair ran ${repair.executed.length} additional tool call(s) ` +
-                `(${repair.stopReason}); trace claims merged: ${claimsMerged}`,
-            );
-          }
-        }
-      }
-    }
   }
 
   // Token/cost telemetry (loop turns + the verdict turn).
@@ -4809,14 +4005,6 @@ function countOccurrences(text: string, needle: string): number {
     pos = text.indexOf(needle, pos + needle.length);
   }
   return count;
-}
-
-/** #1145: bounded display form of an unresolved requirement id for the
- * `trace_repair_continuation` telemetry record: control characters stripped
- * and length-capped, so a hostile id can never forge artifact structure. */
-function traceGapIdLabel(id: string): string {
-  // eslint-disable-next-line no-control-regex
-  return id.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120);
 }
 
 /**
@@ -5095,9 +4283,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     deduplicated_request_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
-    tool_request_budget:
-      maxRequests.budget +
-      (tier === "primary" && deps.traceGapProbe !== undefined ? TRACE_REPAIR_EXTRA_REQUESTS : 0),
+    tool_request_budget: maxRequests.budget,
     tool_budget_source: maxRequests.source,
     tool_budget_configured: maxRequests.configured,
   };
@@ -5247,15 +4433,6 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     deps.readText,
     (deps.env.DERIVED_OBLIGATIONS ?? "false").trim().toLowerCase() === "true",
   )));
-  // #1506: the requirement-trace rows join the SAME admission set. They come
-  // from the harness-authored candidates artifact — the rows the planner was
-  // actually shown — so the reservation guards exactly the requirements the
-  // model saw, and never a row the model never saw. A trace row is admitted
-  // only by a repository read/search call that names its target, so the
-  // merge-gating requirement evidence cannot be satisfied by an unrelated
-  // forge, web or command call.
-  const traceEvidenceRows = traceAdmissionRows(deps.readText(TRACE_PLAN_CANDIDATES_ARTIFACT));
-  requiredEvidence.push(...traceEvidenceRows);
   for (const obligation of trackedDependencyObligations) {
     requiredEvidence.push({ id: obligation, tokens: [], obligation });
   }
@@ -5263,29 +4440,16 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // resolutions, never their sum. Side by side, each held requests back near
   // the same ceiling, so a dependency-update PR had most of its remaining
   // budget reserved twice over by one loop.
-  // #1506: the requirement-trace rows are counted SEPARATELY from the #1381
-  // prose rows: the prose reservation keeps its own count (a run without a
-  // trace plan reserves byte-for-byte what it reserved before), and the trace
-  // reservation joins the same tail as the MAX of the resolutions.
   const proseReserve = computeRequiredEvidenceReservation(
-    requiredEvidence.filter((row) => row.obligation === undefined && row.trace !== true).length,
+    requiredEvidence.filter((row) => row.obligation === undefined).length,
     maxRequests.budget,
   );
-  const traceReserve = computeTraceEvidenceReservation(
-    traceEvidenceRows.reduce((total, row) => total + Math.max(1, row.requiredAttempts ?? 1), 0),
-    maxRequests.budget,
-  );
-  const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve, traceReserve);
+  const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve);
   if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
   if (dependencyReserve > 0) {
     (deps.log ?? (() => {}))(
       `  dependency-evidence reserve: ${dependencyReserve} tool request(s)` +
         `, ${trackedDependencyObligations.length} obligation(s)`,
-    );
-  }
-  if (traceReserve > 0) {
-    (deps.log ?? (() => {}))(
-      `  requirement-trace reserve: ${traceReserve} tool request(s), ${traceEvidenceRows.length} requirement(s)`,
     );
   }
 
@@ -5335,7 +4499,6 @@ turnTimeout,
     tier,
     deps,
     ...(deps.wallClockSecCap !== undefined ? { wallClockSecCap: deps.wallClockSecCap } : {}),
-    ...(deps.traceGapProbe !== undefined ? { traceGapProbe: deps.traceGapProbe } : {}),
   });
   if (!handled) {
     // The model issued no tool calls (or the loop errored before any): degrade

@@ -1157,14 +1157,15 @@ test("#1518: the enforcement helpers name the obligations the pass could not dis
   // `unverifiable` — exactly the rows that set the trace's `incomplete` flag.
   const trace = {
     version: 1,
-    incomplete: true,
+    summary: { confirmed_unmet: [], unmet_claimed: ["REQ-2"], unresolved_material: ["REQ-3"], unresolved_advisory: [], total_rows: 5 },
+    incomplete: false,
     errors: [],
     rows: [
-      { requirement_id: "REQ-1", disposition: "met", proof: "test_required", enforcement: [], test: [], reason: "", notes: [] },
-      { requirement_id: "REQ-2", disposition: "unmet", proof: "test_required", enforcement: [], test: [], reason: "", notes: [] },
-      { requirement_id: "REQ-3", disposition: "unverifiable", proof: "test_required", enforcement: [], test: [], reason: "", notes: [] },
-      { requirement_id: "REQ-4", disposition: "not_applicable", proof: "not_applicable", enforcement: [], test: [], reason: "", notes: [] },
-      { requirement_id: "REQ-2", disposition: "unmet", proof: "test_required", enforcement: [], test: [], reason: "", notes: [] },
+      { requirement_id: "REQ-1", disposition: "met", proof: "test_required", resolution: "evidenced", materiality: "advisory", enforcement: [], test: [], reason: "", notes: [] },
+      { requirement_id: "REQ-2", disposition: "unmet", proof: "test_required", resolution: "unmet_claimed", materiality: "material", enforcement: [], test: [], reason: "", notes: [] },
+      { requirement_id: "REQ-3", disposition: "unverifiable", proof: "test_required", resolution: "unresolved", materiality: "material", enforcement: [], test: [], reason: "", notes: [] },
+      { requirement_id: "REQ-4", disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason: "", notes: [] },
+      { requirement_id: "REQ-2", disposition: "unmet", proof: "test_required", resolution: "unmet_claimed", materiality: "material", enforcement: [], test: [], reason: "", notes: [] },
     ],
   };
   assert.deepEqual(unresolvedTraceRequirementIds(trace), { ids: ["REQ-2", "REQ-3"], total: 2 });
