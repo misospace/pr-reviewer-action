@@ -560,6 +560,10 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
         reviewMarkdown: result.outputs.reviewMarkdown,
         verdict: result.outputs.verdict,
         verdictPolicy: result.verdictPolicy,
+        // #1656: the replay publishes through the SAME authoritative
+        // disposition the real engine hands the publish boundary, so the
+        // captured native event can never certify what the run withheld.
+        ...(result.finalDisposition !== undefined ? { finalDisposition: result.finalDisposition } : {}),
         analysisEngine: result.outputs.analysisEngine,
         baseSha: "b".repeat(40),
         headSha: String(pr.head_sha),

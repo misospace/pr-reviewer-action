@@ -320,13 +320,13 @@ test("source reader returns read-failed when the tree lists the path but its blo
   }
 });
 
-test("source reader's read-failed keeps request_changes through the boundary", async () => {
+test("source reader's read-failed surfaces unverified through the boundary, never certified", async () => {
   // Fail-closed guarantee for the same boundary (mirrors the
   // revision-unreachable test): a commit whose tree contains the cited
   // path but whose blob cannot be read must surface as `unverified`
-  // (reason `read-failed`) through `applyBlockerVerification` and keep
-  // `request_changes` under the strict mapping — unknown evidence can
-  // never certify a clean review.
+  // (reason `read-failed`) through `applyBlockerVerification` — unknown
+  // evidence can never certify a clean review (#1656: the authoritative
+  // disposition withholds the approval instead of fabricating a block).
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "source-verifier-"));
   try {
     git(workspace, ["init"]);
@@ -354,17 +354,20 @@ test("source reader's read-failed keeps request_changes through the boundary", a
     assert.equal(a.findings[0]!.severity, "minor");
     assert.equal(result.findings[0]!.reason, "read-failed");
 
+    // Strict policy: #1656 — an unverified demotion is disposition
+    // evidence, not a forced verdict. The mapping derives approve; the
+    // `unverified_blocking_claim` MATERIAL unknown withholds the approval,
+    // so the review is never certified from evidence it could not read.
     const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-    assert.equal(a.verdict, "request_changes");
-    assert.equal(outcome.verdict, "request_changes");
-    assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
-    assert.ok(a.review_markdown.includes("#1016"));
+    assert.equal(a.verdict, "approve");
+    assert.equal(outcome.verdict, "approve");
+    assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("source reader's revision-unreachable keeps request_changes through the boundary", async () => {
+test("source reader's revision-unreachable surfaces unverified through the boundary, never certified", async () => {
   // #1016 (review pass, fail-closed guarantee): a real git workspace
   // + a well-formed but non-object SHA — the exact shape of the reviewer's
   // "false APPROVE" reproduction — must surface as `unverified` through
@@ -396,13 +399,14 @@ test("source reader's revision-unreachable keeps request_changes through the bou
     assert.equal(a.findings[0]!.grounding_status, "unverified");
     assert.equal(a.findings[0]!.severity, "minor");
 
-    // Strict policy: an `unverified` demotion in the boundary must keep
-    // request_changes even when the model verdict was approve.
+    // Strict policy: #1656 — an unverified demotion is disposition
+    // evidence, not a forced verdict. The mapping derives approve; the
+    // `unverified_blocking_claim` MATERIAL unknown withholds the approval,
+    // so a malformed local checkout can never certify a clean review.
     const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-    assert.equal(a.verdict, "request_changes");
-    assert.equal(outcome.verdict, "request_changes");
-    assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
-    assert.ok(a.review_markdown.includes("#1016"));
+    assert.equal(a.verdict, "approve");
+    assert.equal(outcome.verdict, "approve");
+    assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
     // The workspace's real SHA proves the bogus SHA is missing from the
     // disk, not from a misconfiguration: the boundary is the layer under
     // test, and the repo carries a verifiable commit when asked.
