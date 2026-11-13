@@ -610,6 +610,20 @@ test("parseFinalDisposition accepts the computed object and refuses malformed sh
   const forged = JSON.parse(JSON.stringify(certified));
   forged.nativeEvent = "COMMENT";
   assert.equal(parseFinalDisposition(forged), null);
+
+  // The COMPLETE native-event mapping is enforced: every kind carries
+  // exactly one event, and any other pairing is refused (the fail-closed
+  // unreadable-disposition path takes over).
+  const blocked: FinalDisposition = computeFinalDisposition(input({ verdict: "request_changes", blockingFindingOpen: true }));
+  const forgedBlockEvent = JSON.parse(JSON.stringify(blocked));
+  forgedBlockEvent.nativeEvent = "COMMENT";
+  assert.equal(parseFinalDisposition(forgedBlockEvent), null, "request_changes carries exactly REQUEST_CHANGES");
+  const forgedIncompleteEvent = JSON.parse(JSON.stringify(disposition));
+  forgedIncompleteEvent.nativeEvent = "REQUEST_CHANGES";
+  assert.equal(parseFinalDisposition(forgedIncompleteEvent), null, "incomplete carries exactly COMMENT");
+  const forgedUnavailableEvent = JSON.parse(JSON.stringify(unreadableFinalDisposition()));
+  forgedUnavailableEvent.nativeEvent = "REQUEST_CHANGES";
+  assert.equal(parseFinalDisposition(forgedUnavailableEvent), null, "unavailable carries exactly COMMENT");
   assert.equal(parseFinalDisposition({ ...JSON.parse(JSON.stringify(certified)), kind: "clean" }), null);
   assert.equal(parseFinalDisposition(null), null);
   assert.equal(parseFinalDisposition("approve"), null);

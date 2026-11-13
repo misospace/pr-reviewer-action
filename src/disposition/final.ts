@@ -196,8 +196,10 @@ export interface FinalDisposition {
   readonly reason: FinalDispositionReason;
   readonly nativeEvent: FinalDispositionNativeEvent;
   /** True when a blocking code defect is proven (a grounded current-head
-   * blocker/major finding, an evidence-provider blocker, or the final
-   * verdict itself). */
+   * blocker/major finding, an evidence-provider blocker, or a mechanically
+   * proven unmet mandatory requirement). The raw/final model verdict is
+   * never proof on its own — an ungrounded blocking conclusion is a
+   * material unknown, not a defect. */
   readonly blockerProven: boolean;
   /** Derived, never independent: true exactly when kind is `approve` (the
    * full APPROVE floor passed and the native event is a certified APPROVE). */
@@ -228,7 +230,10 @@ export interface FinalDispositionInput {
   reviewProduced: boolean;
   /** True when the run produced a parseable final verdict. */
   validVerdict: boolean;
-  /** The final verdict ("approve" | "request_changes" | "" when none). */
+  /** The final verdict ("approve" | "request_changes" | "" when none). It
+   * is an input, never proof of a defect on its own — a blocking
+   * conclusion with no grounded/proven evidence behind it is a material
+   * unknown (see `computeFinalDisposition` step 2). */
   verdict: string;
   /** True when the verdict came from a degraded no-evidence fallback (or
    * the model-failure notice) — the review capability was effectively
@@ -351,9 +356,11 @@ function incompleteWording(materialUnknowns: readonly DispositionEvidence[]): {
  *    `unavailable`. It can never certify anything, and it never
  *    fabricates a code blocker out of its own failure.
  * 2. Proven defects — a grounded current-head blocker/major finding, an
- *    evidence-provider blocker, an objectively proven unmet mandatory
- *    requirement, or the final verdict itself — are `request_changes`.
- *    A proven defect outranks every coverage state.
+ *    evidence-provider blocker, or an objectively proven unmet mandatory
+ *    requirement — are `request_changes`. The RAW verdict is not proof: a
+ *    `request_changes` conclusion without grounded/proven blocking
+ *    evidence is itself an unverified blocking claim (step 3), never a
+ *    fabricated block. A proven defect outranks every coverage state.
  * 3. Material unknowns — any material evidence entry (an uninspected
  *    affected path, known-failing required exact-head CI, an unverified
  *    blocking claim, …) — withhold certification as `incomplete` under
@@ -530,7 +537,14 @@ export function parseFinalDisposition(value: unknown): FinalDisposition | null {
   // kind `approve` — is certified, and it always carries the APPROVE event.
   if (record.approvalCertified !== (kind === "approve")) return null;
   if ((reason === "approval_certified") !== (kind === "approve")) return null;
-  if ((record.nativeEvent === "APPROVE") !== (kind === "approve")) return null;
+  // The COMPLETE native-event mapping: each kind carries exactly one event,
+  // and every other pairing is a malformed disposition, never a re-derivation.
+  const expectedEvent: string = kind === "request_changes"
+    ? "REQUEST_CHANGES"
+    : kind === "approve"
+      ? "APPROVE"
+      : "COMMENT";
+  if (record.nativeEvent !== expectedEvent) return null;
   return {
     kind,
     reason,
