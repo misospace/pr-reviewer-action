@@ -9,7 +9,7 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsPageInfo, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
@@ -360,6 +360,60 @@ test("github GraphQL targets <host>/api/graphql on a GHES /api/v3 base, and Grap
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://ghe.example/api/v3", fetchImpl });
   assert.equal((await adapter.listReviewThreads()).ok, false);
   assert.equal(seen[0]!.url, "https://ghe.example/api/graphql");
+});
+
+// ── #1662: the review-thread listing is paginated, not a capped window ───
+
+const threadsPage = (ids: readonly string[], hasNextPage: boolean, endCursor: string | null) =>
+  json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage, endCursor }, nodes: ids.map((id) => ({ id, isResolved: false, isOutdated: false, path: "a.ts", line: 1, originalLine: 1, comments: { nodes: [{ databaseId: 1, body: id, createdAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z", author: { login: "rev" } }] } })) } } } } });
+
+test("#1662: github review-thread listing follows endCursor and merges every page's threads in order", async () => {
+  const { fetchImpl, seen } = recorder((_url, init) => {
+    const cursor = (JSON.parse(String(init?.body)).variables as { cursor?: string }).cursor;
+    if (cursor === "C2") return threadsPage(["T3"], false, null);
+    if (cursor === "C1") return threadsPage(["T2"], true, "C2");
+    return threadsPage(["T1"], true, "C1");
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.ok(result.ok, result.ok ? "" : result.error);
+  assert.deepEqual((result.data as { thread_id: string }[]).map((t) => t.thread_id), ["T1", "T2", "T3"]);
+  const variables = seen.map((s) => (JSON.parse(s.body!).variables as Record<string, unknown>));
+  assert.deepEqual(variables, [
+    { owner: "o", name: "r", number: 7 },
+    { owner: "o", name: "r", number: 7, cursor: "C1" },
+    { owner: "o", name: "r", number: 7, cursor: "C2" },
+  ]);
+  for (const page of seen) assert.deepEqual(JSON.parse(page.body!).query, GITHUB_REVIEW_THREADS_QUERY);
+  assert.equal(seen[0]!.auth, "Bearer t", "every page carries the credential");
+});
+
+test("#1662: a failed review-thread page fails the whole read instead of presenting a partial listing", async () => {
+  const { fetchImpl, seen } = recorder((_url, init) => {
+    const cursor = (JSON.parse(String(init?.body)).variables as { cursor?: string }).cursor;
+    return cursor === "C1" ? json({}, 500) : threadsPage(["T1"], true, "C1");
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  assert.equal((await adapter.listReviewThreads()).ok, false);
+  assert.equal(seen.length, 2);
+});
+
+test("#1662: a looping review-thread cursor is bounded by MAX_PAGES and fails closed", async () => {
+  const { fetchImpl, seen } = recorder(() => threadsPage(["T1"], true, "C1"));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /pagination exceeded 100 pages/);
+  assert.equal(seen.length, 100, "the bound fires before the 101st request");
+});
+
+test("#1662: githubReviewThreadsPageInfo fails closed without a connection or pageInfo", () => {
+  assert.deepEqual(githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }), { hasNextPage: false, endCursor: null });
+  assert.deepEqual(githubReviewThreadsPageInfo({ data: { repository: { pullRequest: null } } }), { hasNextPage: false, endCursor: null });
+  assert.deepEqual(githubReviewThreadsPageInfo({ data: null }), { hasNextPage: false, endCursor: null });
+  assert.deepEqual(githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true, endCursor: "C" }, nodes: [] } } } } }), { hasNextPage: true, endCursor: "C" });
+  // A blank endCursor never advances the cursor, even beside hasNextPage: true.
+  assert.deepEqual(githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true, endCursor: "" } } } } } }), { hasNextPage: true, endCursor: null });
 });
 
 test("github paginated reviews follow Link rel=next and merge pages in order", async () => {

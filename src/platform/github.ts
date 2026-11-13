@@ -5,6 +5,7 @@ import {
   GITHUB_CONVERSATION_COMMENTS_QUERY,
   GITHUB_PR_BODY_REVISION_QUERY,
   GITHUB_REVIEW_THREADS_QUERY,
+  githubReviewThreadsPageInfo,
   normalizeExternalChecks,
   normalizeGithubConversationComments,
   normalizeGithubReviewThreads,
@@ -173,13 +174,16 @@ export class GitHubAdapter implements PlatformReadAdapter {
 
   /** `gh api graphql -f query=... -f owner -f name -F number | jq ...`:
    * an HTTP error or a non-empty `errors` array fails the read (gh exits
-   * nonzero and `set -o pipefail` propagates it). */
-  private async graphql(query: string): Promise<ReadResult<unknown>> {
+   * nonzero and `set -o pipefail` propagates it). `cursor` carries the
+   * opaque `endCursor` of the previous page for #1662's paginated
+   * review-threads read; absent on every other (single-document) read. */
+  private async graphql(query: string, cursor?: string): Promise<ReadResult<unknown>> {
     const ref = parseRepoRef(this.repo);
     if (ref === null) return { ok: false, error: `Invalid repo full name: ${this.repo}` };
     const { owner, name } = ref;
     const number: string | number = NUMBER_RE.test(this.prNumber) ? Number(this.prNumber) : this.prNumber;
-    const body = JSON.stringify({ query, variables: { owner, name, number } });
+    const variables = cursor === undefined ? { owner, name, number } : { owner, name, number, cursor };
+    const body = JSON.stringify({ query, variables });
     try {
       const { status, text } = await requestText(this.graphqlUrl(), { ...this.options(), method: "POST", body });
       if (status < 200 || status >= 300) return { ok: false, error: `GitHub GraphQL error: ${status}` };
@@ -406,11 +410,26 @@ export class GitHubAdapter implements PlatformReadAdapter {
     }
   }
 
+  /** #1662: forward-paginated `reviewThreads(first: 100, after: $cursor)` —
+   * the WHOLE listing is read so a live unresolved thread outside the v2
+   * `last: 100` window can be proven at settlement time. Pages merge in
+   * order; any failed page fails the whole read (a partial listing presented
+   * as complete could never prove an absent thread absent). A hostile or
+   * looping API is bounded by MAX_PAGES. */
   async listReviewThreads(): Promise<ReadResult<unknown[]>> {
-    const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY);
-    if (!response.ok) return response;
+    const responses: unknown[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; ; page += 1) {
+      if (page >= MAX_PAGES) return { ok: false, error: `pagination exceeded ${MAX_PAGES} pages` };
+      const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY, cursor);
+      if (!response.ok) return response;
+      responses.push(response.data);
+      const info = githubReviewThreadsPageInfo(response.data);
+      if (!info.hasNextPage || info.endCursor === null) break;
+      cursor = info.endCursor;
+    }
     try {
-      return { ok: true, data: normalizeGithubReviewThreads(response.data) };
+      return { ok: true, data: responses.flatMap((response) => normalizeGithubReviewThreads(response)) };
     } catch (error) {
       return { ok: false, error: errorText(error) };
     }
