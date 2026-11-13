@@ -14,7 +14,7 @@ import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseN
 import { capCiEvidenceFindings, parseCiCheckNames } from "../src/enforcement/ci-evidence.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "../src/context/review-threads.js";
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
-import { applyReviewThreadEnforcement, evidenceCitesCode } from "../src/enforcement/threads.js";
+import { applyReviewThreadEnforcement, evidenceCitesCode, parseLiveThreadIndex, reconcileCarriedThreads } from "../src/enforcement/threads.js";
 import { applyHumanReviewEnforcement, inlineCode } from "../src/enforcement/human-reviews.js";
 import {
   applyAllEnforcement,
@@ -914,4 +914,111 @@ test("#1248: supersede rewrites only the exact action-authored note lines (#252 
     assert.ok(midLine.review_markdown.includes(line), `line-initial model prose was rewritten: ${line}`);
   }
   assert.ok(!midLine.review_markdown.includes("superseded"), "nothing to supersede in imitation prose");
+});
+
+// ── #1645: carried-thread reconciliation ──────────────────────────────────
+
+test("#1645: the live thread index parses the normalized listing tolerantly and refuses non-listings", () => {
+  const index = parseLiveThreadIndex([
+    { thread_id: "PRRT_live", resolved: false },
+    { thread_id: "PRRT_done", resolved: true },
+    null,
+    "garbage",
+    { no_id: true },
+    { thread_id: "PRRT_bare" }, // no resolved field — existence without a claim reads unresolved=false
+    { thread_id: "", resolved: false }, // empty id skipped
+  ]);
+  assert.ok(index instanceof Map);
+  assert.equal(index!.get("PRRT_live"), false);
+  assert.equal(index!.get("PRRT_done"), true);
+  assert.equal(index!.get("PRRT_bare"), false);
+  assert.equal(index!.size, 3);
+  // A non-array listing is NOT an empty live set: it is unavailable, so the
+  // reconciliation can never read a malformed response as "nothing exists".
+  assert.equal(parseLiveThreadIndex(undefined), null);
+  assert.equal(parseLiveThreadIndex({}), null);
+  assert.equal(parseLiveThreadIndex("[]"), null);
+  // An empty ARRAY is a legitimate listing: the forge says no threads exist.
+  const empty = parseLiveThreadIndex([]);
+  assert.deepEqual([...empty!.keys()], []);
+});
+
+test("#1645: reconciliation keeps only proven live-unresolved carried threads and receipts every row", () => {
+  const snapshot = [
+    { thread_id: "PRRT_still", severity: "major", path: "src/a.ts", line: 1 },
+    { thread_id: "PRRT_resolved", severity: "blocker", path: null, line: null },
+    { thread_id: "PRRT_gone", severity: "major", path: "src/b.ts", line: 2 },
+  ];
+  const live = parseLiveThreadIndex([
+    { thread_id: "PRRT_still", resolved: false },
+    { thread_id: "PRRT_resolved", resolved: true },
+  ]);
+  const result = reconcileCarriedThreads(snapshot as never, live!, "d".repeat(40));
+  assert.equal(result.listing, "live");
+  assert.deepEqual(result.threads.map((t) => t.thread_id), ["PRRT_still"], "only the proven live-unresolved thread survives into settlement");
+  assert.deepEqual(result.receipts, [
+    { thread_id: "PRRT_still", severity: "major", reconciliation: "live-unresolved" },
+    { thread_id: "PRRT_resolved", severity: "blocker", reconciliation: "resolved" },
+    { thread_id: "PRRT_gone", severity: "major", reconciliation: "absent" },
+  ]);
+});
+
+test("#1645: an unavailable live listing drops every carried thread as unknown — no blocker from cache alone", () => {
+  const snapshot = [
+    { thread_id: "PRRT_a", severity: "blocker", path: null, line: null },
+    { thread_id: "PRRT_b", severity: "minor", path: null, line: null },
+  ];
+  for (const dead of [null, undefined]) {
+    const result = reconcileCarriedThreads(snapshot as never, dead as never, "d".repeat(40));
+    assert.equal(result.listing, "unavailable");
+    assert.deepEqual(result.threads, [], "unprovable carried state must not block");
+    assert.deepEqual(result.receipts.map((r) => [r.thread_id, r.reconciliation]), [
+      ["PRRT_a", "unknown"],
+      ["PRRT_b", "unknown"],
+    ]);
+  }
+});
+
+test("#1645: an empty live listing (the forge has no threads) makes every carried thread absent", () => {
+  const snapshot = [{ thread_id: "PRRT_x", severity: "major", path: null, line: null }];
+  const result = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!, "d".repeat(40));
+  assert.equal(result.listing, "live");
+  assert.deepEqual(result.threads, []);
+  assert.deepEqual(result.receipts.map((r) => r.reconciliation), ["absent"]);
+});
+
+test("#1645: no snapshot — reconciliation is a no-op with empty receipts", () => {
+  for (const empty of [[], null, undefined]) {
+    const result = reconcileCarriedThreads(empty as never, parseLiveThreadIndex([{ thread_id: "PRRT_live", resolved: false }])!, "d".repeat(40));
+    assert.equal(result.listing, "no-snapshot");
+    assert.deepEqual(result.threads, []);
+    assert.deepEqual(result.receipts, []);
+  }
+});
+
+test("#1645: settlement over the reconciled set re-emits only the live-unresolved carried blocker", () => {
+  // The composed #1619 shape: the snapshot carried two majors; the live
+  // listing has neither; the reconciled set is empty, so settlement has
+  // nothing to re-emit and an approve-shaped artifact stays untouched.
+  const snapshot = [
+    { thread_id: "PRRT_stale1", severity: "major", path: "src/a.ts", line: 1, message: "old major one", own_finding: true, replies: 0 },
+    { thread_id: "PRRT_stale2", severity: "major", path: "src/b.ts", line: 2, message: "old major two", own_finding: true, replies: 0 },
+  ];
+  const reconciled = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!, "d".repeat(40));
+  const artifact: Record<string, unknown> = { verdict: "approve", findings: [], thread_dispositions: [] };
+  const settlement = applyReviewThreadEnforcement(artifact as never, reconciled.threads as never, "findings_severity_gated");
+  assert.equal(settlement.applied, false);
+  assert.equal(artifact.verdict, "approve");
+  assert.deepEqual(artifact.findings, []);
+  // The live-carried counterpart: one of the two is live-unresolved — it
+  // re-emits and a blocking severity still blocks under the same policy.
+  const liveOne = reconcileCarriedThreads(
+    snapshot as never,
+    parseLiveThreadIndex([{ thread_id: "PRRT_stale1", resolved: false }, { thread_id: "PRRT_stale2", resolved: true }])!,
+    "d".repeat(40),
+  );
+  const liveArtifact: Record<string, unknown> = { verdict: "approve", findings: [], thread_dispositions: [] };
+  applyReviewThreadEnforcement(liveArtifact as never, liveOne.threads as never, "findings_severity_gated");
+  const reemitted = (liveArtifact.findings as Array<{ thread_id?: string; severity?: string }>).filter((f) => f.thread_id);
+  assert.deepEqual(reemitted.map((f) => [f.thread_id, f.severity]), [["PRRT_stale1", "major"]], "the resolved thread is gone; the live one re-emits with its original severity");
 });

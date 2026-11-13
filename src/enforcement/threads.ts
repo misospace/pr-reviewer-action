@@ -200,3 +200,127 @@ export function applyReviewThreadEnforcement(
     reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}`,
   };
 }
+
+// ── #1645: carried-thread reconciliation ────────────────────────────────────
+//
+// The corpus's `# Unresolved Review Threads` section is a CONTEXT-TIME
+// snapshot of the forge's live review-thread listing. Thread settlement
+// (#680) re-emits every listed-but-undispositioned thread as a finding
+// carrying the thread's ORIGINAL severity, and a re-emitted blocker can
+// escalate the verdict — so a stale snapshot converts prior-round findings
+// into current-head blockers. The #1619 organic failure: a review whose
+// model verdict, fresh findings, and required-check coverage all pointed at
+// approve still published REQUEST_CHANGES because two prior-round major
+// thread IDs — absent from the forge's live listing by the time anyone
+// looked — rode the snapshot into settlement.
+//
+// The invariant (#1645): a carried prior blocker may affect the current
+// head's disposition ONLY when the deterministic layer can reconcile it to
+// authoritative current forge state. The forge owns thread truth; a cached
+// snapshot alone never invents a blocker.
+
+/** What the deterministic reconciliation established about one carried
+ * thread. `live-unresolved`: the authoritative listing contains the thread
+ * and reports it unresolved — it counts, exactly as before. `resolved`: the
+ * listing contains it and reports it resolved/dismissed. `absent`: the
+ * listing does not contain it at all (the #1619 shape). `unknown`: the
+ * listing itself could not be established, so nothing is carried from cache
+ * alone — current fresh blockers are untouched. */
+export type ThreadReconciliationResult = "live-unresolved" | "resolved" | "absent" | "unknown";
+
+/** Bounded provenance for one carried thread (the #1645 diagnostic
+ * requirement): identity, the severity it WOULD have re-emitted under, and
+ * the reconciliation outcome. No thread message text — the identity and the
+ * outcome are the diagnostic; the message is in the corpus artifact. */
+export interface ThreadReconciliationReceipt {
+  thread_id: string;
+  severity: string;
+  reconciliation: ThreadReconciliationResult;
+}
+
+export interface CarriedThreadReconciliation {
+  /** The snapshot threads that MAY still affect settlement — every entry is
+   * proven live-unresolved; everything else was dropped. */
+  threads: EnforcementThread[];
+  receipts: ThreadReconciliationReceipt[];
+  /** Whether the authoritative listing was obtainable at all: `live` (the
+   * per-thread receipts are authoritative), `unavailable` (every carried
+   * thread is `unknown` and dropped), `no-snapshot` (nothing carried, the
+   * receipts are empty and the distinction is moot). */
+  listing: "live" | "unavailable" | "no-snapshot";
+}
+
+/**
+ * Index the authoritative live thread listing into `thread_id → resolved`.
+ * Tolerant of the platform shapes the context seam normalizes
+ * (`{thread_id, resolved}` entries from `listReviewThreads`): non-object
+ * entries and entries without a string `thread_id` are skipped, and a
+ * thread whose comments could not be parsed still counts — the
+ * reconciliation is about existence and resolution state, not comment
+ * payloads. Returns null only when `raw` is not an array at all, so a
+ * malformed listing reads as `unavailable`, never as an empty live set (an
+ * empty ARRAY is a legitimate live listing: the forge says no threads
+ * exist, which makes every carried thread `absent`).
+ */
+export function parseLiveThreadIndex(raw: unknown): Map<string, boolean> | null {
+  if (!Array.isArray(raw)) return null;
+  const index = new Map<string, boolean>();
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.thread_id !== "string" || record.thread_id === "") continue;
+    index.set(record.thread_id, Boolean(record.resolved));
+  }
+  return index;
+}
+
+/**
+ * Reconcile the context-time snapshot against the authoritative live
+ * listing. Pure and total. Every input snapshot thread gets exactly one
+ * receipt; only `live-unresolved` threads survive into `threads` (verbatim —
+ * settlement semantics are unchanged for them). With no listing
+ * (`liveIndex === null`), every carried thread is `unknown` and NONE
+ * survive: unprovable carried state must not block, while a live listing
+ * that legitimately contains nothing makes every carried thread `absent`.
+ */
+export function reconcileCarriedThreads(
+  snapshot: readonly EnforcementThread[],
+  liveIndex: Map<string, boolean> | null,
+  headSha: string,
+): CarriedThreadReconciliation {
+  const carried = Array.isArray(snapshot)
+    ? snapshot.filter((t): t is EnforcementThread =>
+        t !== null && typeof t === "object" && !Array.isArray(t) && typeof t.thread_id === "string")
+    : [];
+  if (carried.length === 0) {
+    return { threads: [], receipts: [], listing: "no-snapshot" };
+  }
+  if (liveIndex === null || liveIndex === undefined) {
+    return {
+      threads: [],
+      listing: "unavailable",
+      receipts: carried.map((thread) => ({
+        thread_id: thread.thread_id,
+        severity: typeof thread.severity === "string" ? thread.severity : "minor",
+        reconciliation: "unknown" as const,
+      })),
+    };
+  }
+  const threads: EnforcementThread[] = [];
+  const receipts: ThreadReconciliationReceipt[] = [];
+  for (const thread of carried) {
+    const inListing = liveIndex.has(thread.thread_id);
+    const reconciliation: ThreadReconciliationResult = !inListing
+      ? "absent"
+      : liveIndex.get(thread.thread_id)
+        ? "resolved"
+        : "live-unresolved";
+    receipts.push({
+      thread_id: thread.thread_id,
+      severity: typeof thread.severity === "string" ? thread.severity : "minor",
+      reconciliation,
+    });
+    if (reconciliation === "live-unresolved") threads.push(thread);
+  }
+  return { threads, receipts, listing: "live" };
+}

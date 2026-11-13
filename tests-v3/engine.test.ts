@@ -1524,3 +1524,119 @@ test("engine admission routes precheck diagnostics to the injected error sink on
   );
   assert.deepEqual(stderrChunks, [], "nothing reached process.stderr during admission");
 });
+
+// ── #1645: carried-thread reconciliation at enforcement ───────────────────
+
+/** A prior-round own major finding shaped exactly like the #1619 organic
+ * failure: the bot's own inline finding comment (trailer → `own`), still
+ * open in the CONTEXT-time snapshot. */
+const staleMajorThread = (threadId: string, path: string) => ({
+  thread_id: threadId,
+  path,
+  line: 12,
+  original_line: null,
+  resolved: false,
+  outdated: false,
+  comments: [{
+    id: 9001,
+    user: "its-saffron[bot]",
+    created_at: "2026-11-12T00:00:00Z",
+    updated_at: "2026-11-12T00:00:00Z",
+    body: `**⚠️ Major (bug):** the prior-round major on ${path}\n\n_Automated finding from AI PR review._`,
+  }],
+});
+
+test("#1645: a stale carried major cannot force request_changes — enforcement reconciles against the live listing (#1619 organic shape)", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    // Context time: the forge listing still contains two prior-round major
+    // threads (the snapshot the model reviews). Enforcement time: the live
+    // listing contains NEITHER — exactly the #1619 shape.
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return listingCalls === 1
+          ? { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts"), staleMajorThread("PRRT_stale2", "src/token.ts")] }
+          : { ok: true, data: [] };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    // The model's approve survives: no stale carried major re-enters as a
+    // finding, so the verdict policy never flips the disposition.
+    assert.equal(result.outputs.verdict, "approve");
+    const findings = (result.reviewArtifact.findings ?? []) as Array<{ thread_id?: string }>;
+    assert.equal(findings.filter((f) => f.thread_id).length, 0, "no carried thread re-emitted as a finding");
+    // The bounded provenance: both carried threads receipted as absent.
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.equal(receipt.version, 1);
+    assert.equal(receipt.listing, "live");
+    assert.equal(receipt.head_sha, "a".repeat(40));
+    assert.deepEqual(receipt.receipts.map((r: { thread_id: string; reconciliation: string }) => [r.thread_id, r.reconciliation]), [
+      ["PRRT_stale1", "absent"],
+      ["PRRT_stale2", "absent"],
+    ]);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: a carried thread that is live-unresolved at enforcement still re-emits and blocks", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return listingCalls === 1
+          ? { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts"), staleMajorThread("PRRT_stale2", "src/token.ts")] }
+          : { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts"), { ...staleMajorThread("PRRT_stale2", "src/token.ts"), resolved: true }] };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    // The live one counts: re-emitted with its original severity; the
+    // resolved one is gone. The published disposition is blocking.
+    const findings = (result.reviewArtifact.findings ?? []) as Array<{ thread_id?: string; severity?: string }>;
+    const reemitted = findings.filter((f) => f.thread_id);
+    assert.deepEqual(reemitted.map((f) => [f.thread_id, f.severity]), [["PRRT_stale1", "major"]]);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.deepEqual(receipt.receipts.map((r: { reconciliation: string }) => r.reconciliation), ["live-unresolved", "resolved"]);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: an unavailable live listing drops carried threads as unknown and never invents a blocker from cache", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        if (listingCalls === 1) {
+          return { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts")] };
+        }
+        throw new Error("listing down");
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    assert.equal(result.outputs.verdict, "approve");
+    const findings = (result.reviewArtifact.findings ?? []) as Array<{ thread_id?: string }>;
+    assert.equal(findings.filter((f) => f.thread_id).length, 0);
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.equal(receipt.listing, "unavailable");
+    assert.deepEqual(receipt.receipts.map((r: { reconciliation: string }) => r.reconciliation), ["unknown"]);
+  } finally { await server.close(); f.cleanup(); }
+});

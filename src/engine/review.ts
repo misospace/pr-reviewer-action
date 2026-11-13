@@ -119,6 +119,7 @@ import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, change
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
 import { MAX_TRACE_REPAIR_CLAIMS, harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
+import { parseLiveThreadIndex, reconcileCarriedThreads } from "../enforcement/threads.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
 import {
@@ -2680,6 +2681,43 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ciEvidence: ciGateEvidence,
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
+  // #1645: the context-time thread snapshot is STALE BY CONSTRUCTION — it
+  // was listed before the tool loop ran, and settlement (#680) re-emits its
+  // undispositioned threads as findings carrying their original severity, so
+  // a stale major can force REQUEST_CHANGES on a head whose live state no
+  // longer contains that thread (the #1619 organic failure: an approve-shaped
+  // review published as request_changes on two prior-round thread IDs absent
+  // from the forge's live listing). Reconcile the snapshot against the
+  // authoritative listing fetched NOW, at enforcement time, before anything
+  // carries it into the disposition. A carried thread survives only proven
+  // live-unresolved; resolved/absent threads drop; an unprovable listing
+  // drops every carried thread (unprovable carried state must not block —
+  // current fresh blockers are untouched) and the receipts say so. The
+  // receipts artifact persists the bounded provenance (identity, severity,
+  // outcome, head sha) the diagnostic contract demands.
+  const carriedThreadsSnapshot = safeJsonArray(ws.read("review-threads.json")) as never;
+  const reconciliationHeadSha = context.headSha || String(pr.headRefOid ?? "");
+  const liveThreadListing = await adapter.listReviewThreads().catch(() => null);
+  const liveThreadIndex = liveThreadListing !== null && liveThreadListing.ok
+    ? parseLiveThreadIndex(liveThreadListing.data)
+    : null;
+  const carriedThreadReconciliation = reconcileCarriedThreads(
+    carriedThreadsSnapshot as never,
+    liveThreadIndex,
+    reconciliationHeadSha,
+  );
+  ws.write("thread-reconciliation.json", `${pyJsonDumps({
+    version: 1,
+    head_sha: reconciliationHeadSha,
+    listing: carriedThreadReconciliation.listing,
+    receipts: carriedThreadReconciliation.receipts,
+  })}\n`);
+  if (carriedThreadReconciliation.receipts.length > 0) {
+    const dropped = carriedThreadReconciliation.receipts
+      .filter((receipt) => receipt.reconciliation !== "live-unresolved").length;
+    log(`  #1645: carried threads reconciled against live listing (${carriedThreadReconciliation.listing}): `
+      + `${carriedThreadReconciliation.threads.length} live-unresolved, ${dropped} dropped (resolved/absent/unknown)`);
+  }
   const enforcementInputs: EnforcementInputs = {
     evidenceBlockerEnabled: (env.EVIDENCE_BLOCKER_ENFORCEMENT ?? "false").toLowerCase() === "true",
     toolFailureEnabled: toolMode !== "off" && (env.TOOL_FAILURE_ENFORCEMENT ?? "false").toLowerCase() === "true",
@@ -2688,7 +2726,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     toolHarness: safeJson(ws.read(enforcementHarness)) as never,
     // #812: the settlement views are JSON arrays — the object-only safeJson
     // nulled them, so review-thread and human-review settlement never ran.
-    threads: safeJsonArray(ws.read("review-threads.json")) as never,
+    // #1645: settlement sees the RECONCILED set only — stale carried threads
+    // never re-enter as findings.
+    threads: carriedThreadReconciliation.threads as never,
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
