@@ -412,6 +412,28 @@ test("#1662: a later page that cannot normalize fails the whole read (the catch 
   assert.equal(seen.length, 2);
 });
 
+test("#1662: a page whose body cannot be read for page-info fails the read instead of rejecting", async () => {
+  for (const body of [{ data: "not an object" }, { data: { repository: { pullRequest: "not an object" } } }]) {
+    const { fetchImpl } = recorder(() => json(body));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const result = await adapter.listReviewThreads();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Cannot index/);
+  }
+});
+
+test("#1662: hasNextPage: true with a blank or missing endCursor fails the read instead of presenting a truncated listing", async () => {
+  for (const pageInfo of [{ hasNextPage: true, endCursor: "" }, { hasNextPage: true }]) {
+    const { fetchImpl } = recorder(() =>
+      json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo, nodes: [] } } } } }),
+    );
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const result = await adapter.listReviewThreads();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /without an endCursor/);
+  }
+});
+
 test("#1662: a looping review-thread cursor is bounded by MAX_PAGES and fails closed", async () => {
   const { fetchImpl, seen } = recorder(() => threadsPage(["T1"], true, "C1"));
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });

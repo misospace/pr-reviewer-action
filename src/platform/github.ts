@@ -424,8 +424,19 @@ export class GitHubAdapter implements PlatformReadAdapter {
       const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY, cursor);
       if (!response.ok) return response;
       responses.push(response.data);
-      const info = githubReviewThreadsPageInfo(response.data);
-      if (!info.hasNextPage || info.endCursor === null) break;
+      // The page-info read can throw (a hostile body whose intermediate is a
+      // non-object raises JqError); it must fail the read, not reject it.
+      let info: { hasNextPage: boolean; endCursor: string | null };
+      try {
+        info = githubReviewThreadsPageInfo(response.data);
+      } catch (error) {
+        return { ok: false, error: errorText(error) };
+      }
+      if (!info.hasNextPage) break;
+      // hasNextPage: true with no usable cursor means a next page exists that
+      // can never be read: the listing is truncated and must not be
+      // presented as complete.
+      if (info.endCursor === null) return { ok: false, error: "review-thread pagination reported a next page without an endCursor" };
       cursor = info.endCursor;
     }
     try {
