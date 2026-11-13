@@ -261,10 +261,17 @@ export function applyReviewThreadEnforcement(
   }
 
   // #1645: persist bounded reconciliation provenance whenever reconciliation
-  // ran, independent of whether settlement changed the artifact.
+  // ran, independent of whether settlement changed the artifact. The state
+  // describes the CARRIED THREAD SET, under the same authority as the
+  // disclosure below: "incomplete" iff some carried thread reconciled
+  // unknown (its live state could not be proven), "complete" iff every
+  // carried thread is proven — the artifact can never claim a complete
+  // reconciliation the published review discloses as incomplete, or the
+  // reverse. The listing's own `complete` flag remains provenance for the
+  // `absent` rule in reconcileThreadState, not for this field.
   if (reconciliation !== null && reconciliation !== undefined) {
     artifact.thread_reconciliation = {
-      state: reconciliation.available && reconciliation.complete !== false ? "complete" : "incomplete",
+      state: counts.unknown > 0 ? "incomplete" : "complete",
       head_sha: reconciliation.headSha,
       live_unresolved: counts.live_unresolved,
       resolved: counts.resolved,

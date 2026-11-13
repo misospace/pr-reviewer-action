@@ -137,9 +137,16 @@ export interface ReviewArtifact {
    * the artifact, so a future reader can tell a current-head finding from a
    * carried thread finding and why the latter was allowed to block. */
   thread_reconciliation?: {
-    /** "complete" only when the live listing was read AND proven complete
-     * (available and not declared partial); "incomplete" when the listing
-     * could not be read or is known to be partial. */
+    /** About the CARRIED THREAD SET (#1645): "complete" iff every carried
+     * thread reconciled a proven state (live_unresolved, resolved, or
+     * absent); "incomplete" iff one or more reconciled unknown — the live
+     * listing could not establish a carried thread's state (an unreadable
+     * read, a partial listing that leaves it unseen, or a listed row that
+     * could not be parsed). The same authority that renders the review's
+     * incomplete-reconciliation disclosure, so the artifact and the
+     * disclosure cannot disagree. The listing's own completeness flag is
+     * separate provenance: it decides whether an unseen thread may be
+     * called absent, not this field. */
     state: "complete" | "incomplete";
     head_sha: string;
     live_unresolved: number;

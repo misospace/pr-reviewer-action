@@ -999,11 +999,46 @@ test("#1645: a thread the listing still carries but cannot parse reconciles unkn
   assert.equal(a.thread_reconciliation?.absent, 1, "the genuinely absent sibling still proves absent");
   assert.equal(a.thread_reconciliation?.unknown, 1, "the carried-but-unparsable thread reconciles as unknown");
   assert.equal(a.thread_reconciliation?.live_unresolved, 0);
+  // The transport read succeeded, but the carried thread set did not fully
+  // reconcile: the persisted state must say incomplete, agreeing with the
+  // disclosure (state and disclosure share one authority — counts.unknown).
+  assert.equal(a.thread_reconciliation?.state, "incomplete", "an unresolved unknown makes the carried-set reconciliation incomplete even on a transport-complete listing");
   const settled = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(settled[0]!.reconciliation, "unknown", "the record carries the accurate unknown state");
   assert.equal(settled[0]!.disposition, "open", "its own disposition is not silently treated as settled truth");
   assert.equal(settled[1]!.reconciliation, "absent", "the proven-absent sibling keeps its proven state");
   assert.match(String(a.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+});
+
+test("#1645: a partial listing that positively proves every carried thread reconciles complete", () => {
+  // A globally partial listing (a capped window, a failed sub-read) does not
+  // by itself make the reconciliation incomplete: state describes the
+  // CARRIED THREAD SET, and here every carried thread is positively proven.
+  const live = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(live, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "3".repeat(40),
+    complete: false,
+  });
+  assert.equal(live.findings.length, 1, "the positively-proven live thread still re-emits (blocker recall)");
+  assert.equal(live.thread_reconciliation?.state, "complete", "every carried thread is proven — complete despite the partial listing");
+  assert.equal(live.thread_reconciliation?.unknown, 0);
+  assert.doesNotMatch(String(live.review_markdown), /reconciliation incomplete/, "no disclosure is owed when nothing is unknown");
+
+  const resolved = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(resolved, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "4".repeat(40),
+    complete: false,
+  });
+  assert.equal(resolved.findings.length, 0);
+  assert.equal(resolved.thread_reconciliation?.state, "complete", "a positively-proven resolved thread also reconciles complete");
+  assert.equal(resolved.thread_reconciliation?.unknown, 0);
+  assert.doesNotMatch(String(resolved.review_markdown), /reconciliation incomplete/, "no disclosure for a fully proven carried set");
 });
 
 test("#1645: a listing that proves every carried thread's state owes no disclosure", () => {

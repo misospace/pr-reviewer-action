@@ -701,7 +701,7 @@ test("#1645: a carried thread the listing still reports but cannot parse is unkn
   }, { secondListing: [{ thread_id: "PRRT_stale1", path: "README.md", resolved: false, comments: [] }] });
   assert.equal(artifact.verdict, "approve", "unprovable carried state never blocks");
   const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
-  assert.equal(reconciliation.state, "complete", "the listing was read and transport-complete");
+  assert.equal(reconciliation.state, "incomplete", "the carried thread set did not fully reconcile — state agrees with the disclosure, not with the transport read");
   assert.equal(reconciliation.unknown, 1, "the listed-but-unparsable thread reconciles as unknown");
   assert.equal(reconciliation.absent, 0, "a listing cannot prove a thread absent while it still contains it");
   const settled = artifact.thread_dispositions as Array<Record<string, unknown>>;
