@@ -2307,6 +2307,41 @@ export function insertProofIndexSection(corpus: string, section: string): string
   return `${section}\n\n${corpus}`;
 }
 
+/** #1659 (review): the standard-corpus verdict path's proof-index section —
+ * the same Required-Check Proof Index the in-conversation verdict turn
+ * injects, built from the SAME persisted surfaces the enforcement folds
+ * verify: the harness-authored candidates artifact (the must_check identity
+ * rows) and the harness artifact's `tool_calls` trace (the `call-<n>` ids
+ * the citation gate parses back). A standard `callTier` verdict reached
+ * after a loop ran (the native-loop verdict fell back to the standard call,
+ * or the fallback/smart evidence harness ran) is gated on those ids exactly
+ * like the in-conversation verdict, so its corpus must carry the same
+ * identifier contract — a producer is never rejected for citing identifiers
+ * it was never shown. "" when the gate is inert (no executed calls or no
+ * must_check rows), so the corpus stays byte-identical on every path where
+ * the folds stay inert too. */
+export function standardCorpusProofIndexSection(
+  candidatesText: string | null,
+  harnessArtifact: unknown,
+): string {
+  const trace = harnessArtifact !== null && typeof harnessArtifact === "object" && !Array.isArray(harnessArtifact)
+    ? (harnessArtifact as Record<string, unknown>).tool_calls
+    : null;
+  if (!Array.isArray(trace) || trace.length === 0) return "";
+  // The persisted trace rows are exactly `{tool, args, status}` (the
+  // artifact shape `executedCallEvidenceIndex` parses); lift them back into
+  // the executed-call shape the section renders.
+  const executed = trace.map((row) => {
+    const record = (row ?? null) as { tool?: unknown; args?: unknown; status?: unknown } | null;
+    return {
+      tool: typeof record?.tool === "string" ? record.tool : "",
+      args: (record?.args ?? {}) as Record<string, unknown>,
+      result: { status: typeof record?.status === "string" ? record.status : "error" },
+    };
+  });
+  return verdictProofIndexSection(proofIndexMustCheckRows(candidatesText), { executed } as unknown as LoopOutcome);
+}
+
 /** #1627: the must_check rows the planner was actually SHOWN, parsed from
  * the harness-authored candidates artifact (the same artifact the engine's
  * enforcement contract folds — one row set end to end). Defensive like

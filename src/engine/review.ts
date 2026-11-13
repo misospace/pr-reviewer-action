@@ -19,7 +19,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits, resolveLoopLimits, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
+import { insertProofIndexSection, loopContextLimits, resolveLoopLimits, standardCorpusProofIndexSection, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
 import { harnessGatheredNoEvidence } from "../tools/execution-counts.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
@@ -4661,6 +4661,28 @@ export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): s
  * the same cap. */
 export { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES } from "../corpus/budgets.js";
 
+/** #1659 (review): the standard-corpus verdict path's proof-index wiring —
+ * shared by the primary, fallback, and smart standard `callTier` sites. Reads
+ * the same harness-authored candidates artifact the verdict turn reads, picks
+ * the executed-call trace the enforcement folds read for this tier (the
+ * tier's own harness artifact when present, the primary artifact otherwise),
+ * and rewrites the corpus file with the injected section. No-op when the
+ * citation gate is inert (no executed calls or no must_check rows): the
+ * corpus stays byte-identical. */
+function injectStandardCorpusProofIndex(
+  ws: RunWorkspace,
+  corpusName: string,
+  harnessArtifactName: string,
+  log: (message: string) => void,
+): void {
+  const corpusText = ws.readText(corpusName);
+  if (corpusText === null || corpusText === "") return;
+  const section = standardCorpusProofIndexSection(ws.readText("review-obligations-candidates.json"), safeJson(ws.read(harnessArtifactName)));
+  if (section === "") return;
+  ws.write(corpusName, Buffer.from(insertProofIndexSection(corpusText, section), "utf8"));
+  log(`review: injected the #1627 required-check proof index into ${corpusName} (this standard verdict is citation-gated on the loop's executed calls)`);
+}
+
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
 async function producePrimaryReview(input: ReviewCallInput & {
@@ -4752,6 +4774,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
   // The *.primary.json names are the first-pass slot, not the model. Read
   // the model from the request body or the analysis-engine line, never from
   // the filename.
+  injectStandardCorpusProofIndex(ws, "review-corpus.truncated.md", "tool-harness.json", log);
   const primary = await callTier(firstTier, firstProfile, input, "review-corpus.truncated.md", "ai-request.primary.json", "ai-response.primary.json");
   if (primary.ok) {
     log(`${firstProfile.label} model succeeded`);
@@ -4863,6 +4886,16 @@ async function producePrimaryReview(input: ReviewCallInput & {
     ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
   }
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
+  // #1659 (review): the enforcement folds read the fallback harness's trace
+  // when the evidence failover ran, the primary loop's otherwise — inject the
+  // proof index from the same surface the fallback standard verdict is gated
+  // on. Inert whenever the gate is.
+  injectStandardCorpusProofIndex(
+    ws,
+    "review-corpus.fallback.truncated.md",
+    ws.isFile("tool-harness.fallback.json") ? "tool-harness.fallback.json" : "tool-harness.json",
+    log,
+  );
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");
   if (fallback.ok) {
     log("Fallback model succeeded");
@@ -5139,6 +5172,11 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
   const build = assembleCorpus(ws, input.env as StageEnv, input.budgets, "smart", "smart", input.generatedPaths, input.standards);
   if (build.overBudget) errorLog("ERROR: assembled smart corpus exceeds its context budget");
   const smartProfile = tierProfileFrom(profiles, "smart", env);
+  // #1659 (review): the smart standard verdict is gated on the smart loop's
+  // executed calls (the escalation folds read tool-harness.smart.json) —
+  // inject the proof index the smart corpus never carries otherwise. Inert
+  // whenever the gate is.
+  injectStandardCorpusProofIndex(ws, "review-corpus.smart.truncated.md", "tool-harness.smart.json", log);
   const call = await callTier("smart", smartProfile, input, "review-corpus.smart.truncated.md", "ai-request.smart.json", "ai-response.smart.json");
   return { ok: call.ok };
 }

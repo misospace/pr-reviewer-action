@@ -20,7 +20,7 @@ import { executedCallEvidenceIndex, type ExecutedCallEvidenceIndex } from "../sr
 import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
 import { computeFinalDisposition } from "../src/disposition/final.js";
 import { harnessEvidenceDigest } from "../src/requirements/trace-repair.js";
-import { verdictProofIndexSection } from "../src/tools/harness.js";
+import { insertProofIndexSection, standardCorpusProofIndexSection, verdictProofIndexSection } from "../src/tools/harness.js";
 
 // ---------------------------------------------------------------------------
 // #1659 — ONE canonical evidence-settlement record shared by the native
@@ -536,6 +536,45 @@ test("#1659: the proof index shows every executed call id the enforcement folds 
   for (const id of foldIds) {
     assert.ok(section.includes(`- ${id} `), `the proof index must show ${id} — the fold validates against it`);
   }
+});
+
+test("#1659 (review): the standard/fallback corpus path carries the same executed-call identifier contract", () => {
+  // The standard `callTier` verdict reached after a loop ran (native-loop
+  // verdict fell back, or the fallback/smart evidence harness ran) is gated
+  // on the artifact's `call-<n>` ids exactly like the in-conversation
+  // verdict — its corpus must show them first. Built from the PERSISTED
+  // surfaces: the candidates artifact and the artifact's tool_calls trace
+  // (`{tool, args, status}`), not the in-memory loop outcome.
+  const corpus = "# PR Diff\n+ change\n\n# Tool Harness Findings\n- Tool 1 read_file (ok)\n";
+  const candidates = JSON.stringify({
+    injected: true,
+    obligations: [{ id: "obligation-1", source: "must_check", text: "check the lockfile" }],
+  });
+  const harnessArtifact = { tool_calls: [{ tool: "read_file", args: { path: "package-lock.json" }, status: "ok" }] };
+  const section = standardCorpusProofIndexSection(candidates, harnessArtifact);
+  assert.ok(section.startsWith("# Required-Check Proof Index"));
+  assert.ok(section.includes("- call-1 "), "the persisted trace's call id is shown");
+  assert.ok(section.includes("check the lockfile"), "the must_check identity rows are shown");
+
+  const injected = insertProofIndexSection(corpus, section);
+  assert.ok(injected.includes("# Required-Check Proof Index"), "the fallback-corpus-shaped corpus carries the proof index");
+  assert.ok(injected.includes("- call-1 "), "the producer sees the exact id the fold validates against");
+  assert.ok(injected.includes("# Tool Harness Findings"), "the section is placed, not replacing existing sections");
+
+  // Inert exactly when the citation gate is inert — the corpus stays
+  // byte-identical (no harness artifact, empty trace, no must_check rows).
+  const noTrace = standardCorpusProofIndexSection(candidates, { stop_reason: "completed" });
+  assert.equal(noTrace, "");
+  const emptyTrace = standardCorpusProofIndexSection(candidates, { tool_calls: [] });
+  assert.equal(emptyTrace, "");
+  const noRows = standardCorpusProofIndexSection(
+    JSON.stringify({ injected: true, obligations: [{ id: "obligation-1", source: "derived", text: "derived row" }] }),
+    harnessArtifact,
+  );
+  assert.equal(noRows, "");
+  const malformedCandidates = standardCorpusProofIndexSection("garbage", harnessArtifact);
+  assert.equal(malformedCandidates, "");
+  assert.equal(insertProofIndexSection(corpus, ""), corpus, "an inert section never rewrites the corpus");
 });
 
 test("#1659: the standalone repair digest carries the canonical settlement record, not only the call digest", () => {
