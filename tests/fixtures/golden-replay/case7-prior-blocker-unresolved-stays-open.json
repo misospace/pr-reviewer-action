@@ -63,6 +63,7 @@
   "prior_blocker_id": "PRRT_917",
   "expect": {
     "verdict": "request_changes",
+    "native_event": "REQUEST_CHANGES",
     "blocking_finding_ids": ["missing timeout on the fetch call in `fetchWithTimeout` — an"],
     "prior_blocker_status": "open",
     "unsupported_blocking_claims": 0,

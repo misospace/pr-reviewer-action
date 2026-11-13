@@ -32,6 +32,50 @@ import type { PlatformReadAdapter, ThreadListingReadResult } from "../platform/t
 
 export type ThreadReconciliationState = "live-unresolved" | "resolved" | "absent" | "unknown";
 
+/** #1645: the run's carried-thread reconciliation COVERAGE, published under
+ * the same abstention contract as the #1449 derived-obligation and #1505
+ * required-evidence states. It is derived ONLY from the bounded
+ * `thread_reconciliation` provenance the settlement pass already persists —
+ * no parallel state:
+ * - `complete` — every carried thread reconciled against a provably complete
+ *   live listing, or the remaining `unknown` rows carry no blocking severity:
+ *   nothing material is unproven, a clean approval may be certified.
+ * - `unresolved` — a carried thread that WOULD have blocked (blocker/major
+ *   severity) reconciled `unknown` (its `demoted` provenance row): a material
+ *   unknown. It never manufactures a blocker, but it must not certify a
+ *   trusted native APPROVE: the review reads `partial` and publishes a
+ *   non-blocking COMMENT.
+ * - `unavailable` — carried threads were listed but no reconciliation record
+ *   can be read (a stale/foreign run dir at the standalone publish seam):
+ *   unverifiable carried state, fail closed like `unresolved`.
+ * The empty string means the seam never spoke: no carried threads, so the
+ * published record keeps its pre-#1645 bytes exactly. */
+export type ThreadReconciliationCoverageState = "complete" | "unresolved" | "unavailable";
+
+/** Derive the coverage state from the persisted provenance (snake_case wire
+ * shape, read defensively — the value arrives from a JSON round-trip). A
+ * present-but-corrupt provenance fails closed to `unresolved`. The derivation
+ * itself never produces `unavailable` — that state belongs to the run-dir
+ * seam (carried threads listed, provenance unreadable), not to the
+ * provenance content. */
+export function carriedThreadReconciliationState(raw: unknown): "complete" | "unresolved" | "" {
+  if (raw === undefined || raw === null) return "";
+  if (typeof raw !== "object" || Array.isArray(raw)) return "unresolved";
+  const entries = (raw as { entries?: unknown }).entries;
+  if (!Array.isArray(entries)) return "unresolved";
+  const materialUnknown = entries.some((entry) => entry !== null
+    && typeof entry === "object"
+    && (entry as { reconciliation?: unknown }).reconciliation === "unknown"
+    && ((entry as { demoted?: unknown }).demoted === true
+      // Defensive fail closed: `demoted` is set by the settlement exactly on
+      // the unknown + blocking combination, so the severity test agrees
+      // with it — but a provenance row missing the flag (foreign writer,
+      // older artifact) at blocking severity is still a material unknown.
+      || (entry as { severity?: unknown }).severity === "blocker"
+      || (entry as { severity?: unknown }).severity === "major"));
+  return materialUnknown ? "unresolved" : "complete";
+}
+
 /** One carried thread's reconciliation, keyed by thread id. */
 export interface ThreadLiveReconciliation {
   /** Whether the CURRENT authoritative listing is complete. Only a complete

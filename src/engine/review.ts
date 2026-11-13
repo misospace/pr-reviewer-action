@@ -102,7 +102,7 @@ import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { applyNegativeEvidenceToRecord, negativeEvidenceRulesFromArtifact } from "../enforcement/negative-evidence.js";
-import { readLiveReviewThreadListing } from "../enforcement/thread-reconcile.js";
+import { readLiveReviewThreadListing, carriedThreadReconciliationState } from "../enforcement/thread-reconcile.js";
 import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
@@ -223,6 +223,17 @@ export interface RunReviewResult {
    * `partial` and withholds the native APPROVE (COMMENT), never a
    * manufactured blocking request. */
   requiredEvidenceState?: RequiredEvidenceState;
+  /** #1645: the run's carried-thread reconciliation state ("complete" |
+   * "unresolved"), present ONLY when the run carried unresolved review
+   * threads and reconciliation ran — a run without carried threads has no
+   * state at all and keeps its pre-#1645 published bytes exactly.
+   * `unresolved` is a MATERIAL unknown: a carried blocker/major whose live
+   * forge state could not be established at decision time. The publish
+   * boundary carries it like the #1505 state: the review reads `partial`
+   * and the native APPROVE is withheld (a non-blocking COMMENT), while the
+   * verdict itself stays `approve` — unverifiable historical state never
+   * manufactures a blocking finding. */
+  threadReconciliationState?: "complete" | "unresolved";
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -2917,6 +2928,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
+  // #1645: the run's carried-thread reconciliation state, derived from the
+  // bounded provenance the settlement pass persists — no parallel signal.
+  // `unresolved` when a carried blocker/major reconciled `unknown` (a
+  // material unknown: it never manufactures a blocker, but a trusted native
+  // APPROVE cannot be certified over unverifiable historical state either);
+  // `complete` when every carried thread reconciled against live state (or
+  // nothing material stayed unproven); "" when the seam never spoke (no
+  // carried threads), so a run's published record keeps its pre-#1645 bytes.
+  const threadReconciliationState = carriedThreadReconciliationState(reviewRecord.thread_reconciliation);
   // #1518: the merge-gating ids of the deterministic enforcement pass. They
   // are computed AFTER both enforcement branches, so the strict path and the
   // non-strict path carry the same ids, and they name the obligations that
@@ -3197,6 +3217,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // the review reads `partial`, never `clean`, while required evidence
       // stayed ungathered. Absent when the contract was inactive.
       ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+      // #1645: a material unknown carried-thread reconciliation is a coverage
+      // gap too: the review reads `partial`, never a certifiable `clean`/
+      // `findings` approve — and never a manufactured `issues`.
+      ...(threadReconciliationState !== "" ? { threadReconciliationState } : {}),
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
@@ -3503,6 +3527,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // the review reads `partial`, never `clean`, while required evidence
       // stayed ungathered. Absent when the contract was inactive.
       ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+      // #1645: a material unknown carried-thread reconciliation is a coverage
+      // gap too: the review reads `partial`, never a certifiable `clean`/
+      // `findings` approve — and never a manufactured `issues`.
+      ...(threadReconciliationState !== "" ? { threadReconciliationState } : {}),
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
@@ -3646,6 +3674,12 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // #1505: the run's required-evidence state, only when the contract was
     // active — an inactive run keeps its bytes exactly.
     ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1645: the run's carried-thread reconciliation state, only when the
+    // run carried unresolved threads under reconciliation — a run without
+    // carried threads keeps its bytes exactly. `unresolved` withholds the
+    // native approval at the publish boundary (COMMENT, never a manufactured
+    // request) and reads the review `partial`.
+    ...(threadReconciliationState !== "" ? { threadReconciliationState } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),

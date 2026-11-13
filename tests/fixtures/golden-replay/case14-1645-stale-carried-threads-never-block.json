@@ -89,12 +89,15 @@
   "prior_blocker_id": "PRRT_1645B",
   "expect": {
     "verdict": "approve",
+    "native_event": "APPROVE",
     "blocking_finding_ids": [],
     "prior_blocker_status": "resolved",
     "unsupported_blocking_claims": 0,
     "supported_blocking_claims": 0,
     "published_body_excludes": [
-      "_Verdict set from open findings (verdict_policy=strict): 1 blocker/major finding(s) out of 3 open; model verdict was 'approve'._"
+      "_Verdict set from open findings (verdict_policy=strict): 1 blocker/major finding(s) out of 3 open; model verdict was 'approve'._",
+      "Approval withheld by review-thread reconciliation",
+      "\"review_result\":\"partial\""
     ],
     "published_body_includes": [
       "## Review-Thread Reconciliation (#1645)",

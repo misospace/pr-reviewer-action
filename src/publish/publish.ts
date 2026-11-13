@@ -153,6 +153,15 @@ export interface PublishInput {
    * (a non-blocking COMMENT), never a manufactured blocking request.
    * Absent when the contract was inactive. */
   requiredEvidenceState?: string;
+  /** #1645: the run's carried-thread reconciliation state ("complete" |
+   * "unresolved" | "unavailable"). `unresolved` (or the standalone-publish
+   * fail-closed `unavailable`) is a MATERIAL unknown: a previously blocking
+   * review-thread finding whose live forge state could not be established.
+   * It carries the same abstention contract as the two states above — the
+   * marker reads `partial`, the native APPROVE is withheld in favour of a
+   * non-blocking COMMENT — and never manufactures a blocking finding. Absent
+   * when the run carried no reconciled review threads. */
+  threadReconciliationState?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -328,6 +337,13 @@ export function markerReviewResult(input: {
    * `partial`, never `clean`, and never a manufactured "issues". Absent
    * (the contract was inactive) changes nothing. */
   requiredEvidenceState?: string | undefined;
+  /** #1645: carried-thread reconciliation state. `unresolved` (a carried
+   * blocker/major whose live state could not be established) or the
+   * standalone-publish fail-closed `unavailable` read as a coverage gap:
+   * the marker reports `partial` — never a certifiable clean/findings
+   * approve — and never a manufactured `issues`. Absent when the run
+   * carried no reconciled review threads. */
+  threadReconciliationState?: string | undefined;
 }): string {
   // #1449: the derived gap is a coverage gap: the review never established
   // a derived cross-path relationship, so it cannot be published as a clean
@@ -336,12 +352,18 @@ export function markerReviewResult(input: {
   // #1505: unresolved required review evidence is the same coverage bucket —
   // an availability failure the review could not finish, never a defect.
   const requiredEvidenceGap = input.requiredEvidenceState === "unresolved" || input.requiredEvidenceState === "unavailable";
+  // #1645: a material unknown carried-thread reconciliation is the same
+  // coverage bucket — a previously material finding the current head could
+  // not reconcile is disclosure state, never a defect and never a certifier
+  // of a clean approval.
+  const threadReconciliationGap = input.threadReconciliationState === "unresolved" || input.threadReconciliationState === "unavailable";
   const coverageGap =
     Boolean(input.partialCoverage)
     || Boolean(input.coverageUnknown)
     || input.degradedGateBypass === true
     || derivedGap
-    || requiredEvidenceGap;
+    || requiredEvidenceGap
+    || threadReconciliationGap;
   const coverageIncomplete = input.requiredChecks === "incomplete" || coverageGap;
   if (input.verdictPolicy !== "strict") {
     if (input.verdict === "request_changes") return "issues";
@@ -1743,6 +1765,13 @@ export function evaluateApprovalGuardrails(options: {
    * (a non-blocking COMMENT), never a manufactured blocking request — the
    * same withholding semantics the derived state carries. */
   requiredEvidenceState?: string;
+  /** #1645: the run's carried-thread reconciliation state, when the run
+   * carried unresolved review threads under reconciliation. A material
+   * unknown (`unresolved`, or the standalone-publish fail-closed
+   * `unavailable`) withholds the native APPROVE (a non-blocking COMMENT),
+   * never a manufactured blocking request — the same withholding semantics
+   * the derived and required-evidence states carry. */
+  threadReconciliationState?: string;
 }): {
   canApprove: boolean;
   scopeBlocked: boolean;
@@ -1753,6 +1782,9 @@ export function evaluateApprovalGuardrails(options: {
   /** #1505: present only when the required-evidence state withheld the
    * approval. */
   requiredEvidenceBlocked?: boolean;
+  /** #1645: present only when a material unknown carried-thread
+   * reconciliation withheld the approval. */
+  threadReconciliationBlocked?: boolean;
 } {
   const verdictAllowsApproval = options.verdict === "approve";
   const isFork = options.isForkPr ?? true;
@@ -1761,13 +1793,19 @@ export function evaluateApprovalGuardrails(options: {
     && (options.derivedObligationState === "unresolved" || options.derivedObligationState === "unavailable");
   const requiredEvidenceBlocked = verdictAllowsApproval
     && (options.requiredEvidenceState === "unresolved" || options.requiredEvidenceState === "unavailable");
+  // #1645: unverifiable historical blocking state is a material unknown —
+  // it never manufactures a REQUEST_CHANGES, but a trusted approval cannot
+  // be certified over it either.
+  const threadReconciliationBlocked = verdictAllowsApproval
+    && (options.threadReconciliationState === "unresolved" || options.threadReconciliationState === "unavailable");
   return {
-    canApprove: verdictAllowsApproval && !scopeBlocked && !derivedBlocked && !requiredEvidenceBlocked,
+    canApprove: verdictAllowsApproval && !scopeBlocked && !derivedBlocked && !requiredEvidenceBlocked && !threadReconciliationBlocked,
     scopeBlocked,
     verdictAllowsApproval,
     isForkPr: options.isForkPr,
     ...(derivedBlocked ? { derivedBlocked: true } : {}),
     ...(requiredEvidenceBlocked ? { requiredEvidenceBlocked: true } : {}),
+    ...(threadReconciliationBlocked ? { threadReconciliationBlocked: true } : {}),
   };
 }
 
@@ -2026,6 +2064,7 @@ export async function publishReview(
     isForkPr: input.isForkPr,
     ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
     ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
+    ...(input.threadReconciliationState !== undefined ? { threadReconciliationState: input.threadReconciliationState } : {}),
   });
   // #1447: a native APPROVE is a trusted-approval certificate, not merely a
   // rendering of the model's approve verdict. It therefore requires
@@ -2716,6 +2755,29 @@ export async function publishReview(
         }
         messages.push(
           `Withholding native approval for #${input.prNumber} (required-evidence state: ${state})`,
+        );
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.threadReconciliationBlocked === true) {
+        // #1645: a carried blocker/major whose live forge state could not be
+        // established is a MATERIAL unknown. Settlement already held the row
+        // at minor (it never forces REQUEST_CHANGES); the mirror half of the
+        // contract is that the unproven historical state must not certify a
+        // clean native approval either. The withholding stays ADVISORY,
+        // exactly like the derived/required-evidence cases above: the native
+        // event becomes a COMMENT, never a manufactured blocking request.
+        const state = input.threadReconciliationState ?? "unresolved";
+        const gap = state === "unavailable"
+          ? "the review-thread reconciliation state could not be read, so carried review-thread findings are unverifiable against the current head"
+          : "a previously material review-thread finding could not be reconciled against the forge's current review-thread state";
+        // #752: a review with open findings or a coverage gap must not
+        // call itself clean, even when its verdict is an approve.
+        const advisory = reviewResult === "clean"
+          ? "this clean review is advisory"
+          : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld by review-thread reconciliation**: ${gap}, so ${advisory}.\n`;
+        }
+        messages.push(
+          `Withholding native approval for #${input.prNumber} (review-thread reconciliation state: ${state})`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
         // #1447: degraded review state is an abstention, never a trusted

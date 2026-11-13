@@ -100,6 +100,12 @@ interface GoldenExpect {
   supported_blocking_claims?: number;
   published_body_excludes?: string[];
   published_body_includes?: string[];
+  /** Strings that must appear in the SUBMITTED native review body (the
+   * published surface: metadata marker + publish-time notices), as opposed
+   * to published_body_includes which checks the engine's review-body.md.
+   * #1645: the approval-withheld notice and the `partial` marker state
+   * exist only on the published body. */
+  submitted_includes?: string[];
   /** #1095: the native review event the publish step submitted (APPROVE /
    * REQUEST_CHANGES / COMMENT) — the publication-path assertion for
    * requirement-trace replays. */
@@ -262,11 +268,16 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
     // CURRENT threads); a case without it mirrors the context listing as
     // provably complete, so carried threads reconcile `live-unresolved` and
     // keep their pre-#1645 disposition authority (unknown would hold a
-    // carried blocker/major at minor).
-    listReviewThreadsLiveListing: () => Promise.resolve({
-      ok: true as const,
-      data: (Array.isArray(pr.live_threads) ? (pr.live_threads as unknown[]) : threads),
-      complete: true,
+    // carried blocker/major at minor). A case declaring
+    // `pr.live_listing_unavailable` models a forge seam that cannot
+    // enumerate a complete listing at all: the adapter simply omits the
+    // capability, so every carried thread reconciles `unknown`.
+    ...(pr.live_listing_unavailable === true ? {} : {
+      listReviewThreadsLiveListing: () => Promise.resolve({
+        ok: true as const,
+        data: (Array.isArray(pr.live_threads) ? (pr.live_threads as unknown[]) : threads),
+        complete: true,
+      }),
     }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
@@ -451,6 +462,9 @@ function scoreCase(
     for (const v of c.expect.published_body_includes ?? []) {
       if (!published.reviewBody.includes(v)) mismatches.push(`published_body_includes: ${JSON.stringify(v)} missing from review-body.md`);
     }
+    for (const v of c.expect.submitted_includes ?? []) {
+      if (!published.submitted.some((b) => b.includes(v))) mismatches.push(`submitted_includes: ${JSON.stringify(v)} missing from submitted review bodies`);
+    }
   }
   if (c.expect.native_event !== undefined && published) {
     const events = (published as { submittedEvents?: string[] }).submittedEvents ?? [];
@@ -587,6 +601,11 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
         allowApprove: true,
         approveForks: false,
         isForkPr: false,
+        // #1645: the real hosts forward the run's carried-thread
+        // reconciliation state into the publish input (one shared
+        // `reviewDerivedPublishFields`); the replay mirrors that wiring so
+        // the native-event assertion sees the same gate the action applies.
+        ...(result.threadReconciliationState !== undefined ? { threadReconciliationState: result.threadReconciliationState } : {}),
         upstreamLinkMode: "inert",
         conditionalPresence: { linkedIssue: false, evidenceProvider: false, standards: false, toolHarnessFindings: false, toolHarnessResults: false },
         forgejoPositions: false,

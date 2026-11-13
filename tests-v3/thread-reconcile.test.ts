@@ -4,9 +4,13 @@
  * live-listing reader's fail-closed states. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applyAllEnforcement, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
-import { readLiveReviewThreadListing, type ThreadLiveReconciliation } from "../src/enforcement/thread-reconcile.js";
+import { readLiveReviewThreadListing, carriedThreadReconciliationState, type ThreadLiveReconciliation } from "../src/enforcement/thread-reconcile.js";
+import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 
@@ -326,4 +330,124 @@ test("#1645 a thread whose comments were all stripped never counts as live", asy
     }),
   }));
   assert.equal(listing.reconciliation!.unresolvedById.has("t-empty"), false);
+});
+
+// #1645: the publication contract derives the run's carried-thread
+// reconciliation STATE from the settlement's persisted provenance only —
+// no parallel signal. Material unknown (a demoted blocking row) withholds
+// the native approval; everything else certifies or stays silent.
+test("#1645 coverage state: a demoted unknown row reads unresolved", () => {
+  assert.equal(carriedThreadReconciliationState({
+    version: 1,
+    head_sha: "a".repeat(40),
+    listing_complete: false,
+    entries: [
+      { thread_id: "T1", severity: "blocker", reconciliation: "unknown", dropped: false, demoted: true },
+      { thread_id: "T2", severity: "minor", reconciliation: "unknown", dropped: false, demoted: false },
+    ],
+  }), "unresolved");
+});
+
+test("#1645 coverage state: unknown NON-blocking rows stay complete (approval not withheld)", () => {
+  assert.equal(carriedThreadReconciliationState({
+    version: 1,
+    head_sha: "a".repeat(40),
+    listing_complete: false,
+    entries: [
+      { thread_id: "T1", severity: "minor", reconciliation: "unknown", dropped: false, demoted: false },
+      { thread_id: "T2", severity: "info", reconciliation: "unknown", dropped: false, demoted: false },
+    ],
+  }), "complete");
+});
+
+test("#1645 coverage state: fully reconciled or dropped carried threads read complete", () => {
+  assert.equal(carriedThreadReconciliationState({
+    version: 1,
+    head_sha: "a".repeat(40),
+    listing_complete: true,
+    entries: [
+      { thread_id: "T1", severity: "blocker", reconciliation: "resolved", dropped: true, demoted: false },
+      { thread_id: "T2", severity: "major", reconciliation: "absent", dropped: true, demoted: false },
+      { thread_id: "T3", severity: "blocker", reconciliation: "live-unresolved", dropped: false, demoted: false },
+    ],
+  }), "complete");
+});
+
+test("#1645 coverage state: a carried BLOCKER reconciled unknown without demotion still reads unresolved", () => {
+  // Defensive: even if the provenance row lacked the demoted flag, an
+  // unknown entry at blocking severity is material — fail closed.
+  assert.equal(carriedThreadReconciliationState({
+    version: 1,
+    head_sha: "a".repeat(40),
+    listing_complete: false,
+    entries: [
+      { thread_id: "T1", severity: "blocker", reconciliation: "unknown", dropped: false },
+    ],
+  }), "unresolved");
+});
+
+test("#1645 coverage state: no seam silence — absent provenance is empty, corrupt provenance fails closed", () => {
+  assert.equal(carriedThreadReconciliationState(undefined), "");
+  assert.equal(carriedThreadReconciliationState(null), "");
+  // Present but unusable provenance (a foreign writer, a truncated record):
+  // an unprovable settlement cannot certify an approval.
+  assert.equal(carriedThreadReconciliationState({ version: 1 }), "unresolved");
+  assert.equal(carriedThreadReconciliationState([]), "unresolved");
+  assert.equal(carriedThreadReconciliationState({ entries: {} }), "unresolved");
+});
+
+// #1645: the standalone `publish` CLI reads the state through the run-dir
+// seam (same fail-closed discipline as the #1449/#1505 states): provenance
+// decides when readable; carried threads listed with NO readable provenance
+// fail closed to `unavailable`; a run without carried threads stays silent.
+test("#1645: the standalone publish seam reads the state from the run dir's provenance", () => {
+  const mkDir = (): string => mkdtempSync(join(tmpdir(), "v3-thread-recon-dir-"));
+  const readState = (dir: string): string | undefined =>
+    publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github")
+      .threadReconciliationState;
+
+  let dir = mkDir();
+  try {
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      thread_reconciliation: {
+        version: 1, head_sha: "a".repeat(40), listing_complete: false,
+        entries: [{ thread_id: "T1", severity: "blocker", reconciliation: "unknown", dropped: false, demoted: true }],
+      },
+    }));
+    assert.equal(readState(dir), "unresolved");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  dir = mkDir();
+  try {
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      thread_reconciliation: {
+        version: 1, head_sha: "a".repeat(40), listing_complete: true,
+        entries: [{ thread_id: "T1", severity: "blocker", reconciliation: "resolved", dropped: true, demoted: false }],
+      },
+    }));
+    writeFileSync(join(dir, "review-threads.json"), JSON.stringify([{ thread_id: "T1" }]));
+    assert.equal(readState(dir), "complete");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  // Carried threads were listed but the settlement's provenance cannot be
+  // read: unverifiable carried state must never certify an approval.
+  dir = mkDir();
+  try {
+    writeFileSync(join(dir, "review-threads.json"), JSON.stringify([{ thread_id: "T1" }]));
+    assert.equal(readState(dir), "unavailable");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  // A run dir whose artifact exists but carries no provenance key and no
+  // carried threads: the seam never spoke — no state, pre-#1645 bytes.
+  dir = mkDir();
+  try {
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "approve" }));
+    writeFileSync(join(dir, "review-threads.json"), "[]");
+    assert.equal(readState(dir), undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  dir = mkDir();
+  try {
+    assert.equal(readState(dir), undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

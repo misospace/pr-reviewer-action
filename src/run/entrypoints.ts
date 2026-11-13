@@ -30,6 +30,7 @@ import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../rout
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
+import { carriedThreadReconciliationState } from "../enforcement/thread-reconcile.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
 
@@ -391,6 +392,40 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
   return featureEnabled ? "unavailable" : undefined;
 }
 
+/** #1645: the run's carried-thread reconciliation state, read through the
+ * same run-dir seam as the two states above (never cwd, never ambient env).
+ *
+ * The state is derived from the review artifact's OWN bounded
+ * `thread_reconciliation` provenance (never a parallel file): a provably
+ * complete settlement of every carried thread reads `complete`; a carried
+ * blocker/major that reconciled `unknown` (its `demoted` provenance row) — a
+ * material unknown — reads `unresolved` and withholds the native approval
+ * (COMMENT), never a manufactured blocking request.
+ *
+ * The gate fails CLOSED on uncertainty: the context stage writes a non-empty
+ * `review-threads.json` exactly when the run carried unresolved threads, and
+ * the engine persists reconciliation provenance for every such settlement.
+ * Carried threads listed but no readable provenance is therefore a stale or
+ * foreign run dir whose carried state is unverifiable — `unavailable`, which
+ * withholds the approval like `unresolved`. An empty/absent threads file is
+ * a run without carried state: the state stays absent and the published
+ * bytes keep their pre-#1645 shape exactly. */
+function threadReconciliationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const artifact = readJsonObject(join(runDir, "ai-output.json"));
+  const provenance = artifact === null ? undefined : artifact.thread_reconciliation;
+  const state = carriedThreadReconciliationState(provenance);
+  if (state !== "") return state;
+  let carried: unknown;
+  try {
+    carried = JSON.parse(readFileSync(join(runDir, "review-threads.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  return Array.isArray(carried) && carried.length > 0 ? "unavailable" : undefined;
+}
+
 /** The row-status vocabulary `applyRequiredCheckValidation` records. */
 const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "not_applicable", "unresolved", "unmet"]);
 
@@ -749,6 +784,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
   const derivedObligationState = derivedObligationStateFromRunDir(env);
   const requiredEvidenceState = requiredEvidenceStateFromRunDir(env);
+  const threadReconciliationState = threadReconciliationStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -859,6 +895,12 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // sentinel fails closed to `unavailable`). Absent when the contract was
     // off.
     ...(requiredEvidenceState !== undefined ? { requiredEvidenceState } : {}),
+    // #1645: the run's carried-thread reconciliation state, the same
+    // gate-as-disclosure seam as the two above: carried threads listed with
+    // no readable provenance fail closed to `unavailable` so unverifiable
+    // historical state can never certify an approval through the standalone
+    // `publish` CLI either. Absent when the run carried no threads.
+    ...(threadReconciliationState !== undefined ? { threadReconciliationState } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),
@@ -1098,6 +1140,12 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // native approval while required review evidence stayed unresolved.
     // Absent when the contract was inactive.
     ...(review.requiredEvidenceState !== undefined ? { requiredEvidenceState: review.requiredEvidenceState } : {}),
+    // #1645: a GATE as well as disclosure — a material unknown carried-thread
+    // reconciliation (a carried blocker/major whose live forge state could
+    // not be established) refuses the native approval in favour of a
+    // COMMENT, never a manufactured request. Absent when the run carried no
+    // reconciled review threads.
+    ...(review.threadReconciliationState !== undefined ? { threadReconciliationState: review.threadReconciliationState } : {}),
     // #1455: advisory verifier telemetry (never touches the verdict).
     ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
     // #847: the #810/#702 tool-budget provenance.

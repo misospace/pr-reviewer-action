@@ -1,0 +1,132 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case15-1645-unknown-reconciliation-withholds-approval",
+  "status": "active",
+  "provenance": {
+    "source_head": "3f8a1c6d9b0e4f7a2c5d8b1e6f9a0c3d4e7b2f5a",
+    "origin": "The mirror half of the #1645 contract: two old blocker/major threads were carried into the current-head review, and the forge seam could not enumerate the CURRENT review-thread state at all (a host without a completeness-proving listing read). The material unknown must NOT force REQUEST_CHANGES (that is case14's resolved/absent shape taken to the unknown state), but it must NOT certify a clean native approval either: the review publishes partial and the native event is a non-blocking COMMENT.",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): approve, one minor and one info finding, no thread_dispositions. The un-dispositioned carried rows settle open, reconcile `unknown`, and are held at minor; the run's carried-thread reconciliation state is `unresolved`."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "3f8a1c6d9b0e4f7a2c5d8b1e6f9a0c3d4e7b2f5a",
+    "title": "Fix #917: add request timeout to fetchWithTimeout",
+    "body": "Closes the prior review blocker: the fetch call now carries an AbortSignal timeout.",
+    "diff": "diff --git a/src/client.ts b/src/client.ts\nindex 5b2e9c1..f3a8d07 100644\n--- a/src/client.ts\n+++ b/src/client.ts\n@@ -6,6 +6,7 @@\n }\n \n export async function fetchWithTimeout(options: ClientOptions): Promise<globalThis.Response> {\n-  const res = await fetch(options.endpoint);\n+  const signal = AbortSignal.timeout(options.timeoutMs ?? 5000);\n+  const res = await fetch(options.endpoint, { signal });\n   return res;\n }\n",
+    "files": [
+      {
+        "filename": "src/client.ts",
+        "status": "modified",
+        "additions": 2,
+        "deletions": 1,
+        "changes": 3
+      }
+    ],
+    "threads": [
+      {
+        "thread_id": "PRRT_1645D",
+        "path": "src/client.ts",
+        "line": 9,
+        "original_line": 9,
+        "resolved": false,
+        "outdated": false,
+        "comments": [
+          {
+            "id": 164503,
+            "user": {
+              "login": "ai-pr-review"
+            },
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-01T09:00:00Z",
+            "body": "**🛑 Blocker (bug):** the client never bounds the request lifetime\n\n_Automated finding from AI PR review._"
+          }
+        ]
+      },
+      {
+        "thread_id": "PRRT_1645E",
+        "path": "src/client.ts",
+        "line": 4,
+        "original_line": 4,
+        "resolved": false,
+        "outdated": false,
+        "comments": [
+          {
+            "id": 164504,
+            "user": {
+              "login": "ai-pr-review"
+            },
+            "created_at": "2026-10-02T09:00:00Z",
+            "updated_at": "2026-10-02T09:00:00Z",
+            "body": "**⚠️ Major:** the options interface accepts a timeout it never applies\n\n_Automated finding from AI PR review._"
+          }
+        ]
+      }
+    ],
+    "live_listing_unavailable": true
+  },
+  "source_files": {
+    "src/client.ts": "// Provider API client.\n\nexport interface ClientOptions {\n  endpoint: string;\n  timeoutMs?: number;\n}\n\nexport async function fetchWithTimeout(options: ClientOptions): Promise<globalThis.Response> {\n  const signal = AbortSignal.timeout(options.timeoutMs ?? 5000);\n  const res = await fetch(options.endpoint, { signal });\n  return res;\n}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "approve",
+    "review_markdown": "Recommendation: approve\n\nThe timeout is now derived and passed to the fetch call (src/client.ts:9), which is the change the PR describes. Two small follow-ups below; neither blocks merging.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "minor-naming",
+        "severity": "minor",
+        "category": "style",
+        "file": "src/client.ts",
+        "line": 4,
+        "message": "`timeoutMs` reads like a client-wide default; a name like `requestTimeoutMs` would say what it bounds"
+      },
+      {
+        "id": "info-default",
+        "severity": "info",
+        "category": "docs",
+        "file": "src/client.ts",
+        "line": 9,
+        "message": "the 5000 ms fallback is undocumented; a short comment would make the default discoverable"
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null,
+    "thread_dispositions": []
+  },
+  "prior_blocker_id": "PRRT_1645D",
+  "expect": {
+    "verdict": "approve",
+    "blocking_finding_ids": [],
+    "prior_blocker_status": "resolved",
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "native_event": "COMMENT",
+    "published_body_excludes": [
+      "_Verdict set from open findings (verdict_policy=strict): 1 blocker/major finding(s) out of 3 open; model verdict was 'approve'._"
+    ],
+    "published_body_includes": [
+      "_Review-state reconciliation incomplete: the current review-thread state could not be fully established at decision time, so carried thread(s) with blocking severity are recorded as `unknown` and held at minor",
+      "- `PRRT_1645D`: open",
+      "- `PRRT_1645E`: open"
+    ],
+    "thread_dispositions": [
+      {
+        "thread_id": "PRRT_1645D",
+        "disposition": "open",
+        "evidence": null
+      },
+      {
+        "thread_id": "PRRT_1645E",
+        "disposition": "open",
+        "evidence": null
+      }
+    ],
+    "submitted_includes": [
+      "\"review_result\":\"partial\"",
+      "> **Approval withheld by review-thread reconciliation**: a previously material review-thread finding could not be reconciled against the forge's current review-thread state"
+    ]
+  }
+}

@@ -471,6 +471,73 @@ test("#1505: a real blocking finding still publishes REQUEST_CHANGES with unreso
   assert.ok(!api.submitted.some((review) => review.event === "COMMENT"));
 });
 
+test("#1645: a native approval cannot bypass a material unknown carried-thread reconciliation", async () => {
+  // The publish mirror of the #1645 settlement contract: a carried
+  // blocker/major whose live forge state could not be established is held
+  // at minor (it never forces REQUEST_CHANGES), and the publish boundary
+  // likewise refuses to CERTIFY a native APPROVE over unverifiable
+  // historical state. The withholding is ADVISORY — a COMMENT, never a
+  // manufactured blocking request — exactly like the #1449/#1505 gates.
+  for (const state of ["unresolved", "unavailable"]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(
+      input({ mode: "review_verdict", verdict: "approve", threadReconciliationState: state }),
+      api,
+      { diffText: "" },
+    );
+    assert.equal(result.status, "published", state);
+    assert.equal(api.submitted.length, 1, state);
+    assert.equal(api.submitted[0]!.event, "COMMENT", state);
+    assert.ok(
+      result.messages.some((message) => message.includes("Withholding native approval") && message.includes(state)),
+      result.messages.join("; "),
+    );
+    // The published body names the reason.
+    assert.match(api.submitted[0]!.body, /Approval withheld by review-thread reconciliation/);
+    // Never a blocking request.
+    assert.ok(!api.submitted.some((review) => review.event === "REQUEST_CHANGES"), state);
+  }
+  // A complete reconciliation (every carried thread proven against live
+  // forge state) approves exactly like a run without the seam.
+  const complete = new MockPublishApi();
+  await publishReview(
+    input({ mode: "review_verdict", verdict: "approve", threadReconciliationState: "complete" }),
+    complete,
+    { diffText: "" },
+  );
+  assert.equal(complete.submitted[0]!.event, "APPROVE");
+});
+
+test("#1645: the approval guardrails withhold an approval for a material unknown reconciliation state", () => {
+  const check = (overrides: Partial<Parameters<typeof evaluateApprovalGuardrails>[0]>) => evaluateApprovalGuardrails({
+    verdict: "approve", approveForks: false, isForkPr: false, ...overrides,
+  });
+  assert.equal(check({ threadReconciliationState: "unresolved" }).canApprove, false);
+  assert.equal(check({ threadReconciliationState: "unavailable" }).canApprove, false);
+  assert.equal(check({ threadReconciliationState: "complete" }).canApprove, true);
+  // A verdict that is not an approve never allows an approval.
+  assert.equal(check({ verdict: "request_changes", threadReconciliationState: "unresolved" }).canApprove, false);
+  // The state absent: the result is byte-identical to the pre-#1645 shape.
+  const absent = check({});
+  assert.equal(absent.canApprove, true);
+  assert.equal("threadReconciliationBlocked" in absent, false);
+});
+
+test("#1645: a real blocking finding still publishes REQUEST_CHANGES with an unresolved reconciliation", async () => {
+  // The COMMENT withholding applies to an APPROVE verdict only: concrete
+  // blocker/major findings on the CURRENT head own REQUEST_CHANGES
+  // regardless of the carried-thread reconciliation state.
+  const api = new MockPublishApi();
+  const result = await publishReview(
+    input({ mode: "review_verdict", verdict: "request_changes", threadReconciliationState: "unresolved", findings: FINDINGS }),
+    api,
+    { diffText: "" },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  assert.ok(!api.submitted.some((review) => review.event === "COMMENT"));
+});
+
 test("#1505: the marker reads partial while required evidence stays unresolved", () => {
   const strictApprove = { verdictPolicy: "strict", verdict: "approve", findings: [], requiredChecks: "complete" } as const;
   assert.equal(markerReviewResult({ ...strictApprove, requiredEvidenceState: "unresolved" }), "partial");
