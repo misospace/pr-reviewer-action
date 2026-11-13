@@ -37,9 +37,11 @@ export const GITHUB_REVIEW_THREADS_QUERY =
 
 /** Page-info of one review-threads page. Fail closed: a response without the
  * connection or its `pageInfo` reports `hasNextPage: false` so pagination
- * stops instead of looping; the page's nodes still normalize (the pure
- * normalizer only reads `nodes`), so a single page without page-info reads
- * exactly like the verbatim v2 document. */
+ * stops instead of looping. The two cases are NOT equivalent downstream:
+ * with the connection present but page-info absent the page's nodes still
+ * normalize (the pure normalizer only reads `nodes`) and the read completes
+ * exactly like the verbatim v2 document; with the connection itself absent
+ * or null the merge's `jqEach` throws and the adapter fails the whole read. */
 export function githubReviewThreadsPageInfo(response: unknown): { hasNextPage: boolean; endCursor: string | null } {
   const connection = jqPath(response, "data", "repository", "pullRequest", "reviewThreads");
   const pageInfo = isPlainObject(connection) && isPlainObject(connection.pageInfo) ? connection.pageInfo : null;

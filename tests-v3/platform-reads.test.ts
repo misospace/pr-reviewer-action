@@ -452,6 +452,16 @@ test("#1662: githubReviewThreadsPageInfo fails closed without a connection or pa
   assert.deepEqual(githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true, endCursor: "" } } } } } }), { hasNextPage: true, endCursor: null });
 });
 
+test("#1662: an absent reviewThreads connection fails the whole read (the stop-only semantics end at page-info)", async () => {
+  for (const body of [{ data: { repository: { pullRequest: {} } } }, { data: { repository: { pullRequest: { reviewThreads: null } } } }]) {
+    const { fetchImpl } = recorder(() => json(body));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const result = await adapter.listReviewThreads();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Cannot iterate over null/);
+  }
+});
+
 test("github paginated reviews follow Link rel=next and merge pages in order", async () => {
   const { fetchImpl, seen } = recorder((url) => {
     const page = Number(url.searchParams.get("page") ?? "1");
