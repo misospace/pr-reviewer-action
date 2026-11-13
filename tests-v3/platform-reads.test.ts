@@ -9,7 +9,7 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsTruncated, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
@@ -355,6 +355,34 @@ test("github GraphQL reads POST the verbatim v2 queries with typed variables", a
   assert.deepEqual(JSON.parse(seen[1]!.body!).query, GITHUB_REVIEW_THREADS_QUERY);
 });
 
+test("#1645: a capped GitHub review-threads window declares the listing incomplete; a proven-full window does not", async () => {
+  const threadNodes = (count: number) => Array.from({ length: count }, (_, index) => ({
+    id: `PRRT_${index}`, isResolved: false, path: "a.ts", line: 1, originalLine: 1, comments: { nodes: [] },
+  }));
+  const cases: Array<{ pageInfo?: { hasPreviousPage: boolean }; count: number; incomplete: boolean }> = [
+    { pageInfo: { hasPreviousPage: true }, count: 100, incomplete: true },
+    { pageInfo: { hasPreviousPage: false }, count: 100, incomplete: false },
+    { count: 100, incomplete: true }, // no pageInfo: the filled window cannot disprove truncation
+    { count: 99, incomplete: false },
+  ];
+  // A response that never enumerated the connection proves nothing — the
+  // helper must not read its way to "complete".
+  assert.equal(githubReviewThreadsTruncated({ data: null }, 0), true);
+  assert.equal(githubReviewThreadsTruncated({ data: { repository: { pullRequest: { reviewThreads: null } } } }, 0), true);
+  for (const { pageInfo, count, incomplete } of cases) {
+    const { fetchImpl } = recorder(() => json({
+      data: { repository: { pullRequest: { reviewThreads: { ...(pageInfo ? { pageInfo } : {}), nodes: threadNodes(count) } } } },
+    }));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+    const read = await adapter.listReviewThreads();
+    assert.equal(read.ok, true);
+    if (!read.ok) continue;
+    assert.equal(read.data.length, count);
+    assert.equal(read.complete, incomplete ? false : undefined,
+      `pageInfo=${JSON.stringify(pageInfo)} count=${count}`);
+  }
+});
+
 test("github GraphQL targets <host>/api/graphql on a GHES /api/v3 base, and GraphQL errors fail the read", async () => {
   const { fetchImpl, seen } = recorder(() => json({ data: null, errors: [{ message: "nope" }] }));
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://ghe.example/api/v3", fetchImpl });
@@ -579,6 +607,25 @@ test("forgejo review threads fetch each integer review's comments; externalCheck
     "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/8/comments",
     "https://git.example/sub/api/v1/repos/o/r/commits/abc/status",
   ]);
+});
+
+test("#1645: a Forgejo listing with a failed per-review comments read declares itself incomplete", async () => {
+  const { fetchImpl } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: 8 }]);
+    if (url.pathname.includes("/reviews/8/")) return json({}, 500);
+    return json([{ id: 1, body: "kept thread", path: "a.ts", line: 1 }]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true, "the read still succeeds like before");
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "the skipped review's threads were not enumerated");
+});
+
+test("#1645: a Forgejo reviews-page failure is an incomplete empty listing, not a proven-empty one", async () => {
+  const { fetchImpl } = recorder((url) => (url.pathname.endsWith("/reviews") ? json({}, 502) : json([])));
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  assert.deepEqual(await adapter.listReviewThreads(), { ok: true, data: [], complete: false });
 });
 
 test("forgejo externalChecks: a hung status read is bounded and folds like a failed read", async () => {

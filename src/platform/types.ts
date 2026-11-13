@@ -102,8 +102,11 @@ export interface PlatformAdapter {
 }
 
 /** Outcome of a platform read that the v2 seam can fail: `ok` mirrors the
- * shell function's exit status, `data` its (parsed) stdout. */
-export type ReadResult<T> = { ok: true; data: T } | { ok: false; error: string };
+ * shell function's exit status, `data` its (parsed) stdout. `complete: false`
+ * on a successful read declares a listing that is known to be partial (a
+ * capped window or a skipped failed sub-read) — absence from it is not proof
+ * of absence. Absent field means the adapter asserts completeness. */
+export type ReadResult<T> = { ok: true; data: T; complete?: boolean } | { ok: false; error: string };
 
 /** CI-polling bounds for `externalChecks` (#663), taken from config/env by
  * the caller: `CI_API_TIMEOUT_SEC`, `CI_TIMEOUT_SEC`, `CI_DEADLINE_EPOCH`. */
@@ -187,7 +190,8 @@ export interface PlatformReadAdapter extends PlatformAdapter {
    * conversation comments as `{id,user,created_at,updated_at,body}`. */
   listPrConversationComments(): Promise<ReadResult<unknown[]>>;
   /** `platform_review_threads`: up to 100 inline review threads in the
-   * review_threads.py shape. */
+   * review_threads.py shape. `complete: false` declares the 100-thread window
+   * (or partial sub-reads) may have dropped threads (#1645). */
   listReviewThreads(): Promise<ReadResult<unknown[]>>;
   /** #812: the PR body and the instant of its latest edit as ONE atomic
    * snapshot — on GitHub both fields come from the same GraphQL document

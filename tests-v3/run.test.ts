@@ -503,7 +503,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[] } = {},
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean } = {},
 ): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>> }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -530,7 +530,12 @@ async function runStaleThreadVerdict(
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
-      return Promise.resolve({ ok: true, data: reads === 1 ? [majorThread] : (options.secondListing ?? [majorThread]) });
+      if (reads === 1) return Promise.resolve({ ok: true, data: [majorThread] });
+      return Promise.resolve({
+        ok: true,
+        data: options.secondListing ?? [majorThread],
+        ...(options.secondListingComplete === false ? { complete: false } : {}),
+      });
     };
     const result = await runReview({
       env: { VERDICT_POLICY: "strict" },
@@ -653,6 +658,31 @@ test("#1645: a carried thread proven live-unresolved at settlement still blocks"
   const api = await publishRunHandoff(result);
   assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
+});
+
+test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
+  // The #1619 shape again, but the settlement read declares the listing
+  // incomplete (a GitHub 100-thread window or a Forgejo partial read): the
+  // carried major is UNSEEN, not proven absent — it must neither block nor
+  // be reported as gone, and the reconciliation must not claim completeness.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [], secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "an unverifiable carried thread fails open, never a fabricated block");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "a capped listing never claims complete reconciliation");
+  assert.equal(reconciliation.unknown, 1, "the unseen thread reconciles as unknown, not absent");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the incompleteness is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
 });
 
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {

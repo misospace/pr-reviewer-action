@@ -86,7 +86,11 @@ export type ThreadReconciliationState = "live_unresolved" | "resolved" | "absent
 
 /** The authoritative live listing, re-read at settlement time. `available`
  * is false when the read failed or the platform cannot serve it — every
- * listed thread is then `unknown`. When no input is provided at all (unit
+ * listed thread is then `unknown`. `complete` is false when the read
+ * succeeded but the listing is known to be partial (a capped thread window
+ * or a skipped failed sub-read): a thread the listing omits is then
+ * `unknown`, never `absent`, because absence from an incomplete listing is
+ * not proof of absence (#1645). When no input is provided at all (unit
  * callers without a listing), each listed thread is treated as
  * `live_unresolved`, preserving the historical contract that the
  * enforcement view IS the live listing. */
@@ -95,6 +99,7 @@ export interface ThreadReconciliationInput {
   unresolvedIds: ReadonlySet<string>;
   resolvedIds: ReadonlySet<string>;
   headSha: string;
+  complete?: boolean;
 }
 
 function reconcileThreadState(threadId: string, reconciliation: ThreadReconciliationInput | null | undefined): ThreadReconciliationState {
@@ -102,7 +107,7 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
   if (!reconciliation.available) return "unknown";
   if (reconciliation.unresolvedIds.has(threadId)) return "live_unresolved";
   if (reconciliation.resolvedIds.has(threadId)) return "resolved";
-  return "absent";
+  return reconciliation.complete === false ? "unknown" : "absent";
 }
 
 /**
@@ -239,7 +244,7 @@ export function applyReviewThreadEnforcement(
   // ran, independent of whether settlement changed the artifact.
   if (reconciliation !== null && reconciliation !== undefined) {
     artifact.thread_reconciliation = {
-      state: reconciliation.available ? "complete" : "incomplete",
+      state: reconciliation.available && reconciliation.complete !== false ? "complete" : "incomplete",
       head_sha: reconciliation.headSha,
       live_unresolved: counts.live_unresolved,
       resolved: counts.resolved,
@@ -256,9 +261,11 @@ export function applyReviewThreadEnforcement(
   const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
-  // review still has to say the live listing could not be proven.
+  // review still has to say the live listing could not be proven. A listing
+  // that was read but is known partial (capped window, failed sub-read) owes
+  // the same disclosure whenever it left carried threads unverifiable.
   const discloseIncomplete = reconciliation !== null && reconciliation !== undefined
-    && !reconciliation.available && counts.unknown > 0;
+    && (!reconciliation.available || reconciliation.complete === false) && counts.unknown > 0;
   if (changed || discloseIncomplete) {
     const lines = ["", "", "## Unresolved Review Threads", ""];
     for (const record of settled) {
@@ -271,7 +278,7 @@ export function applyReviewThreadEnforcement(
     if (discloseIncomplete) {
       lines.push(
         "",
-        "_Review-thread reconciliation incomplete: the live thread listing could not be read at settlement time, so carried threads were recorded but not treated as blocking._",
+        "_Review-thread reconciliation incomplete: the live thread listing could not be read in full at settlement time, so carried threads were recorded but not treated as blocking._",
       );
     }
     artifact.review_markdown = (artifact.review_markdown || "") + lines.join("\n");

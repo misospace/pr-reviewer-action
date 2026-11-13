@@ -636,23 +636,44 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
   }
 
-  /** `list_review_threads`: every review's comments grouped into threads. */
+  /** `list_review_threads`: every review's comments grouped into threads.
+   * The read still succeeds like before, but a failed reviews page or a
+   * skipped review's comments read marks the listing incomplete (#1645): a
+   * thread missing from an incomplete listing is not proven absent. */
   listReviewThreads(): Promise<ReadResult<unknown[]>> {
     return this.read(async (at) => {
       const { status, text } = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
-      if (status !== 200) return [];
+      if (status !== 200) return { threads: [], complete: false };
       const reviews = pyJsonDecode(text);
-      if (!Array.isArray(reviews)) return [];
+      if (!Array.isArray(reviews)) return { threads: [], complete: false };
       const commentLists: unknown[][] = [];
+      let complete = true;
       for (const review of reviews) {
         const reviewId = forgejoReviewCommentId(review);
+        // The v2 id gate skips unaddressable review rows; a skipped row is
+        // a data-shape gate, not a failed read, and does not mark the
+        // listing incomplete.
         if (reviewId === null) continue;
         const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
-        if (response.status !== 200) continue;
+        if (response.status !== 200) {
+          complete = false;
+          continue;
+        }
         const comments = pyJsonDecode(response.text);
-        if (Array.isArray(comments)) commentLists.push(comments);
+        if (Array.isArray(comments)) {
+          commentLists.push(comments);
+        } else {
+          // An undecodable comments payload means this review's threads were
+          // not enumerated — the listing cannot prove any unseen thread absent.
+          complete = false;
+        }
       }
-      return groupForgejoReviewThreads(commentLists);
+      return { threads: groupForgejoReviewThreads(commentLists), complete };
+    }).then((result) => {
+      if (!result.ok) return result;
+      return result.data.complete
+        ? { ok: true as const, data: result.data.threads }
+        : { ok: true as const, data: result.data.threads, complete: false as const };
     });
   }
 

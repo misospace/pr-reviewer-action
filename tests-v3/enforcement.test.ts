@@ -891,6 +891,31 @@ test("#1645: unreadable live listing fails open — no blocker invented, incompl
   assert.match(String(a.review_markdown), /PRRT_stale1/, "carried threads stay visible as bookkeeping");
 });
 
+test("#1645: a capped (incomplete) listing never proves absence — unseen threads stay unknown, proven ones still block", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "f".repeat(40),
+    complete: false,
+  });
+  const carried = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(carried.length, 1, "a thread the partial listing reports unresolved is still live evidence");
+  assert.equal(carried[0]!.thread_reconciliation, "live_unresolved");
+  assert.ok(!a.findings.some((f) => f.thread_id === "PRRT_stale2"), "a thread the partial listing omits is not proven absent");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+  assert.equal(a.thread_reconciliation?.unknown, 1, "the unseen thread reconciles as unknown");
+  assert.equal(a.thread_reconciliation?.absent, 0);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes", "the thread proven live still blocks under strict policy");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
+});
+
 test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
   const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict");

@@ -947,7 +947,10 @@ export function claimsPrepassGate(
  * The enforcement view was built once at context time; this fresh read is
  * what a carried thread must be proven against before it can block. A failed
  * or unsupported read fails open — every listed thread becomes `unknown`,
- * disclosed, never promoted into a blocker. */
+ * disclosed, never promoted into a blocker. A read that succeeds but declares
+ * the listing incomplete (a capped window or a failed sub-read) carries
+ * `complete: false` through, so a carried thread the partial listing omits
+ * reconciles as `unknown`, never as a proven `absent`. */
 async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: string): Promise<ThreadReconciliationInput> {
   const empty: ThreadReconciliationInput = { available: false, unresolvedIds: new Set(), resolvedIds: new Set(), headSha };
   try {
@@ -962,7 +965,7 @@ async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: 
     for (const thread of prepareThreads(fetched.data)) {
       (thread.resolved ? resolvedIds : unresolvedIds).add(thread.threadId);
     }
-    return { available: true, unresolvedIds, resolvedIds, headSha };
+    return { available: true, unresolvedIds, resolvedIds, headSha, complete: fetched.complete !== false };
   } catch {
     return empty;
   }
