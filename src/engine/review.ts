@@ -94,7 +94,7 @@ import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTe
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, hasBlockingOpenFinding, isUnverifiedBlockingGrounding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, hasBlockingOpenFinding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
@@ -103,7 +103,7 @@ import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { applyNegativeEvidenceToRecord, negativeEvidenceRulesFromArtifact } from "../enforcement/negative-evidence.js";
 import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.js";
-import { markerReviewResult, isNativeVerdictMode, publishStepRuns } from "../publish/publish.js";
+import { isNativeVerdictMode, publishStepRuns } from "../publish/publish.js";
 import { computeFinalDisposition, reviewResultFromDisposition, type FinalDisposition } from "../disposition/final.js";
 import { buildDispositionEvidence } from "../disposition/engine-evidence.js";
 import { toolCapabilityFailure, toolMinSuccessfulFloorUnmet } from "../enforcement/enforce.js";
@@ -2810,6 +2810,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
   let completenessResult: ReturnType<typeof applyRequiredCheckValidation> | null = null;
   let completenessStatus = "none";
+  // #1656 audit round 3: requirements a MECHANICAL current-head refutation
+  // proved false — the only `provenUnmetRequirement` signal.
+  let mechanicallyProvenUnmetRequirements = 0;
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
@@ -2832,7 +2835,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // structural proof). Runs before the overlays and the strict mapping so
     // the synthesized blockers count toward the open-findings set.
     if (requirementTraceResult.applied) {
-      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+      // #1656 audit round 3: the confirmed-unmet escalation is a MECHANICAL
+      // current-head refutation (#985's structural proof) — the only signal
+      // allowed to set the disposition's `provenUnmetRequirement`.
+      mechanicallyProvenUnmetRequirements += applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #1238: thread settlement (inside the overlays) re-emits prior reviews'
@@ -2913,7 +2919,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // `requirement_trace_incomplete` is set or an open non-verification
     // blocker exists, so the flip is stable.
     if (requirementTraceResult.applied) {
-      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+      // #1656 audit round 3: mechanical refutation count (strict branch
+      // rationale above applies to the non-strict composition too).
+      mechanicallyProvenUnmetRequirements += applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #1238: second boundary pass over findings thread settlement re-emitted
@@ -3148,6 +3156,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       : null,
     toolFloorUnmet: enforcementInputs.toolFailureEnabled
       && toolMinSuccessfulFloorUnmet(enforcementInputs.toolHarness ?? null, enforcementInputs.toolMinSuccessful),
+    // #1656 audit round 3: the harness's own recorded zero-evidence
+    // degradation is material in either lane; the mechanical refutation
+    // count is the only proven-requirement signal.
+    noEvidenceReason,
+    mechanicallyProvenUnmetRequirements,
     // The loop stopping early is disclosure, not a blanket veto (#1656
     // audit delta).
     partialCoverageStopReason: partialCoverage !== undefined ? partialCoverage.stop_reason : null,

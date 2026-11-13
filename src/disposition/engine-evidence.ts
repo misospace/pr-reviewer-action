@@ -8,32 +8,32 @@
  * reason-coded `DispositionEvidence` list the authoritative disposition
  * consumes, plus the confirmed-negative flag.
  *
- * Materiality mapping (#1656 + audit delta):
- * - MATERIAL: a confirmed-negative obligation (`unmet` — proven, and it
- *   also drives `provenUnmetRequirement`), an unresolved behavioral
-   * required check (the `required_check=incomplete` BIT itself is never
- *   read), a risk-scan unread affected path, an undischarged derived/
- *   trusted-base obligation, an unverified current-head blocker/major
- *   claim, a tool CAPABILITY failure (planning/execution error, every call
- *   failed, a recorded no-evidence degradation), known-failing required
- *   exact-head CI, and materially-required pending CI.
- * - ADVISORY: ONLY cases identified from trusted deterministic reason
- *   codes — the citation-gate reason family (`citation-already-used`,
- *   `uncited-satisfaction`, `unrelated-executed-call`,
- *   `malformed-executed-trace`; #1657 re-owns the internals) and the
- *   operator-configured min-successful CALL-COUNT floor. No prose/wording
- *   matching exists anywhere in this module: lexical materiality inference
- *   is forbidden (#1656 audit round 2).
- * - TRANSITIONAL CONSERVATIVE (material): the requirement trace's
- *   remaining incompleteness, unresolved required-check rows not
- *   objectively identified as bookkeeping, and the #810 loop-stopped-early
- *   record stay MATERIAL unknowns inside this disposition while #1657/
- *   #1658 have not landed — #1656 must not raise native APPROVE merely
+ * Materiality mapping (#1656, through audit round 3):
+ * - MATERIAL: a model-authored `unmet` required-check/obligation row (a
+ *   usable rationale makes the disposition structurally VALID, not
+ *   objectively TRUE — without a mechanical current-head refutation it is
+ *   a material unknown, never `provenUnmetRequirement`; #1656 audit round
+ *   3), an unresolved behavioral required check (the
+ *   `required_check=incomplete` BIT itself is never read), a risk-scan
+ *   unread affected path, an undischarged derived/trusted-base
+ *   obligation, an unverified current-head blocker/major claim, a tool
+ *   CAPABILITY failure (planning/execution error, every call failed), a
+ *   RECORDED zero-evidence loop degradation (lane-independent — the
+ *   harness's own record, never a route/tier name), known-failing
+ *   required exact-head CI, and materially-required pending CI.
+ * - ADVISORY: the operator-configured min-successful CALL-COUNT floor
+ *   only — a count must never define adequacy. No prose/wording matching
+ *   exists anywhere in this module: lexical materiality inference is
+ *   forbidden (#1656 audit round 2).
+ * - TRANSITIONAL CONSERVATIVE (material, until #1657/#1658/#1659 replace
+ *   them with principled settlement): the requirement trace's remaining
+ *   incompleteness, unresolved required-check rows, and the #810
+ *   loop-stopped-early record. #1656 must not raise native APPROVE merely
  *   because the old proof machinery could not settle them (#1656 audit
  *   round 2).
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
-import { isForcingObligation, type ReviewObligation } from "../enforcement/review-obligations.js";
+import type { ReviewObligation } from "../enforcement/review-obligations.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
@@ -49,14 +49,26 @@ export interface DispositionEvidenceParts {
   /** True when the configured min-successful CALL-COUNT floor was unmet —
    * advisory only (#1656 audit delta). */
   toolFloorUnmet: boolean;
-  /** The #810 partial-coverage stop reason, or null — advisory disclosure
-   * only (#1656 audit delta). */
+  /** The #810 partial-coverage stop reason, or null — a TRANSITIONAL
+   * CONSERVATIVE material unknown until #1657 settles it (#1656 audit
+   * round 2). */
   partialCoverageStopReason: string | null;
-  /** The #874 requirement-trace incompleteness flag — a compatibility
-   * diagnostic (proof-shape/coverage-repair rows) while #1658 is in
-   * flight; the trace's confirmed-unmet rows escalate as synthesized
-   * blockers BEFORE this builder runs. */
+  /** The #874 requirement-trace incompleteness flag — a TRANSITIONAL
+   * CONSERVATIVE material unknown while #1658 is in flight; the trace's
+   * mechanically refuted rows escalate as synthesized blockers BEFORE
+   * this builder runs. */
   requirementTraceIncomplete: boolean;
+  /** The harness's recorded zero-evidence degradation reason
+   * (`native_loop_degraded` — the loop ran and the model issued no tool
+   * calls), or null. A recorded zero-evidence degradation is MATERIAL in
+   * either lane — the harness's own record, never a route/tier name
+   * (#1656 audit round 3). Distinct from the min-successful COUNT floor. */
+  noEvidenceReason: string | null;
+  /** The count of requirements a MECHANICAL current-head refutation
+   * proved false (the #1145 confirmed-unmet escalation, re-derived from
+   * the checkout at head). The ONLY signal allowed to set
+   * `provenUnmetRequirement` (#1656 audit round 3). */
+  mechanicallyProvenUnmetRequirements: number;
   /** The CI gate's exact-head conclusion ("success" | "failure" |
    * "pending" | "none"), or null when the gate did not run. */
   ciConclusion: string | null;
@@ -84,7 +96,13 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   for (const row of parts.completenessChecks) {
     const check = typeof row.check === "string" ? row.check : "";
     if (row.status === "unmet") {
-      provenUnmetRequirement = true;
+      // #1656 audit round 3: the model's structured `unmet` is NOT
+      // objective proof — a usable rationale makes it structurally valid,
+      // not objectively true. Without a mechanical current-head
+      // refutation it is a MATERIAL UNKNOWN (INCOMPLETE/COMMENT), never a
+      // proven requirement and never a silent approve. An ordinary
+      // semantic defect blocks through a grounded blocker/major finding.
+      evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
       continue;
     }
     if (row.status !== "unresolved" || check === "") continue;
@@ -100,13 +118,17 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
   }
 
-  // The obligation fold's rows: forcing rows are confirmed negatives; the
-  // coverage-only sources are material unknowns of their own kind.
-  // must_check rows are the completeness fold's rows above — skipped here so
-  // one row yields one evidence entry.
+  // The obligation fold's rows. #1656 audit round 3: materiality is never
+  // inferred from the row's source name or via `isForcingObligation` — a
+  // model-authored `unmet` is a material unknown, and only the mechanical
+  // count below may prove a requirement false. must_check rows are the
+  // completeness fold's rows above — skipped here so one row yields one
+  // evidence entry.
   for (const obligation of parts.obligations) {
-    if (isForcingObligation(obligation)) {
-      provenUnmetRequirement = true;
+    if (obligation.status === "unmet") {
+      if (obligation.source !== "must_check") {
+        evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", obligation.id));
+      }
       continue;
     }
     if (obligation.status !== "unresolved") continue;
@@ -117,6 +139,10 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
       evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", obligation.id));
     }
   }
+  // The ONLY proven-requirement signal: a mechanical current-head
+  // refutation (the #1145 confirmed-unmet escalation's count). Everything
+  // the model asserted stays subject to the material-unknown floor.
+  provenUnmetRequirement = parts.mechanicallyProvenUnmetRequirements > 0;
 
   // An unverified blocker/major demotion (the verifier could not check the
   // claim) is a MATERIAL UNKNOWN, not a forced code blocker (#1656).
@@ -138,6 +164,13 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   }
   if (parts.toolFloorUnmet) {
     evidence.push(dispositionEvidence("investigation_floor_unmet", "deterministic", "advisory", "min-successful tool requests unmet"));
+  }
+  // A RECORDED zero-evidence degradation (the loop ran; the model issued
+  // no tool calls) is a material unknown in either lane — the harness's
+  // own record, never a route/tier rule (#1656 audit round 3). Distinct
+  // from the advisory count floor above.
+  if (parts.noEvidenceReason !== null) {
+    evidence.push(dispositionEvidence("investigation_unavailable", "deterministic", "material", parts.noEvidenceReason));
   }
   // The loop stopping early is a TRANSITIONAL CONSERVATIVE material
   // unknown (#1656 audit round 2): while #1657 has not landed, the run

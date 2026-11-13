@@ -4,6 +4,7 @@ import {
   ADVISORY_DISPOSITION_CODES,
   MATERIAL_CODE_CLAUSES,
   MATERIAL_DISPOSITION_CODES,
+  boundDispositionSubject,
   computeFinalDisposition,
   dispositionEvidence,
   parseFinalDisposition,
@@ -17,6 +18,7 @@ import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js"
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import {
   applyAllEnforcement,
+  applyToolMinSuccessfulEnforcement,
   failClosedEnforcementFired,
   toolCapabilityFailure,
   toolMinSuccessfulFloorUnmet,
@@ -340,6 +342,7 @@ test("the engine evidence builder maps the exact-head CI floor per the audit del
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
   };
   // KNOWN failing: material, always.
   const failing = buildDispositionEvidence({ ...base, ciConclusion: "failure", ciEvidenceContractActive: false });
@@ -364,8 +367,10 @@ test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; t
     findings: [],
     toolCapabilityFailure: null,
     toolFloorUnmet: false,
+    noEvidenceReason: null,
     partialCoverageStopReason: null,
     requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
   };
@@ -426,6 +431,7 @@ test("the engine evidence builder keeps capability failures material and confirm
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
   };
@@ -433,12 +439,20 @@ test("the engine evidence builder keeps capability failures material and confirm
   const capability = buildDispositionEvidence({ ...base, toolCapabilityFailure: "all tool requests failed" });
   assert.deepEqual(capability.evidence.map((entry) => entry.code), ["investigation_unavailable"]);
   assert.deepEqual(capability.evidence.map((entry) => entry.materiality), ["material"]);
-  // A confirmed-negative obligation stays proven.
+  // #1656 audit round 3: a model-authored `unmet` is a MATERIAL UNKNOWN —
+  // structurally valid, not objectively true. Only the mechanical count
+  // proves a requirement.
   const unmet = buildDispositionEvidence({
     ...base,
-    obligations: [{ id: "mc1", source: "must_check", text: "check", status: "unmet", cause: null } as never],
+    completenessChecks: [{ check: "verify audit findings are addressed", status: "unmet" }],
   });
-  assert.equal(unmet.provenUnmetRequirement, true);
+  assert.deepEqual(unmet.evidence.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
+  assert.deepEqual(unmet.evidence.map((entry) => entry.materiality), ["material"]);
+  assert.equal(unmet.provenUnmetRequirement, false);
+  // The mechanical refutation count is the ONLY proven-requirement signal.
+  const mechanical = buildDispositionEvidence({ ...base, mechanicallyProvenUnmetRequirements: 2 });
+  assert.equal(mechanical.provenUnmetRequirement, true);
+  assert.deepEqual(mechanical.evidence, []);
   // An unresolved risk row is a materially unread affected path.
   const risk = buildDispositionEvidence({
     ...base,
@@ -842,6 +856,191 @@ test("pin: raw verdict request_changes + final disposition INCOMPLETE => the wor
     failOnRequestChanges(stage as never, "approve", true, false, "", "", "unavailable"),
     0,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 3: a model-authored `unmet` is NOT objective proof.
+// ---------------------------------------------------------------------------
+
+test("pin: must_check `unmet` from the model, no grounded finding/objective refutation => INCOMPLETE/COMMENT", () => {
+  const build = buildDispositionEvidence({
+    completenessChecks: [{ check: "verify audit findings are addressed", status: "unmet" }],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  assert.equal(build.provenUnmetRequirement, false);
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.notEqual(disposition.kind, "request_changes");
+  assert.notEqual(disposition.kind, "approve");
+});
+
+test("pin: trusted-base `unmet` from the model, no grounded finding/objective refutation => INCOMPLETE/COMMENT", () => {
+  const build = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [{ id: "tb1", source: "trusted_base_guidance", text: "verify before approval", status: "unmet", cause: null } as never],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  assert.equal(build.provenUnmetRequirement, false);
+  assert.deepEqual(build.evidence.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
+test("pin: a grounded major finding still => REQUEST_CHANGES (the ordinary semantic-defect path)", () => {
+  const disposition = computeFinalDisposition(input({ verdict: "request_changes", blockingFindingOpen: true }));
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.reason, "blocker_proven");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("pin: an explicit mechanical proven-unmet input still => REQUEST_CHANGES", () => {
+  const disposition = computeFinalDisposition(input({ provenUnmetRequirement: true }));
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.reason, "requirement_unmet");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+  // And the builder's mechanical count feeds exactly that input.
+  const mechanical = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 1,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  const fromMechanical = computeFinalDisposition(input({ provenUnmetRequirement: mechanical.provenUnmetRequirement }));
+  assert.equal(fromMechanical.kind, "request_changes");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 3: the recorded zero-evidence degradation is consumed.
+// ---------------------------------------------------------------------------
+
+test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane", () => {
+  const build = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: "no-tool-calls",
+    partialCoverageStopReason: null,
+    requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  assert.deepEqual(build.evidence.map((entry) => entry.code), ["investigation_unavailable"]);
+  assert.deepEqual(build.evidence.map((entry) => entry.materiality), ["material"]);
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.notEqual(disposition.nativeEvent, "APPROVE");
+  // The count floor is NOT this signal: an advisory floor alone still
+  // approves — an adequately investigated run with no zero-evidence state.
+  const adequateFallback = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: true,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    requirementTraceIncomplete: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  assert.deepEqual(adequateFallback.evidence.map((entry) => entry.materiality), ["advisory"]);
+  const approved = computeFinalDisposition(input({ evidence: adequateFallback.evidence }));
+  assert.equal(approved.kind, "approve");
+  assert.equal(approved.nativeEvent, "APPROVE");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 3: hostile-boundary regression for `boundDispositionSubject`.
+// ---------------------------------------------------------------------------
+
+test("#252 hostile boundary: boundDispositionSubject collapses controls and bounds the subject", () => {
+  // The hostile token is the boundary itself: control characters (which
+  // could forge log lines or break single-line consumers) and oversized
+  // input (which could bloat the disposition artifact).
+  const controls = "src\u0000/\u001bauth\u0007/\nsession\u007f.ts";
+  const bounded = boundDispositionSubject(controls);
+  assert.equal(/[\u0000-\u001f\u007f]/.test(bounded), false, "no control character survives");
+  assert.ok(bounded.length <= 200, "the subject stays within the cap");
+  assert.ok(bounded.includes("src"), "readable content survives the collapse");
+  // A 500-char hostile run is bounded to exactly the cap.
+  const long = "x".repeat(500);
+  assert.equal(boundDispositionSubject(long).length, 200);
+  // A forged delimiter-style token is flattened but never grows the
+  // subject beyond the cap.
+  const forged = "ghadelimiter_" + "a".repeat(300) + "\u0000" + "b".repeat(300);
+  const forgedBounded = boundDispositionSubject(forged);
+  assert.equal(forgedBounded.length, 200);
+  assert.equal(/[\u0000-\u001f\u007f]/.test(forgedBounded), false);
+  // Empty and non-hostile inputs are stable.
+  assert.equal(boundDispositionSubject(""), "");
+  assert.equal(boundDispositionSubject("src/auth/session.ts"), "src/auth/session.ts");
+});
+
+// ---------------------------------------------------------------------------
+// Audit round 3: the min-successful disclosure never denies a certification.
+// ---------------------------------------------------------------------------
+
+test("pin: the min-successful section is diagnostic-only and cannot contradict a certified APPROVE", async () => {
+  // The section's own wording: it states the configured floor, not review
+  // incompleteness and not a certification denial.
+  const artifactRecord: Record<string, unknown> = {
+    verdict: "approve", verdict_source: "model", review_markdown: "", findings: [],
+  };
+  const outcome = applyToolMinSuccessfulEnforcement(artifactRecord as never, 3, null);
+  assert.equal(outcome.applied, true);
+  const markdown = String(artifactRecord.review_markdown);
+  assert.ok(markdown.includes("## Tool Harness Insufficient Evidence"));
+  assert.ok(markdown.includes("Diagnostic: this workflow's configured floor"));
+  assert.equal(/no approval is certified/.test(markdown), false, "the diagnostic must not deny certification");
+  assert.equal(/investigation is incomplete/.test(markdown), false, "the diagnostic must not claim incompleteness");
+
+  // Publication consistency: the same artifact publishes a certified
+  // APPROVE beside the diagnostic section with no contradicting prose.
+  const disposition = computeFinalDisposition(input({
+    evidence: [dispositionEvidence("investigation_floor_unmet", "deterministic", "advisory", "min-successful tool requests unmet")],
+  }));
+  assert.equal(disposition.kind, "approve");
+  assert.equal(disposition.nativeEvent, "APPROVE");
+  const api = new MockPublishApi();
+  await publishReview(publishInput({
+    finalDisposition: disposition,
+    reviewMarkdown: markdown,
+  }), api, { diffText: "" });
+  assert.equal(api.submitted[0]!.event, "APPROVE", "the advisory floor cannot withhold the certified event");
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes("## Tool Harness Insufficient Evidence"), "the diagnostic stays observable");
+  assert.equal(/no approval is certified/.test(body), false, "no action-owned prose denies the certification");
+  assert.equal(/investigation is incomplete/.test(body), false, "no action-owned prose claims incompleteness");
 });
 
 // ---------------------------------------------------------------------------

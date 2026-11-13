@@ -2931,8 +2931,17 @@ test("#875 negative: with equivalent-paths on, grouped equivalent paths never ma
   // No required checks are configured in this fixture, so the honest
   // output is "none" — the point is that the hint introduced no gap.
   assert.equal(result.outputs.requiredChecks, "none");
-  assert.match(result.marker, /"review_result":"clean"/);
-  assert.ok(!result.marker.includes('"review_result":"partial"'));
+  // The #875 property: the hint manufactured nothing — no findings, no
+  // escalation, no issues. #1656 audit round 3: the marker's review_result
+  // is a projection of the authoritative disposition, and this run's
+  // native loop recorded a zero-evidence degradation (the model answered
+  // from the corpus without issuing tool calls) — a MATERIAL unknown that
+  // withholds certification regardless of the hint. The review is
+  // therefore `partial`, never `issues`, and the hint's innocence is
+  // pinned by the empty findings set above.
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  assert.ok(result.finalDisposition?.materialUnknowns.some((entry) => entry.code === "investigation_unavailable"));
+  assert.match(result.marker, /"review_result":"partial"/);
   assert.ok(!result.marker.includes('"review_result":"issues"'));
 });
 

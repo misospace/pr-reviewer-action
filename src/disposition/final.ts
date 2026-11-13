@@ -90,23 +90,30 @@ export type MaterialDispositionCode = (typeof MATERIAL_DISPOSITION_CODES)[number
  * Advisory evidence codes — non-material proof-shape, bookkeeping and
  * serialization diagnostics (#1656 + audit delta). They stay observable but
  * never independently veto an approval, and they are never independent
- * final-disposition authorities.
+ * final-disposition authorities. These codes are SEAM vocabulary: the
+ * engine feeds almost none of them today — while #1657/#1658/#1659 have not
+ * landed, it maps the underlying states CONSERVATIVELY to material unknowns
+ * inside this disposition (see `buildDispositionEvidence`); a code becomes
+ * advisory only when trusted deterministic provenance identifies the case.
  */
 export const ADVISORY_DISPOSITION_CODES = [
-  /** A requirement-trace predicate/test-shape mismatch (or other proof-
-   * shape diagnostic, including the trace's repairable coverage rows) where
-   * the underlying behavior was adequately assessed. #1658 refines. */
+  /** A requirement-trace predicate/test-shape mismatch established by
+   * trusted provenance (#1658 feeds this). Until then the engine maps the
+   * trace's remaining incompleteness conservatively to MATERIAL
+   * `mandatory_requirement_unresolved` — it never downgrades by wording. */
   "proof_shape_mismatch",
-  /** The one-call-per-row citation allocation could not back satisfied rows
-   * with their own executed calls (allocation, uncited, unrelated, or
-   * unparseable-trace shapes). A compatibility diagnostic while #1657 is in
-   * flight — never an approval veto on its own. */
+  /** Call-ID proof bookkeeping established by trusted provenance (#1657
+   * feeds this). Until then the engine maps unbacked satisfactions
+   * conservatively to MATERIAL `mandatory_requirement_unresolved` — the
+   * #1634 safety contract pins that withheld approval. */
   "citation_allocation_failed",
   /** Stale historical thread bookkeeping (#1654's reconciliation state is
    * consumed as provenance only). */
   "stale_thread_bookkeeping",
-  /** A missing/invalid disposition for a generic scrutiny prompt (a P0/P1
-   * "verify carefully/thoroughly" exhortation without a named behavior). */
+  /** A missing/invalid disposition for a generic scrutiny prompt, fed ONLY
+   * from trusted row provenance (#1657) — no lexical classification exists
+   * in this runtime, so the engine maps such rows conservatively to
+   * MATERIAL `mandatory_requirement_unresolved` until then. */
   "generic_scrutiny_row_missing",
   /** A non-material serialization/bookkeeping failure. */
   "serialization_diagnostic",
@@ -114,9 +121,10 @@ export const ADVISORY_DISPOSITION_CODES = [
    * configured count, which must never define investigation adequacy by
    * itself (#1656 audit delta). */
   "investigation_floor_unmet",
-  /** The tool loop stopped early (budget/rounds/context) — disclosure
-   * only; whether the affected behavior lacked evidence is a seam question
-   * (#1657), never a blanket veto (#1656 audit delta). */
+  /** The tool loop stopped early, established by trusted provenance
+   * (#1657 feeds this). Until then the engine maps the #810 stop record
+   * conservatively to MATERIAL `investigation_unavailable` — the run
+   * cannot prove the affected behavior had adequate available evidence. */
   "investigation_partial",
 ] as const;
 export type AdvisoryDispositionCode = (typeof ADVISORY_DISPOSITION_CODES)[number];
@@ -241,9 +249,11 @@ export interface FinalDispositionInput {
   /** True when a configured evidence provider reported blocker-level
    * findings. */
   evidenceProviderBlocker: boolean;
-  /** True when a mandatory objective requirement is objectively proven
-   * unmet (a confirmed-negative obligation row / deterministic refutation),
-   * independent of any finding. */
+  /** True when a mandatory objective requirement is proven false by a
+   * MECHANICAL current-head refutation (the #1145 confirmed-unmet
+   * escalation). A model-authored `unmet` disposition is structurally
+   * valid, NOT objectively true, and must never set this — it rides the
+   * material-unknown floor instead (#1656 audit round 3). */
   provenUnmetRequirement: boolean;
   /** True when this publication's authoritative surface is a verdict-
    * bearing native review. */

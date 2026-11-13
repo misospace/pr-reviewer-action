@@ -191,11 +191,13 @@ export function applyToolHarnessFailureEnforcement(
 }
 
 /**
- * Disclose an unmet min-successful tool-request floor (#1656: an
- * observable diagnostic, no longer a verdict overlay). The shortfall is
- * reason-coded evidence for the authoritative disposition
- * (`investigation_unavailable`) — an abstention, never a fabricated
- * blocking request.
+ * Disclose an unmet min-successful tool-request floor (#1656 audit round
+ * 3: a DIAGNOSTIC ONLY). The configured successful-request COUNT was not
+ * met — a count must never define investigation adequacy, so this section
+ * must not claim review incompleteness or certification withholding: the
+ * authoritative disposition carries the shortfall as ADVISORY
+ * `investigation_floor_unmet` evidence, and a certified APPROVE may stand
+ * beside it.
  */
 export function applyToolMinSuccessfulEnforcement(
   artifact: ReviewArtifact,
@@ -210,9 +212,11 @@ export function applyToolMinSuccessfulEnforcement(
   }
   artifact.review_markdown = (artifact.review_markdown || "")
     + "\n\n## Tool Harness Insufficient Evidence\n"
-    + `This workflow requires at least ${minRequired} successful tool requests, `
-    + `but only ${successful} succeeded. The review's investigation is `
-    + "incomplete, so no approval is certified. Rerun after adjusting tool planning settings.";
+    + `Diagnostic: this workflow's configured floor of at least ${minRequired} `
+    + `successful tool requests was not met (${successful} succeeded). This is `
+    + "a recorded count, not a measure of review adequacy; it does not change "
+    + "the review's conclusion. Rerun after adjusting tool planning settings if "
+    + "a deeper investigation is wanted.";
   return { applied: true, reason: "" };
 }
 

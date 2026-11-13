@@ -84,20 +84,36 @@ Advisory codes (observable, never vetoing, never independent authorities):
 `proof_shape_mismatch`, `citation_allocation_failed`,
 `stale_thread_bookkeeping`, `generic_scrutiny_row_missing`,
 `serialization_diagnostic`, `investigation_floor_unmet`,
-`investigation_partial`.
+`investigation_partial`. These are SEAM vocabulary: the engine feeds only
+`investigation_floor_unmet` today (the configured min-successful CALL-COUNT
+floor — a count never defines adequacy).
 
-The compatibility mapping while #1657/#1658 are in flight
-(`buildDispositionEvidence`): the citation-gate reason family
-(`citation-already-used`, `uncited-satisfaction`, `unrelated-executed-call`,
-`malformed-executed-trace`), the requirement trace's remaining
-incompleteness, the configured min-successful CALL-COUNT floor and the #810
-loop-stopped-early record are advisory; a tool CAPABILITY failure (planning/
-execution error, every call failed) and a recorded no-evidence degradation
-are material; confirmed-negative (`unmet`) rows prove
-`request_changes`; the exact-head CI floor reads the CI gate's already-paid
-conclusion — a KNOWN failure is always material, a PENDING one withholds
-only when the #1594 head-bound evidence contract proves CI materially
-required.
+The mapping while #1657/#1658/#1659 are in flight
+(`buildDispositionEvidence`) — deliberately CONSERVATIVE, so #1656 does not
+raise native APPROVE merely because the old proof machinery could not
+settle a state:
+
+- a model-authored `unmet` row (must_check, trusted-base) is a MATERIAL
+  unknown — a usable rationale makes the disposition structurally valid,
+  not objectively true; only a MECHANICAL current-head refutation (the
+  #1145 confirmed-unmet escalation) may prove a requirement and drive
+  `request_changes`;
+- unresolved required-check rows (call-ID allocation refusals included —
+  the #1634 safety contract), the requirement trace's remaining
+  incompleteness and the #810 loop-stopped-early record are MATERIAL
+  unknowns;
+- a tool CAPABILITY failure (planning/execution error, every call failed)
+  and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
+  lane-independent — never a route/tier name) are MATERIAL;
+- the exact-head CI floor reads the CI gate's already-paid conclusion — a
+  KNOWN failure is always material, a PENDING one withholds only when the
+  #1594 head-bound evidence contract proves CI materially required.
+
+The historical enforcement layer may keep rendering the model-authored
+`unmet` rows and forcing the artifact verdict (telemetry), but it is never a
+second final authority: the disposition ignores the raw verdict (an
+ungrounded blocking conclusion is itself an unverified claim) and the
+fail-on-request-changes gate reads the disposition kind.
 
 ## Consumers (all read the same object)
 
