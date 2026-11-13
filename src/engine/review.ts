@@ -109,7 +109,7 @@ import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enf
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import type { ThreadReconciliationInput } from "../enforcement/threads.js";
-import { prepareThreads } from "../context/review-threads.js";
+import { listedThreadIds, prepareThreads } from "../context/review-threads.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, dispositionReceiptFromArtifact, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
@@ -950,7 +950,10 @@ export function claimsPrepassGate(
  * disclosed, never promoted into a blocker. A read that succeeds but declares
  * the listing incomplete (a capped window or a failed sub-read) carries
  * `complete: false` through, so a carried thread the partial listing omits
- * reconciles as `unknown`, never as a proven `absent`. */
+ * reconciles as `unknown`, never as a proven `absent`. The same holds for a
+ * listed row whose live state could not be parsed into a thread: its id is
+ * positively carried by the listing (`listedThreadIds`), so it reconciles
+ * `unknown` — a listing cannot prove a thread absent while it contains it. */
 async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: string): Promise<ThreadReconciliationInput> {
   const empty: ThreadReconciliationInput = { available: false, unresolvedIds: new Set(), resolvedIds: new Set(), headSha };
   try {
@@ -962,10 +965,13 @@ async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: 
     if (!fetched.ok) return empty;
     const unresolvedIds = new Set<string>();
     const resolvedIds = new Set<string>();
-    for (const thread of prepareThreads(fetched.data)) {
+    const parsed = prepareThreads(fetched.data);
+    for (const thread of parsed) {
       (thread.resolved ? resolvedIds : unresolvedIds).add(thread.threadId);
     }
-    return { available: true, unresolvedIds, resolvedIds, headSha, complete: fetched.complete !== false };
+    const parsedIds = new Set(parsed.map((thread) => thread.threadId));
+    const unparsedIds = new Set([...listedThreadIds(fetched.data)].filter((id) => !parsedIds.has(id)));
+    return { available: true, unresolvedIds, resolvedIds, unparsedIds, headSha, complete: fetched.complete !== false };
   } catch {
     return empty;
   }

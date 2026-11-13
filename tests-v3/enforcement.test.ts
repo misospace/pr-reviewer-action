@@ -986,6 +986,40 @@ test("#1645: a dropped thread's stale record never supplies a disposition to a l
   assert.match(String(reemitted[0]!.message), /\(review thread PRRT_stale1: open\)$/, "it re-emits as an open thread, not a withdrawn one");
 });
 
+test("#1645: a thread the listing still carries but cannot parse reconciles unknown, never absent", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    unparsedIds: new Set(["PRRT_stale1"]),
+    headSha: "1".repeat(40),
+  });
+  assert.equal(a.findings.length, 0, "an unparsable listed thread never re-emits (its live state is unproven)");
+  assert.equal(a.thread_reconciliation?.absent, 1, "the genuinely absent sibling still proves absent");
+  assert.equal(a.thread_reconciliation?.unknown, 1, "the carried-but-unparsable thread reconciles as unknown");
+  assert.equal(a.thread_reconciliation?.live_unresolved, 0);
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "unknown", "the record carries the accurate unknown state");
+  assert.equal(settled[0]!.disposition, "open", "its own disposition is not silently treated as settled truth");
+  assert.equal(settled[1]!.reconciliation, "absent", "the proven-absent sibling keeps its proven state");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+});
+
+test("#1645: a listing that proves every carried thread's state owes no disclosure", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1", "PRRT_stale2"]),
+    headSha: "2".repeat(40),
+  });
+  assert.equal(a.thread_reconciliation?.state, "complete");
+  assert.equal(a.thread_reconciliation?.unknown, 0);
+  assert.doesNotMatch(String(a.review_markdown), /reconciliation incomplete/, "no unverifiable state remains, so nothing is disclosed");
+  assert.equal(a.verdict, "approve");
+});
+
 // ---------------------------------------------------------------------------
 // #812: the publish path records the folded external-CI conclusion in the
 // managed marker so the next diff-unchanged skip can compare it.

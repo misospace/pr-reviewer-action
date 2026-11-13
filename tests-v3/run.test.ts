@@ -685,6 +685,33 @@ test("#1645: a capped settlement-time listing never proves absence — the unsee
   assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
 });
 
+test("#1645: a carried thread the listing still reports but cannot parse is unknown, never absent", async () => {
+  // The settlement read DOES contain the carried thread's row, but the row
+  // has no parseable comments — its live resolved/unresolved state cannot be
+  // established. The listing therefore proves nothing about absence: the
+  // thread reconciles `unknown` (disclosed, non-blocking), never `absent`,
+  // and an approve stands without claiming the thread is gone.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [{ thread_id: "PRRT_stale1", path: "README.md", resolved: false, comments: [] }] });
+  assert.equal(artifact.verdict, "approve", "unprovable carried state never blocks");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete", "the listing was read and transport-complete");
+  assert.equal(reconciliation.unknown, 1, "the listed-but-unparsable thread reconciles as unknown");
+  assert.equal(reconciliation.absent, 0, "a listing cannot prove a thread absent while it still contains it");
+  const settled = artifact.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "unknown", "the carried record carries the accurate state");
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
   const artifact = await runVerificationThreadVerdict({
     verdict: "approve",

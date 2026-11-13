@@ -90,14 +90,18 @@ export type ThreadReconciliationState = "live_unresolved" | "resolved" | "absent
  * succeeded but the listing is known to be partial (a capped thread window
  * or a skipped failed sub-read): a thread the listing omits is then
  * `unknown`, never `absent`, because absence from an incomplete listing is
- * not proof of absence (#1645). When no input is provided at all (unit
- * callers without a listing), each listed thread is treated as
- * `live_unresolved`, preserving the historical contract that the
- * enforcement view IS the live listing. */
+ * not proof of absence (#1645). `unparsedIds` carries the ids a listing
+ * still positively reports but whose live state could not be parsed into a
+ * thread (a row without parseable comments); they reconcile `unknown` too —
+ * a listing cannot prove a thread absent while it still contains it. When
+ * no input is provided at all (unit callers without a listing), each listed
+ * thread is treated as `live_unresolved`, preserving the historical
+ * contract that the enforcement view IS the live listing. */
 export interface ThreadReconciliationInput {
   available: boolean;
   unresolvedIds: ReadonlySet<string>;
   resolvedIds: ReadonlySet<string>;
+  unparsedIds?: ReadonlySet<string>;
   headSha: string;
   complete?: boolean;
 }
@@ -107,6 +111,7 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
   if (!reconciliation.available) return "unknown";
   if (reconciliation.unresolvedIds.has(threadId)) return "live_unresolved";
   if (reconciliation.resolvedIds.has(threadId)) return "resolved";
+  if (reconciliation.unparsedIds?.has(threadId)) return "unknown";
   return reconciliation.complete === false ? "unknown" : "absent";
 }
 
@@ -276,11 +281,13 @@ export function applyReviewThreadEnforcement(
   const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
-  // review still has to say the live listing could not be proven. A listing
-  // that was read but is known partial (capped window, failed sub-read) owes
-  // the same disclosure whenever it left carried threads unverifiable.
+  // review still has to say the live listing could not be proven. `unknown`
+  // is exactly the state whose live truth could not be established (an
+  // unreadable read, a partial listing, or a listed row that could not be
+  // parsed), so it is the precise trigger: a listing that proved every
+  // carried thread's state owes no disclosure.
   const discloseIncomplete = reconciliation !== null && reconciliation !== undefined
-    && (!reconciliation.available || reconciliation.complete === false) && counts.unknown > 0;
+    && counts.unknown > 0;
   if (changed || discloseIncomplete) {
     const lines = ["", "", "## Unresolved Review Threads", ""];
     for (const record of settled) {
