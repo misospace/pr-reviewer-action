@@ -769,23 +769,30 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
   ].filter((value): value is string => typeof value === "string" && value !== "").join(" ");
 }
 
-/** Whether ONE receipt covers one trusted scope entry under one obligation
- * kind: the receipt's own identity must carry the dependency slug as an
- * EXACT identity (kind-appropriate boundaries, never a substring), and —
- * for every kind that asserts the update itself (release delta, security
- * advisory) — the trustworthy changed version identity the producer
- * captured. Provenance binds the dependency identity; the version identity
- * binds the update. */
-function receiptCoversDependencyEntry(
-  receipt: EvidenceReceipt,
+/** Whether the given receipts cover one trusted scope entry under one
+ * obligation kind. Every candidate receipt must carry the dependency slug
+ * as an EXACT identity (kind-appropriate boundaries, never a substring);
+ * beyond that the kind decides:
+ * - `provenance` asserts WHO publishes the dependency — identity of the
+ *   dependency itself is the whole binding;
+ * - `release_delta` asserts the old→new pair — the candidates must JOINTLY
+ *   carry EVERY captured changed version, so one side alone (e.g. the old
+ *   end of a wrong-range compare link) never covers;
+ * - `security_advisory` binds the changed version the check examined — any
+ *   captured changed identity the candidates carry counts. */
+function dependencyCellCovered(
+  receipts: readonly EvidenceReceipt[],
   kind: DependencyEvidenceObligation,
   entry: DependencyScopeEntry,
 ): boolean {
-  if (!(receipt.subject.obligations ?? []).includes(kind)) return false;
-  const identity = receiptIdentityString(receipt);
-  if (!identityCarriesToken(identity, entry.slug)) return false;
+  const candidates = receipts.filter((receipt) => (receipt.subject.obligations ?? []).includes(kind)
+    && identityCarriesToken(receiptIdentityString(receipt), entry.slug));
+  if (candidates.length === 0) return false;
   if (kind === "provenance" || entry.versions.length === 0) return true;
-  return entry.versions.some((version) => identityCarriesToken(identity, version));
+  if (kind === "release_delta") {
+    return entry.versions.every((version) => candidates.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), version)));
+  }
+  return candidates.some((receipt) => entry.versions.some((version) => identityCarriesToken(receiptIdentityString(receipt), version)));
 }
 
 /** Settle a dependency-evidence row: for EVERY obligation kind the row
@@ -819,15 +826,16 @@ function dependencyReceiptCoverage(
   const uncovered: Array<{ kind: DependencyEvidenceObligation; entry: DependencyScopeEntry }> = [];
   for (const kind of kinds) {
     for (const entry of scope) {
-      if (!verified.some((receipt) => receiptCoversDependencyEntry(receipt, kind, entry))) {
-        uncovered.push({ kind, entry });
-      }
+      if (!dependencyCellCovered(verified, kind, entry)) uncovered.push({ kind, entry });
     }
   }
   if (uncovered.length === 0) return { state: "receipt-backed", receipts: verified };
-  // An uncovered cell that an unverified acquisition WOULD cover keeps
-  // `receipt-unverified`; verified-but-partial coverage is a mismatch.
-  const unverifiedFill = uncovered.some((cell) => unverified.some((receipt) => receiptCoversDependencyEntry(receipt, cell.kind, cell.entry)));
+  // An uncovered cell that the verified receipts plus an unverified
+  // acquisition WOULD cover keeps `receipt-unverified`; verified-but-
+  // partial coverage is a mismatch.
+  const pool = [...verified, ...unverified];
+  const unverifiedFill = uncovered.some((cell) => dependencyCellCovered(pool, cell.kind, cell.entry)
+    && !dependencyCellCovered(verified, cell.kind, cell.entry));
   return { state: unverifiedFill ? "receipt-unverified" : "receipt-mismatch", receipts: [] };
 }
 
