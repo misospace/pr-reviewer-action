@@ -21,13 +21,38 @@ import { pyCompareTuples, pyDict, pyGet, pyIsInt, pyOr, PyError, pyStr, pyTruthy
 import type { ExternalCheck } from "./types.js";
 export type { ExternalCheck } from "./types.js";
 
-// ── GraphQL queries (verbatim from scripts/platform_api.sh) ─────────────
+// ── GraphQL queries (ports of the v2 scripts/platform_api.sh programs;
+//    #1662: the review-threads document is forward-paginated and no longer
+//    verbatim) ─────────────
 
 export const GITHUB_CONVERSATION_COMMENTS_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }";
 
+export const GITHUB_REVIEW_THREADS_WINDOW = 100;
+
+/** #1662: the review-thread read is forward-paginated (`first: $WINDOW,
+ * after: $cursor`) so the adapter reads the WHOLE listing — a live unresolved
+ * thread outside the v2 `last: 100` window must be provable at settlement
+ * time, which a capped window can never establish. */
 export const GITHUB_REVIEW_THREADS_QUERY =
-  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }";
+  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }`;
+
+/** Page-info of one review-threads page. Fail closed: a response without the
+ * connection or its `pageInfo` reports `hasNextPage: false` so pagination
+ * stops instead of looping. The two cases are NOT equivalent downstream:
+ * with the connection present but page-info absent the page's nodes still
+ * normalize (the pure normalizer only reads `nodes`) and the read completes
+ * exactly like the verbatim v2 document; with the connection itself absent
+ * or null the merge's `jqEach` throws and the adapter fails the whole read. */
+export function githubReviewThreadsPageInfo(response: unknown): { hasNextPage: boolean; endCursor: string | null } {
+  const connection = jqPath(response, "data", "repository", "pullRequest", "reviewThreads");
+  const pageInfo = isPlainObject(connection) && isPlainObject(connection.pageInfo) ? connection.pageInfo : null;
+  const endCursor = pageInfo?.endCursor;
+  return {
+    hasNextPage: pageInfo?.hasNextPage === true,
+    endCursor: typeof endCursor === "string" && endCursor !== "" ? endCursor : null,
+  };
+}
 
 /** #812: body and `lastEditedAt` in ONE document — the atomic snapshot the
  * whole metadata pass consumes. `lastEditedAt` is the body's own edit
@@ -166,7 +191,9 @@ export function normalizeForgejoConversationComments(rawComments: readonly unkno
 
 // ── Review threads ──────────────────────────────────────────────────────
 
-/** GitHub GraphQL `reviewThreads(last: 100)` → the review_threads.py shape. */
+/** One `reviewThreads` page of the #1662 paginated read → the
+ * review_threads.py shape. Only `nodes` is read; page traversal lives in
+ * `githubReviewThreadsPageInfo` / the adapter. */
 export function normalizeGithubReviewThreads(response: unknown): unknown[] {
   const nodes = jqEach(jqPath(response, "data", "repository", "pullRequest", "reviewThreads", "nodes"));
   return nodes.map((node) => ({
