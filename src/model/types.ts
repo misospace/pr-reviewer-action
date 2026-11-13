@@ -49,6 +49,28 @@ export interface ModelRequestConfig {
    * prompt-only. `json_object` is never sent on this wire family regardless
    * (no Anthropic-native equivalent exists to opt into). Ignored by OpenAI. */
   anthropicStructuredOutputSupported: boolean;
+  /** #1655: whether this request's Anthropic system prompt carries the
+   * prompt-cache checkpoint (a one-block `system` array with
+   * `cache_control: { type: "ephemeral" }`).
+   *
+   * TRUE for the corpus-only REVIEW request — the request #1655 scoped, and
+   * the one whose transport lane can DEGRADE a gateway that rejects the
+   * marker (the #1655 checkpoint strip in `src/transport/transport.ts`).
+   *
+   * FALSE for every ONE-attempt lane. The confidence scorer (#1073) and the
+   * follow-up answer executor (#1294) each make exactly ONE wire attempt by
+   * contract — a boundary they enforce, not negotiate — so they cannot retry
+   * without the marker: a gateway that accepts only a string `system` would
+   * answer 400, and the capability that call exists to produce (a confidence
+   * score, a follow-up answer) would be lost. The marker would buy the
+   * follow-up lane nothing anyway — its system prompt is a single line, far
+   * below any prompt cache's minimum prefix.
+   *
+   * Required, with no default: every construction site states the decision,
+   * so a lane can never silently inherit a wire surface it has no way to
+   * repair. Ignored by the OpenAI wire family — `cache_control` is
+   * Anthropic-only. */
+  anthropicCacheCheckpoint: boolean;
   /** #1368: the INNER JSON schema object used instead of the pinned verdict
    * schema when `responseFormat === "json_schema"` — the confidence scorer's
    * own compact answer contract (`CONFIDENCE_ANSWER_JSON_SCHEMA`). Absent
@@ -86,11 +108,32 @@ export interface OpenAiWireBody {
   reasoning_effort?: string;
 }
 
+/**
+ * #1655: Anthropic's cache-checkpointed text block — the shape the native
+ * tool loop's Conversation renderer already places on its system breakpoint
+ * (`src/model/conversation.ts`). One block, one ephemeral checkpoint.
+ */
+export interface AnthropicSystemCacheBlock {
+  type: "text";
+  text: string;
+  cache_control: { type: "ephemeral" };
+}
+
+/**
+ * #1655: the `system` field of an Anthropic request. The one-shot corpus
+ * request carries the system prompt as a single cache-checkpointed text
+ * block; an empty system stays the plain string (never an empty-block array).
+ */
+export type AnthropicSystem = string | [AnthropicSystemCacheBlock];
+
 export interface AnthropicWireBody {
   model: string;
   max_tokens: number;
   stream: boolean;
-  system: string;
+  /** #1655: the one-shot request carries the system prompt as a single
+   * cache-checkpointed text block (mirroring the Conversation renderer's
+   * stable breakpoint); an empty system passes through as the plain string. */
+  system: AnthropicSystem;
   messages: [{ role: "user"; content: string }];
   temperature?: number;
   /** #998/#1047: Anthropic's own container for output controls; `effort` is

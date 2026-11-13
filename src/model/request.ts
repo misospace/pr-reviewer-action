@@ -1,4 +1,4 @@
-import type { AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
+import type { AnthropicSystem, AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
 
 /**
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
@@ -236,6 +236,52 @@ export function wireEffortOf(payload: TransportWirePayload): string {
 }
 
 /**
+ * #1655: the one-shot corpus-only REVIEW request carried no `cache_control`
+ * marker, so Anthropic's explicit prefix cache never engaged for it — unlike
+ * the native tool loop, whose Conversation renderer already places
+ * system/tool/message breakpoints (#263 Part 2).
+ *
+ * WHO reuses the cached prefix, precisely: Anthropic's cache entries are
+ * scoped to the model that wrote them, so the reuse is SAME-MODEL reuse only.
+ * Inside one run that is the non-streamed verdict retry
+ * (`src/model/call.ts:617`), which re-sends the identical prefix to the SAME
+ * model; across runs it is a later review of the same repository inside the
+ * provider's cache TTL, whose system prompt and standards prefix are
+ * byte-identical. A tier chain that switches models (primary → fallback, or
+ * the smart-escalation pass on its own model) does NOT reuse the primary's
+ * entry unless the operator points those lanes at the SAME model — the
+ * fallback lane normally runs `ai-fallback-model`, so the common case is no
+ * cross-lane reuse at all.
+ *
+ * LENGTH FLOOR (#1655 review): Anthropic caches a prefix only when it reaches
+ * the model's minimum cacheable prompt length — from 512 up to 4,096 tokens
+ * depending on the model — and a shorter prefix is processed WITHOUT caching
+ * and WITHOUT any error. A system prompt below that floor keeps the
+ * checkpoint inert (no cost, no benefit), so the win above is real only for
+ * system prompts at or above the floor, not for every deployment.
+ *
+ * Shaped exactly like the Conversation renderer's stable system breakpoint
+ * (`[{ type: "text", text, cache_control: { type: "ephemeral" } }]`) so the
+ * two surfaces cache identically and a gateway that already serves the native
+ * loop already accepts this shape. An empty system passes through unchanged
+ * (never an empty-block array), and the OpenAI branch is untouched —
+ * `cache_control` is Anthropic wire-only. Scope note: this is the
+ * system-prompt checkpoint only; the user message (corpus + instruction) is
+ * deliberately left as a plain string, keeping the request at ONE breakpoint
+ * and the user-content bytes byte-identical to before.
+ *
+ * WHO may carry it (#1655 review): only the review lanes, whose transport
+ * can DEGRADE a gateway that rejects the marker (the checkpoint strip in
+ * `src/transport/transport.ts`). The one-attempt lanes — the confidence
+ * scorer and the follow-up answer executor — cannot retry without it, so
+ * they send the system prompt as the plain string they always sent.
+ */
+function anthropicSystemCacheCheckpoint(system: string): AnthropicSystem {
+  if (system === "") return system;
+  return [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+}
+
+/**
  * Build the transport wire payload for a review request. Provider-neutral:
  * branches only on the configured api format, never on model names.
  *
@@ -248,6 +294,9 @@ export function wireEffortOf(payload: TransportWirePayload): string {
  *   `anthropicStructuredOutputSupported` opt-in is set; `json_object` has no
  *   Anthropic-native equivalent and is never sent or translated, so an
  *   un-opted-in or `json_object` configuration leaves the bytes unchanged.
+ *   #1655: it carries the `system` prompt-cache checkpoint only when the
+ *   lane's own `anthropicCacheCheckpoint` decision is set — the review lanes,
+ *   whose transport can degrade a gateway that rejects the marker.
  * - OpenAI-compatible: the token field flips wholesale via `tokensParam`
  *   (never both), temperature is omitted iff empty, stream_options is
  *   attached only while streaming, and #998 `reasoning_effort` is sent
@@ -256,11 +305,17 @@ export function wireEffortOf(payload: TransportWirePayload): string {
 export function buildModelRequest(config: ModelRequestConfig): TransportWirePayload {
   const content = userContent(config);
   if (config.apiFormat === "anthropic") {
-    const body: Record<string, unknown> = {
+    // Typed as the wire contract itself, not a loose record: the #1655 system
+    // checkpoint is CHECKED at this construction site, so the `system` union
+    // and the block shape the helper builds cannot drift apart unnoticed.
+    const body: AnthropicWireBody = {
       model: config.model,
       max_tokens: config.maxTokens,
       stream: config.stream,
-      system: config.system,
+      // #1655 review: the checkpoint rides ONLY the lanes whose transport can
+      // degrade a gateway that rejects it (the review lanes). A lane that
+      // cannot retry without it sends the plain string it always sent.
+      system: config.anthropicCacheCheckpoint ? anthropicSystemCacheCheckpoint(config.system) : config.system,
       messages: [{ role: "user", content }],
     };
     if (config.temperature !== "") body.temperature = config.temperature;
@@ -280,7 +335,7 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       : undefined;
     const outputConfig = buildAnthropicOutputConfig(effort, format);
     if (outputConfig !== null) body.output_config = outputConfig;
-    return { endpointPath: "/messages", body: body as unknown as TransportWirePayload["body"] };
+    return { endpointPath: "/messages", body };
   }
   const body: Record<string, unknown> = {
     model: config.model,

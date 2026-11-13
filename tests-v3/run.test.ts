@@ -6266,6 +6266,87 @@ test("#1047 (review): a 400 strip recovery reports prompt-only truthfully and pe
   }
 });
 
+test("#1655 (review): a checkpoint strip recovery persists the degraded request truthfully", async () => {
+  // The blocking review shape: the review request carries the #1655 system
+  // prompt-cache checkpoint, and a string-only gateway rejects it with a 400
+  // naming the checkpoint. The transport degrades to the plain-string system
+  // for exactly one retry and the verdict succeeds — the run must then warn
+  // once, keep the INITIAL request artifact bytes as first-sent evidence, and
+  // persist the bounded effective-request record naming the removed
+  // checkpoint, so no persisted state stands as if the block array had been
+  // the wire bytes of the successful request.
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "cache_control is not supported by this endpoint" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_ok", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "test-key-1655-0123456789",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(requests, 2, "exactly one checkpoint strip retry");
+    // Wire evidence: the first attempt carried the checkpointed block array,
+    // the successful retry carried the plain string.
+    const first = bodies[0]!.system;
+    assert.ok(Array.isArray(first) && first.length === 1, "the first attempt carried the checkpointed block array");
+    const block = first[0] as Record<string, unknown>;
+    assert.equal((block.cache_control as Record<string, unknown>).type, "ephemeral");
+    assert.equal(bodies[1]!.system, block.text, "the effective (successful) request sent the plain string");
+    // Truthful log: the degradation is announced once, by lane.
+    assert.ok(
+      logs.some((line) =>
+        line.includes("rejected the system prompt-cache checkpoint")
+        && line.includes("ran without the checkpoint")
+        && line.includes("Primary")),
+      logs.join(" | "),
+    );
+    // Persisted evidence: the INITIAL request artifact keeps its first-sent
+    // checkpointed bytes, and the effective-request record is bounded,
+    // secret-free, and content-free.
+    const initial = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;
+    assert.ok(Array.isArray(initial.system), "the initial artifact preserves the first-sent checkpointed bytes");
+    const effective = JSON.parse(readFileSync(join(runDir, "ai-request.primary.effective.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(effective).sort(), ["attempts", "note", "removed"]);
+    assert.equal(effective.removed, "system cache checkpoint");
+    assert.equal(effective.attempts, 1);
+    assert.equal(JSON.stringify(effective).includes("test-key-1655"), false, "no secret in the effective-request record");
+    assert.equal(JSON.stringify(effective).includes("verdict"), false, "no response content in the effective-request record");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#1047 (review): a >64-char configured key echoed in a stop reason never survives diagnostics or logs", async () => {
   // Adversarial companion to the reasoning-only e2e: the broken endpoint
   // echoes the operator's over-64-char API key inside the stop reason. The

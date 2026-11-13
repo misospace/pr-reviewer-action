@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA, wireEffortOf } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
-import type { ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
+import type { AnthropicWireBody, ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
 // json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
@@ -30,6 +30,11 @@ function config(overrides: Partial<ModelRequestConfig> = {}): ModelRequestConfig
     anthropicEffortSupported: false,
     // #1047: the structured-output opt-in, default off for byte compatibility.
     anthropicStructuredOutputSupported: false,
+    // #1655: ON by default here because this helper describes the REVIEW
+    // request — the lane whose transport can degrade a gateway that rejects
+    // the cache marker. The one-attempt lanes (the confidence scorer, the
+    // follow-up answer executor) turn it off; their own tests pin that.
+    anthropicCacheCheckpoint: true,
     ...overrides,
   };
 }
@@ -102,13 +107,61 @@ test("anthropic request shape: max_tokens always, no response_format, no token-p
     model: "test-model",
     max_tokens: 8192,
     stream: true,
-    system: "SYSTEM",
+    system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: "USER\n\nCORPUS" }],
     temperature: 0.1,
   });
   const body = payload.body as unknown as Record<string, unknown>;
   assert.equal("response_format" in body, false);
   assert.equal("stream_options" in body, false);
+});
+
+test("#1655: anthropic system prompt carries one ephemeral cache checkpoint; empty system and openai wire untouched", () => {
+  // The corpus-only request previously sent the system prompt as a bare
+  // string, so Anthropic's explicit prefix cache never engaged for it. The
+  // breakpoint shape mirrors the Conversation renderer's stable system
+  // breakpoint exactly.
+  const payload = buildModelRequest(config({ apiFormat: "anthropic" }));
+  const anthropicBody = payload.body as AnthropicWireBody;
+  assert.deepEqual(anthropicBody.system, [
+    { type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } },
+  ]);
+  // The widened `system` union is NARROWED here, not cast: the block arm is
+  // the tuple the builder produces, so a shape change is a typecheck failure
+  // at the construction site (#1655 review).
+  if (typeof anthropicBody.system !== "string") {
+    assert.equal(anthropicBody.system[0]!.type, "text");
+    assert.equal(anthropicBody.system[0]!.cache_control.type, "ephemeral");
+  }
+  // Exactly one breakpoint on this surface — the user message stays a plain
+  // string, byte-identical to before.
+  assert.equal(JSON.stringify(payload.body).match(/"cache_control"/g)?.length, 1);
+  // An empty system passes through unchanged — never an empty-block array.
+  const empty = buildModelRequest(config({ apiFormat: "anthropic", system: "" }));
+  assert.equal((empty.body as AnthropicWireBody).system, "");
+  // The OpenAI branch never carries cache_control — it is Anthropic wire-only.
+  const openai = buildModelRequest(config({ apiFormat: "openai" }));
+  assert.equal(JSON.stringify(openai.body).includes("cache_control"), false);
+  const openaiBody = openai.body as unknown as { messages: { role: string; content: unknown }[] };
+  assert.equal(openaiBody.messages[0]!.role, "system");
+  assert.equal(openaiBody.messages[0]!.content, "SYSTEM");
+});
+
+test("#1655 review: the checkpoint rides only the lanes whose transport can degrade it", () => {
+  // The compatibility repair for a gateway that rejects the cache marker is
+  // wired into the REVIEW lane's transport (`runChatRequestLoop`). The
+  // one-attempt lanes — the confidence scorer and the follow-up answer
+  // executor — make exactly ONE wire attempt by contract, so they cannot
+  // retry without the marker: a gateway that accepts only a string `system`
+  // would answer 400 and the capability that call exists to produce would be
+  // lost. Their requests therefore carry the plain-string system prompt.
+  const payload = buildModelRequest(config({ apiFormat: "anthropic", anthropicCacheCheckpoint: false }));
+  const body = payload.body as AnthropicWireBody;
+  assert.equal(body.system, "SYSTEM", "the system prompt stays the plain string the lane always sent");
+  assert.equal(JSON.stringify(payload.body).includes("cache_control"), false, "no cache marker anywhere in the body");
+  // The OpenAI wire is unaffected either way — the marker is Anthropic-only.
+  const openai = buildModelRequest(config({ apiFormat: "openai", anthropicCacheCheckpoint: false }));
+  assert.equal(JSON.stringify(openai.body).includes("cache_control"), false);
 });
 
 test("anthropic omits temperature when empty and supports trailing_task", () => {
