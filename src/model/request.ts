@@ -236,6 +236,30 @@ export function wireEffortOf(payload: TransportWirePayload): string {
 }
 
 /**
+ * #1655: the one-shot corpus-only review request carries no `cache_control`
+ * marker, so Anthropic's explicit prefix cache never engages for it — unlike
+ * the native tool loop, whose Conversation renderer already places
+ * system/tool/message breakpoints (#263 Part 2). The corpus is assembled once
+ * per review, but a tier chain (primary → fallback) and the smart-escalation
+ * pass re-send the SAME system prompt through separate `buildModelRequest`
+ * calls, so a breakpoint on the system block lets each of those calls reuse
+ * the cached prefix.
+ *
+ * Shaped exactly like the Conversation renderer's stable system breakpoint
+ * (`[{ type: "text", text, cache_control: { type: "ephemeral" } }]`) so the
+ * two surfaces cache identically. An empty system passes through unchanged
+ * (never an empty-block array), and the OpenAI branch is untouched —
+ * `cache_control` is Anthropic wire-only. Scope note: this is the
+ * system-prompt checkpoint only; the user message (corpus + instruction) is
+ * deliberately left as a plain string, keeping the request at ONE breakpoint
+ * and the user-content bytes byte-identical to before.
+ */
+function anthropicSystemCacheCheckpoint(system: string): unknown {
+  if (system === "") return system;
+  return [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+}
+
+/**
  * Build the transport wire payload for a review request. Provider-neutral:
  * branches only on the configured api format, never on model names.
  *
@@ -260,7 +284,7 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       model: config.model,
       max_tokens: config.maxTokens,
       stream: config.stream,
-      system: config.system,
+      system: anthropicSystemCacheCheckpoint(config.system),
       messages: [{ role: "user", content }],
     };
     if (config.temperature !== "") body.temperature = config.temperature;

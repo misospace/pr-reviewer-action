@@ -102,13 +102,37 @@ test("anthropic request shape: max_tokens always, no response_format, no token-p
     model: "test-model",
     max_tokens: 8192,
     stream: true,
-    system: "SYSTEM",
+    system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: "USER\n\nCORPUS" }],
     temperature: 0.1,
   });
   const body = payload.body as unknown as Record<string, unknown>;
   assert.equal("response_format" in body, false);
   assert.equal("stream_options" in body, false);
+});
+
+test("#1655: anthropic system prompt carries one ephemeral cache checkpoint; empty system and openai wire untouched", () => {
+  // The corpus-only request previously sent the system prompt as a bare
+  // string, so Anthropic's explicit prefix cache never engaged for it. The
+  // breakpoint shape mirrors the Conversation renderer's stable system
+  // breakpoint exactly.
+  const payload = buildModelRequest(config({ apiFormat: "anthropic" }));
+  const anthropicBody = payload.body as unknown as { system: unknown };
+  assert.deepEqual(anthropicBody.system, [
+    { type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } },
+  ]);
+  // Exactly one breakpoint on this surface — the user message stays a plain
+  // string, byte-identical to before.
+  assert.equal(JSON.stringify(payload.body).match(/"cache_control"/g)?.length, 1);
+  // An empty system passes through unchanged — never an empty-block array.
+  const empty = buildModelRequest(config({ apiFormat: "anthropic", system: "" }));
+  assert.equal((empty.body as unknown as { system: unknown }).system, "");
+  // The OpenAI branch never carries cache_control — it is Anthropic wire-only.
+  const openai = buildModelRequest(config({ apiFormat: "openai" }));
+  assert.equal(JSON.stringify(openai.body).includes("cache_control"), false);
+  const openaiBody = openai.body as unknown as { messages: { role: string; content: unknown }[] };
+  assert.equal(openaiBody.messages[0]!.role, "system");
+  assert.equal(openaiBody.messages[0]!.content, "SYSTEM");
 });
 
 test("anthropic omits temperature when empty and supports trailing_task", () => {
