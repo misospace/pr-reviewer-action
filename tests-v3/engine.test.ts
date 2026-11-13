@@ -5,7 +5,7 @@ import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
-import { runReviewEngine, createRunCancellation, claimsPrepassGate } from "../src/engine/review.js";
+import { runReviewEngine, createRunCancellation, claimsPrepassGate, type RunReviewResult } from "../src/engine/review.js";
 import { harnessGatheredNoEvidence } from "../src/tools/execution-counts.js";
 import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.js";
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
@@ -15,6 +15,9 @@ import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerpri
 import { validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { engineMain } from "../src/engine/cli.js";
+import { publishReview } from "../src/publish/publish.js";
+import { parseReviewHandoff } from "../src/publish/handoff.js";
+import { publishInputFromEnv, reviewDerivedPublishFields } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
 
@@ -1652,6 +1655,282 @@ test("#1645: an unavailable live listing drops carried threads as unknown and ne
     assert.equal(receipt.listing, "unavailable");
     assert.deepEqual(receipt.receipts.map((r: { reconciliation: string }) => r.reconciliation), ["unknown"]);
   } finally { await server.close(); f.cleanup(); }
+});
+
+// ── #1645: the PUBLISHED surfaces disclose an unavailable reconciliation ───
+//
+// The reconciliation state is a DISCLOSURE: it never changes the verdict, the
+// review result, the native event or the approval guardrails. It only says
+// what the run could NOT prove — that the prior-round threads it carried
+// could not be verified against the forge's live state and were therefore
+// dropped as unknown rather than counted as findings.
+
+/** A publish seam that records the native review event the run produced and
+ * every body it published. */
+class PublishedEventApi {
+  readonly platform = "github" as const;
+  readonly nativeReviewSurface = { supported: true };
+  readonly submitted: Array<{ event: string; body: string }> = [];
+  readonly sticky: { marker: string; body: string }[] = [];
+  async getHeadSha(): Promise<string | null> { return "a".repeat(40); }
+  async listIssueComments() { return []; }
+  async upsertStickyComment(marker: string, body: string) {
+    this.sticky.push({ marker, body });
+    return { ok: true, created: true };
+  }
+  async listReviews() { return []; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
+  async createReview(request: { event: string; body: string }) {
+    this.submitted.push({ event: request.event, body: request.body });
+    return { ok: true, id: "review-1" };
+  }
+  async dismissReview() { return true; }
+  async minimizeReviewIds() { return []; }
+  async minimizeReview() { return true; }
+  async unresolvedSupersededThreads() { return { ok: true, threads: [] }; }
+  async resolveThread() { return true; }
+  async removeLabel() { return true; }
+  async requestReviewers() { return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] }; }
+}
+
+/** The metadata marker line of a published body. */
+function markerLine(body: string): string {
+  const line = body.split("\n").find((entry) => entry.startsWith("<!-- ai-pr-reviewer:{"));
+  assert.ok(line !== undefined, "the published body carries no metadata marker");
+  return line!;
+}
+
+/** The `review-handoff/v1` payload of a published body — the fenced JSON
+ * document the action renders into its marker preamble. */
+function handoffPayload(body: string): Record<string, unknown> {
+  const lines = body.split("\n");
+  const anchor = lines.findIndex((entry) => entry.startsWith("<!-- ai-pr-reviewer-handoff:v1 -->"));
+  assert.ok(anchor !== -1, "the published body carries no handoff container");
+  const payload = lines[anchor + 2];
+  assert.ok(payload !== undefined, "the handoff container carries no payload");
+  return JSON.parse(payload!) as Record<string, unknown>;
+}
+
+/** The metadata marker's own `review_result`. */
+function markerReviewResult(body: string): string {
+  const line = markerLine(body);
+  const json = line.slice(line.indexOf("{"), line.lastIndexOf("}") + 1);
+  return String((JSON.parse(json) as Record<string, unknown>).review_result);
+}
+
+/** The findings the run published (the engine's compact JSON array). */
+function publishedFindings(result: RunReviewResult): Array<Record<string, unknown>> {
+  const parsed: unknown = JSON.parse(result.outputs.findings);
+  return Array.isArray(parsed) ? parsed as Array<Record<string, unknown>> : [];
+}
+
+/** The publish input the composite action builds for this engine result: the
+ * same fields the action's publish step reads from the stage env, plus the
+ * derived publish fields the engine carries in memory (`reviewDerivedPublishFields`
+ * — the one seam both action hosts use). */
+function publishInputFor(result: RunReviewResult): Parameters<typeof publishReview>[0] {
+  return {
+    mode: "review_verdict",
+    reviewMarkdown: result.outputs.reviewMarkdown,
+    verdict: result.outputs.verdict,
+    verdictPolicy: result.verdictPolicy,
+    analysisEngine: result.outputs.analysisEngine,
+    baseSha: "b".repeat(40),
+    headSha: result.reviewedHeadSha,
+    prNumber: "7",
+    commentMarker: "<!-- ai-pr-review -->",
+    // #1518: the run's own review id rides the publish input, so the
+    // published handoff names the same review the `review-bundle` output
+    // names (the action host generates it per run).
+    reviewId: "0123456789abcdef",
+    requiredChecks: result.outputs.requiredChecks,
+    reviewRoute: result.outputs.reviewRoute,
+    escalationReason: result.outputs.escalationReason,
+    cacheHitRatio: result.outputs.cacheHitRatio,
+    inlineFindings: false,
+    inlineFindingsMax: 10,
+    findings: publishedFindings(result),
+    cleanupPreviousNativeReviews: "false",
+    approveForks: false,
+    isForkPr: false,
+    upstreamLinkMode: "inert",
+    conditionalPresence: {
+      linkedIssue: false, evidenceProvider: false, standards: false,
+      toolHarnessFindings: false, toolHarnessResults: false,
+    },
+    forgejoPositions: false,
+    degradedGateBypass: result.outputs.degradedGateBypass,
+    ...reviewDerivedPublishFields(result),
+  };
+}
+
+test("#1645: an unavailable reconciliation is disclosed in the published review, the marker and the machine handoff", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    // The context-time listing carries a prior-round own major; the
+    // enforcement-time listing cannot be read at all — the reconciliation is
+    // INCOMPLETE, so every carried thread is dropped as unknown.
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        if (listingCalls === 1) return { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts")] };
+        throw new Error("listing down");
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    assert.equal(result.threadReconciliation, "unavailable");
+    const api = new PublishedEventApi();
+    const published = await publishReview(publishInputFor(result), api as never, { diffText: "" });
+    assert.equal(published.status, "published");
+    assert.equal(api.submitted.length, 1);
+    const body = api.submitted[0]!.body;
+    // 1. the published review carries the action-owned notice.
+    assert.ok(body.includes("## Review-State Reconciliation Notice"), body);
+    assert.ok(
+      body.includes("> **Review-state reconciliation is incomplete.** The live review-thread listing could not be read for this run, so prior-round review threads carried into this run could not be verified against current forge state and were not counted as findings."),
+      body,
+    );
+    // 2. the published metadata marker carries the additive key.
+    assert.ok(markerLine(body).includes('"thread_reconciliation":"unavailable"'), markerLine(body));
+    // 3. the published machine handoff carries the same key.
+    assert.equal(handoffPayload(body).thread_reconciliation, "unavailable");
+    // The repo's own consumer-side parser surfaces it too.
+    assert.equal(parseReviewHandoff(JSON.stringify(handoffPayload(body)))?.thread_reconciliation, "unavailable");
+    // The disclosure changed NOTHING else: the verdict, the review result and
+    // the native event are the model's own approve — an incomplete
+    // reconciliation is not a defect and never manufactures a blocker.
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(api.submitted[0]!.event, "APPROVE");
+    assert.equal(markerReviewResult(body), "clean");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: the published surfaces agree with the reconciled thread set — a stale carried major never publishes as REQUEST_CHANGES", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    // The #1619 organic shape: the context-time listing carries a
+    // prior-round own major, the enforcement-time live listing contains
+    // NEITHER it nor anything else — the reconciled set is EMPTY.
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return listingCalls === 1
+          ? { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts")] }
+          : { ok: true, data: [] };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    // The reconciliation was COMPLETE, so there is nothing to disclose.
+    assert.equal(result.threadReconciliation, undefined);
+    const api = new PublishedEventApi();
+    const published = await publishReview(publishInputFor(result), api as never, { diffText: "" });
+    assert.equal(published.status, "published");
+    assert.equal(api.submitted.length, 1);
+    const body = api.submitted[0]!.body;
+    // The native event is the one the reconciled set implies: an APPROVE, not
+    // the REQUEST_CHANGES the stale carried major used to force.
+    assert.equal(api.submitted[0]!.event, "APPROVE");
+    // The published recommendation line agrees with the event.
+    assert.ok(body.includes("✅ **Automated recommendation: APPROVE**"), body);
+    // The published marker agrees.
+    assert.equal(markerReviewResult(body), "clean");
+    // The published handoff agrees with both.
+    const handoff = handoffPayload(body);
+    assert.equal(handoff.verdict, "approve");
+    assert.equal(handoff.review_result, markerReviewResult(body));
+    // No finding carries the stale thread id, and the finding count is the
+    // reconciled count — the stale thread is not a finding any more.
+    const findings = publishedFindings(result);
+    assert.equal(findings.filter((finding) => typeof finding.thread_id === "string").length, 0);
+    assert.equal((handoff.items as unknown[]).length, findings.length);
+    assert.equal(handoff.items_total, findings.length);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: a run that carries no thread never reads the live listing twice and discloses nothing", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return { ok: true, data: [] };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    // The context stage reads the listing once; with nothing carried there is
+    // nothing to reconcile, so the enforcement pass never reads it again.
+    assert.equal(listingCalls, 1);
+    assert.equal(result.threadReconciliation, undefined);
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.equal(receipt.listing, "no-snapshot");
+    // The healthy path publishes byte-identically to a run without this
+    // feature: neither the marker nor the machine handoff carries the key.
+    const api = new PublishedEventApi();
+    const published = await publishReview(publishInputFor(result), api as never, { diffText: "" });
+    assert.equal(published.status, "published");
+    const body = api.submitted[0]!.body;
+    assert.ok(!markerLine(body).includes("thread_reconciliation"), markerLine(body));
+    assert.ok(!("thread_reconciliation" in handoffPayload(body)), "the healthy handoff carries no reconciliation key");
+    assert.equal(parseReviewHandoff(JSON.stringify(handoffPayload(body)))?.thread_reconciliation, null);
+    assert.ok(!body.includes("## Review-State Reconciliation Notice"), body);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: the standalone publish CLI reads the reconciliation state from the run dir's own artifact", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-engine-reconciliation-"));
+  const artifact = (listing: unknown): void => {
+    writeFileSync(join(dir, "thread-reconciliation.json"), JSON.stringify({ version: 1, head_sha: "a".repeat(40), listing, receipts: [] }));
+  };
+  const state = (): string | undefined => publishInputFromEnv(
+    { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+    "github",
+  ).threadReconciliation;
+  try {
+    // An incomplete reconciliation is disclosed.
+    artifact("unavailable");
+    assert.equal(state(), "unavailable");
+    // A complete reconciliation discloses nothing — the published bytes stay
+    // exactly the pre-#1645 ones.
+    artifact("live");
+    assert.equal(state(), undefined);
+    artifact("no-snapshot");
+    assert.equal(state(), undefined);
+    // An unreadable artifact FAILS CLOSED: a reconciliation that cannot be
+    // proven complete is disclosed, because a reader must never read the
+    // dropped carried state as a proven absence.
+    writeFileSync(join(dir, "thread-reconciliation.json"), "{not json");
+    assert.equal(state(), "unavailable");
+    // An absent artifact means the run never reconciled anything — there is
+    // nothing to disclose.
+    rmSync(join(dir, "thread-reconciliation.json"));
+    assert.equal(state(), undefined);
+    // No run dir at all: the state stays absent.
+    assert.equal(
+      publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").threadReconciliation,
+      undefined,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

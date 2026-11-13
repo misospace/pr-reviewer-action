@@ -539,6 +539,18 @@ here for readability, real output has no newlines):
   disclose it. A source count larger than `*_total` means the shared cap
   dropped ids. A `*_total` larger than the listed length means the byte
   budget dropped ids.
+- `thread_reconciliation` is present only when the run's review-state
+  reconciliation was INCOMPLETE (#1645): the authoritative live review-thread
+  listing could not be established for the prior-round threads the run
+  carried, so their state could not be verified against the forge and every
+  carried thread was dropped as unknown rather than proven absent. The only
+  published value is `unavailable`. The member is absent in every healthy run,
+  so a run whose reconciliation was complete publishes the pre-#1645 bytes
+  exactly. It is a disclosure, never a gate: it changes no verdict, no
+  `review_result` and no native review event. The same state rides the
+  published metadata marker (as `thread_reconciliation`) and the published
+  review body, which renders a "Review-State Reconciliation Notice" section —
+  the three published surfaces always agree.
 - A handoff published before #1538 carries no id counters. The parser then
   reports the count and the flag as unknown (`null`). An unknown flag is
   never read as `false`, because such a document may still hide a dropped

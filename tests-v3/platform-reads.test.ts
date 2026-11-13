@@ -581,6 +581,47 @@ test("forgejo review threads fetch each integer review's comments; externalCheck
   ]);
 });
 
+// #1645: the review-thread listing is AUTHORITATIVE forge state for the
+// enforcement pass — a failed read must never be an empty listing, or every
+// carried thread reads `absent` and a live blocker is silently dropped.
+test("forgejo review threads: a failed reviews read FAILS the read, never an empty listing", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json({ message: "boom" }, 500);
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.equal(result.ok, false, "a failed listing is not an empty successful listing");
+  assert.deepEqual(seen.map((s) => s.url), ["https://git.example/api/v1/repos/o/r/pulls/5/reviews"]);
+});
+
+test("forgejo review threads: a failed per-review comments read FAILS the read, never a truncated listing", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }]);
+    if (url.pathname.endsWith("/reviews/4/comments")) return json({ message: "boom" }, 502);
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.equal(result.ok, false, "a partially-read listing is never presented as a complete one");
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments",
+  ]);
+});
+
+test("forgejo review threads: a listing past the review bound FAILS the read rather than truncating it", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json(Array.from({ length: 101 }, (_v, i) => ({ id: i + 1 })));
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.equal(result.ok, false, "a listing past the bound fails instead of presenting a truncated set as whole");
+  // The bound stops the fan-out: the 101st review's comments are never fetched.
+  assert.equal(seen.filter((s) => s.url.includes("/comments")).length, 100);
+});
+
 test("forgejo externalChecks: a hung status read is bounded and folds like a failed read", async () => {
   const { fetchImpl, seen } = recorder((_url, init) => hang(init));
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", fetchImpl });

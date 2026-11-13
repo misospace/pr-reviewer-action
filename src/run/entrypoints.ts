@@ -396,6 +396,37 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
 const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "not_applicable", "unresolved", "unmet"]);
 
 /**
+ * #1645: the run's review-state reconciliation state, read from the run
+ * dir's OWN `thread-reconciliation.json` artifact (never cwd, never ambient
+ * env) — the same seam and the same discipline as the derived state above.
+ *
+ * The artifact's `listing` field carries the state the engine reconciled:
+ * - `unavailable` — the authoritative live thread listing could not be
+ *   established for the threads this run carried, so their state was
+ *   reconciled INCOMPLETELY and every carried thread was dropped as unknown
+ *   rather than proven absent. The publish step discloses that.
+ * - `live` / `no-snapshot` — the reconciliation was complete (or there was
+ *   nothing to reconcile): nothing is disclosed, and the published bytes are
+ *   exactly the pre-#1645 ones.
+ *
+ * FAIL CLOSED on an unreadable or malformed artifact: a reconciliation that
+ * cannot be proven complete is disclosed as `unavailable`, because a reader
+ * must never read the dropped carried state as a proven absence. An ABSENT
+ * artifact means the run never reconciled anything (an older run), so there
+ * is nothing to disclose and the state stays absent.
+ */
+function threadReconciliationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const path = join(runDir, "thread-reconciliation.json");
+  if (!existsSync(path)) return undefined;
+  const record = readJsonObject(path);
+  const listing = record === null ? undefined : record.listing;
+  if (listing === "live" || listing === "no-snapshot") return undefined;
+  return "unavailable";
+}
+
+/**
  * #1594: read the engine's RECONCILED required-check coverage rows from the
  * run dir's `required-check-coverage.json` (the completeness result object,
  * version-tagged at the write site in `review.ts`). Strict round-trip in the
@@ -765,6 +796,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
   const derivedObligationState = derivedObligationStateFromRunDir(env);
   const requiredEvidenceState = requiredEvidenceStateFromRunDir(env);
+  const threadReconciliation = threadReconciliationStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -875,6 +907,14 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // sentinel fails closed to `unavailable`). Absent when the contract was
     // off.
     ...(requiredEvidenceState !== undefined ? { requiredEvidenceState } : {}),
+    // #1645: the run's review-state reconciliation state, read back from the
+    // run dir's own artifact so the standalone `publish` CLI publishes the
+    // SAME record the composite action does. A DISCLOSURE, never a gate: it
+    // changes no verdict, review result, native event or approval
+    // guardrail. An unreadable artifact over an existing file fails closed
+    // to `unavailable`; an absent artifact means the run never reconciled
+    // anything, so nothing is disclosed.
+    ...(threadReconciliation !== undefined ? { threadReconciliation } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),
@@ -1114,6 +1154,13 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // native approval while required review evidence stayed unresolved.
     // Absent when the contract was inactive.
     ...(review.requiredEvidenceState !== undefined ? { requiredEvidenceState: review.requiredEvidenceState } : {}),
+    // #1645: the run's review-state reconciliation state — a DISCLOSURE
+    // (never a gate): the publish step states it in the published review,
+    // the metadata marker and the machine handoff, so a reader never reads
+    // the dropped carried review state as a proven absence. Absent when the
+    // reconciliation was complete (or there was nothing to reconcile), so a
+    // healthy run keeps its pre-#1645 published bytes exactly.
+    ...(review.threadReconciliation !== undefined ? { threadReconciliation: review.threadReconciliation } : {}),
     // #1455: advisory verifier telemetry (never touches the verdict).
     ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
     // #847: the #810/#702 tool-budget provenance.

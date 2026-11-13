@@ -133,6 +133,13 @@ export interface MetadataOptions {
   tool_calls_successful?: number | null;
   tool_calls_refused?: number | null;
   tool_calls_deduplicated?: number | null;
+  /** #1645: the run's review-state reconciliation state. Only ever
+   * "unavailable" — the authoritative live thread listing could not be
+   * established for threads this run carried, so the carried review state
+   * was reconciled INCOMPLETELY and the carried threads were dropped as
+   * unknown. Omitted in every healthy run, so pre-#1645 marker bytes are
+   * preserved. */
+  thread_reconciliation?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -266,6 +273,14 @@ for (const key of ["tool_calls_issued", "tool_calls_successful", "tool_calls_ref
   if (value !== null && value !== undefined && Number.isInteger(value) && value >= 0) {
     data[key] = value;
   }
+}
+// #1645 additive key: appended last, same discipline key above —
+// a run whose review-state reconciliation was complete serializes
+// byte-identically pre-#1645 marker, and older parsers ignore keys
+// they do not know. Only the closed value publishes; any other value
+// is omitted rather than published as an unknown state.
+if (options.thread_reconciliation === "unavailable") {
+  data.thread_reconciliation = options.thread_reconciliation;
 }
 return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

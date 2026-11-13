@@ -275,6 +275,19 @@ export function parseLiveThreadIndex(raw: unknown): Map<string, boolean> | null 
 }
 
 /**
+ * The threads a context-time snapshot actually CARRIES: the entries that
+ * are objects with a string `thread_id`. The engine's read-avoidance
+ * decision (no carried thread → no live listing to fetch) and the
+ * reconciliation itself must agree on this set exactly, so both read it
+ * through this one filter.
+ */
+export function carriedThreads(snapshot: readonly unknown[] | null | undefined): EnforcementThread[] {
+  if (!Array.isArray(snapshot)) return [];
+  return snapshot.filter((t): t is EnforcementThread =>
+    t !== null && typeof t === "object" && !Array.isArray(t) && typeof t.thread_id === "string");
+}
+
+/**
  * Reconcile the context-time snapshot against the authoritative live
  * listing. Pure and total. Every input snapshot thread gets exactly one
  * receipt; only `live-unresolved` threads survive into `threads` (verbatim —
@@ -286,12 +299,8 @@ export function parseLiveThreadIndex(raw: unknown): Map<string, boolean> | null 
 export function reconcileCarriedThreads(
   snapshot: readonly EnforcementThread[],
   liveIndex: Map<string, boolean> | null,
-  headSha: string,
 ): CarriedThreadReconciliation {
-  const carried = Array.isArray(snapshot)
-    ? snapshot.filter((t): t is EnforcementThread =>
-        t !== null && typeof t === "object" && !Array.isArray(t) && typeof t.thread_id === "string")
-    : [];
+  const carried = carriedThreads(snapshot);
   if (carried.length === 0) {
     return { threads: [], receipts: [], listing: "no-snapshot" };
   }

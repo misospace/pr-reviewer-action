@@ -985,7 +985,7 @@ test("#1645: reconciliation keeps only proven live-unresolved carried threads an
     { thread_id: "PRRT_still", resolved: false },
     { thread_id: "PRRT_resolved", resolved: true },
   ]);
-  const result = reconcileCarriedThreads(snapshot as never, live!, "d".repeat(40));
+  const result = reconcileCarriedThreads(snapshot as never, live!);
   assert.equal(result.listing, "live");
   assert.deepEqual(result.threads.map((t) => t.thread_id), ["PRRT_still"], "only the proven live-unresolved thread survives into settlement");
   assert.deepEqual(result.receipts, [
@@ -1001,7 +1001,7 @@ test("#1645: an unavailable live listing drops every carried thread as unknown â
     { thread_id: "PRRT_b", severity: "minor", path: null, line: null },
   ];
   for (const dead of [null, undefined]) {
-    const result = reconcileCarriedThreads(snapshot as never, dead as never, "d".repeat(40));
+    const result = reconcileCarriedThreads(snapshot as never, dead as never);
     assert.equal(result.listing, "unavailable");
     assert.deepEqual(result.threads, [], "unprovable carried state must not block");
     assert.deepEqual(result.receipts.map((r) => [r.thread_id, r.reconciliation]), [
@@ -1013,7 +1013,7 @@ test("#1645: an unavailable live listing drops every carried thread as unknown â
 
 test("#1645: an empty live listing (the forge has no threads) makes every carried thread absent", () => {
   const snapshot = [{ thread_id: "PRRT_x", severity: "major", path: null, line: null }];
-  const result = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!, "d".repeat(40));
+  const result = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!);
   assert.equal(result.listing, "live");
   assert.deepEqual(result.threads, []);
   assert.deepEqual(result.receipts.map((r) => r.reconciliation), ["absent"]);
@@ -1021,7 +1021,7 @@ test("#1645: an empty live listing (the forge has no threads) makes every carrie
 
 test("#1645: no snapshot â€” reconciliation is a no-op with empty receipts", () => {
   for (const empty of [[], null, undefined]) {
-    const result = reconcileCarriedThreads(empty as never, parseLiveThreadIndex([{ thread_id: "PRRT_live", resolved: false }])!, "d".repeat(40));
+    const result = reconcileCarriedThreads(empty as never, parseLiveThreadIndex([{ thread_id: "PRRT_live", resolved: false }])!);
     assert.equal(result.listing, "no-snapshot");
     assert.deepEqual(result.threads, []);
     assert.deepEqual(result.receipts, []);
@@ -1036,7 +1036,7 @@ test("#1645: settlement over the reconciled set re-emits only the live-unresolve
     { thread_id: "PRRT_stale1", severity: "major", path: "src/a.ts", line: 1, message: "old major one", own_finding: true, replies: 0 },
     { thread_id: "PRRT_stale2", severity: "major", path: "src/b.ts", line: 2, message: "old major two", own_finding: true, replies: 0 },
   ];
-  const reconciled = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!, "d".repeat(40));
+  const reconciled = reconcileCarriedThreads(snapshot as never, parseLiveThreadIndex([])!);
   const artifact: Record<string, unknown> = { verdict: "approve", findings: [], thread_dispositions: [] };
   const settlement = applyReviewThreadEnforcement(artifact as never, reconciled.threads as never, "findings_severity_gated");
   assert.equal(settlement.applied, false);
@@ -1047,7 +1047,6 @@ test("#1645: settlement over the reconciled set re-emits only the live-unresolve
   const liveOne = reconcileCarriedThreads(
     snapshot as never,
     parseLiveThreadIndex([{ thread_id: "PRRT_stale1", resolved: false }, { thread_id: "PRRT_stale2", resolved: true }])!,
-    "d".repeat(40),
   );
   const liveArtifact: Record<string, unknown> = { verdict: "approve", findings: [], thread_dispositions: [] };
   applyReviewThreadEnforcement(liveArtifact as never, liveOne.threads as never, "findings_severity_gated");

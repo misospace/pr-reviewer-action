@@ -153,6 +153,19 @@ export interface PublishInput {
    * (a non-blocking COMMENT), never a manufactured blocking request.
    * Absent when the contract was inactive. */
   requiredEvidenceState?: string;
+  /** #1645: the run's review-state reconciliation state. Present ONLY as
+   * "unavailable" — the authoritative live review-thread listing could not
+   * be established for the threads this run carried, so their state was
+   * reconciled INCOMPLETELY and every carried thread was dropped as unknown
+   * rather than proven absent. The state rides the published review (a
+   * notice), the published metadata marker and the published machine
+   * handoff, so a reader never mistakes the dropped carried state for a
+   * proven absence. A DISCLOSURE, never a gate: it changes no verdict, no
+   * review result, no native event and no approval guardrail. Any other
+   * value is treated as absent and publishes nothing, so an unknown state is
+   * never published as one — and a run without the state publishes exactly
+   * the bytes it published before this field existed. */
+  threadReconciliation?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -676,10 +689,11 @@ function renderObligationsReserved(input: ReviewObligationsInput | undefined): s
 
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
- * present) + the optional #1003 human-review triage section + sanitized
- * review. Every block is action-owned and inserted AFTER sanitization (never
- * model text) so no stripping pass can drop them, and they sit near the top
- * so a partial-coverage run cannot read as complete.
+ * present) + the optional #1645 review-state reconciliation notice + the
+ * optional #1003 human-review triage section + sanitized review. Every block
+ * is action-owned and inserted AFTER sanitization (never model text) so no
+ * stripping pass can drop them, and they sit near the top so a
+ * partial-coverage run cannot read as complete.
  *
  * #1518: the optional handoff container is inserted IMMEDIATELY after the
  * marker preamble, so it is the first anchored block in the body. The
@@ -735,6 +749,11 @@ export function buildPublishedBody(options: {
   coverageNotice?: string;
   /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
   stateBlock?: string | undefined;
+  /** #1645: the rendered review-state reconciliation notice (only when the
+   * live review-thread listing could not be established for the threads this
+   * run carried). Rendered in the action-owned notices group, between the
+   * state block and the triage block. */
+  reconciliationNotice?: string | undefined;
   /** #1003: rendered human-review triage section (only when triage ran). */
   triageBlock?: string | undefined;
   /** #1005: rendered reviewer-routing section (only when routing ran and the
@@ -782,6 +801,9 @@ export function buildPublishedBody(options: {
   if (options.stateBlock) {
     lines.push(options.stateBlock, "");
   }
+  if (options.reconciliationNotice) {
+    lines.push(options.reconciliationNotice, "");
+  }
   if (options.triageBlock) {
     lines.push(options.triageBlock, "");
   }
@@ -804,8 +826,8 @@ export function buildPublishedBody(options: {
   // #1554 (integrated with #1521): overflow — trim ONLY the model-authored
   // prose. The byte cost of everything else is fixed: the prefix (marker
   // preamble, handoff container, the RESERVED review-obligations container,
-  // header, note, engine line, coverage notice, state/triage/routing/
-  // confidence blocks), the two newlines that wrap the prose, the tail
+  // header, note, engine line, coverage notice, state/reconciliation/triage/
+  // routing/confidence blocks), the two newlines that wrap the prose, the tail
   // block, and the disclosure note itself (reserved at its worst-case size,
   // so the note can never push the body back past the ceiling it just
   // enforced). The +1 covers the final newline after the note. The
@@ -1096,6 +1118,30 @@ export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
   }
   lines.push("> Absence of findings in the unread paths is not evidence they are safe.");
   return lines.join("\n");
+}
+
+/**
+ * #1645: the review-state reconciliation notice.
+ *
+ * The run reconciled the review threads it carried from the context-time
+ * snapshot against the forge's AUTHORITATIVE live listing. When that
+ * listing could not be established, every carried thread was dropped as
+ * unknown — the run could not prove the threads were resolved, and it could
+ * not prove they were still open either. The review itself is unaffected
+ * (the state is a disclosure, never a gate: no verdict, no review result, no
+ * native event and no approval guardrail reads it), so the notice is the
+ * ONLY place where a reader learns that the carried prior-round threads
+ * could not be verified against current forge state.
+ *
+ * Action-owned prose (never model text), rendered only for the closed
+ * "unavailable" state.
+ */
+export function renderThreadReconciliationNotice(): string {
+  return [
+    "## Review-State Reconciliation Notice",
+    "",
+    "> **Review-state reconciliation is incomplete.** The live review-thread listing could not be read for this run, so prior-round review threads carried into this run could not be verified against current forge state and were not counted as findings.",
+  ].join("\n");
 }
 
 /** Build inline review comments from structured findings against the diff.
@@ -2109,6 +2155,15 @@ export async function publishReview(
   // #1003: rendered only when triage ran; the three modes share the one
   // block so a triage answer can never differ by publish mode.
   const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
+  // #1645: the review-state reconciliation notice — rendered ONLY for the
+  // closed "unavailable" state (the authoritative live thread listing could
+  // not be established for the threads this run carried). It is a
+  // DISCLOSURE: no verdict, review result, native event or approval
+  // guardrail reads it, so it changes nothing but the reader's knowledge.
+  // Any other value is treated as absent and renders nothing.
+  const reconciliationNotice = input.threadReconciliation === "unavailable"
+    ? renderThreadReconciliationNotice()
+    : "";
   // #1005: rendered only when routing ran and the status carries a decision.
   const routingBlock = reviewRouting ? renderReviewRoutingBlock(reviewRouting) : "";
   // #1073: rendered only when the scorer ran; the whole block passes
@@ -2163,6 +2218,11 @@ export async function publishReview(
     // value is never published.
     ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
     ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
+    // #1645: the run's review-state reconciliation state — the marker
+    // builder publishes the additive key only for the closed value
+    // "unavailable", so an unknown value never rides the published marker
+    // and a healthy run keeps its pre-#1645 marker bytes exactly.
+    ...(input.threadReconciliation !== undefined ? { threadReconciliation: input.threadReconciliation } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -2353,6 +2413,10 @@ export async function publishReview(
     // review and how complete the derived coverage was.
     unresolvedReviewObligations: input.unresolvedReviewObligations ?? [],
     derivedObligationState: input.derivedObligationState,
+    // #1645: the review-state reconciliation state rides the published
+    // handoff too — the machine-readable surface must disclose the same
+    // incomplete reconciliation the human-readable notice does.
+    threadReconciliation: input.threadReconciliation,
     publishedPrescriptions,
   }));
   // #1521: the published review-obligations document — the COMPLETE set of
@@ -2400,6 +2464,9 @@ export async function publishReview(
       // the review.
       unresolvedReviewObligations: input.unresolvedReviewObligations ?? [],
       derivedObligationState: input.derivedObligationState,
+      // #1645: the SAME state as the suggestion-carrying variant above — the
+      // two documents must never disagree about what the run could prove.
+      threadReconciliation: input.threadReconciliation,
       publishedPrescriptions: new Map(),
     }));
 
@@ -2447,6 +2514,10 @@ export async function publishReview(
         // #588: the `comment` mode publishes no findings natively on any
         // platform, so it compensates nothing for a missing native surface.
         stateBlock: stateSection("", false),
+        // #1645: the reconciliation notice rides every published body of
+        // this run, so the human-readable surface discloses what the marker
+        // and the handoff disclose.
+        reconciliationNotice: reconciliationNotice || undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
@@ -2476,6 +2547,10 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: stateSection(platformNotice),
+        // #1645: the reconciliation notice rides every published body of
+        // this run, so the human-readable surface discloses what the marker
+        // and the handoff disclose.
+        reconciliationNotice: reconciliationNotice || undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
@@ -2558,6 +2633,10 @@ export async function publishReview(
               sanitizedMarkdown: sanitized,
               coverageNotice,
               stateBlock: stateSection(platformNotice),
+              // #1645: the reconciliation notice rides every published body of
+              // this run, so the human-readable surface discloses what the
+              // marker and the handoff disclose.
+              reconciliationNotice: reconciliationNotice || undefined,
               triageBlock: triageBlock || undefined,
               routingBlock: routingBlock || undefined,
               confidenceBlock: confidenceBlock || undefined,
@@ -2767,6 +2846,10 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: stateSection(platformNotice),
+        // #1645: the reconciliation notice rides every published body of
+        // this run, so the human-readable surface discloses what the marker
+        // and the handoff disclose.
+        reconciliationNotice: reconciliationNotice || undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
@@ -2837,6 +2920,10 @@ export async function publishReview(
           sanitizedMarkdown: sanitized,
           coverageNotice,
           stateBlock: stateSection(platformNotice),
+          // #1645: the reconciliation notice rides the fallback body too —
+          // the fallback publishes the same review, so it must disclose the
+          // same incomplete reconciliation.
+          reconciliationNotice: reconciliationNotice || undefined,
           triageBlock: triageBlock || undefined,
           routingBlock: routingBlock || undefined,
           confidenceBlock: confidenceBlock || undefined,

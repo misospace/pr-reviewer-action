@@ -120,7 +120,7 @@ import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, change
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
 import { MAX_TRACE_REPAIR_CLAIMS, harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
-import { parseLiveThreadIndex, reconcileCarriedThreads } from "../enforcement/threads.js";
+import { carriedThreads, parseLiveThreadIndex, reconcileCarriedThreads } from "../enforcement/threads.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
 import {
@@ -224,6 +224,14 @@ export interface RunReviewResult {
    * `partial` and withholds the native APPROVE (COMMENT), never a
    * manufactured blocking request. */
   requiredEvidenceState?: RequiredEvidenceState;
+  /** #1645: the run's review-state reconciliation state. Present ONLY as
+   * `"unavailable"` — the authoritative live thread listing could not be
+   * established for threads this run carried, so their state is unknown
+   * and none of them was carried into the disposition. The publish step
+   * discloses it in the published review, the metadata marker and the
+   * machine handoff. Absent (the healthy case) keeps the pre-#1645
+   * published bytes exactly. */
+  threadReconciliation?: "unavailable";
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -2748,16 +2756,23 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // current fresh blockers are untouched) and the receipts say so. The
   // receipts artifact persists the bounded provenance (identity, severity,
   // outcome, head sha) the diagnostic contract demands.
+  //
+  // The live listing is read ONLY when this run carries a thread to
+  // reconcile: with nothing carried there is nothing to prove, so the
+  // extra read is skipped entirely — on Forgejo the listing costs one
+  // request per review, and a run that carries nothing must not pay it.
   const carriedThreadsSnapshot = safeJsonArray(ws.read("review-threads.json")) as never;
   const reconciliationHeadSha = context.headSha || String(pr.headRefOid ?? "");
-  const liveThreadListing = await adapter.listReviewThreads().catch(() => null);
+  const carriedThreadList = carriedThreads(carriedThreadsSnapshot as unknown[]);
+  const liveThreadListing = carriedThreadList.length === 0
+    ? null
+    : await adapter.listReviewThreads().catch(() => null);
   const liveThreadIndex = liveThreadListing !== null && liveThreadListing.ok
     ? parseLiveThreadIndex(liveThreadListing.data)
     : null;
   const carriedThreadReconciliation = reconcileCarriedThreads(
     carriedThreadsSnapshot as never,
     liveThreadIndex,
-    reconciliationHeadSha,
   );
   ws.write("thread-reconciliation.json", `${pyJsonDumps({
     version: 1,
@@ -2771,6 +2786,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     log(`  #1645: carried threads reconciled against live listing (${carriedThreadReconciliation.listing}): `
       + `${carriedThreadReconciliation.threads.length} live-unresolved, ${dropped} dropped (resolved/absent/unknown)`);
   }
+  // #1645: the reconciliation was INCOMPLETE — the authoritative listing
+  // could not be established for threads this run carried, so their state
+  // is unknown and none of them was carried into the disposition. The
+  // publish step discloses that in the published review, the metadata
+  // marker and the machine handoff, so a reader never mistakes the
+  // dropped carried state for a proven absence.
+  const threadReconciliation = carriedThreadReconciliation.listing === "unavailable"
+    ? "unavailable" as const
+    : undefined;
   const enforcementInputs: EnforcementInputs = {
     evidenceBlockerEnabled: (env.EVIDENCE_BLOCKER_ENFORCEMENT ?? "false").toLowerCase() === "true",
     toolFailureEnabled: toolMode !== "off" && (env.TOOL_FAILURE_ENFORCEMENT ?? "false").toLowerCase() === "true",
@@ -3682,6 +3706,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // #1505: the run's required-evidence state, only when the contract was
     // active — an inactive run keeps its bytes exactly.
     ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1645: the review-state reconciliation state, only when the
+    // authoritative live listing could not be established — the marker
+    // discloses the incomplete reconciliation. A healthy run keeps its
+    // pre-#1645 marker bytes exactly.
+    ...(threadReconciliation !== undefined ? { threadReconciliation } : {}),
     // #1455: the verifier's telemetry, only when the run measured it — a
     // disabled verifier, or a call with no usage, keeps the pre-#1455
     // marker bytes exactly.
@@ -3731,6 +3760,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // #1505: the run's required-evidence state, only when the contract was
     // active — an inactive run keeps its bytes exactly.
     ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1645: the run's review-state reconciliation state, only when the
+    // authoritative live listing could not be established — the publish
+    // step discloses it, so a reader never reads the dropped carried
+    // state as a proven absence.
+    ...(threadReconciliation !== undefined ? { threadReconciliation } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),

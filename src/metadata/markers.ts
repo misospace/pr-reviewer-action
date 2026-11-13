@@ -564,6 +564,15 @@ export interface RunMarkerContext {
    * can read them from the published record. Omitted when the run measured
    * none of them. */
   confidenceTelemetry?: ConfidenceTelemetry;
+  /** #1645: the run's review-state reconciliation state. Present ONLY as
+   * `"unavailable"` — the authoritative live thread listing could not be
+   * established for threads this run carried, so the reconciliation of the
+   * carried review state was INCOMPLETE. Published so a reader of the
+   * review (not only of the run's own artifacts) can tell that the
+   * carried prior-round threads were dropped as unknown rather than
+   * proven absent. Omitted in every healthy run, so the pre-#1645 marker
+   * bytes are preserved. */
+  threadReconciliation?: string;
 }
 
 /**
@@ -701,6 +710,12 @@ confidence_score: confidenceScore,
     ...(context.toolCallsSuccessful !== undefined ? { tool_calls_successful: context.toolCallsSuccessful } : {}),
     ...(context.toolCallsRefused !== undefined ? { tool_calls_refused: context.toolCallsRefused } : {}),
     ...(context.toolCallsDeduplicated !== undefined ? { tool_calls_deduplicated: context.toolCallsDeduplicated } : {}),
+    // #1645: the review-state reconciliation state, appended last under the
+    // same additive-key discipline — present ONLY when the authoritative
+    // live listing could not be established, so a healthy run keeps its
+    // pre-#1645 marker bytes exactly. buildMetadataMarker re-validates the
+    // value.
+    ...(context.threadReconciliation === "unavailable" ? { thread_reconciliation: context.threadReconciliation } : {}),
   });
 }
 

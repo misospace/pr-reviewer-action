@@ -44,6 +44,12 @@ function errorText(error: unknown): string {
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
 const JWT_TTL_SECONDS = 2700;
+/** #1645: the bound on the review-thread listing's per-review comment
+ * fan-out (one request per review). A listing larger than the bound FAILS
+ * the read rather than being truncated — a truncated listing presented as
+ * a complete one is the bug this bound exists to prevent. The magnitude
+ * mirrors the GitHub listing's own 100-thread bound. */
+const FORGEJO_REVIEW_THREADS_MAX_REVIEWS = 100;
 
 export interface ForgejoAdapterOptions {
   repo: string;
@@ -636,21 +642,45 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
   }
 
-  /** `list_review_threads`: every review's comments grouped into threads. */
+  /** `list_review_threads`: every review's comments grouped into threads.
+   *
+   * #1645: a FAILED read is never an empty listing. The enforcement pass
+   * reads this listing as AUTHORITATIVE forge state (it decides whether a
+   * carried prior-round thread still exists and is unresolved), so an empty
+   * array read as "the forge has no threads" would receipt every carried
+   * thread `absent` and silently drop a live blocker — the #1619 shape.
+   * A failed reviews read, a malformed payload, and a failed per-review
+   * comments read all FAIL the read (`ok:false`): the enforcement pass then
+   * treats the listing as unavailable, carries no thread from cache alone,
+   * and discloses the incomplete reconciliation. The same reasoning bounds
+   * the fan-out: this read costs one request per review, so a listing
+   * larger than the bound is failed rather than truncated — a truncated
+   * listing presented as a complete one is the same bug.
+   *
+   * The per-review fan-out is the platform's own shape (Forgejo serves one
+   * review's comments per request), so the bound is what keeps the cost
+   * finite; the enforcement pass additionally skips the read entirely when
+   * the run carries no thread to reconcile. */
   listReviewThreads(): Promise<ReadResult<unknown[]>> {
     return this.read(async (at) => {
       const { status, text } = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
-      if (status !== 200) return [];
+      if (status !== 200) throw new Error(`forgejo review listing failed with status ${status}`);
       const reviews = pyJsonDecode(text);
-      if (!Array.isArray(reviews)) return [];
+      if (!Array.isArray(reviews)) throw new Error("forgejo review listing is not a list");
       const commentLists: unknown[][] = [];
       for (const review of reviews) {
         const reviewId = forgejoReviewCommentId(review);
         if (reviewId === null) continue;
+        if (commentLists.length >= FORGEJO_REVIEW_THREADS_MAX_REVIEWS) {
+          throw new Error(`forgejo review listing exceeds the ${FORGEJO_REVIEW_THREADS_MAX_REVIEWS}-review bound`);
+        }
         const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
-        if (response.status !== 200) continue;
+        if (response.status !== 200) {
+          throw new Error(`forgejo review ${reviewId} comments failed with status ${response.status}`);
+        }
         const comments = pyJsonDecode(response.text);
-        if (Array.isArray(comments)) commentLists.push(comments);
+        if (!Array.isArray(comments)) throw new Error(`forgejo review ${reviewId} comments are not a list`);
+        commentLists.push(comments);
       }
       return groupForgejoReviewThreads(commentLists);
     });

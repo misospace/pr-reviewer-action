@@ -381,6 +381,13 @@ export interface ReviewHandoff {
   /** #1521: the run's derived-obligation state (#1449), null when unknown.
    * ALWAYS present, so the document's key set stays fixed. */
   derived_obligation_state: PublishedDerivedObligationState | null;
+  /** #1645: the run's review-state reconciliation state, null when the
+   * document discloses none. The only published value is "unavailable" — the
+   * carried prior-round review threads could not be verified against the
+   * forge's live state, so they were dropped as unknown rather than proven
+   * absent. A disclosure, never a gate: it changes no verdict, no
+   * `review_result` and no native review event. */
+  thread_reconciliation: string | null;
 }
 
 export interface ReviewHandoffInput {
@@ -417,6 +424,14 @@ export interface ReviewHandoffInput {
   /** #1521: the run's derived-obligation state ("complete" | "unresolved" |
    * "unavailable"). Anything else is published as null (unknown). */
   derivedObligationState?: string | undefined;
+  /** #1645: the run's review-state reconciliation state. The ONLY published
+   * value is the closed string "unavailable" — the authoritative live review-
+   * thread listing could not be established for the threads this run carried,
+   * so their state was reconciled INCOMPLETELY and every carried thread was
+   * dropped as unknown rather than proven absent. A DISCLOSURE, never a gate:
+   * it changes no verdict, no review result and no native event. Any other
+   * value publishes nothing, so an unknown state is never published as one. */
+  threadReconciliation?: string | undefined;
   /** #1541: the number of DISTINCT requirement ids the enforcement pass
    * produced before the shared id cap shortened the list. The producers
    * carry it here; without it the document discloses nothing about that
@@ -621,6 +636,15 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     unresolved_review_obligations_total: obligationTotal,
     unresolved_review_obligations_truncated: obligationTruncated,
     derived_obligation_state: derivedState,
+    // #1645: the review-state reconciliation state rides the document BASE,
+    // after `derived_obligation_state` — it is a disclosure about the run's
+    // own evidence, not an item, and it must survive every byte-budget
+    // shrink (the shrink gives way on the id lists and the obligation rows
+    // first). Only the closed value "unavailable" publishes: a controller
+    // must be able to tell that the carried prior-round threads were dropped
+    // as UNKNOWN rather than proven absent, and an unknown state is never
+    // published as one.
+    ...(input.threadReconciliation === "unavailable" ? { thread_reconciliation: "unavailable" } : {}),
   });
 
   // The document without any item is the base the disclosure rides on. The
@@ -838,6 +862,16 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     || (typeof derivedState === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(derivedState)))) {
     return null;
   }
+  // #1645: the review-state reconciliation state is OPTIONAL on parse — a
+  // handoff published before #1645 carries none, and it must stay
+  // parseable. An absent member parses as null (the document discloses no
+  // incomplete reconciliation); a PRESENT member must carry the closed value
+  // "unavailable", because the builder emits nothing else and a document
+  // that carries an unknown state was not produced by this action.
+  const threadReconciliation = record.thread_reconciliation === undefined
+    ? null
+    : record.thread_reconciliation;
+  if (!(threadReconciliation === null || threadReconciliation === "unavailable")) return null;
   const items: ReviewHandoffItem[] = [];
   // #1541: the shared-bound disclosure counters — absent means unknown,
   // never "the list is the whole set".
@@ -900,6 +934,7 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     unresolved_review_obligations_total: obligationTotal,
     unresolved_review_obligations_truncated: obligationTruncated,
     derived_obligation_state: derivedState as PublishedDerivedObligationState | null,
+    thread_reconciliation: threadReconciliation,
   };
 }
 
