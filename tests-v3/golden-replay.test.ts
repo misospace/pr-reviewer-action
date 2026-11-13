@@ -598,6 +598,11 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       // not yet persisted the assignments; the test tolerates absence.
       stepOutput: existsSync(stepOutputPath) ? readFileSync(stepOutputPath, "utf8") : "",
     };
+    if (c.name.includes("case8")) {
+      console.error("[dbg-case8] verdict=" + result.outputs.verdict + " requiredChecks=" + result.outputs.requiredChecks
+        + " disposition=" + JSON.stringify(result.finalDisposition ?? null)
+        + " reviewResult=" + JSON.stringify(result.outputs.reviewResult ?? null));
+    }
     return scoreCase(c, result.outputs.verdict, findings, recordedFindings(c), published, artifact.thread_dispositions);
   } finally {
     if (previousActionRef === undefined) delete process.env.GITHUB_ACTION_REF;
