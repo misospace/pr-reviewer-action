@@ -48,7 +48,6 @@ import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { safePath } from "../findings/safe-path.js";
 import { RESERVED_MARKER_PATTERNS, REVIEW_HANDOFF_ANCHOR } from "../metadata/markers.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
-import type { ReviewDisposition } from "./disposition.js";
 
 /** The container anchor. It marks the START of the action-owned block and is
  * reserved against model-authored text on every published surface, so the
@@ -390,19 +389,19 @@ export interface ReviewHandoffInput {
   headSha: string;
   verdict: string;
   reviewResult: string;
-  /** #1596: the review's authoritative disposition (`computeReviewDisposition`,
-   * computed once at the publish boundary). When it proves a blocking defect —
-   * the final `request_changes` verdict OR a still-open blocker/major finding
-   * a non-strict verdict policy left under an approve — the handoff's
-   * `verdict` and `review_result` publish the AUTHORITATIVE semantics
-   * ("request_changes" and "issues", the marker word both verdict policies
-   * give a proven blocking defect), never the raw model verdict the native
-   * event overrode: without this, the native review could publish
+  /** #1596/#1656: the review's authoritative disposition — pre-#1656 the
+   * publish-boundary `computeReviewDisposition` object, now the engine's
+   * authoritative `FinalDisposition` (only `blockerProven` is read). When
+   * it proves a blocking defect, the handoff's `verdict` and
+   * `review_result` publish the AUTHORITATIVE semantics ("request_changes"
+   * and "issues", the marker word both verdict policies give a proven
+   * blocking defect), never the raw model verdict the native event
+   * overrode: without this, the native review could publish
    * REQUEST_CHANGES while this document told a controller `approve`/`clean`.
    * Absent, or a disposition that proves no blocker, leaves both fields at
    * the run's own values — every other disposition kind is DERIVED from that
    * raw pair, so the pair already agrees with it. */
-  disposition?: ReviewDisposition | undefined;
+  disposition?: { blockerProven: boolean } | undefined;
   requiredChecks: string;
   /** The FINAL post-enforcement findings (the artifact's findings), never
    * raw model output. */

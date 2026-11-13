@@ -67,6 +67,10 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
   /** Execution or requirement-trace coverage was incomplete (or the review
    * result was `partial`). */
   "coverage_incomplete",
+  /** #1656: the authoritative disposition withheld certification for a
+   * material unknown (a materially relevant review question remains
+   * unknown/unavailable). */
+  "material_unknown",
   /** The publish boundary withheld the native approval (scope, derived
    * obligations, required evidence, degraded state, or coverage) and
    * published a non-blocking COMMENT instead. */
@@ -130,6 +134,7 @@ export const REVIEW_ATTESTATION_CONCLUSION_REASONS: Readonly<
   request_changes: ["blocked"],
   required_checks_incomplete: ["incomplete"],
   coverage_incomplete: ["incomplete"],
+  material_unknown: ["incomplete"],
   approval_withheld: ["incomplete"],
   advisory_only: ["incomplete"],
   not_published: ["incomplete"],
@@ -178,6 +183,12 @@ export interface ReviewAttestationSignals {
   /** The run's partial-coverage artifact was present (the same signal the
    * bundle lifecycle uses to mark `partial`). */
   partialCoverage?: boolean;
+  /** #1656: the run's authoritative final disposition. When present, the
+   * semantic conclusion comes from it (the same object every other
+   * consumer reads) and only the publication proof below is decided here.
+   * Absent (a caller without the disposition) keeps the legacy signal
+   * table below unchanged. */
+  disposition?: AttestationDisposition;
   /** Exact reviewed head SHA ("" when unknown). */
   headSha?: string;
   /** Publication was attempted: the publish outcome plus the native
@@ -192,17 +203,86 @@ export interface ReviewAttestationSignals {
   };
 }
 
-/** Decide the attestation from the run's own signals. Total function, fixed
- * precedence (crash → skip → model/degraded capability → verdict → coverage →
- * publication): the capability failures are answered before the verdict
- * exists so a synthetic notice or advisory fallback can never read as a
- * verdict-backed conclusion. */
+/**
+ * Decide the attestation from the run's own signals. Total function, fixed
+ * precedence (crash → skip → disposition-or-legacy-capability → verdict →
+ * coverage → publication): the capability failures are answered before the
+ * verdict exists so a synthetic notice or advisory fallback can never read
+ * as a verdict-backed conclusion.
+ *
+ * #1656: when the run's authoritative final disposition is present, the
+ * SEMANTIC conclusion comes from it — the same object the recommendation,
+ * the handoff, the marker and the native event consume — and this function
+ * owns only the publication proof (whether a commit-bound native event
+ * actually landed). The legacy signal table further below stays for
+ * callers without a disposition and is unchanged. */
 export function computeReviewAttestation(signals: ReviewAttestationSignals): ReviewAttestation {
   const head = typeof signals.headSha === "string" ? signals.headSha : "";
   const finish = (conclusion: ReviewAttestationConclusion, reason_code: ReviewAttestationReasonCode): ReviewAttestation =>
     ({ conclusion, reason_code, head_sha: head });
   if (signals.crashed === true) return finish("unavailable", "run_crashed");
   if (signals.reviewProduced === false) return finish("skipped", "skipped");
+  const disposition = signals.disposition;
+  if (disposition !== undefined) {
+    // The semantic state is the disposition's, word for word.
+    if (disposition.kind === "unavailable") {
+      return finish("unavailable",
+        disposition.reason === "degraded_no_evidence" ? "degraded_no_evidence"
+          : disposition.reason === "review_failed" ? "model_unavailable"
+          : "no_verdict");
+    }
+    if (disposition.kind === "incomplete") {
+      const publication = signals.publication;
+      if (publication === undefined) return finish("incomplete", "not_published");
+      if (publication.status === "superseded") return finish("incomplete", "superseded_head");
+      // The abstention's own reason: a material unknown vs a certification
+      // gate withholding. A withholding with NO verdict-bearing native
+      // event (an advisory comment/review_comment publication) is
+      // `advisory_only`; a withheld COMMENT on a verdict-bearing surface
+      // (fork scope policy) is `approval_withheld`.
+      if (disposition.reason === "material_unknown") return finish("incomplete", "material_unknown");
+      return finish("incomplete", publication.native === undefined ? "advisory_only" : "approval_withheld");
+    }
+    if (disposition.kind === "request_changes") {
+      // The block counts as LANDED only when the native record proves a
+      // REQUEST_CHANGES review actually landed — the same positive proof
+      // `approved` requires (#1580 review fix). A failed publication with
+      // no proved landed native block attests the capability failure,
+      // never `blocked`.
+      const native = signals.publication?.native;
+      if (native !== undefined && native.event === "REQUEST_CHANGES" && native.submitted === true) {
+        return finish("blocked", "request_changes");
+      }
+      if (signals.publication?.status === "failed") {
+        if (native !== undefined && native.event === "REQUEST_CHANGES") {
+          return finish("unavailable", "native_submission_failed");
+        }
+        return finish("unavailable", "publication_failed");
+      }
+      if (signals.publication === undefined) return finish("incomplete", "not_published");
+      if (signals.publication.status === "superseded") return finish("incomplete", "superseded_head");
+      return finish("incomplete", "advisory_only");
+    }
+    // kind approve — the publication proof decides between a certified
+    // approval and every abstention (the disposition already established
+    // complete coverage and no material unknown).
+    const publication = signals.publication;
+    if (publication === undefined) return finish("incomplete", "not_published");
+    if (publication.status === "superseded") return finish("incomplete", "superseded_head");
+    const native = publication.native;
+    if (publication.status === "failed") {
+      if (native !== undefined && native.event === "APPROVE") return finish("unavailable", "native_approval_failed");
+      return finish("unavailable", "publication_failed");
+    }
+    if (native === undefined) return finish("incomplete", "advisory_only");
+    if (native.event === "APPROVE" && native.submitted === true) {
+      if (head === "") return finish("unavailable", "head_unknown");
+      if (native.fellBack === true) return finish("incomplete", "native_approval_unbound");
+      return finish("approved", "native_approval_submitted");
+    }
+    return finish("incomplete", "approval_withheld");
+  }
+  // ── Legacy signal table (callers without the #1656 disposition) ────────
   if (signals.modelUnavailable === true) return finish("unavailable", "model_unavailable");
   if (signals.degraded === true) return finish("unavailable", "degraded_no_evidence");
   const verdict = signals.verdict ?? "";
@@ -286,6 +366,21 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
  * written verbatim; the head SHA is a hex-or-empty token by construction. */
 export function serializeReviewAttestation(attestation: ReviewAttestation): string {
   return JSON.stringify(attestation);
+}
+
+/** The disposition-shaped input the attestation consumes on the
+ * #1656 authoritative path: the engine's ONE final object (kind, machine
+ * reason and the material unknowns), carried from `FinalDisposition` — the
+ * same object the published recommendation, the handoff, the marker and
+ * the native event already read, so the attestation can never disagree
+ * with any of them about what the run concluded. The structural subset
+ * keeps the attestation decoupled from the disposition module's type. */
+export interface AttestationDisposition {
+  kind: "request_changes" | "approve" | "incomplete" | "unavailable";
+  reason: string;
+  blockerProven: boolean;
+  approvalCertified: boolean;
+  materialUnknowns: ReadonlyArray<{ code: string }>;
 }
 
 /** Fail-closed parse for consumers of the `review-attestation` output (and

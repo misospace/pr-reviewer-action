@@ -529,6 +529,9 @@ async function runActionPipeline(
     reviewResult: review.outputs.reviewResult,
     incompleteReason: review.outputs.incompleteReason,
     partialCoverage: review.partialCoverage !== undefined,
+    // #1656: the authoritative disposition — when present it owns the
+    // semantic conclusion and only the publication proof is decided here.
+    ...(review.finalDisposition !== undefined ? { disposition: review.finalDisposition } : {}),
     headSha: reviewedHeadSha,
     ...(publishStatus !== undefined
       ? { publication: { status: publishStatus, ...(publishNative !== undefined ? { native: publishNative } : {}) } }
@@ -552,6 +555,11 @@ async function runActionPipeline(
       reviewResult: review.outputs.reviewResult,
       incompleteReason: review.outputs.incompleteReason,
       degraded: review.outputs.degradedGateBypass === true,
+      // #1656: the authoritative disposition's kind and reason ride the
+      // bundle so the machine surface names WHAT the run concluded in the
+      // shared vocabulary.
+      ...(review.finalDisposition !== undefined ? { dispositionKind: review.finalDisposition.kind } : {}),
+      ...(review.finalDisposition !== undefined ? { dispositionReason: review.finalDisposition.reason } : {}),
     },
     ...(publishStatus !== undefined ? { publication: { status: publishStatus } } : {}),
     findings: review.outputs.findings,

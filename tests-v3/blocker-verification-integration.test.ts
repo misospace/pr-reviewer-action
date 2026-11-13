@@ -10,6 +10,7 @@ import {
   type SourceReadResult,
 } from "../src/enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../src/enforcement/action-source.js";
+import { computeFinalDisposition, dispositionEvidence } from "../src/disposition/final.js";
 import { readWorkflowInputNamesByFile } from "../src/enforcement/workflow-inputs.js";
 import {
   applyStrictVerdictPolicy,
@@ -201,18 +202,20 @@ test("#1016 unavailable exact-head source leaves the claim unverified and keeps 
   const result = await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
-  // #1016 (review pass): unknown evidence must NOT silently become
-  // approve — the strict mapping forces request_changes when any demoted
-  // finding is "unverified" rather than "refuted" or "unsupported".
+  // #1016's fail-closed guarantee now lives in the authoritative
+  // disposition (#1656): unknown evidence never certifies a clean review —
+  // the `unverified_blocking_claim` MATERIAL unknown withholds approval —
+  // and the strict mapping no longer manufactures a code blocker for it.
   const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(a.verdict, "approve");
+  assert.equal(outcome.verdict, "approve");
 });
 
 test("#1016 stale-revision unverified finding keeps request_changes", async () => {
   // A stale revision produces a reader that returns unavailable/non-
-  // authoritative; the boundary must mark it unverified and the strict
-  // mapping must keep request_changes rather than flipping to approve.
+  // authoritative; the boundary must mark it unverified. #1656: the strict
+  // mapping derives approve (no proven defect) and the disposition's
+  // `unverified_blocking_claim` material unknown withholds the approval.
   const staleReader: SourceReader = async (): Promise<SourceReadResult> => ({
     status: "ok",
     text: "marker text",
@@ -223,14 +226,15 @@ test("#1016 stale-revision unverified finding keeps request_changes", async () =
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
   const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(a.verdict, "approve");
+  assert.equal(outcome.verdict, "approve");
 });
 
 test("#1016 read-budget-exhausted unverified finding keeps request_changes", async () => {
   // Past MAX_VERIFICATION_READS the boundary stops reading and demotes the
-  // remaining candidates as unverified. The strict mapping must keep
-  // request_changes for any unverified demotion.
+  // remaining candidates as unverified. #1656: the strict mapping derives
+  // approve (no proven defect); the disposition's `unverified_blocking_claim`
+  // material unknown withholds the approval instead.
   const markerArray = Array.from({ length: 21 }, () => finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" }));
   const a = artifact({ findings: markerArray });
   const readSource: SourceReader = async (): Promise<SourceReadResult> => ({
@@ -242,8 +246,8 @@ test("#1016 read-budget-exhausted unverified finding keeps request_changes", asy
   const unverified = result.findings.filter((entry) => entry.status === "unverified" && entry.reason === "read-budget-exhausted");
   assert.equal(unverified.length, 1);
   const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(a.verdict, "approve");
+  assert.equal(outcome.verdict, "approve");
 });
 
 test("#1016 model-policy relaxation fires only for a refuted-only request_changes", async () => {
@@ -385,12 +389,12 @@ test("#1016 native review is not REQUEST_CHANGES once marker claims are refuted"
   assert.notEqual(api.submitted[0]?.event, "REQUEST_CHANGES");
 });
 
-test("#1016 native review stays REQUEST_CHANGES once marker claims are unverified", async () => {
-  // #1016 (review pass): an unavailable / ambiguous source check must NOT
-  // silently become APPROVE. The strict mapping forces request_changes
-  // whenever any demoted finding has grounding_status="unverified", and
-  // publish therefore submits REQUEST_CHANGES — the same event the
-  // control call (un-demoted artifact) emits.
+test("#1656 the unverified claim publishes as a COMMENT abstention via the disposition, never APPROVE", async () => {
+  // #1656 (was "#1016 native review stays REQUEST_CHANGES"): an unavailable
+  // / ambiguous source check must NOT silently become APPROVE. The strict
+  // mapping derives approve (no proven defect), and the authoritative
+  // disposition carries the `unverified_blocking_claim` MATERIAL unknown —
+  // so the native event is a COMMENT with no certified approval.
   class RecordingApi {
     readonly head = "head-123";
     // #588: the native review surface is declared explicitly, so the publish
@@ -417,16 +421,43 @@ test("#1016 native review stays REQUEST_CHANGES once marker claims are unverifie
   const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
-  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict, "approve");
+
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: a.verdict,
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: false,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: a.findings
+      .filter((entry) => (entry as { grounding_status?: unknown }).grounding_status === "unverified")
+      .map((entry) => {
+        const record = entry as { file?: unknown; line?: unknown };
+        return dispositionEvidence(
+          "unverified_blocking_claim",
+          "deterministic",
+          "material",
+          `${typeof record.file === "string" ? record.file : "unlocated"}`,
+        );
+      }),
+  });
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
 
   const api = new RecordingApi();
   await publishReview(
-    publishInput({ verdict: a.verdict, reviewMarkdown: a.review_markdown, findings: a.findings }),
+    publishInput({ verdict: a.verdict, reviewMarkdown: a.review_markdown, findings: a.findings, finalDisposition: disposition }),
     api as unknown as PublishPlatformApi,
     { diffText: "" },
   );
   assert.equal(api.submitted.length, 1);
-  assert.equal(api.submitted[0]?.event, "REQUEST_CHANGES");
+  assert.equal(api.submitted[0]?.event, "COMMENT");
 });
 
 test("#1016 attribution note discloses unverified co-existence with a blocker", async () => {
@@ -468,13 +499,13 @@ test("#1016 attribution note discloses unverified co-existence with a blocker", 
     a.review_markdown.includes("1 blocker/major finding(s) out of 2 open"),
     `expected blocker-count disclosure in note, got: ${a.review_markdown}`,
   );
+  // #1656: the unverified demotion no longer contributes a forced-veto
+  // attribution part — it rides the disposition's
+  // `unverified_blocking_claim` material unknown instead, so the note
+  // names exactly the signals that decided the verdict.
   assert.ok(
-    a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
-    `expected #1016 attribution disclosure in note, got: ${a.review_markdown}`,
-  );
-  assert.ok(
-    a.review_markdown.includes("#1016"),
-    `expected #1016 reference in note, got: ${a.review_markdown}`,
+    !a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
+    `unexpected #1016 attribution disclosure in note, got: ${a.review_markdown}`,
   );
 });
 
@@ -506,7 +537,9 @@ test("#1016 attribution note discloses enforcement-forced co-existence with a bl
   assert.equal(outcome.overridden, true);
   assert.equal(outcome.source, "findings");
   assert.ok(a.review_markdown.includes("1 blocker/major finding(s) out of 2 open"));
-  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+  // #1656: the unverified demotion no longer adds its own note part; the
+  // enforcement-forced contribution is still disclosed.
+  assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
   assert.ok(a.review_markdown.includes("a fail-closed enforcement layer forced request_changes"));
 });
 
@@ -572,15 +605,15 @@ test("#1016 requirement claim with the cited snippet only away from the cited li
   assert.equal(a.findings[0]!.severity, "minor");
   assert.equal(a.findings[0]!.grounding_status, "unverified");
 
-  // Model policy: the relaxer refuses unknown evidence; strict policy: an
-  // approve model verdict is forced back to request_changes with the #1016
-  // unknown-evidence attribution.
+  // Model policy: the relaxer refuses unknown evidence (unknown is never a
+  // refutation). #1656: the strict mapping derives approve (no proven
+  // defect, no live blocker) — the unverified claim rides the disposition's
+  // `unverified_blocking_claim` MATERIAL unknown, which withholds the
+  // approval instead of manufacturing a code blocker.
   assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
-  assert.equal(a.verdict, "request_changes");
   applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
-  assert.ok(a.review_markdown.includes("#1016"));
+  assert.equal(a.verdict, "approve");
+  assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
 });
 
 test("#1016 findings_severity_gated: a model approve cannot survive an unverified blocker demotion", async () => {
@@ -603,18 +636,18 @@ test("#1016 findings_severity_gated: a model approve cannot survive an unverifie
   assert.equal(a.findings[0]!.capped_from, "blocker");
   assert.equal(a.findings[0]!.severity, "minor");
 
+  // #1656 (was the #1016 gated escalation): the unverified demotion no
+  // longer escalates the model approve — only a LIVE blocker does. The
+  // disposition's `unverified_blocking_claim` material unknown withholds
+  // certification, and the relaxer still refuses unknown evidence.
   applyVerdictPolicy(a, "findings_severity_gated", gated);
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(a.verdict_source, "findings");
-  assert.ok(
-    a.review_markdown.includes("1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)"),
-    `expected the #1016 unknown-evidence attribution, got: ${a.review_markdown}`,
-  );
-  assert.ok(!a.review_markdown.includes("1 blocker finding(s) out of 1"), `note must not claim a live blocker: ${a.review_markdown}`);
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.verdict_source, "model");
+  assert.ok(!a.review_markdown.includes("escalated from structured findings"));
   // The relaxer downstream still refuses: the boundary never certifies a
   // clean review from evidence it could not read.
   assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
-  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict, "approve");
 });
 
 test("#1016 findings_severity_gated: a positively refuted blocker demotion still ends approve", async () => {
@@ -741,10 +774,12 @@ test("#1238 the incident gate claim stays unverified when the action source is u
   assert.equal(a.findings[0]!.capped_from, undefined);
 });
 
-test("#1238 an unverified major input claim still fails closed to request_changes", async () => {
+test("#1238 an unverified major input claim is unknown evidence, never a fabricated block", async () => {
   // Fail-safe control: without the registry witness the boundary cannot
-  // check the claim. An originally-major demotion is unknown evidence, so
-  // the strict mapping keeps request_changes with the #1016 attribution.
+  // check the claim. An originally-major demotion is unknown evidence:
+  // #1656 — the strict mapping derives approve, the disposition's
+  // `unverified_blocking_claim` material unknown withholds the approval,
+  // and the relaxer still refuses.
   const a = artifact({
     verdict: "request_changes",
     findings: [
@@ -764,11 +799,12 @@ test("#1238 an unverified major input claim still fails closed to request_change
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
   assert.equal(a.findings[0]!.capped_from, "major");
-  // The model approved; the strict mapping refuses to certify an approve
-  // from evidence it could not check, and attributes the unknown evidence.
+  // The demotion is UNKNOWN evidence, not a refutation and not a defect:
+  // the strict mapping derives approve, and the disposition's
+  // `unverified_blocking_claim` material unknown withholds the approval.
   applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+  assert.equal(a.verdict, "approve");
+  assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
 });
 
 test("#1238 a genuine missing-input claim is retained as substantiated and keeps blocking", async () => {
@@ -859,11 +895,12 @@ test("#1240 a claim about another revision is unverified and still fails closed"
   assert.equal(a.findings[0]!.grounding_status, "unverified");
   assert.equal(a.findings[0]!.capped_from, "major");
   assert.equal(a.findings[0]!.severity, "minor");
-  // The model approved; the strict mapping refuses to certify an approve
-  // from a claim it could not check, and attributes the unknown evidence.
+  // The claim could not be checked against its claimed revision: unknown
+  // evidence. #1656 — the strict mapping derives approve; the disposition's
+  // `unverified_blocking_claim` material unknown withholds the approval.
   applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-  assert.equal(a.verdict, "request_changes");
-  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+  assert.equal(a.verdict, "approve");
+  assert.ok(!a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
 });
 
 // ---------------------------------------------------------------------------
@@ -991,16 +1028,16 @@ test("#1238 a workflow-mapped name the witness cannot corroborate keeps the revi
     assert.equal(a.findings[0]!.grounding_status, "unverified");
     assert.equal(a.findings[0]!.severity, "minor");
     assert.equal(a.findings[0]!.capped_from, "major");
-    // The strict mapping sees the unverified blocker-level demotion as a
-    // fail-closed forcing signal: no approve is derived from a claim the
-    // witness did not corroborate.
+    // #1656: the unverified blocker-level demotion is disposition evidence,
+    // not a forced verdict — the strict mapping derives approve and the
+    // disposition's material unknown withholds certification.
     const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
-    assert.equal(a.verdict, "request_changes");
-    assert.equal(outcome.verdict, "request_changes");
+    assert.equal(a.verdict, "approve");
+    assert.equal(outcome.verdict, "approve");
     // The relaxer refuses too: unknown evidence never certifies a clean
     // review.
     assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
-    assert.equal(a.verdict, "request_changes");
+    assert.equal(a.verdict, "approve");
   } finally {
     rmSync(repo.dir, { recursive: true, force: true });
   }

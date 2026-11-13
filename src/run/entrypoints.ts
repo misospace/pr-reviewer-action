@@ -33,6 +33,7 @@ import { executedCallEvidenceIndex } from "../enforcement/executed-calls.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
+import { parseFinalDisposition } from "../disposition/final.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -589,6 +590,13 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
       }
     }
   }
+  // #1656: the run's authoritative final disposition, read back from the
+  // engine's own artifact (never re-derived from ambient env). A missing or
+  // unrecognizable artifact (every pre-#1656 run dir) yields nothing — the
+  // publish boundary then keeps its legacy scalar derivation, which fails
+  // closed on unknown coverage.
+  const finalDisposition = parseFinalDisposition(readJsonObject(join(runDir, "final-disposition.json")));
+  if (finalDisposition !== null) fields.finalDisposition = finalDisposition;
   return fields;
 }
 
@@ -1107,6 +1115,11 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // marker and body only through these.
     ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
     ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+    // #1656: the run's authoritative final disposition — the publish
+    // boundary consumes it for the recommendation, the native event and the
+    // withholding notices instead of re-deriving any of them. Absent on the
+    // admission-skip path (nothing ran to disposition).
+    ...(review.finalDisposition !== undefined ? { finalDisposition: review.finalDisposition } : {}),
     // #1449: a GATE as well as disclosure — the publish boundary refuses a
     // native approval while the state is not `complete`. Absent when off.
     ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),

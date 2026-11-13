@@ -94,7 +94,7 @@ import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTe
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, hasBlockingOpenFinding, isUnverifiedBlockingGrounding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
@@ -103,7 +103,11 @@ import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { applyNegativeEvidenceToRecord, negativeEvidenceRulesFromArtifact } from "../enforcement/negative-evidence.js";
 import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.js";
-import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
+import { markerReviewResult, isNativeVerdictMode, publishStepRuns } from "../publish/publish.js";
+import { computeFinalDisposition, reviewResultFromDisposition, type FinalDisposition } from "../disposition/final.js";
+import { buildDispositionEvidence } from "../disposition/engine-evidence.js";
+import { toolCapabilityFailure, toolMinSuccessfulFloorUnmet } from "../enforcement/enforce.js";
+import { isProvenHeadSha } from "../outcomes/schema.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
@@ -223,6 +227,15 @@ export interface RunReviewResult {
    * `partial` and withholds the native APPROVE (COMMENT), never a
    * manufactured blocking request. */
   requiredEvidenceState?: RequiredEvidenceState;
+  /** #1656: the run's authoritative final disposition — the ONE post-
+   * validation object the published recommendation, the machine handoff,
+   * the marker's `review_result`, the attestation and the native review
+   * event all consume. Computed once, post-enforcement, from the run's
+   * deterministic state plus the reason-coded evidence seam; also written
+   * to the run directory as `final-disposition.json` for the standalone
+   * publish read-back. Present on every review-producing run (including
+   * the model-unavailable notice path). */
+  finalDisposition?: FinalDisposition;
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -3088,6 +3101,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // not merely whether some part of the tool loop degraded.
   const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
   const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
+  // #1656: the loop's own recorded no-evidence reason — an evidence-
+  // availability fact in either lane, fed to the disposition as material
+  // `investigation_unavailable` evidence (never a route/tier rule).
+  const noEvidenceReason = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0 ? nativeLoopDegraded : null;
   // The authoritative trace-incomplete flag covers both unmet and
   // unverifiable rows. Policy and enforcement have finished before this
   // snapshot, so the final verdict and provenance are authoritative here.
@@ -3109,6 +3126,72 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     noEvidenceGathered,
     deterministicBlock,
   });
+  // ── #1656: the authoritative final disposition ─────────────────────────
+  // Computed ONCE, post-validation, from this run's own deterministic state
+  // plus the reason-coded evidence seam (the seam #1657/#1658/#1659 feed).
+  // Every downstream consumer — the published recommendation, the machine
+  // handoff, the marker's `review_result`, the attestation and the native
+  // review event — reads from THIS object; nothing else decides the event,
+  // and kind `approve` always means a certified APPROVE (the full APPROVE
+  // floor lives inside the disposition, #1656 audit delta).
+  const dispositionBuild = buildDispositionEvidence({
+    completenessChecks: Array.isArray(completenessResult?.result?.checks)
+      ? (completenessResult!.result.checks as Array<{ check?: unknown; status?: unknown; reason?: unknown }>)
+      : [],
+    obligations: resolvedObligations.obligations,
+    findings: Array.isArray(reviewRecord.findings) ? reviewRecord.findings : [],
+    // A tool CAPABILITY failure is material; the configured min-successful
+    // CALL-COUNT floor is advisory — a count never defines adequacy
+    // (#1656 audit delta).
+    toolCapabilityFailure: enforcementInputs.toolFailureEnabled
+      ? toolCapabilityFailure(enforcementInputs.toolHarness ?? null)
+      : null,
+    toolFloorUnmet: enforcementInputs.toolFailureEnabled
+      && toolMinSuccessfulFloorUnmet(enforcementInputs.toolHarness ?? null, enforcementInputs.toolMinSuccessful),
+    // A recorded no-evidence degradation is an evidence-availability fact
+    // in either lane — never a route/tier rule (#1656 audit delta).
+    noEvidenceReason: noEvidenceReason,
+    // The loop stopping early is disclosure, not a blanket veto (#1656
+    // audit delta).
+    partialCoverageStopReason: partialCoverage !== undefined ? partialCoverage.stop_reason : null,
+    // The trace's remaining incompleteness is proof-shape/coverage-repair
+    // territory — a compatibility diagnostic while #1658 is in flight
+    // (#1656 audit delta).
+    requirementTraceIncomplete: traceIncomplete,
+    // The exact-head CI floor: the CI gate's already-paid conclusion — a
+    // KNOWN failure can never certify an approval; a PENDING one withholds
+    // only when the #1594 head-bound evidence contract proves CI materially
+    // required (#1656 audit delta). No new forge call.
+    ciConclusion: traceCiState,
+    ciEvidenceContractActive: ciGateEvidence !== null,
+  });
+  // The objective approval scope gates (fork policy, publish mode): the
+  // same fail-closed rule `evaluateApprovalGuardrails` applies (an unknown
+  // fork state is treated as a fork), evaluated here so the disposition is
+  // the single object the publish boundary consumes.
+  const approveForksAllowed = (env.APPROVE_FORKS ?? "").trim().toLowerCase() === "true";
+  const forkState = context.isForkPr === "true" ? true : context.isForkPr === "false" ? false : null;
+  // The exact-head APPROVE floor: the reviewed head is a proven full git
+  // object id (the publish seam's exact-head currency re-check stays
+  // upstream of any submission), and a verdict-bearing publication binds to
+  // it. The body-only fallback (#1249) remains caught downstream by the
+  // attestation's `native_approval_unbound`.
+  const dispositionExactHead = isProvenHeadSha(context.headSha || String(pr.headRefOid ?? ""));
+  const finalDisposition: FinalDisposition = computeFinalDisposition({
+    reviewProduced: analysisEngine !== MODEL_UNAVAILABLE_ENGINE,
+    validVerdict: outputVerdict === "approve" || outputVerdict === "request_changes",
+    verdict: outputVerdict,
+    degraded: degradedGateBypass,
+    exactHead: dispositionExactHead,
+    publicationHeadBound: dispositionExactHead && isNativeVerdictMode(env.PUBLISH_MODE ?? ""),
+    blockingFindingOpen: hasBlockingOpenFinding(reviewRecord.findings),
+    evidenceProviderBlocker: enforcementInputs.evidenceBlockerEnabled === true && enforcementInputs.evidence?.has_blocker === true,
+    provenUnmetRequirement: dispositionBuild.provenUnmetRequirement,
+    verdictBearing: isNativeVerdictMode(env.PUBLISH_MODE ?? ""),
+    approvalScopeAllowed: !((forkState ?? true) && !approveForksAllowed),
+    evidence: dispositionBuild.evidence,
+  });
+  ws.write("final-disposition.json", Buffer.from(`${pyJsonDumps(finalDisposition)}\n`, "utf8"));
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
@@ -3227,21 +3310,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const confidenceProofPins = {
     headSha: context.headSha || String(pr.headRefOid ?? ""),
     baseSha: identity.baseSha ?? "",
-    reviewResult: markerReviewResult({
-      verdictPolicy,
-      verdict: outputVerdict,
-      findings: reviewRecord.findings,
-      requiredChecks: outputRequiredChecks,
-      partialCoverage,
-      degradedGateBypass,
-      // #1449: an undischarged derived obligation is missing coverage, so the
-      // review reads `partial` — never `clean`, and never a manufactured
-      // `issues`. Absent when the feature is off.
-      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
-      // #1505: unresolved required review evidence is a coverage state too —
-      // the review reads `partial`, never `clean`, while required evidence
-      // stayed ungathered. Absent when the contract was inactive.
-      ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1656: the marker's review_result is a PROJECTION of the authoritative
+    // disposition — the marker can never disagree with it.
+    reviewResult: reviewResultFromDisposition(finalDisposition, {
+      strict: verdictPolicy === "strict",
+      openFindings: Array.isArray(reviewRecord.findings) ? reviewRecord.findings.length : 0,
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
@@ -3533,21 +3606,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // still read "approve" (the strict mapping's own contract), so this is
     // the one output that surfaces the coverage gap on its own.
     incompleteReason,
-    reviewResult: markerReviewResult({
-      verdictPolicy,
-      verdict: outputVerdict,
-      findings: reviewRecord.findings,
-      requiredChecks: outputRequiredChecks,
-      partialCoverage,
-      degradedGateBypass,
-      // #1449: an undischarged derived obligation is missing coverage, so the
-      // review reads `partial` — never `clean`, and never a manufactured
-      // `issues`. Absent when the feature is off.
-      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
-      // #1505: unresolved required review evidence is a coverage state too —
-      // the review reads `partial`, never `clean`, while required evidence
-      // stayed ungathered. Absent when the contract was inactive.
-      ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1656: the marker's review_result is a PROJECTION of the authoritative
+    // disposition — the marker can never disagree with it.
+    reviewResult: reviewResultFromDisposition(finalDisposition, {
+      strict: verdictPolicy === "strict",
+      openFindings: Array.isArray(reviewRecord.findings) ? reviewRecord.findings.length : 0,
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
@@ -3691,6 +3754,8 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // #1505: the run's required-evidence state, only when the contract was
     // active — an inactive run keeps its bytes exactly.
     ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
+    // #1656: the authoritative final disposition (see the computation above).
+    finalDisposition,
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),

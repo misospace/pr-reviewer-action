@@ -22,6 +22,8 @@ import {
   applyToolHarnessFailureEnforcement,
   applyToolMinSuccessfulEnforcement,
   failClosedEnforcementFired,
+  toolCapabilityFailure,
+  toolMinSuccessfulFloorUnmet,
   normalizeEnforcedReviewMarkdown,
 } from "../src/enforcement/enforce.js";
 import { extractCoveragePayload, normalizeRequirementCoverage } from "../src/enforcement/requirement-coverage.js";
@@ -317,15 +319,16 @@ test("#1016 findings policy keeps an unverified blocker demotion blocking", () =
     capped_from: "blocker", grounding_status: "unverified", ...overrides,
   });
 
+  // #1656 (was #1016's gated-policy escalation): the unverified demotion no
+  // longer escalates the model approve — the authoritative disposition
+  // carries the `unverified_blocking_claim` MATERIAL unknown and withholds
+  // certification instead, so no code blocker is fabricated from unknown
+  // evidence and no approve silently certifies it either.
   const a = artifact({ findings: [demoted()] });
   applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(a.verdict_source, "findings");
-  assert.ok(
-    a.review_markdown.includes("1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)"),
-    `expected the unknown-evidence attribution in the note, got: ${a.review_markdown}`,
-  );
-  assert.ok(a.review_markdown.includes("model verdict was 'approve'._"));
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.verdict_source, "model");
+  assert.ok(!a.review_markdown.includes("escalated from structured findings"));
 
   // A positively REFUTED demotion is proof the claim is wrong: the model
   // approve stands and the note never implies an unverifiable blocker.
@@ -359,7 +362,7 @@ test("#1016 findings policy attributes a live blocker and an unverified demotion
   applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
   assert.equal(a.verdict, "request_changes");
   assert.ok(
-    a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 2; 1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016); model verdict was 'approve'._"),
+    a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 2; model verdict was 'approve'._"),
     `expected one composed attribution note, got: ${a.review_markdown}`,
   );
 });
@@ -533,9 +536,14 @@ test("applyAll counts evidence and tool enforcement, fallback, and applies settl
     evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
     toolHarness: { planning_error: "plan broke" }, threads: null, humanReviews: null, verdictPolicy: "model" };
   const both = artifact();
+  // #1656: the tool overlay still counts as an applied action (it
+  // discloses the capability failure in the body), but it no longer
+  // contributes a forcing reason to the enforcement banner — the
+  // disposition answers it with `investigation_unavailable` evidence.
   assert.equal(applyAllEnforcement(both, inputs), 2);
   assert.ok(both.review_markdown.includes("- Evidence provider blocker detected: scanner."));
-  assert.ok(both.review_markdown.includes("- Tool harness failure detected (plan broke)."));
+  assert.ok(!both.review_markdown.includes("- Tool harness failure detected (plan broke)."));
+  assert.ok(both.review_markdown.includes("## Tool Harness Failure\nThe tool harness failed during planning or execution (plan broke)."));
 
   const fallback = artifact();
   assert.equal(applyAllEnforcement(fallback, { ...inputs, evidenceBlockerEnabled: false, toolFailureEnabled: true,
@@ -559,11 +567,16 @@ test("evidence/tool helpers preserve exact sections, reasons, precedence, null b
   });
   assert.ok(evidence.review_markdown.endsWith("## Evidence Provider Blockers\nOne or more configured evidence providers reported blocker-level findings (sec). Resolve blocker findings before approval."));
 
+  // #1656: the overlay is an observable diagnostic — it discloses the
+  // failure and never touches the verdict.
   for (const [harness, reason] of [[{ planning_error: "planning", error: "execution", executed_request_count: 2 }, "planning"], [{ error: "execution" }, "execution"]] as Array<[any, string]>) {
     const a = artifact();
     const outcome = applyToolHarnessFailureEnforcement(a, harness);
-    assert.equal(outcome.reason, `Tool harness failure detected (${reason}). The tool harness failed during planning or execution; this workflow is configured fail-closed for tool harness failures.`);
+    assert.deepEqual(outcome, { applied: true, reason: "" });
     assert.ok(a.review_markdown.includes(`## Tool Harness Failure\nThe tool harness failed during planning or execution (${reason}).`));
+    assert.equal(a.verdict, "approve");
+    assert.equal(a.verdict_source, undefined);
+    assert.equal(toolCapabilityFailure(harness), reason);
   }
   assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), null), { applied: false, reason: "" });
   assert.deepEqual(applyToolMinSuccessfulEnforcement(artifact(), 1, { tool_results: [{ status: "ok" }] }), { applied: false, reason: "" });
@@ -590,11 +603,14 @@ test("#1606: the tool-harness failure check fires for a run whose every tool cal
   };
   const a = artifact();
   const outcome = applyToolHarnessFailureEnforcement(a, allFailed);
-  assert.equal(outcome.applied, true);
-  assert.equal(outcome.reason, "Tool harness failure detected (all tool requests failed). The tool harness failed during planning or execution; this workflow is configured fail-closed for tool harness failures.");
+  // #1656: the failure is disclosed and reason-coded for the disposition —
+  // it no longer forces a verdict (an abstention, never a fabricated block).
+  assert.deepEqual(outcome, { applied: true, reason: "" });
   assert.ok(a.review_markdown.includes("## Tool Harness Failure\nThe tool harness failed during planning or execution (all tool requests failed)."));
-  assert.equal(a.verdict, "request_changes");
-  assert.equal(a.verdict_source, "enforcement");
+  assert.ok(a.review_markdown.includes("no approval is certified"));
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.verdict_source, undefined);
+  assert.equal(toolCapabilityFailure(allFailed), "all tool requests failed");
 
   // A run with at least one successful call stays silent.
   const mixed = {
@@ -624,22 +640,18 @@ test("#1606: the tool-harness failure check fires for a run whose every tool cal
   };
   assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), none), { applied: false, reason: "" });
 
-  // The fail-closed signal agrees with the overlay: an all-failed run can
-  // never be relaxed into an approval.
+  // #1656: a capability failure is no longer a fail-closed forcing
+  // condition — the authoritative disposition answers it with
+  // `investigation_unavailable` evidence (an abstention), so the
+  // fail-closed FORCING signal stays silent for it.
   assert.equal(failClosedEnforcementFired({
     evidenceBlockerEnabled: false,
-    toolFailureEnabled: true,
-    toolMinSuccessful: 0,
     evidence: null,
-    toolHarness: allFailed,
-  }), true);
-  assert.equal(failClosedEnforcementFired({
-    evidenceBlockerEnabled: false,
-    toolFailureEnabled: true,
-    toolMinSuccessful: 0,
-    evidence: null,
-    toolHarness: mixed,
   }), false);
+  assert.equal(toolCapabilityFailure(allFailed), "all tool requests failed");
+  assert.equal(toolCapabilityFailure(mixed), null);
+  assert.equal(toolMinSuccessfulFloorUnmet(none, 2), true);
+  assert.equal(toolMinSuccessfulFloorUnmet(none, 0), false);
 });
 
 test("requirement coverage credits grounded claims, downgrades unsafe claims, and reports ledger errors", () => {
