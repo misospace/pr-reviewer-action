@@ -257,7 +257,13 @@ export type ModelCallOutcome =
        * transport's one-shot structured-output strip retry — the verdict was
        * produced WITHOUT the parameter, so effective-format reporting must
        * reflect the stripped state, not the configuration. */
-      strippedStructuredOutput?: StructuredOutputSurface | undefined }
+      strippedStructuredOutput?: StructuredOutputSurface | undefined;
+      /** #1655 (review round 3): set only when the successful request came
+       * from the transport's one-shot system cache checkpoint strip retry —
+       * the verdict was produced with the system prompt as the PLAIN STRING,
+       * so persisted request state must record the degradation instead of
+       * letting the pre-call artifact stand as the wire's word. */
+      strippedSystemCacheCheckpoint?: true | undefined }
   | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
   | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
   | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean; diagnostics?: ResponseDiagnostics | undefined;
@@ -440,6 +446,9 @@ export async function callModelTier(
         ...(raisedTokens !== null ? { budgetRaisedTo: raisedTokens } : {}),
         ...(outcome.strippedStructuredOutput !== undefined
           ? { strippedStructuredOutput: outcome.strippedStructuredOutput }
+          : {}),
+        ...(outcome.strippedSystemCacheCheckpoint === true
+          ? { strippedSystemCacheCheckpoint: true }
           : {}),
       };
     } catch (error) {

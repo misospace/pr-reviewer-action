@@ -103,7 +103,13 @@ export type ChatRequestOutcome =
        * one-shot strip retry — the request that produced it did NOT carry the
        * named parameter, so "what was enforced" reporting must reflect the
        * stripped state, not the configuration. */
-      strippedStructuredOutput?: StructuredOutputSurface | undefined }
+      strippedStructuredOutput?: StructuredOutputSurface | undefined;
+      /** #1655 (review round 3): set only when THIS successful response came
+       * from the system cache checkpoint strip retry — the request that
+       * produced it sent the system prompt as the PLAIN STRING, so persisted
+       * request state must not stand as if the checkpointed block array had
+       * been the wire bytes. Same reporting posture as the tag above. */
+      strippedSystemCacheCheckpoint?: true | undefined }
   | { status: "failure"; failure: TransportFailure };
 
 /**
@@ -260,8 +266,15 @@ async function runChatRequestLoop(
         // The nested loop reported its own wire calls, so this branch reports
         // nothing more. The outcome carries NO structured-output tag: this
         // strip dropped the checkpoint, not the structured-output parameter,
-        // and that tag means exactly one thing.
-        return runChatRequestLoop({ ...checkpoint.input, requestTimeoutSec: attemptTimeoutSec() }, clampRemaining, false, attemptBase + attempt);
+        // and that tag means exactly one thing. It DOES carry its own tag,
+        // mirroring the strip above, so callers can report the EFFECTIVE
+        // request bytes — the plain-string system — instead of letting a
+        // pre-call persisted artifact stand as the wire's word.
+        const retryOutcome = await runChatRequestLoop({ ...checkpoint.input, requestTimeoutSec: attemptTimeoutSec() }, clampRemaining, false, attemptBase + attempt);
+        if (retryOutcome.status === "ok") {
+          return { ...retryOutcome, strippedSystemCacheCheckpoint: true };
+        }
+        return retryOutcome;
       }
       if (
         outcome.failure.kind === "http_status"

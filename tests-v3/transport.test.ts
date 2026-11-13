@@ -2059,6 +2059,9 @@ test("#1655 review: a 400 naming cache_control is retried once with the plain-st
     // The strip dropped the CHECKPOINT, not the structured-output parameter:
     // that tag means exactly one thing and stays untouched here.
     assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, undefined);
+    // And it carries its OWN tag: the successful request went out with the
+    // plain-string system, so callers must report the effective state.
+    assert.equal(outcome.status === "ok" && outcome.strippedSystemCacheCheckpoint, true);
   } finally {
     await server.close();
   }
@@ -2172,6 +2175,11 @@ test("#1655 review (round 3): a 415/422 shape rejection naming the checkpoint de
       assert.equal(outcome.status, "ok", `HTTP ${status} degrades instead of failing the review`);
       assert.equal(requests, 2, `HTTP ${status}: exactly one follow-up wire call`);
       assert.equal(bodies[1]!.system, "SYSTEM", `HTTP ${status}: the retry sent the plain string`);
+      assert.equal(
+        outcome.status === "ok" && outcome.strippedSystemCacheCheckpoint,
+        true,
+        `HTTP ${status}: the outcome is tagged with the degradation`,
+      );
     } finally {
       await server.close();
     }

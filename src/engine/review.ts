@@ -4387,7 +4387,11 @@ async function callTier(
     // #1655: the persisted request artifact must show the bytes the wire
     // actually carries, and the wire body is built by the same review lane
     // (`src/model/call.ts` → `requestConfig`), so BOTH sides state the same
-    // checkpoint decision. The artifact and the wire body cannot drift.
+    // checkpoint decision and the artifact cannot drift from the request at
+    // construction. The one case where the successful wire bytes differ is
+    // the transport's checkpoint strip: the artifact then keeps the
+    // FIRST-sent bytes (the v2 once-write semantics) and the effective-
+    // request record written beside it after the call states the degradation.
     anthropicCacheCheckpoint: true,
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
@@ -4484,6 +4488,23 @@ async function callTier(
       ws.write(effectiveArtifact, Buffer.from(`${pyJsonDumps({
         removed: stripped,
         note: "structured output removed after HTTP 400; request recovered prompt-only",
+        attempts: outcome.attempts,
+      })}\n`, "utf8"));
+    }
+    // #1655 (review round 3): the SAME truth-telling for the system cache
+    // checkpoint. The initial artifact above records the FIRST-sent bytes;
+    // when the endpoint rejected the checkpointed shape and the transport
+    // degraded to the plain-string system, the verdict came WITHOUT the
+    // checkpoint, so the degradation is announced once and persisted in the
+    // same bounded, secret-free effective-request record. The shared strip
+    // budget makes at most one of the two companion notes possible, so the
+    // artifact names cannot collide.
+    if (outcome.strippedSystemCacheCheckpoint === true) {
+      log(`WARNING: ${profile.label}: the endpoint rejected the system prompt-cache checkpoint; the request was retried once with the plain string system prompt and ran without the checkpoint`);
+      const effectiveArtifact = requestArtifact.replace(/\.json$/, ".effective.json");
+      ws.write(effectiveArtifact, Buffer.from(`${pyJsonDumps({
+        removed: "system cache checkpoint",
+        note: "prompt-cache checkpoint removed after a request-shape rejection; retried once with the plain string system prompt",
         attempts: outcome.attempts,
       })}\n`, "utf8"));
     }
