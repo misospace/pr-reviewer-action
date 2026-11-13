@@ -4641,9 +4641,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // resolutions, never their sum. Side by side, each held requests back near
   // the same ceiling, so a dependency-update PR had most of its remaining
   // budget reserved twice over by one loop.
+  // #1629: the reservations are a portion of the BUDGET THE LOOP WILL GET —
+  // the effective (envelope-capped) budget, never the pre-envelope number, or
+  // a capped low-risk run could reserve more than its whole envelope.
   const proseReserve = computeRequiredEvidenceReservation(
     requiredEvidence.filter((row) => row.obligation === undefined).length,
-    maxRequests.budget,
+    effectiveMaxRequests,
   );
   const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve);
   if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
@@ -4690,8 +4693,10 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     workspaceRoot,
     maxResponseBytes,
     requestTimeout,
-maxRequests: maxRequests.budget,
-reserveForRequiredEvidence,
+    // #1629: the loop sees the low-risk envelope's effective budget — the
+    // cap binds the loop's own gate, not just the artifact's telemetry.
+    maxRequests: effectiveMaxRequests,
+    reserveForRequiredEvidence,
 requiredEvidence,
 ...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
