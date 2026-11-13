@@ -86,6 +86,24 @@ export interface OpenAiWireBody {
   reasoning_effort?: string;
 }
 
+/**
+ * #1655: Anthropic's cache-checkpointed text block — the shape the native
+ * tool loop's Conversation renderer already places on its system breakpoint
+ * (`src/model/conversation.ts`). One block, one ephemeral checkpoint.
+ */
+export interface AnthropicSystemCacheBlock {
+  type: "text";
+  text: string;
+  cache_control: { type: "ephemeral" };
+}
+
+/**
+ * #1655: the `system` field of an Anthropic request. The one-shot corpus
+ * request carries the system prompt as a single cache-checkpointed text
+ * block; an empty system stays the plain string (never an empty-block array).
+ */
+export type AnthropicSystem = string | [AnthropicSystemCacheBlock];
+
 export interface AnthropicWireBody {
   model: string;
   max_tokens: number;
@@ -93,7 +111,7 @@ export interface AnthropicWireBody {
   /** #1655: the one-shot request carries the system prompt as a single
    * cache-checkpointed text block (mirroring the Conversation renderer's
    * stable breakpoint); an empty system passes through as the plain string. */
-  system: string | [{ type: "text"; text: string; cache_control: { type: "ephemeral" } }];
+  system: AnthropicSystem;
   messages: [{ role: "user"; content: string }];
   temperature?: number;
   /** #998/#1047: Anthropic's own container for output controls; `effort` is

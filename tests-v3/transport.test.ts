@@ -2008,6 +2008,216 @@ test("#1047: the strip is strictly evidence-gated and once-per-request", async (
   }
 });
 
+// ── #1655 review: the Anthropic system cache checkpoint strip on a 400 ─────
+// The corpus-only Anthropic request carries a prompt-cache checkpoint on its
+// system prompt (#1655). A gateway that only accepts a STRING `system` answers
+// HTTP 400, and the review would die on bytes the pre-#1655 request never
+// had. The transport degrades the request once instead — the same posture the
+// #1047 structured-output strip already takes, on the same single strip budget.
+
+test("#1655 review: a 400 naming cache_control is retried once with the plain-string system", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "cache_control is not supported by this endpoint" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false,
+        system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: "u" }],
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2, "exactly one follow-up wire call");
+    assert.deepEqual(
+      bodies[0]!.system,
+      [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+      "the first attempt carried the checkpoint",
+    );
+    // The retry carries the exact pre-#1655 bytes: the system prompt back as
+    // the plain string.
+    assert.equal(bodies[1]!.system, "SYSTEM", "the retry sent the plain string");
+    // The successful outcome of the follow-up is the one returned.
+    assert.equal(outcome.status === "ok" && outcome.response.content, "ok");
+    // The strip dropped the CHECKPOINT, not the structured-output parameter:
+    // that tag means exactly one thing and stays untouched here.
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1655 review: a 400 naming the system field's type is stripped the same way", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "system must be a string" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false,
+        system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: "u" }],
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2);
+    assert.equal(bodies[1]!.system, "SYSTEM");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1655 review: a native-loop-like body is never stripped", async () => {
+  // The native tool loop's body carries tool definitions and a moving message
+  // breakpoint. It is not the request shape #1655 changed, so its behavior is
+  // unchanged: the 400 fails the request, with no follow-up call.
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "cache_control is not supported by this endpoint" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false,
+        system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+        tools: [{ name: "read_file", input_schema: { type: "object" } }],
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "u", cache_control: { type: "ephemeral" } }],
+        }],
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(requests, 1, "the native tool loop keeps its bytes: no follow-up call");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1655 review: a 400 that does not name the checkpoint surface never strips", async () => {
+  // "internal system error" names no surface: a bare "system" is too weak a
+  // signal, so the strip budget is not spent on it.
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "internal system error" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false,
+        system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: "u" }],
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(requests, 1, "the body named no surface: no follow-up call");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1655 review: the checkpoint strip happens at most once per request", async () => {
+  // The strip shares the #1047 budget: a follow-up that fails the same way is
+  // the request's failure, never a third attempt.
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "cache_control is not supported by this endpoint" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false,
+        system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: "u" }],
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(requests, 2, "one strip retry, never a third attempt");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1655 review: an openai-format body is never stripped", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "cache_control is not supported by this endpoint" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 64, messages: [{ role: "user", content: "u" }] }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(requests, 1, "the openai wire carries no checkpoint: no follow-up call");
+  } finally {
+    await server.close();
+  }
+});
+
 // ── #1037: ai-extra-headers on the wire ───────────────────────────────────
 
 test("#1037: extra headers ride every request format with case-preserved names", async () => {

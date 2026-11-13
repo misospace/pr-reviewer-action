@@ -1,4 +1,4 @@
-import type { AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
+import type { AnthropicSystem, AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
 
 /**
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
@@ -236,25 +236,34 @@ export function wireEffortOf(payload: TransportWirePayload): string {
 }
 
 /**
- * #1655: the one-shot corpus-only review request carries no `cache_control`
- * marker, so Anthropic's explicit prefix cache never engages for it — unlike
+ * #1655: the one-shot corpus-only review request carried no `cache_control`
+ * marker, so Anthropic's explicit prefix cache never engaged for it — unlike
  * the native tool loop, whose Conversation renderer already places
- * system/tool/message breakpoints (#263 Part 2). The corpus is assembled once
- * per review, but a tier chain (primary → fallback) and the smart-escalation
- * pass re-send the SAME system prompt through separate `buildModelRequest`
- * calls, so a breakpoint on the system block lets each of those calls reuse
- * the cached prefix.
+ * system/tool/message breakpoints (#263 Part 2).
+ *
+ * WHO reuses the cached prefix, precisely: Anthropic's cache entries are
+ * scoped to the model that wrote them, so the reuse is SAME-MODEL reuse only.
+ * Inside one run that is the non-streamed verdict retry
+ * (`src/model/call.ts:617`), which re-sends the identical prefix to the SAME
+ * model; across runs it is a later review of the same repository inside the
+ * provider's cache TTL, whose system prompt and standards prefix are
+ * byte-identical. A tier chain that switches models (primary → fallback, or
+ * the smart-escalation pass on its own model) does NOT reuse the primary's
+ * entry unless the operator points those lanes at the SAME model — the
+ * fallback lane normally runs `ai-fallback-model`, so the common case is no
+ * cross-lane reuse at all.
  *
  * Shaped exactly like the Conversation renderer's stable system breakpoint
  * (`[{ type: "text", text, cache_control: { type: "ephemeral" } }]`) so the
- * two surfaces cache identically. An empty system passes through unchanged
+ * two surfaces cache identically and a gateway that already serves the native
+ * loop already accepts this shape. An empty system passes through unchanged
  * (never an empty-block array), and the OpenAI branch is untouched —
  * `cache_control` is Anthropic wire-only. Scope note: this is the
  * system-prompt checkpoint only; the user message (corpus + instruction) is
  * deliberately left as a plain string, keeping the request at ONE breakpoint
  * and the user-content bytes byte-identical to before.
  */
-function anthropicSystemCacheCheckpoint(system: string): unknown {
+function anthropicSystemCacheCheckpoint(system: string): AnthropicSystem {
   if (system === "") return system;
   return [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
 }
@@ -280,7 +289,10 @@ function anthropicSystemCacheCheckpoint(system: string): unknown {
 export function buildModelRequest(config: ModelRequestConfig): TransportWirePayload {
   const content = userContent(config);
   if (config.apiFormat === "anthropic") {
-    const body: Record<string, unknown> = {
+    // Typed as the wire contract itself, not a loose record: the #1655 system
+    // checkpoint is CHECKED at this construction site, so the `system` union
+    // and the block shape the helper builds cannot drift apart unnoticed.
+    const body: AnthropicWireBody = {
       model: config.model,
       max_tokens: config.maxTokens,
       stream: config.stream,
@@ -304,7 +316,7 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       : undefined;
     const outputConfig = buildAnthropicOutputConfig(effort, format);
     if (outputConfig !== null) body.output_config = outputConfig;
-    return { endpointPath: "/messages", body: body as unknown as TransportWirePayload["body"] };
+    return { endpointPath: "/messages", body };
   }
   const body: Record<string, unknown> = {
     model: config.model,

@@ -22,6 +22,8 @@ import {
   redactTextDeep,
 } from "../src/context/redact.js";
 import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
+import { buildModelRequest } from "../src/model/request.js";
+import type { AnthropicWireBody } from "../src/model/types.js";
 
 // #876: repository SOURCE content (tool reads, grep matches, blame, related-code
 // snippets) must survive structurally under redaction — every rule replaces
@@ -867,6 +869,47 @@ test("#1149: redactTextDeep inherits maskKnownSecretsDeep's depth cutoff (fails 
   assert.equal(protoEntry.keep, 1);
   assert.equal(out.safe, "value");
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
+});
+
+test("#1655: redactTextDeep recurses into the Anthropic system cache-checkpoint block array", () => {
+  // #1655 nests the one-shot Anthropic system prompt inside a block array
+  // (one cache-checkpointed text block) instead of a top-level string. The
+  // persisted request artifacts (e.g. `confidence-request.json`) are written
+  // through `redactTextDeep`, so the nested block's TEXT must still be
+  // masked: an array-shaped value is no reason to skip a leaf. The secret
+  // below is NOT credential-shaped, so only the configured-exact layer can
+  // mask it — a proof that the ARRAY path is walked, not that some generic
+  // rule happened to fire.
+  const CONFIGURED = "gw-8f2a1c9d3b7e4a10";
+  const payload = buildModelRequest({
+    apiFormat: "anthropic",
+    model: "test-model",
+    system: `SYSTEM rules carrying ${CONFIGURED}`,
+    user: "USER",
+    corpus: "CORPUS",
+    stream: false,
+    shape: "default",
+    maxTokens: 8192,
+    temperature: 0.1,
+    responseFormat: "off",
+    tokensParam: "max_tokens",
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
+    anthropicStructuredOutputSupported: false,
+  });
+  const masked = redactTextDeep(payload.body, [CONFIGURED]);
+  const serialized = JSON.stringify(masked);
+  assert.equal(serialized.includes(CONFIGURED), false, "the configured secret survived inside the nested system block");
+  const body = masked as AnthropicWireBody;
+  assert.equal(Array.isArray(body.system), true, "the block array survives the redaction");
+  if (typeof body.system !== "string") {
+    // Shape preserved: one text block, still carrying its ephemeral
+    // checkpoint, with only the secret-bearing text masked.
+    assert.equal(body.system.length, 1);
+    assert.equal(body.system[0]!.type, "text");
+    assert.equal(body.system[0]!.cache_control.type, "ephemeral");
+    assert.equal(body.system[0]!.text, `SYSTEM rules carrying ${KNOWN_SECRET_REDACTED}`);
+  }
 });
 
 test("#1333: containsSecretShapedContent detects credential shapes a durable payload must not carry", () => {

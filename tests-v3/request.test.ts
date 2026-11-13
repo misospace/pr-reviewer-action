@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA, wireEffortOf } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
-import type { ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
+import type { AnthropicWireBody, ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
 // json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
@@ -117,16 +117,23 @@ test("#1655: anthropic system prompt carries one ephemeral cache checkpoint; emp
   // breakpoint shape mirrors the Conversation renderer's stable system
   // breakpoint exactly.
   const payload = buildModelRequest(config({ apiFormat: "anthropic" }));
-  const anthropicBody = payload.body as unknown as { system: unknown };
+  const anthropicBody = payload.body as AnthropicWireBody;
   assert.deepEqual(anthropicBody.system, [
     { type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } },
   ]);
+  // The widened `system` union is NARROWED here, not cast: the block arm is
+  // the tuple the builder produces, so a shape change is a typecheck failure
+  // at the construction site (#1655 review).
+  if (typeof anthropicBody.system !== "string") {
+    assert.equal(anthropicBody.system[0]!.type, "text");
+    assert.equal(anthropicBody.system[0]!.cache_control.type, "ephemeral");
+  }
   // Exactly one breakpoint on this surface — the user message stays a plain
   // string, byte-identical to before.
   assert.equal(JSON.stringify(payload.body).match(/"cache_control"/g)?.length, 1);
   // An empty system passes through unchanged — never an empty-block array.
   const empty = buildModelRequest(config({ apiFormat: "anthropic", system: "" }));
-  assert.equal((empty.body as unknown as { system: unknown }).system, "");
+  assert.equal((empty.body as AnthropicWireBody).system, "");
   // The OpenAI branch never carries cache_control — it is Anthropic wire-only.
   const openai = buildModelRequest(config({ apiFormat: "openai" }));
   assert.equal(JSON.stringify(openai.body).includes("cache_control"), false);
