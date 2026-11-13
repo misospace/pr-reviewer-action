@@ -30,6 +30,11 @@ function config(overrides: Partial<ModelRequestConfig> = {}): ModelRequestConfig
     anthropicEffortSupported: false,
     // #1047: the structured-output opt-in, default off for byte compatibility.
     anthropicStructuredOutputSupported: false,
+    // #1655: ON by default here because this helper describes the REVIEW
+    // request — the lane whose transport can degrade a gateway that rejects
+    // the cache marker. The one-attempt lanes (the confidence scorer, the
+    // follow-up answer executor) turn it off; their own tests pin that.
+    anthropicCacheCheckpoint: true,
     ...overrides,
   };
 }
@@ -140,6 +145,23 @@ test("#1655: anthropic system prompt carries one ephemeral cache checkpoint; emp
   const openaiBody = openai.body as unknown as { messages: { role: string; content: unknown }[] };
   assert.equal(openaiBody.messages[0]!.role, "system");
   assert.equal(openaiBody.messages[0]!.content, "SYSTEM");
+});
+
+test("#1655 review: the checkpoint rides only the lanes whose transport can degrade it", () => {
+  // The compatibility repair for a gateway that rejects the cache marker is
+  // wired into the REVIEW lane's transport (`runChatRequestLoop`). The
+  // one-attempt lanes — the confidence scorer and the follow-up answer
+  // executor — make exactly ONE wire attempt by contract, so they cannot
+  // retry without the marker: a gateway that accepts only a string `system`
+  // would answer 400 and the capability that call exists to produce would be
+  // lost. Their requests therefore carry the plain-string system prompt.
+  const payload = buildModelRequest(config({ apiFormat: "anthropic", anthropicCacheCheckpoint: false }));
+  const body = payload.body as AnthropicWireBody;
+  assert.equal(body.system, "SYSTEM", "the system prompt stays the plain string the lane always sent");
+  assert.equal(JSON.stringify(payload.body).includes("cache_control"), false, "no cache marker anywhere in the body");
+  // The OpenAI wire is unaffected either way — the marker is Anthropic-only.
+  const openai = buildModelRequest(config({ apiFormat: "openai", anthropicCacheCheckpoint: false }));
+  assert.equal(JSON.stringify(openai.body).includes("cache_control"), false);
 });
 
 test("anthropic omits temperature when empty and supports trailing_task", () => {

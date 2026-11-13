@@ -258,6 +258,12 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // Unasserted, the Anthropic wire carries no effort/format at all.
     anthropicEffortSupported: profile.anthropicEffortSupported,
     anthropicStructuredOutputSupported: profile.structuredOutputSupported,
+    // #1655 review: the scorer makes EXACTLY ONE wire attempt (the boundary
+    // this module enforces), so it cannot retry without a marker it carries:
+    // a gateway that accepts only a string `system` would answer 400 and the
+    // confidence score would be lost. The scorer's request therefore keeps
+    // the plain-string system prompt it always sent.
+    anthropicCacheCheckpoint: false,
   });
   // #998: the effort this dispatch carries, read back from the body the
   // transport sends — never re-derived from the profile.

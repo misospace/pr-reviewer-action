@@ -4384,6 +4384,11 @@ async function callTier(
     reasoningEffort: profile.reasoningEffort,
     anthropicEffortSupported: profile.anthropicEffortSupported,
     anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
+    // #1655: the persisted request artifact must show the bytes the wire
+    // actually carries, and the wire body is built by the same review lane
+    // (`src/model/call.ts` → `requestConfig`), so BOTH sides state the same
+    // checkpoint decision. The artifact and the wire body cannot drift.
+    anthropicCacheCheckpoint: true,
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");

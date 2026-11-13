@@ -236,7 +236,7 @@ export function wireEffortOf(payload: TransportWirePayload): string {
 }
 
 /**
- * #1655: the one-shot corpus-only review request carried no `cache_control`
+ * #1655: the one-shot corpus-only REVIEW request carried no `cache_control`
  * marker, so Anthropic's explicit prefix cache never engaged for it — unlike
  * the native tool loop, whose Conversation renderer already places
  * system/tool/message breakpoints (#263 Part 2).
@@ -262,6 +262,12 @@ export function wireEffortOf(payload: TransportWirePayload): string {
  * system-prompt checkpoint only; the user message (corpus + instruction) is
  * deliberately left as a plain string, keeping the request at ONE breakpoint
  * and the user-content bytes byte-identical to before.
+ *
+ * WHO may carry it (#1655 review): only the review lanes, whose transport
+ * can DEGRADE a gateway that rejects the marker (the checkpoint strip in
+ * `src/transport/transport.ts`). The one-attempt lanes — the confidence
+ * scorer and the follow-up answer executor — cannot retry without it, so
+ * they send the system prompt as the plain string they always sent.
  */
 function anthropicSystemCacheCheckpoint(system: string): AnthropicSystem {
   if (system === "") return system;
@@ -281,6 +287,9 @@ function anthropicSystemCacheCheckpoint(system: string): AnthropicSystem {
  *   `anthropicStructuredOutputSupported` opt-in is set; `json_object` has no
  *   Anthropic-native equivalent and is never sent or translated, so an
  *   un-opted-in or `json_object` configuration leaves the bytes unchanged.
+ *   #1655: it carries the `system` prompt-cache checkpoint only when the
+ *   lane's own `anthropicCacheCheckpoint` decision is set — the review lanes,
+ *   whose transport can degrade a gateway that rejects the marker.
  * - OpenAI-compatible: the token field flips wholesale via `tokensParam`
  *   (never both), temperature is omitted iff empty, stream_options is
  *   attached only while streaming, and #998 `reasoning_effort` is sent
@@ -296,7 +305,10 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       model: config.model,
       max_tokens: config.maxTokens,
       stream: config.stream,
-      system: anthropicSystemCacheCheckpoint(config.system),
+      // #1655 review: the checkpoint rides ONLY the lanes whose transport can
+      // degrade a gateway that rejects it (the review lanes). A lane that
+      // cannot retry without it sends the plain string it always sent.
+      system: config.anthropicCacheCheckpoint ? anthropicSystemCacheCheckpoint(config.system) : config.system,
       messages: [{ role: "user", content }],
     };
     if (config.temperature !== "") body.temperature = config.temperature;

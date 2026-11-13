@@ -896,6 +896,9 @@ test("#1655: redactTextDeep recurses into the Anthropic system cache-checkpoint 
     reasoningEffort: "",
     anthropicEffortSupported: false,
     anthropicStructuredOutputSupported: false,
+    // #1655: the review lane's request — the one that carries the nested
+    // cache-checkpoint block array this test proves the redactor walks.
+    anthropicCacheCheckpoint: true,
   });
   const masked = redactTextDeep(payload.body, [CONFIGURED]);
   const serialized = JSON.stringify(masked);

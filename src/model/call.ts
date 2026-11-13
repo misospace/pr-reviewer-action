@@ -287,6 +287,11 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
     // #1047: forwarded so the Anthropic wire family can enforce the verdict
     // schema only under the lane's own endpoint assertion.
     anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
+    // #1655: the review request is the one #1655 scoped, and this lane's
+    // transport can degrade a gateway that rejects the cache marker (the
+    // checkpoint strip). The one-attempt lanes never build a request through
+    // here.
+    anthropicCacheCheckpoint: true,
   };
 }
 
