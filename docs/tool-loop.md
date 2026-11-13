@@ -119,6 +119,35 @@ signals come from `pr.json`/`pr-files.json` and the per-role specialist lead
 artifacts already in the harness workspace; a workspace without size signals
 just uses the tier default.
 
+#### Low-risk evidence envelope (#1629)
+
+A derived budget (tier-default or size-scaled source only) on the ordinary
+primary/fallback routes is additionally narrowed when the trusted
+deterministic classification proves the low-risk shape: **no risk flags at
+all**, and either a digest-only kind (`image_digest_only`,
+`renovate_digest_only` — a single local verification row, no upstream
+version range to evidence) or a lockfile-only refresh whose #1595 triage
+parsed and found **zero material bumps** (the exact #1618 scoped-review
+semantics). The envelope is `4 + 2 × mandatory obligation rows` requests,
+clamped to **6..12** — mandatory evidence stays reachable; the optional
+archaeology around it is what gets bounded. Any risk flag retains the full
+envelope (risk escalation outranks proportionality), as do the
+obligation-bearing image/chart families, a material lockfile bump, an
+unparseable triage, an explicit or route-override budget, the deep smart
+route, and an absent classification artifact (fail open). The required
+evidence reservations are computed against the effective (capped) budget, so
+the reserved tail can never exceed the envelope.
+
+The decision rides the artifact and the telemetry as `low_risk_budget`
+(`envelope`: `capped`/`retained`, closed `basis` vocabulary —
+`digest-only`, `low-risk-lockfile`, `risk-flags`, `material-lockfile`,
+`unparseable-triage`, `obligation-bearing-kind`, `no-signal` — plus
+`mandatory_rows` and the `cap`), and a capped run reports
+`tool_budget_source: low-risk-cap`. The generic
+`obligations-settled` early stop (#1627) is the completion-aware
+counterpart: once every mandatory row has settled with budget left, the
+loop stops exploring instead of spending the envelope on optional work.
+
 ### Round cap
 
 A round is one model turn. `tool-max-rounds` left empty (the default)

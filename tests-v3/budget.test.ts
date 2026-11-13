@@ -4,6 +4,9 @@ import {
   resolveToolMaxRequests,
   sizeScaledToolBudget,
   toolBudgetSizeFromArtifacts,
+  lowRiskToolBudgetCap,
+  LOW_RISK_BUDGET_MIN_REQUESTS,
+  LOW_RISK_BUDGET_MAX_REQUESTS,
   TOOL_REQUEST_HARD_MAX,
   TOOL_REQUEST_TIER_DEFAULTS,
 } from "../src/tools/budget.js";
@@ -107,4 +110,53 @@ test("#810: the size signal loads from the artifacts the harness can see", () =>
   assert.deepEqual(empty, { changedFiles: 0, changedLines: 0, specialistLeads: 0 });
   const broken = toolBudgetSizeFromArtifacts(() => "{not json");
   assert.deepEqual(broken, { changedFiles: 0, changedLines: 0, specialistLeads: 0 });
+});
+
+// ── #1629: the deterministic low-risk evidence envelope ──────────────────
+
+test("#1629: a digest-only kind with no risk flags caps the envelope at the mandatory-row floor", () => {
+  // The #12074 shape: one local verification row, no risk flags.
+  const cap = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 });
+  assert.deepEqual(cap, { cap: LOW_RISK_BUDGET_MIN_REQUESTS, basis: "digest-only", mandatoryRows: 1 });
+  assert.equal(cap!.cap, 6);
+  const renovate = lowRiskToolBudgetCap({ prKind: "renovate_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 0 });
+  assert.deepEqual(renovate, { cap: 6, basis: "digest-only", mandatoryRows: 0 });
+});
+
+test("#1629: the envelope scales with enforced mandatory rows and clamps at the ceiling", () => {
+  // The #1595/#1618 low-risk lockfile shape: three scoped rows.
+  const lockfile = lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 });
+  assert.deepEqual(lockfile, { cap: 10, basis: "low-risk-lockfile", mandatoryRows: 3 });
+  // Many rows never exceed the ceiling — no per-package archaeology rides
+  // under a low-risk classification.
+  const many = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 40 });
+  assert.equal(many!.cap, LOW_RISK_BUDGET_MAX_REQUESTS);
+});
+
+test("#1629: any risk flag retains the full envelope — risk escalation outranks proportionality", () => {
+  for (const flags of [1, 2, 5]) {
+    assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: flags, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+    assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: flags, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
+  }
+});
+
+test("#1629: the lockfile envelope opens only on the #1595 positive proof", () => {
+  // Material bump: full envelope.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 1, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
+  // Unparseable triage fails closed to material.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 0, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+  // No triage at all: the digest kinds are the only class left, and an
+  // app_code/dependency kind without proof retains everything.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "app_code", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 2 }), null);
+  // The obligation-bearing image/chart families deliberately stay outside
+  // the envelope: their #1379 upstream-evidence rows need real budget.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "renovate_image_update", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 4 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_update", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+});
+
+test("#1629: unshaped signals fail open — the envelope narrows only on positive proof", () => {
+  assert.equal(lowRiskToolBudgetCap({ prKind: "", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: -1, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: -3 }), null);
 });

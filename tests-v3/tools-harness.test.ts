@@ -4976,3 +4976,161 @@ test("#1627: the verdict turn carries the proof index when the loop executed cal
   assert.match(verdictUser, /- call-1 — `read_file` \(ok\)/);
   assert.match(verdictUser, /cites, by id, at least one executed call/);
 });
+
+// ── #1629: the deterministic low-risk evidence envelope ──────────────────
+
+test("#1629: a no-risk image-digest PR caps the derived budget to the mandatory-row envelope and the loop stops on it", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const files = ["src/a1.ts", "src/a2.ts", "src/a3.ts", "src/a4.ts", "src/a5.ts", "src/a6.ts", "src/a7.ts", "src/a8.ts"];
+  for (const file of files) fs.writeFileSync(path.join(root, file), "export const a = 1;\n");
+  // One deterministic explorer trace, used for BOTH runs: a batch-heavy model
+  // that demands 8 calls in 4 rounds before emitting its verdict. The
+  // envelope's cut is the delta between the two runs on this same script.
+  const responses: unknown[] = [];
+  for (let batch = 0; batch < 4; batch++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * batch, 2 * batch + 1].map((offset, i) => ({
+            id: `c${offset + i}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: files[offset] }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict());
+
+  let cappedTurn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[cappedTurn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6 });
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.executed_request_count, 6, "the loop must stop at the capped budget: the 4th batch is never executed");
+  // The receipt rides the budget telemetry provenance (the artifact's
+  // tool_loop_telemetry, already folded by writeOutputs).
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  assert.equal(budget.source, "low-risk-cap");
+  assert.deepEqual(budget.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6 });
+
+  // The same explorer trace without the envelope (explicit operator budget)
+  // executes the whole 8-call exploration and closes with its verdict — the
+  // delta is exactly the envelope's cut.
+  let defaultTurn = 0;
+  const uncapped = await runToolHarness(deps({
+    transport: async () => responses[defaultTurn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_REQUESTS: "40" },
+  }));
+  assert.equal(uncapped.result.tool_request_budget, 40);
+  assert.equal(uncapped.result.tool_budget_source, "explicit");
+  assert.equal(uncapped.result.low_risk_budget, undefined);
+  assert.equal(uncapped.result.executed_request_count, 8, "without the envelope the same explorer spends all 8 calls");
+  assert.equal(uncapped.result.native_loop_verdict_produced, true);
+});
+
+test("#1629: the low-risk lockfile envelope caps to the scoped rows' sum", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    risk_flags: [],
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+    lockfile_only_refresh: { material: 0, low_risk: 7, parseable: true },
+  }));
+  const { result } = await runToolHarness(deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 10);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "low-risk-lockfile", mandatory_rows: 3, cap: 10 });
+});
+
+test("#1629: any risk flag, a material lockfile bump, or an unparseable triage retains the full envelope with a receipt", async () => {
+  const write = (root: string, body: Record<string, unknown>) => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    [{ pr_kind: "image_digest_only", risk_flags: ["linked_priority_p1"], must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "risk-flags", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: 2, low_risk: 5, parseable: true } },
+      { envelope: "retained", basis: "material-lockfile", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: [], lockfile_only_refresh: { material: 0, low_risk: 0, parseable: false } },
+      { envelope: "retained", basis: "unparseable-triage", mandatory_rows: 0 }],
+    [{ pr_kind: "renovate_image_update", risk_flags: [], must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are the reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629: no classification artifact, an explicit override, or the smart tier keeps the pre-#1629 shape byte-for-byte", async () => {
+  // No classification.json: no receipt, tier-default budget, artifact shape
+  // untouched.
+  const bare = workspace();
+  fs.writeFileSync(path.join(bare.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const bareResult = await runToolHarness(bare.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(bareResult.result.tool_request_budget, 40);
+  assert.equal(bareResult.result.tool_budget_source, "tier-default");
+  assert.equal(bareResult.result.low_risk_budget, undefined);
+  // The receipt is also absent from the telemetry provenance on a run that
+  // never had a classification artifact (the capped-run test above pins the
+  // present side; the degraded no-tool-calls run carries no telemetry object
+  // at all, so the artifact-level absence is the pin here).
+  assert.ok(!JSON.stringify(bareResult.result).includes("low_risk_budget"));
+
+  // An explicit operator value is an operator decision — never narrowed, no
+  // receipt (the envelope only shapes DERIVED budgets).
+  const explicit = workspace();
+  fs.writeFileSync(path.join(explicit.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(explicit.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  const explicitResult = await runToolHarness(explicit.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_REQUESTS: "20" },
+  }));
+  assert.equal(explicitResult.result.tool_request_budget, 20);
+  assert.equal(explicitResult.result.tool_budget_source, "explicit");
+  assert.equal(explicitResult.result.low_risk_budget, undefined);
+
+  // VALIDATE_REQUIRED_CHECKS=false keeps deterministic rows out of the
+  // contract at BOTH layers: zero enforced rows, floor envelope.
+  const gated = workspace();
+  fs.writeFileSync(path.join(gated.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(gated.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  const gatedResult = await runToolHarness(gated.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", VALIDATE_REQUIRED_CHECKS: "false" },
+  }));
+  assert.equal(gatedResult.result.tool_request_budget, 6);
+  assert.deepEqual(gatedResult.result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 0, cap: 6 });
+});

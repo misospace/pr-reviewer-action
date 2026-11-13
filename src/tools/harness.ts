@@ -5384,13 +5384,16 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // prose rows: the prose reservation keeps its own count (a run without a
   // trace plan reserves byte-for-byte what it reserved before), and the trace
   // reservation joins the same tail as the MAX of the resolutions.
+  // #1629: the reservations are a portion of the BUDGET THE LOOP WILL GET —
+  // the effective (envelope-capped) budget, never the pre-envelope number, or
+  // a capped low-risk run could reserve more than its whole envelope.
   const proseReserve = computeRequiredEvidenceReservation(
     requiredEvidence.filter((row) => row.obligation === undefined && row.trace !== true).length,
-    maxRequests.budget,
+    effectiveMaxRequests,
   );
   const traceReserve = computeTraceEvidenceReservation(
     traceEvidenceRows.reduce((total, row) => total + Math.max(1, row.requiredAttempts ?? 1), 0),
-    maxRequests.budget,
+    effectiveMaxRequests,
   );
   const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve, traceReserve);
   if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
@@ -5442,8 +5445,10 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     workspaceRoot,
     maxResponseBytes,
     requestTimeout,
-maxRequests: maxRequests.budget,
-reserveForRequiredEvidence,
+    // #1629: the loop sees the low-risk envelope's effective budget — the
+    // cap binds the loop's own gate, not just the artifact's telemetry.
+    maxRequests: effectiveMaxRequests,
+    reserveForRequiredEvidence,
 requiredEvidence,
 ...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
