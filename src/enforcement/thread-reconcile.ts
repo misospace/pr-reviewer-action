@@ -22,9 +22,10 @@
  *   or a stale cached listing said so. No ghost blockers.
  * - `unknown` — the current state cannot be established (adapter without a
  *   completeness-proving listing read, fetch failure, or a capped/partial
- *   listing). Unknown must NOT fabricate a blocker: settlement falls back to
- *   the listing it was given (which was itself the authoritative read at
- *   context time), records the unknown provenance, and discloses it.
+ *   listing). Unknown must NOT fabricate a blocker: a carried
+ *   blocker/major row is held at minor (original severity in `capped_from`)
+ *   so unverifiable historical state never forces the disposition, and the
+ *   review plus the run log disclose that reconciliation was incomplete.
  */
 import { prepareThreads } from "../context/review-threads.js";
 import type { PlatformReadAdapter, ThreadListingReadResult } from "../platform/types.js";

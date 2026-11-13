@@ -39,11 +39,9 @@ export interface ArtifactFinding {
   /** #1645: set on a carried review-thread re-emission whose live state could
    * not be established at decision time (reconciliation `unknown`: no
    * adapter that proves listing completeness, a failed read, or a capped
-   * window). The row keeps the thread's severity and today's settlement
-   * behavior — the context listing found it unresolved, the best available
-   * evidence — but the review discloses it is NOT independently proven live.
-   * Never set when a complete live listing confirms the thread, and never
-   * set on the `resolved`/`absent` rows (those are dropped, not flagged). */
+   * window). A carried blocker/major row is held at minor with its original
+   * severity in `capped_from`: unverifiable historical state stays visible
+   * but never blocks. Never set when the live listing confirms the thread. */
   thread_state_unverified?: boolean;
   /** #976: this finding was capped because it relied only on a CI conclusion. */
   ci_capped?: boolean;

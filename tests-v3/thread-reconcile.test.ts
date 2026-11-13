@@ -121,24 +121,27 @@ test("#1645 resolved/dismissed carried blocker never blocks", () => {
   assert.equal(settled.reconciliation, "resolved");
 });
 
-test("#1645 reconciliation unavailable: recorded as unknown and disclosed, never silently trusted", () => {
+test("#1645 reconciliation unavailable: held at minor and disclosed, never promoted to a blocker", () => {
   const a = artifact();
   const outcome = compose(a, inputs({
     threads: [carriedMajor(GHOST_ONE)],
     threadReconciliation: { listingComplete: false, unresolvedById: new Map() },
   }));
-  // Nothing beyond the context-listed row entered the finding set: unknown
-  // cannot INVENT a blocker. The context-listed row keeps today's behavior
-  // and is explicitly flagged as unproven rather than confirmed live.
-  assert.equal(a.findings.length, 3);
+  // Maintained rule (issue #1645 review): with no complete live listing, an
+  // unverifiable carried row must NOT enter the blocking set. It stays
+  // visible at minor (original severity in capped_from) with the
+  // reconciliation disclosed, so a reader can tell it from a confirmed row.
+  assert.equal(outcome.verdict, "approve", "unverifiable historical state cannot force request_changes");
+  assert.equal(a.findings.length, 3, "the row stays visible");
   const carried = a.findings.find((f) => f.thread_id === GHOST_ONE);
-  assert.ok(carried, "the row stays visible");
-  assert.equal(carried!.thread_state_unverified, true, "flagged unverified, not confirmed live");
+  assert.ok(carried);
+  assert.equal(carried!.severity, "minor", "held at minor");
+  assert.equal(carried!.capped_from, "major", "original severity preserved");
+  assert.equal(carried!.thread_state_unverified, true);
   assert.ok(String(a.review_markdown).includes("Review-state reconciliation incomplete"), "disclosed in the review");
-  assert.equal(outcome.verdict, "request_changes", "the carried row still decides, as today");
-  const entries = ((a as { thread_reconciliation?: { entries: Array<{ reconciliation: string; dropped: boolean }>; listing_complete: boolean } }).thread_reconciliation)!;
+  const entries = ((a as { thread_reconciliation?: { entries: Array<{ reconciliation: string; dropped: boolean; demoted: boolean }>; listing_complete: boolean } }).thread_reconciliation)!;
   assert.equal(entries.listing_complete, false);
-  assert.deepEqual(entries.entries.map((e) => [e.reconciliation, e.dropped]), [["unknown", false]]);
+  assert.deepEqual(entries.entries.map((e) => [e.reconciliation, e.dropped, e.demoted]), [["unknown", false, true]]);
 });
 
 test("#1645 reconciliation unavailable with nothing carried: no findings, no blocker invented", () => {
@@ -160,6 +163,37 @@ test("#1645 reconciliation unavailable: a current-head blocker still blocks", ()
     threadReconciliation: { listingComplete: false, unresolvedById: new Map() },
   }));
   assert.equal(a.verdict, "request_changes", "the fresh blocker decides, not the carried row");
+});
+
+test("#1645 reconciliation unavailable under findings_severity_gated: no escalation from an unproven row", () => {
+  const a = artifact({ verdict: "approve" });
+  applyAllEnforcement(a, inputs({
+    threads: [carriedMajor(GHOST_ONE, "blocker")],
+    threadReconciliation: { listingComplete: false, unresolvedById: new Map() },
+    verdictPolicy: "findings_severity_gated",
+  }));
+  assert.equal(a.verdict, "approve", "the gated escalation only counts re-emitted LIVE blockers");
+  assert.doesNotMatch(String(a.review_markdown), /Verdict escalated from unresolved review threads/);
+});
+
+test("#1645 reconciliation unavailable: the thread pass holds the carried blocker at minor under the gated policy", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [{ severity: "blocker", category: "bug", file: "src/c.ts", line: 1, message: "fresh blocker" }],
+  });
+  applyAllEnforcement(a, inputs({
+    threads: [carriedMajor(GHOST_ONE, "blocker")],
+    threadReconciliation: { listingComplete: false, unresolvedById: new Map() },
+    verdictPolicy: "findings_severity_gated",
+  }));
+  // The thread-settlement escalation banner is computed from RE-EMITTED rows
+  // only; the unproven carried row is not among them (it re-enters at minor).
+  // The fresh model blocker's own escalation belongs to the verdict-policy
+  // pass, which this unit composition deliberately does not run.
+  assert.doesNotMatch(String(a.review_markdown), /Verdict escalated from unresolved review threads/);
+  const carried = a.findings.find((f) => f.thread_id === GHOST_ONE);
+  assert.ok(carried);
+  assert.equal(carried!.severity, "minor", "the unproven carried blocker re-enters at minor, not blocker");
 });
 
 test("#1645 without a reconciliation input settlement keeps its pre-#1645 bytes", () => {

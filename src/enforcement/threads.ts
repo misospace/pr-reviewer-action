@@ -93,6 +93,9 @@ export interface ThreadReconciliationEntry {
   /** True when the reconciliation changed this thread's outcome: a would-be
    * re-emission was dropped (`resolved`/`absent`). */
   dropped: boolean;
+  /** True when an `unknown` reconciliation demoted a blocking carried severity
+   * to minor: unverifiable historical state stays visible but never blocks. */
+  demoted: boolean;
 }
 
 export interface ThreadReconciliationProvenance {
@@ -220,6 +223,7 @@ export function applyReviewThreadEnforcement(
       severity: reemittedSeverity(thread.severity),
       reconciliation: state,
       dropped: false,
+      demoted: false,
     });
     settled.push(record);
     if (reconciledOut) {
@@ -231,19 +235,25 @@ export function applyReviewThreadEnforcement(
     }
     if (disposition !== "fixed" && disposition !== "withdrawn" && !knownThreadIds.has(threadId)) {
       const baseSeverity = reemittedSeverity(thread.severity);
-      // #1645: an `unknown` reconciliation cannot prove the thread live, but
-      // the run's own context listing found it unresolved — that stays the
-      // best available evidence (dropping it would silently disable
-      // carried-blocker enforcement on every forge that cannot enumerate a
-      // provably complete listing). The row keeps its severity and the
-      // review DISCLOSES that the state is unverified, so a reader can tell
-      // a confirmed-live blocker from an unproven one. A thread the complete
-      // live listing reports `resolved`/`absent` is not re-emitted at all.
-      if (reconciled && state === "unknown" && isBlockingSeverity(baseSeverity) && !isAlwaysNonBlockingCategory(thread.category)) {
+      // #1645 (maintainer review): an `unknown` reconciliation cannot prove
+      // the thread live, and unverifiable historical state must never be
+      // promoted into a blocking current-head finding solely from cached
+      // state. The row stays visible at minor (original severity kept in
+      // `capped_from`, `thread_state_unverified` set) and the review
+      // discloses the incomplete reconciliation — but neither the strict
+      // mapping nor the gated escalation can REQUEST_CHANGES on it. A thread
+      // the complete live listing confirms (`live-unresolved`) keeps its
+      // severity and blocks; `resolved`/`absent` are dropped above.
+      const unverifiable = reconciled
+        && state === "unknown"
+        && isBlockingSeverity(baseSeverity)
+        && !isAlwaysNonBlockingCategory(thread.category);
+      if (unverifiable) {
         unknownBlocking = true;
+        reconciliationEntries[reconciliationEntries.length - 1]!.demoted = true;
       }
       const finding: ArtifactFinding = {
-        severity: baseSeverity,
+        severity: unverifiable ? "minor" : baseSeverity,
         // #977: carry the non-blocking marker forward so a verification ask
         // cannot return as a blocking `other` finding on the next run. Every
         // other kind stays `other` — re-emission never changes what can block.
@@ -253,10 +263,8 @@ export function applyReviewThreadEnforcement(
         message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
         thread_id: threadId,
       };
-      if (reconciled && state === "unknown") {
-        // #1645 diagnostic: this carried row's live state could not be
-        // established at decision time (the artifact provenance names the
-        // thread; the markdown discloses the incomplete reconciliation).
+      if (unverifiable) {
+        finding.capped_from = baseSeverity;
         finding.thread_state_unverified = true;
       }
       findings.push(finding);
@@ -294,14 +302,15 @@ export function applyReviewThreadEnforcement(
       artifact.review_markdown += ["", "", "## Review-Thread Reconciliation (#1645)", "", ...reconciliationLines].join("\n");
     } else if (unknownBlocking) {
       // Unknown reconciliation matters exactly when an unproven carried
-      // thread carries BLOCKING severity: the review must say the live state
-      // was never established, so a reader can tell it from a confirmed one.
-      // Non-blocking carried rows disclose in the artifact provenance.
+      // thread carried BLOCKING severity: #1645 holds it at minor rather
+      // let unverifiable historical state force the disposition, and the
+      // review must say so. Non-blocking carried rows disclose in the
+      // artifact provenance.
       artifact.review_markdown += (
         "\n\n_Review-state reconciliation incomplete: the current review-thread state could not be"
-        + " fully established at decision time, so the carried blocking thread(s) above are marked"
-        + " `unknown` — they were listed unresolved for this head but are not independently"
-        + " proven live (#1645)._"
+        + " fully established at decision time, so carried thread(s) with blocking severity are"
+        + " recorded as `unknown` and held at minor — unverifiable historical state does not"
+        + " request changes (#1645). Current-head findings are unaffected._"
       );
     }
     const blockers = reemitted.filter((f) => f.severity === "blocker" && !isAlwaysNonBlockingCategory(f.category));

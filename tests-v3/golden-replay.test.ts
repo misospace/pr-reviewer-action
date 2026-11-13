@@ -259,17 +259,15 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
     listReviewThreads: () => Promise.resolve({ ok: true, data: threads }),
     // #1645: a case declaring `pr.live_threads` serves the enforcement-time
     // reconciliation read (a provably complete enumeration of the forge's
-    // CURRENT threads); a case without it keeps today's unknown-state
-    // behavior, where absence proves nothing.
-    ...(Array.isArray(pr.live_threads)
-      ? {
-        listReviewThreadsLiveListing: () => Promise.resolve({
-          ok: true as const,
-          data: pr.live_threads as unknown[],
-          complete: (pr.live_threads as unknown[]).length < 100,
-        }),
-      }
-      : {}),
+    // CURRENT threads); a case without it mirrors the context listing as
+    // provably complete, so carried threads reconcile `live-unresolved` and
+    // keep their pre-#1645 disposition authority (unknown would hold a
+    // carried blocker/major at minor).
+    listReviewThreadsLiveListing: () => Promise.resolve({
+      ok: true as const,
+      data: (Array.isArray(pr.live_threads) ? (pr.live_threads as unknown[]) : threads),
+      complete: true,
+    }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),

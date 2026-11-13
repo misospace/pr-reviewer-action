@@ -21,7 +21,7 @@ import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, Publi
  * without network. Everything else must not be reached by the pipeline with
  * the feature flags the tests set. */
 function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number; threads?: unknown[] } = {}): PlatformReadAdapter {
-  return {
+  const adapter: PlatformReadAdapter = {
     platform: "github",
     getPr: () => {
       return Promise.resolve({
@@ -48,6 +48,15 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),
     listReviewThreads: () => Promise.resolve({ ok: true, data: options.threads ?? [] }),
+    // #1645: the mock's live listing delegates to the adapter's CURRENT
+    // `listReviewThreads` (tests may replace that method after construction)
+    // and proves its completeness, so thread settlement runs the
+    // `live-unresolved` path (a thread can still escalate) rather than the
+    // `unknown` path (a historical blocking row is held at minor).
+    listReviewThreadsLiveListing: async () => {
+      const threads = await adapter.listReviewThreads();
+      return threads.ok ? { ok: true as const, data: threads.data, complete: true } : { ok: false as const, error: threads.error };
+    },
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
@@ -59,6 +68,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     ghApi: () => Promise.resolve({ error: "not served" }),
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
+  return adapter;
 }
 
 function verdictBody(verdict: Record<string, unknown>): string {
