@@ -69,7 +69,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
-import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/evidence-receipts.js";
+import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry } from "../enforcement/evidence-receipts.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
@@ -1756,7 +1756,7 @@ export function buildPlanningContext(
   // shape classification.json persists); untagged rows carry none and stay
   // `legacy` downstream.
   const mustCheckTags = new Map(mustCheckEvidence.map((tag) => [tag.text, tag]));
-  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string; row_class?: string; gate?: string; obligations?: string[] }> = [
+  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string; row_class?: string; gate?: string; obligations?: string[]; dependency_scope?: DependencyScopeEntry[] }> = [
     ...(includeMustCheck
       ? mustCheck.map((text) => {
           const tag = mustCheckTags.get(text);
@@ -1764,7 +1764,18 @@ export function buildPlanningContext(
             source: "must_check" as const,
             text,
             ...(tag !== undefined
-              ? { row_class: tag.rowClass, ...(tag.gate !== null ? { gate: tag.gate } : {}), ...(tag.obligations.length > 0 ? { obligations: tag.obligations } : {}) }
+              ? {
+                  row_class: tag.rowClass,
+                  ...(tag.gate !== null ? { gate: tag.gate } : {}),
+                  ...(tag.obligations.length > 0 ? { obligations: tag.obligations } : {}),
+                  // #1657 (review round 3): the trusted dependency update
+                  // identity rides the row too — the strict `{slug,
+                  // versions}` entry set, the same shape classification.json
+                  // persists; absent/empty fails closed downstream.
+                  ...(tag.dependencyScope.length > 0
+                    ? { dependency_scope: tag.dependencyScope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+                    : {}),
+                }
               : {}),
           };
         })
@@ -1793,11 +1804,12 @@ export function buildPlanningContext(
         // #1657 (review): the producer's trusted evidence tags ride the
         // candidates rows into the obligation contract — row class is this
         // metadata, never inferred from wording downstream.
-        obligations: candidates.map(({ id, source, text, row_class, gate, obligations: rowObligations }) => ({
+        obligations: candidates.map(({ id, source, text, row_class, gate, obligations: rowObligations, dependency_scope }) => ({
           id, source, text,
           ...(row_class !== undefined ? { row_class } : {}),
           ...(gate !== undefined ? { gate } : {}),
           ...(rowObligations !== undefined && rowObligations.length > 0 ? { obligations: rowObligations } : {}),
+          ...(dependency_scope !== undefined && dependency_scope.length > 0 ? { dependency_scope } : {}),
         })),
       }, null, 2) + "\n");
     }

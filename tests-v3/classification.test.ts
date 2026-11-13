@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyPr, PR_KINDS, RISK_FLAGS } from "../src/classification/classify.js";
+import { classifyPr, PR_KINDS, RISK_FLAGS, parseDependencyScope, mustCheckEvidenceTags } from "../src/classification/classify.js";
+import type { DependencyScopeResult } from "../src/enforcement/evidence-receipts.js";
 import { dependencyObligationForCheckText } from "../src/tools/loop.js";
 import {
   classificationFromArtifact,
@@ -3669,4 +3670,104 @@ test("#1379: the new kinds route and keep specialist scrutiny (zero-selection ga
   const renovateSelection = selectSpecialistRoles(renovate);
   assert.deepEqual(renovateSelection.selectedRoles, []);
   assert.match(renovateSelection.zeroSelectionReason, /benign Renovate image tag\/digest refresh/);
+});
+
+// ── #1657 (review round 3): the trusted dependency update identity scope ──
+// The scope is the COMPLETE trustworthy set of dependency updates this diff
+// changes, parsed ONLY from producer-recognized dependency surfaces, with
+// the exact changed version identity where the diff shape carries one.
+// Overflow, unattributable shapes, and unread dependency surfaces fail the
+// scope CLOSED — never a partial-prefix certificate.
+
+test("#1657 (round 3): an unchanged neighboring lockfile block never enters trusted scope; the changed block does, with its exact old→new identity", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "    \"node_modules/chalk\": {\n" +
+    "      \"version\": \"5.3.0\",\n" +
+    "    },\n" +
+    "    \"node_modules/lodash\": {\n" +
+    "-      \"version\": \"4.17.15\",\n" +
+    "+      \"version\": \"4.17.21\",\n" +
+    "    },\n";
+  const scope = parseDependencyScope(diff);
+  assert.deepEqual(scope, { available: true, entries: [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }] });
+});
+
+test("#1657 (round 3): dependency-shaped text in an unrelated changed file is NOT trusted scope", () => {
+  const diff =
+    "diff --git a/src/deps-note.ts b/src/deps-note.ts\n" +
+    "+// See \"node_modules/left-pad\": { — the vendored copy we considered\n" +
+    "+const manifest = { \"dependencies\": { \"left-pad\": \"^1.3.0\" } };\n" +
+    "diff --git a/docs/advisory.md b/docs/advisory.md\n" +
+    "+## node_modules/lodash is affected\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: true, entries: [] });
+});
+
+test("#1657 (round 3): a manifest dependency pair records the exact changed range identity", () => {
+  const diff =
+    "diff --git a/package.json b/package.json\n" +
+    "  \"dependencies\": {\n" +
+    "-    \"chalk\": \"^4.1.2\",\n" +
+    "+    \"chalk\": \"^5.3.0\",\n" +
+    "  },\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: true, entries: [{ slug: "chalk", versions: ["4.1.2", "5.3.0"] }] });
+});
+
+test("#1657 (round 3): scope overflow fails CLOSED — a truncated prefix never certifies the aggregate", () => {
+  const blocks = Array.from({ length: 25 }, (_, i) =>
+    `    "node_modules/pkg-${i}": {\n-      "version": "1.0.0",\n+      "version": "1.0.1",\n    },\n`).join("");
+  const scope = parseDependencyScope("diff --git a/package-lock.json b/package-lock.json\n" + blocks);
+  assert.deepEqual(scope, { available: false });
+});
+
+test("#1657 (round 3): a dependency surface this parser does not read fails the scope closed", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "    \"node_modules/lodash\": {\n" +
+    "-      \"version\": \"4.17.15\",\n" +
+    "+      \"version\": \"4.17.21\",\n" +
+    "    },\n" +
+    "diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n" +
+    "+  lodash: 4.17.21\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 3): hostile or unrepresentable changed dependency identities fail closed", () => {
+  const hostile = "diff --git a/package-lock.json b/package-lock.json\n-    \"node_modules/../evil\": {\n";
+  assert.deepEqual(parseDependencyScope(hostile), { available: false });
+});
+
+test("#1657 (round 3): an unavailable scope leaves the dependency rows scope-less; an available one rides the row verbatim", () => {
+  const rows = ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed"];
+  const unavailable: DependencyScopeResult = { available: false };
+  assert.deepEqual(
+    mustCheckEvidenceTags(rows, unavailable).map((row) => "dependency_scope" in row),
+    [false],
+  );
+  const available: DependencyScopeResult = { available: true, entries: [{ slug: "ms", versions: ["2.1.2", "2.1.3"] }] };
+  assert.deepEqual(
+    mustCheckEvidenceTags(rows, available).map((row) => row.dependency_scope),
+    [[{ slug: "ms", versions: ["2.1.2", "2.1.3"] }]],
+  );
+});
+
+test("#1657 (round 3): the persisted tag rows carry strictly the artifact shape — the producer-internal takes_dependency_scope marker never rides the artifact", () => {
+  const artifact = classificationToArtifact(classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText:
+      "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "2.1.2", "2.1.3"),
+  }));
+  const rows = artifact.must_check_evidence as Array<Record<string, unknown>>;
+  assert.ok(rows.length > 0);
+  const allowed = new Set(["text", "row_class", "gate", "obligations", "dependency_scope"]);
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      assert.ok(allowed.has(key), JSON.stringify(row));
+    }
+  }
+  // The scoped aggregate advisory row carries its parsed entry set — the
+  // exact shape the strict tag parser accepts back.
+  const scoped = rows.filter((row) => Array.isArray(row.dependency_scope)) as Array<{ dependency_scope: Array<{ slug: string; versions: string[] }> }>;
+  assert.deepEqual(scoped.map((row) => row.dependency_scope), [[{ slug: "ms", versions: ["2.1.2", "2.1.3"] }]]);
 });

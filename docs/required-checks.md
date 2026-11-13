@@ -346,8 +346,20 @@ The rules this buys, and their limits:
   identity/scope genuinely proves the ask. Upstream-evidence rows
   (provenance/release-delta/advisory) are acquisition asks: their satisfaction
   is validated against acquisition receipts attributed by the shared #1379
-  URL/query-shape rules — the static classifier sentence still embeds no
-  package identity (#1595), and the receipts carry the objective identity.
+  URL/query-shape rules, bound to the producer-parsed dependency scope. That
+  scope (`dependency_scope` on the tagged rows) is the COMPLETE trustworthy
+  set of dependency updates the PR's diff actually changes — exact
+  `{slug, versions}` entries parsed ONLY from producer-recognized dependency
+  surfaces (npm lockfile package blocks, npm manifest dependency sections,
+  Helm chart manifests), carrying the exact changed old→new version identity
+  where the diff shape has one. A receipt backs the row only when, per
+  obligation kind, the validated receipts JOINTLY cover EVERY entry — slug
+  as an exact identity, and the changed version identity for the kinds that
+  assert the update itself (release delta, advisory). Unchanged hunk-context
+  neighbors never enter scope; dependency-shaped text outside a recognized
+  surface never does; overflow, unattributable shapes, and unread
+  dependency surfaces (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows
+  stay unresolved rather than certifying a partial update set.
 - **No repair from prose.** Malformed or stale provenance is visible and
   reason-coded; nothing rewrites a disposition.
 - **Surfaces for #1656/#1659**: every coverage and obligation row carries

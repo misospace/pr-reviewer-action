@@ -351,6 +351,71 @@ export type EvidenceGateKind = "ci-evidence" | "dependency-evidence" | "source-i
  * not propositions); review-prompt rows carry no gate (semantic review
  * questions); objective rows carry an explicit gate kind, and — for
  * `dependency-evidence` — the obligation kinds the row asks to acquire. */
+/** #1657 (review round 3): ONE trusted dependency update identity the
+ * producer parsed into a row's scope — the exact dependency slug plus the
+ * exact version tokens carried by the CHANGED dependency lines that
+ * introduced it (the trustworthy old→new identity where the diff shape
+ * carries one; empty where it does not). */
+export interface DependencyScopeEntry {
+  slug: string;
+  versions: string[];
+}
+
+/** The producer's dependency-scope parse result: either the COMPLETE
+ * trustworthy identity set, or unavailable — the producer could not
+ * establish it completely (unattributable changed lines, cap overflow,
+ * truncated scan). `available: false` is its own state, never conflated
+ * with "no dependencies changed"; both fail closed at the receipt seam. */
+export type DependencyScopeResult =
+  | { available: true; entries: DependencyScopeEntry[] }
+  | { available: false };
+
+const DEPENDENCY_SCOPE_MAX_ENTRIES = 20;
+const DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS = 16;
+const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
+/** Exact version tokens only — the same shape `identityCarriesToken`
+ * treats as a version identity (x.y.z with optional -suffix), so a
+ * recorded version is checkable against receipts and a partial numeric
+ * run never stands in for one. */
+const DEPENDENCY_SCOPE_VERSION_RE = /^\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?$/;
+
+/** Strict shape check for one persisted dependency-scope entry
+ * (`{slug, versions}`); hostile slug shapes (traversal dots, option-like
+ * leads) and non-exact version tokens are refused, never half-trusted. */
+function dependencyScopeEntryFromArtifact(value: unknown): DependencyScopeEntry | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "slug" && key !== "versions") return null;
+  }
+  const slug = record.slug;
+  if (typeof slug !== "string" || !DEPENDENCY_SCOPE_SLUG_RE.test(slug)
+    || slug.includes("..") || slug.startsWith(".") || slug.startsWith("-")) return null;
+  const versions: string[] = [];
+  if (record.versions !== undefined) {
+    if (!Array.isArray(record.versions) || record.versions.length > DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) return null;
+    for (const version of record.versions) {
+      if (typeof version !== "string" || !DEPENDENCY_SCOPE_VERSION_RE.test(version)) return null;
+      versions.push(version);
+    }
+  }
+  return { slug, versions };
+}
+
+/** Strict parser for a tag's persisted `dependency_scope` — the COMPLETE
+ * trusted entry set or nothing. A row whose scope does not parse is
+ * DROPPED to `legacy` (fail closed), never partially trusted. */
+export function dependencyScopeEntriesFromArtifact(value: unknown): DependencyScopeEntry[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > DEPENDENCY_SCOPE_MAX_ENTRIES) return null;
+  const entries: DependencyScopeEntry[] = [];
+  for (const raw of value) {
+    const entry = dependencyScopeEntryFromArtifact(raw);
+    if (entry === null) return null;
+    entries.push(entry);
+  }
+  return entries;
+}
+
 export interface CheckEvidenceTag {
   rowClass: "attention" | "objective" | "review-prompt";
   gate: EvidenceGateKind | null;
@@ -358,17 +423,21 @@ export interface CheckEvidenceTag {
    * `dependency-evidence` row asks to acquire (validated per kind against
    * the ledger's attributed acquisition receipts). */
   obligations: DependencyEvidenceObligation[];
-  /** #1657 (review round 2): the TRUSTED dependency identity scope the
-   * producer parsed for this row's update — the exact dependency-name
-   * slugs (lowercased; scoped names normalized to `scope/pkg`) the
-   * classifier extracted from the PR's own changed dependency surfaces. A
-   * dependency-evidence receipt backs the row only when it carries at
-   * least one scope slug as an EXACT identity (kind-appropriate
-   * boundaries — never a substring), so an acquisition about dependency B
-   * can never back dependency A's row. ABSENT/EMPTY means the producer
-   * could not establish a reliable identity: the row FAILS CLOSED — no
-   * kind-only evidence ever credits it. */
-  dependencyScope: string[];
+  /** #1657 (review round 3): the TRUSTED dependency update identity scope
+   * the producer parsed for this row — the COMPLETE set of dependency
+   * updates the PR's diff actually changes (exact slugs, plus the exact
+   * old→new version identity where the diff shape carries one), extracted
+   * ONLY from producer-recognized dependency surfaces. A receipt backs the
+   * row only when, for every obligation kind the row demands, the
+   * validated receipts JOINTLY cover EVERY entry — slug as an EXACT
+   * identity (never a substring), and the changed version identity for the
+   * kinds that assert the update itself. An acquisition about dependency B
+   * can never back dependency A's row, and evidence for one package can
+   * never satisfy an aggregate row naming several. ABSENT/EMPTY means the
+   * producer could not establish the identity set completely: the row
+   * FAILS CLOSED — no kind-only or partial-scope evidence ever credits
+   * it. */
+  dependencyScope: DependencyScopeEntry[];
 }
 
 export interface CheckEvidenceTagWithText extends CheckEvidenceTag {
@@ -700,31 +769,66 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
   ].filter((value): value is string => typeof value === "string" && value !== "").join(" ");
 }
 
-function supportedDependencyReceipts(
+/** Whether ONE receipt covers one trusted scope entry under one obligation
+ * kind: the receipt's own identity must carry the dependency slug as an
+ * EXACT identity (kind-appropriate boundaries, never a substring), and —
+ * for every kind that asserts the update itself (release delta, security
+ * advisory) — the trustworthy changed version identity the producer
+ * captured. Provenance binds the dependency identity; the version identity
+ * binds the update. */
+function receiptCoversDependencyEntry(
+  receipt: EvidenceReceipt,
+  kind: DependencyEvidenceObligation,
+  entry: DependencyScopeEntry,
+): boolean {
+  if (!(receipt.subject.obligations ?? []).includes(kind)) return false;
+  const identity = receiptIdentityString(receipt);
+  if (!identityCarriesToken(identity, entry.slug)) return false;
+  if (kind === "provenance" || entry.versions.length === 0) return true;
+  return entry.versions.some((version) => identityCarriesToken(identity, version));
+}
+
+/** Settle a dependency-evidence row: for EVERY obligation kind the row
+ * demands, the validated receipts must JOINTLY cover EVERY trusted scope
+ * entry. Any combination of receipts may share the cover (no allocation;
+ * one receipt may support several legitimate conclusions), but evidence
+ * for one package can never satisfy an aggregate row that names several,
+ * and a receipt about the wrong old→new version identity never covers a
+ * versioned entry. */
+function dependencyReceiptCoverage(
   ledger: EvidenceLedger,
   kinds: readonly DependencyEvidenceObligation[],
-  scope: readonly string[],
-): { verified: EvidenceReceipt[]; relevantUnverified: number } {
+  scope: readonly DependencyScopeEntry[],
+): { state: "receipt-backed" | "receipt-absent" | "receipt-mismatch" | "receipt-unverified"; receipts: EvidenceReceipt[] } {
   const verified: EvidenceReceipt[] = [];
-  let relevantUnverified = 0;
+  const unverified: EvidenceReceipt[] = [];
   for (const receipt of ledger.receipts) {
     const attribution = receipt.subject.obligations ?? [];
-    // #1657 (review round 2): a receipt bears on the row only when BOTH the
-    // acquisition obligation kind AND the row's trusted dependency identity
-    // scope match — the receipt's own target (URL/query) must carry at
-    // least one producer-parsed scope slug as an EXACT identity
-    // (kind-appropriate boundaries, never a substring). An acquisition
-    // about dependency B never backs dependency A's row, whatever its kind.
-    const relevant = kinds.some((kind) => attribution.includes(kind))
-      && scope.some((slug) => identityCarriesToken(receiptIdentityString(receipt), slug));
-    if (!relevant) continue;
+    if (!kinds.some((kind) => attribution.includes(kind))) continue;
+    const identity = receiptIdentityString(receipt);
+    if (!scope.some((entry) => identityCarriesToken(identity, entry.slug))) continue;
     if (receipt.acquired && receipt.complete && receipt.trust === "web") {
       verified.push(receipt);
     } else {
-      relevantUnverified += 1;
+      unverified.push(receipt);
     }
   }
-  return { verified, relevantUnverified };
+  if (verified.length === 0) {
+    return { state: unverified.length > 0 ? "receipt-unverified" : "receipt-absent", receipts: [] };
+  }
+  const uncovered: Array<{ kind: DependencyEvidenceObligation; entry: DependencyScopeEntry }> = [];
+  for (const kind of kinds) {
+    for (const entry of scope) {
+      if (!verified.some((receipt) => receiptCoversDependencyEntry(receipt, kind, entry))) {
+        uncovered.push({ kind, entry });
+      }
+    }
+  }
+  if (uncovered.length === 0) return { state: "receipt-backed", receipts: verified };
+  // An uncovered cell that an unverified acquisition WOULD cover keeps
+  // `receipt-unverified`; verified-but-partial coverage is a mismatch.
+  const unverifiedFill = uncovered.some((cell) => unverified.some((receipt) => receiptCoversDependencyEntry(receipt, cell.kind, cell.entry)));
+  return { state: unverifiedFill ? "receipt-unverified" : "receipt-mismatch", receipts: [] };
 }
 
 function supportedIdentityReceipts(
@@ -778,15 +882,19 @@ export function evaluateRowEvidence(
   if (ledger.state === "refused") return { ...base, state: "trace-refused" };
   if (tag.gate === "ci-evidence") return { ...base, state: "receipt-absent" };
   if (tag.gate === "dependency-evidence") {
-    // #1657 (review round 2): without a trusted dependency identity the
-    // producer could not establish WHAT this row's acquisition must be
-    // about — fail closed: kind-only evidence never credits it.
-    if (tag.dependencyScope.length === 0) return { ...base, state: "receipt-absent" };
-    const { verified, relevantUnverified } = supportedDependencyReceipts(ledger, tag.obligations, tag.dependencyScope);
-    if (verified.length > 0) {
-      return { ...base, state: "receipt-backed", receipts: verified.slice(0, MAX_ROW_RECEIPT_IDS).map((receipt) => receipt.id) };
-    }
-    return { ...base, state: relevantUnverified > 0 ? "receipt-unverified" : "receipt-absent" };
+    // #1657 (review rounds 2–3): without a COMPLETE trusted update identity
+    // the producer could not establish WHAT this row's acquisition must be
+    // about — fail closed: kind-only evidence never credits it, and
+    // neither does evidence for a partial dependency set.
+    if (tag.dependencyScope.length === 0 || tag.obligations.length === 0) return { ...base, state: "receipt-absent" };
+    const coverage = dependencyReceiptCoverage(ledger, tag.obligations, tag.dependencyScope);
+    return {
+      ...base,
+      state: coverage.state,
+      receipts: coverage.state === "receipt-backed"
+        ? coverage.receipts.slice(0, MAX_ROW_RECEIPT_IDS).map((receipt) => receipt.id)
+        : [],
+    };
   }
   // source-identity: every exact identity token the row names must be
   // covered JOINTLY by validated head-bound content receipts — one receipt
@@ -847,21 +955,14 @@ export function checkEvidenceTagsFromArtifact(value: unknown): CheckEvidenceTagW
       }
       if (!ok) continue;
     }
-    // #1657 (review round 2): the trusted dependency identity scope —
-    // bounded exact slugs; an unparseable scope row is DROPPED (fail
-    // closed), never half-trusted.
-    const dependencyScope: string[] = [];
+    // #1657 (review round 3): the trusted dependency update identity —
+    // strict `{slug, versions}` entries; an unparseable scope DROPS the
+    // row (fail closed to `legacy`), never half-trusted.
+    let dependencyScope: DependencyScopeEntry[] = [];
     if (record.dependency_scope !== undefined) {
-      if (!Array.isArray(record.dependency_scope)) continue;
-      let ok = true;
-      for (const slug of record.dependency_scope) {
-        // #1657 (round 2): the exact-slug shape, hostile shapes refused —
-        // traversal dots and option-like leads never enter the scope.
-        if (typeof slug !== "string" || !/^[a-z0-9@/._-]{1,214}$/.test(slug)
-          || slug.includes("..") || slug.startsWith(".") || slug.startsWith("-")) { ok = false; break; }
-        dependencyScope.push(slug);
-      }
-      if (!ok || dependencyScope.length === 0 || dependencyScope.length > 20) continue;
+      const parsedScope = dependencyScopeEntriesFromArtifact(record.dependency_scope);
+      if (parsedScope === null) continue;
+      dependencyScope = parsedScope;
     }
     const rowClass = record.row_class as Exclude<RequiredEvidenceRowClass, "legacy">;
     // A tag claiming objective MUST carry its explicit gate kind; other

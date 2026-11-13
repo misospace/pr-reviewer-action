@@ -858,8 +858,12 @@ function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>
 
 /** A trusted producer tag for one check text (#1657 review: row class is
  * producer metadata, never inferred from wording). */
-function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[], dependencyScope?: string[]): CheckEvidenceTagWithText {
-  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"], dependencyScope: dependencyScope ?? [] };
+function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[], dependencyScope?: Array<string | { slug: string; versions: string[] }>): CheckEvidenceTagWithText {
+  return {
+    text, rowClass, gate: gate ?? null,
+    obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"],
+    dependencyScope: (dependencyScope ?? []).map((entry) => typeof entry === "string" ? { slug: entry, versions: [] } : entry),
+  };
 }
 
 test("#1657: an objective satisfied claim folds identically in BOTH folds against the same ledger — receipt-backed, prose-uncited, and refused shapes agree", () => {

@@ -80,12 +80,14 @@ import {
   evaluateRowEvidence,
   receiptRefusalReason,
   rowEvidenceStateToArtifact,
+  dependencyScopeEntriesFromArtifact,
   type CheckEvidenceTagWithText,
   type DependencyEvidenceObligation,
   type EvidenceGateKind,
   type EvidenceLedger,
   type RequiredEvidenceRowClass,
   type RowEvidenceState,
+  type DependencyScopeEntry,
 } from "./evidence-receipts.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
@@ -185,10 +187,11 @@ export interface ReviewObligation {
   /** #1657 (review): the dependency-evidence obligation kinds an
    * explicitly-objective `dependency-evidence` row asks to acquire. */
   obligations?: DependencyEvidenceObligation[];
-  /** #1657 (review round 2): the trusted dependency identity scope an
-   * explicitly-objective `dependency-evidence` row is bound to (the
-   * producer-parsed dependency slugs). Absent/empty fails closed. */
-  dependencyScope?: string[];
+  /** #1657 (review round 3): the trusted dependency update identity scope
+   * an explicitly-objective `dependency-evidence` row is bound to — the
+   * producer-parsed `{slug, versions}` entry set (every dependency the PR
+   * actually changes). Absent/empty fails closed. */
+  dependencyScope?: DependencyScopeEntry[];
   /** #1657: the reason-coded provenance state of a `must_check` row against
    * the evidence ledger, present only on runs with an active ledger. Never
    * model text; the #1656 disposition surface reads it. */
@@ -460,7 +463,7 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
   // Trusted metadata, validated against the closed vocabularies: an
   // unparseable tag is DROPPED (the row falls back to `legacy`), never
   // half-trusted.
-  let metadata: { rowClass: RequiredEvidenceRowClass; gate?: EvidenceGateKind | null; obligations?: DependencyEvidenceObligation[]; dependencyScope?: string[] } | null = null;
+  let metadata: { rowClass: RequiredEvidenceRowClass; gate?: EvidenceGateKind | null; obligations?: DependencyEvidenceObligation[]; dependencyScope?: DependencyScopeEntry[] } | null = null;
   if (source === "must_check"
     && typeof record.row_class === "string"
     && REQUIRED_EVIDENCE_ROW_CLASSES.has(record.row_class)
@@ -470,11 +473,18 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
     const obligations = Array.isArray(record.obligations)
       ? (record.obligations as DependencyEvidenceObligation[])
       : [];
-    const dependencyScope = Array.isArray(record.dependency_scope)
-      ? (record.dependency_scope as string[])
-      : [];
+    // #1657 (review round 3): the trusted dependency update identity is the
+    // strict `{slug, versions}` entry set — an unparseable scope DROPS the
+    // row's metadata (the row falls back to `legacy`, gating), never
+    // half-trusted.
+    let dependencyScope: DependencyScopeEntry[] | undefined;
+    if (record.dependency_scope !== undefined) {
+      const parsedScope = dependencyScopeEntriesFromArtifact(record.dependency_scope);
+      if (parsedScope === null) return null;
+      dependencyScope = parsedScope;
+    }
     if (rowClass === "objective" && gate !== null) {
-      metadata = { rowClass, gate, obligations, dependencyScope };
+      metadata = { rowClass, gate, obligations, ...(dependencyScope !== undefined ? { dependencyScope } : {}) };
     } else if (rowClass !== "objective" && gate === null && obligations.length === 0) {
       metadata = { rowClass, gate: null, obligations: [], dependencyScope: [] };
     }

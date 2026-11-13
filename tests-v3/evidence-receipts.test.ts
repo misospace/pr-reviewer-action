@@ -11,16 +11,24 @@ import {
   rowEvidenceStateToArtifact,
   type CheckEvidenceTag,
   type CheckEvidenceTagWithText,
+  type DependencyScopeEntry,
   type EvidenceLedger,
 } from "../src/enforcement/evidence-receipts.js";
 
 /** A trusted producer tag for one check text (#1657 review: row class is
- * producer metadata, never inferred from wording). */
-function tag(text: string, rowClass: CheckEvidenceTag["rowClass"], gate?: CheckEvidenceTag["gate"], obligations?: string[], dependencyScope?: string[]): CheckEvidenceTagWithText {
+ * producer metadata, never inferred from wording). The scope accepts bare
+ * slugs (identity only) or full `{slug, versions}` entries. */
+function tag(
+  text: string,
+  rowClass: CheckEvidenceTag["rowClass"],
+  gate?: CheckEvidenceTag["gate"],
+  obligations?: string[],
+  dependencyScope?: Array<string | DependencyScopeEntry>,
+): CheckEvidenceTagWithText {
   return {
     text, rowClass, gate: gate ?? null,
     obligations: (obligations ?? []) as CheckEvidenceTag["obligations"],
-    dependencyScope: dependencyScope ?? [],
+    dependencyScope: (dependencyScope ?? []).map((entry) => typeof entry === "string" ? { slug: entry, versions: [] } : entry),
   };
 }
 
@@ -430,4 +438,118 @@ test("#1657: the per-row evidence projection serializes reason-coded state with 
   assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "review-prompt", gate: null, state: "not-required", receipts: [] }), {
     gate: null, state: "not-required",
   });
+});
+
+// ── #1657 (review round 3): settlement is JOINT over the trusted scope ────
+// For every obligation kind the row demands, the validated receipts must
+// jointly cover EVERY trusted scope entry — any combination of receipts may
+// share the cover (no allocation), but evidence for one package can never
+// satisfy an aggregate row naming several, and a receipt about the wrong
+// old→new identity never covers a versioned entry.
+
+const LODASH_UPDATE = { slug: "lodash", versions: ["4.17.15", "4.17.21"] };
+const CHALK_UPDATE = { slug: "chalk", versions: ["4.1.2", "5.3.0"] };
+
+test("#1657 (round 3): A+B changed with evidence only for A stays unresolved — a partial scope never certifies the aggregate", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const aggregate = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE, CHALK_UPDATE]);
+  const state = evaluateRowEvidence(aggregate, DELTA_ROW, ledger);
+  assert.equal(state.state, "receipt-mismatch");
+  assert.deepEqual(state.receipts, []);
+});
+
+test("#1657 (round 3): A+B changed with matching evidence for BOTH is receipt-backed — receipts share the cover, no allocation", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/chalk/chalk/compare/v4.1.2...v5.3.0" }, status: "ok" },
+    ],
+    toolResults: [{ status: "ok" }, { status: "ok" }],
+  });
+  const aggregate = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE, CHALK_UPDATE]);
+  const state = evaluateRowEvidence(aggregate, DELTA_ROW, ledger);
+  assert.deepEqual([state.state, state.receipts], ["receipt-backed", ["call-1", "call-2"]]);
+});
+
+test("#1657 (round 3): the correct package with the WRONG old→new range does not back release_delta; the exact changed range does", () => {
+  const versioned = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE]);
+  const wrongRange = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v9.9.9" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, wrongRange).state, "receipt-mismatch");
+  // Carrying only ONE side of the changed identity is also a mismatch: the
+  // release delta asserts the old→new pair.
+  const halfRange = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.20" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, halfRange).state, "receipt-mismatch");
+  const exactRange = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, exactRange).state, "receipt-backed");
+});
+
+test("#1657 (round 3): a security-advisory acquisition binds the changed version identity when the producer captured one; provenance binds the dependency identity", () => {
+  const versionedAdvisory = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [{ slug: "lodash", versions: ["4.17.21"] }]);
+  const unversioned = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "lodash security advisory CVE" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, unversioned).state, "receipt-mismatch");
+  const bound = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "lodash 4.17.21 security advisory CVE" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, bound).state, "receipt-backed");
+  // Provenance asserts WHO publishes the dependency, not which version —
+  // the changed version identity is not a provenance demand.
+  const versionedProvenance = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [{ slug: "example-pkg", versions: ["1.4.0"] }]);
+  const provenance = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(versionedProvenance, PROVENANCE_ROW, provenance).state, "receipt-backed");
+});
+
+test("#1657 (round 3): a multi-obligation row needs EVERY kind covered — evidence for one kind alone never backs it", () => {
+  const both = tag("verify the update provenance and any referenced security advisory", "objective", "dependency-evidence", ["provenance", "security_advisory"], [{ slug: "example-pkg", versions: ["1.4.0"] }]);
+  const advisoryOnly = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", advisoryOnly).state, "receipt-mismatch");
+  const bothKinds = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
+      { tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" },
+    ],
+    toolResults: [{ status: "ok" }, { status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", bothKinds).state, "receipt-backed");
+});
+
+test("#1657 (round 3): the strict tag parser takes the {slug, versions} entry shape and refuses everything else", () => {
+  assert.deepEqual(
+    checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: [LODASH_UPDATE] }]),
+    [{ text: "t", rowClass: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependencyScope: [LODASH_UPDATE] }],
+  );
+  for (const bad of [
+    ["lodash"],                                  // the retired bare-slug shape
+    [{ slug: "lodash", versions: ["4.17"] }],    // a partial numeric run is not a version identity
+    [{ slug: "lodash", versions: "4.17.21" }],
+    [{ slug: "lodash", versions: ["4.17.21"], extra: true }],
+    [{ slug: "../evil", versions: [] }],
+  ]) {
+    assert.deepEqual(
+      checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: bad }]),
+      [],
+      JSON.stringify(bad),
+    );
+  }
 });

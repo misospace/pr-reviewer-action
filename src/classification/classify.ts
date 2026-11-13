@@ -12,6 +12,7 @@
  * persisted v2-identical snake_case `classification.json` schema. */
 
 import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
+import type { DependencyScopeEntry, DependencyScopeResult } from "../enforcement/evidence-receipts.js";
 
 /** The authoritative pr_kind enumeration (order = documentation order). */
 export const PR_KINDS: readonly string[] = [
@@ -2413,7 +2414,12 @@ export function classificationToArtifact(classification: PRClassification): Reco
     // #1657 (review): trusted per-row evidence tags — additive; a pre-#1657
     // consumer ignores the field, and a row missing from it stays `legacy`
     // (gating) at every fold.
-    must_check_evidence: classification.mustCheckEvidence,
+    // #1657 (review): trusted per-row evidence tags — additive; a pre-#1657
+    // consumer ignores the field, and a row missing from it stays `legacy`
+    // (gating) at every fold. Serialized strictly to the artifact shape
+    // (the producer-internal `takes_dependency_scope` marker never rides
+    // the artifact — the strict tag parser would drop such a row).
+    must_check_evidence: mustCheckEvidenceTagsToArtifact(classification.mustCheckEvidence),
     linked_metadata_uncertain: classification.linkedMetadataUncertain,
     linked_metadata_uncertainty: classification.linkedMetadataUncertainty,
     path_handling_provenance: {
@@ -4004,7 +4010,7 @@ type MustCheckEvidenceTag = {
    * surfaces. Image/chart/platform rows carry NO scope source yet — they
    * fail closed (never kind-only credit) until a reliable parse exists. */
   takes_dependency_scope?: boolean;
-  dependency_scope?: string[];
+  dependency_scope?: DependencyScopeEntry[];
 };
 
 const REVIEW_PROMPT_TAG: MustCheckEvidenceTag["row_class"] = "review-prompt";
@@ -4077,91 +4083,230 @@ const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> =
   ),
 ) as Readonly<Record<string, MustCheckEvidenceTag>>;
 
-// #1657 (review round 2): bounded caps for the trusted dependency-scope
+// #1657 (review round 3): bounded caps for the trusted dependency-scope
 // parse. The parse reads the PR's own changed dependency surfaces — never
-// checklist or reviewer prose.
+// checklist or reviewer prose. Every cap FAILS THE SCOPE CLOSED
+// (unavailable): a truncated scan or a partial entry set is never trusted
+// as complete.
 const DEPENDENCY_SCOPE_MAX_LINES = 4000;
-const DEPENDENCY_SCOPE_MAX_SLUGS = 20;
+const DEPENDENCY_SCOPE_MAX_ENTRIES = 20;
+const DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS = 16;
+const DEPENDENCY_SCOPE_MAX_LINE_VERSIONS = 8;
 const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
-/** npm dependency-section keys whose value shapes make them reliable dep
- * identities; anything else in the section is skipped, never guessed. */
-const NPM_DEPENDENCY_SECTION_KEYS: ReadonlySet<string> = new Set([
-  "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
-]);
-const LOCKFILE_BLOCK_KEY_CAPTURE_RE = /^[-+]?"(node_modules\/[^"]+)"\s*:\s*\{/;
-const NPM_SECTION_OPEN_RE = /^[-+]?\s*"(dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/;
-const NPM_SECTION_PAIR_RE = /^\s*"([^"]+)"\s*:\s*"[^"]*"\s*,?\s*$/;
+/** Exact version tokens only — the same x.y.z(+-suffix) shape the evidence
+ * seam's version-boundary matcher treats as a version identity, so a
+ * recorded version is checkable against receipts and a partial numeric run
+ * never stands in for one. */
+const DEPENDENCY_SCOPE_VERSION_TOKEN_RE = /\b\d+(?:\.\d+){2,}(?:[-+][0-9A-Za-z.-]+)?\b/g;
+/** #1657 (review round 3): trusted scope comes ONLY from producer-
+ * recognized dependency surfaces — an npm lockfile, an npm manifest, or a
+ * Helm chart manifest. Dependency-shaped text in any other changed file
+ * (source, docs, tests) never enters trusted scope, whatever it looks
+ * like. */
+const NPM_LOCKFILE_SHAPE_RE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json)$/;
+const NPM_MANIFEST_SHAPE_RE = /(^|\/)package\.json$/;
+const CHART_MANIFEST_SHAPE_RE = /(^|\/)Chart\.yaml$/;
+/** Dependency surfaces this parser does NOT read. When one of them changes,
+ * the complete changed-dependency identity set is not provable (an
+ * ecosystem this runtime cannot scope) — the scope fails closed rather
+ * than pretending an npm-only view is the whole update. */
+const UNPARSED_DEPENDENCY_SURFACE_RES: readonly RegExp[] = [
+  /(^|\/)(yarn\.lock|pnpm-lock\.yaml|composer\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|mix\.lock)$/,
+  /(^|\/)(go\.mod|Cargo\.toml|composer\.json|Pipfile|pyproject\.toml|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?)$/,
+  /(^|\/)requirements[^/]*\.txt$/,
+];
+const LOCKFILE_BLOCK_KEY_CAPTURE_RE = /"(node_modules\/[^"]+)"\s*:\s*\{/;
+const NPM_SECTION_OPEN_RE = /^\s*"(dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/;
+const NPM_SECTION_PAIR_RE = /^\s*"([^"]+)"\s*:\s*"([^"]*)"\s*,?\s*$/;
+const NPM_BLOCK_VERSION_LINE_RE = /^\s*"version"\s*:\s*"([^"]*)"/;
+const NPM_SECTION_CLOSE_RE = /^\s*\}\s*,?\s*$/;
+const NPM_STRUCTURAL_LINE_RE = /^[{}[\],]+$/;
 const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
+const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][A-Za-z0-9._+-]*)\s*$/;
 
 /**
- * #1657 (review round 2): the TRUSTED dependency identity scope — the exact
- * dependency-name slugs the producer parsed from the PR's own changed
- * dependency surfaces (npm lockfile package blocks, npm manifest
- * dependency-section keys, Chart.yaml `name:`). Lowercased; scoped names
- * normalized to `scope/pkg`. These slugs bind a dependency-evidence
- * receipt to the row: a receipt whose own target does not carry one of
- * them never backs the row, whatever its acquisition kind. NEVER derived
- * from checklist or reviewer prose. Empty when no reliable identity could
- * be parsed — the objective rows then fail closed (never kind-only
- * credit).
+ * #1657 (review round 3): the TRUSTED dependency update identity scope —
+ * the COMPLETE set of dependency updates this diff actually changes,
+ * parsed only from producer-recognized dependency surfaces (npm lockfile
+ * package blocks, npm manifest dependency sections, Helm chart
+ * manifests). Each entry names the dependency exactly (lowercased,
+ * `scope/pkg` normalized) and carries the exact version tokens from the
+ * CHANGED lines that introduced it — the trustworthy old→new identity
+ * where the diff shape carries one. A package enters scope only when THIS
+ * diff changes a line attributable to that package (its own block header,
+ * a version line inside its block, or its manifest dependency pair);
+ * unchanged hunk-context neighbors never enter scope. Identity is NEVER
+ * derived from checklist or reviewer prose.
+ *
+ * `{ available: false }` is the fail-closed outcome: the producer could
+ * not establish the COMPLETE trustworthy identity set — a recognized
+ * dependency surface carried changed lines this parser cannot attribute
+ * exactly (unrecognized shape, hostile identity, malformed version), an
+ * entry/version cap overflowed, or the scan budget ended mid-diff. The
+ * objective dependency rows then stay unresolved — never kind-only
+ * credit, never a partial-scope certificate. An available-but-empty scope
+ * means no dependency change could be attributed at all; the rows fail
+ * closed the same way at the receipt seam.
  */
-export function parseDependencyScopeSlugs(fullDiffText: string): string[] {
-  const slugs = new Set<string>();
+export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
+  const entries = new Map<string, Set<string>>();
+  let scopeComplete = true;
   let lines = 0;
   let currentFile = "";
-  // Per-file npm dependency-section depth (1 = inside a dependency-section
-  // object). Section state resets at each diff file header.
+  // Per-file attribution state (reset at each diff file header): the npm
+  // JSON brace depth, the `node_modules/<name>` package block a line
+  // belongs to, the npm dependency-section nesting depth, and the Chart.yaml
+  // identity a changed line belongs to. Context lines KEEP the attribution
+  // state (they anchor changed lines to their package) but NEVER create
+  // scope entries themselves.
+  let braceDepth = 0;
+  let currentBlockSlug: string | null = null;
   let npmSectionDepth = 0;
-  let inChartYaml = false;
-  const pushSlug = (rawName: string): void => {
-    const name = rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
-    if (name === "" || name.length > 214 || name.includes("..") || name.startsWith(".") || name.startsWith("-")) return;
-    if (!DEPENDENCY_SCOPE_SLUG_RE.test(name)) return;
-    if (slugs.size >= DEPENDENCY_SCOPE_MAX_SLUGS) return;
-    slugs.add(name);
+  let chartSlug: string | null = null;
+  const normalizeSlug = (rawName: string): string =>
+    rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
+  const usableSlug = (name: string): boolean =>
+    name !== "" && name.length <= 214 && !name.includes("..") && !name.startsWith(".") && !name.startsWith("-")
+    && DEPENDENCY_SCOPE_SLUG_RE.test(name);
+  const recordVersion = (slug: string, version: string): void => {
+    const versions = entries.get(slug);
+    if (versions === undefined) return;
+    if (!versions.has(version)) {
+      if (versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) { scopeComplete = false; return; }
+      versions.add(version);
+    }
+  };
+  const recordVersions = (slug: string, content: string): void => {
+    if (!entries.has(slug)) return;
+    let taken = 0;
+    for (const match of content.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
+      if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS || entries.get(slug)!.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
+        scopeComplete = false;
+        return;
+      }
+      recordVersion(slug, match[0].toLowerCase());
+    }
+  };
+  const recordChangedEntry = (rawName: string, content: string): void => {
+    const name = normalizeSlug(rawName);
+    if (!usableSlug(name)) { scopeComplete = false; return; }
+    if (!entries.has(name)) {
+      if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
+      entries.set(name, new Set<string>());
+    }
+    recordVersions(name, content);
   };
   for (const line of fullDiffText.split("\n")) {
-    if (++lines > DEPENDENCY_SCOPE_MAX_LINES) break;
+    if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
     const fileHeader = /^diff --git a\/(\S+)/.exec(line);
     if (fileHeader !== null) {
       currentFile = fileHeader[1] ?? "";
-      inChartYaml = currentFile.endsWith("Chart.yaml");
+      braceDepth = 0;
+      currentBlockSlug = null;
       npmSectionDepth = 0;
+      chartSlug = null;
+      // A changed dependency surface this parser does not read breaks the
+      // completeness of the identity set — fail closed, never an npm-only
+      // approximation of a mixed-ecosystem update.
+      if (UNPARSED_DEPENDENCY_SURFACE_RES.some((pattern) => pattern.test(currentFile))) scopeComplete = false;
       continue;
     }
+    // Trusted scope comes ONLY from recognized dependency surfaces.
+    const inLockfile = NPM_LOCKFILE_SHAPE_RE.test(currentFile);
+    const inManifest = NPM_MANIFEST_SHAPE_RE.test(currentFile);
+    const inChartYaml = CHART_MANIFEST_SHAPE_RE.test(currentFile);
+    if (!inLockfile && !inManifest && !inChartYaml) continue;
+    if (line.startsWith("index ") || line.startsWith("@@")) continue;
     const sign = line.startsWith("-") && !line.startsWith("---") ? "-"
       : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
     const content = line.slice(sign === "" ? 0 : 1).trim();
-    // npm lockfile package blocks: the block key names the dependency.
-    const lockfileBlock = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
-    if (lockfileBlock !== null) {
-      pushSlug(lockfileBlock[1] ?? "");
-      continue;
-    }
-    // npm manifest dependency sections: the section opens on its key, the
-    // changed `"name": "range"` pairs inside name the dependencies, and the
-    // section closes when its own object closes (brace-depth tracked over
-    // ALL lines — a minimal-context diff must not strand the state).
-    const sectionOpen = NPM_SECTION_OPEN_RE.exec(content);
-    if (sectionOpen !== null) {
-      npmSectionDepth = 1;
-      continue;
-    }
-    if (npmSectionDepth > 0) {
-      if (/^[-+]?\s*\}\s*,?\s*$/.test(content)) { npmSectionDepth = 0; continue; }
-      if (sign !== "") {
-        const pair = NPM_SECTION_PAIR_RE.exec(content);
-        if (pair !== null) pushSlug(pair[1] ?? "");
+    if (sign === "") {
+      // Context anchors the attribution state; it is never itself a
+      // change, so it never creates or extends a scope entry.
+      if (inLockfile) {
+        for (const ch of content) {
+          if (ch === "{") braceDepth += 1;
+          else if (ch === "}") braceDepth -= 1;
+        }
+        if (braceDepth <= 0) {
+          braceDepth = 0;
+          currentBlockSlug = null;
+        } else {
+          const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
+          if (block !== null) {
+            const name = normalizeSlug(block[1] ?? "");
+            currentBlockSlug = usableSlug(name) ? name : null;
+          }
+        }
+      } else if (inManifest) {
+        // The dependency section's structural lines anchor the pair state
+        // (context or changed); only the pairs themselves must change.
+        if (NPM_SECTION_OPEN_RE.test(content)) npmSectionDepth = 1;
+        else if (NPM_SECTION_CLOSE_RE.test(content)) npmSectionDepth = 0;
       }
       continue;
     }
-    // Helm chart identity: the Chart.yaml `name:` value on a changed line.
-    if (inChartYaml && sign !== "") {
-      const chartName = CHART_NAME_LINE_RE.exec(content);
-      if (chartName !== null) pushSlug(chartName[1] ?? "");
+    if (inLockfile) {
+      // The package's own block header changed: the dependency enters
+      // scope (an added or removed block) and anchors the lines after it.
+      const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
+      if (block !== null) {
+        recordChangedEntry(block[1] ?? "", content);
+        const name = normalizeSlug(block[1] ?? "");
+        currentBlockSlug = usableSlug(name) ? name : null;
+        for (const ch of content) { if (ch === "{") braceDepth += 1; }
+        continue;
+      }
+      if (braceDepth > 0 && currentBlockSlug !== null) {
+        // A changed line inside the package's own block: version lines
+        // carry the exact old→new identity; any other changed line still
+        // proves the package's entry changed (a re-resolution) without a
+        // version identity. Pure structural braces carry neither.
+        if (!NPM_STRUCTURAL_LINE_RE.test(content)) recordChangedEntry(currentBlockSlug, content);
+      } else if (braceDepth > 0) {
+        // A changed line inside a block this parser cannot attribute to a
+        // package (hostile/unrecognized block key): the changed-dependency
+        // set is not provably complete — fail closed.
+        if (!NPM_STRUCTURAL_LINE_RE.test(content)) scopeComplete = false;
+      }
+      // Outside any package block, a changed line mirrors a manifest
+      // declaration; the acquisition identity is the resolved package
+      // block, so it contributes no entry of its own.
+      for (const ch of content) {
+        if (ch === "{") braceDepth += 1;
+        else if (ch === "}") braceDepth -= 1;
+      }
+      if (braceDepth <= 0) { braceDepth = 0; currentBlockSlug = null; }
+      continue;
     }
+    if (inManifest) {
+      const sectionOpen = NPM_SECTION_OPEN_RE.exec(content);
+      if (sectionOpen !== null) { npmSectionDepth = 1; continue; }
+      if (npmSectionDepth > 0) {
+        if (NPM_SECTION_CLOSE_RE.test(content)) { npmSectionDepth = 0; continue; }
+        const pair = NPM_SECTION_PAIR_RE.exec(content);
+        if (pair !== null) recordChangedEntry(pair[1] ?? "", content);
+        else scopeComplete = false;
+      }
+      continue;
+    }
+    // Helm chart manifest: the chart's own identity on a changed line.
+    const chartName = CHART_NAME_LINE_RE.exec(content);
+    if (chartName !== null) {
+      const name = normalizeSlug(chartName[1] ?? "");
+      if (usableSlug(name)) {
+        chartSlug = name;
+        recordChangedEntry(chartName[1] ?? "", content);
+      }
+      continue;
+    }
+    if (chartSlug !== null && CHART_IDENTITY_VERSION_LINE_RE.test(content)) recordVersions(chartSlug, content);
   }
-  return [...slugs];
+  if (!scopeComplete) return { available: false };
+  return {
+    available: true,
+    entries: [...entries].map(([slug, versions]) => ({ slug, versions: [...versions] })),
+  };
 }
 
 /** The trusted evidence tags for the emitted must_check rows, in emission
@@ -4169,24 +4314,46 @@ export function parseDependencyScopeSlugs(fullDiffText: string): string[] {
  * sentence someone added without a tag) contributes NO tag — it stays
  * `legacy` downstream, which fails safe (gating), never non-gating.
  *
- * #1657 (review round 2): `dependencyScope` is the producer's parse of the
- * PR's own changed dependency surfaces (exact dependency-name slugs). It is
- * attached ONLY to the npm-dependency-family rows (`takes_dependency_scope`)
- * — image/chart/platform rows carry no reliable scope parse yet and FAIL
- * CLOSED (never kind-only credit). A `dependency-evidence` row whose tag
- * ends up without a scope cannot be receipt-backed at all. */
-export function mustCheckEvidenceTags(checks: readonly string[], dependencyScope: readonly string[] = []): MustCheckEvidenceTag[] {
+ * #1657 (review round 3): `dependencyScope` is the producer's parse of the
+ * PR's own changed dependency surfaces — the COMPLETE trustworthy entry
+ * set, or unavailable. It is attached ONLY to the rows that take a scope
+ * (`takes_dependency_scope`) and ONLY when the parse is available and
+ * non-empty; an unavailable/empty parse leaves the rows scope-less, and
+ * they FAIL CLOSED at the receipt seam (never kind-only credit, never a
+ * partial-scope certificate). */
+export function mustCheckEvidenceTags(
+  checks: readonly string[],
+  dependencyScope: DependencyScopeResult = { available: true, entries: [] },
+): MustCheckEvidenceTag[] {
+  const scopeEntries = dependencyScope.available ? dependencyScope.entries : [];
   const tags: MustCheckEvidenceTag[] = [];
   for (const text of checks) {
     const tag = MUST_CHECK_EVIDENCE_TAGS[text];
     if (tag === undefined) continue;
     tags.push(
-      tag.takes_dependency_scope === true && dependencyScope.length > 0
-        ? { ...tag, dependency_scope: [...dependencyScope] }
+      tag.takes_dependency_scope === true && scopeEntries.length > 0
+        ? { ...tag, dependency_scope: scopeEntries.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
         : tag,
     );
   }
   return tags;
+}
+
+/** #1657 (review round 3): the PERSISTED tag rows — strictly the artifact
+ * shape (`text`/`row_class`/`gate`/`obligations`/`dependency_scope`). The
+ * producer-internal `takes_dependency_scope` marker never rides the
+ * artifact: the strict tag parser refuses rows with unknown keys, so
+ * emitting it would silently drop the row to `legacy` at every fold. */
+export function mustCheckEvidenceTagsToArtifact(tags: readonly MustCheckEvidenceTag[]): Array<Record<string, unknown>> {
+  return tags.map((tag) => ({
+    text: tag.text,
+    row_class: tag.row_class,
+    ...(tag.gate !== undefined ? { gate: tag.gate } : {}),
+    ...(tag.obligations !== undefined && tag.obligations.length > 0 ? { obligations: [...tag.obligations] } : {}),
+    ...(tag.dependency_scope !== undefined && tag.dependency_scope.length > 0
+      ? { dependency_scope: tag.dependency_scope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+      : {}),
+  }));
 }
 
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
@@ -4477,7 +4644,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
   // npm-dependency evidence rows — the producer's parse of the PR's own
   // changed dependency surfaces. Empty (or a family without a reliable
   // parse) fails closed at the receipt seam.
-  const dependencyScope = parseDependencyScopeSlugs(fullDiffText ?? diffText);
+  const dependencyScope = parseDependencyScope(fullDiffText ?? diffText);
   const mustCheckEvidence = mustCheckEvidenceTags(mustCheck, dependencyScope);
 
   // Build changed files summary (just filenames, truncated).
