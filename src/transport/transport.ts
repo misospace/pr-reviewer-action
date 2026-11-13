@@ -144,12 +144,13 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
  * the review degrades to prompted-JSON instead of dying. `stripRemaining`
  * makes it strictly once-per-request, exactly like the clamp.
  *
- * #1655 (review) adds a third 400 repair on the SAME strip budget: the
- * corpus-only Anthropic request carries a prompt-cache checkpoint on its
+ * #1655 (review) adds a third repair of this shape on the SAME strip budget:
+ * the corpus-only Anthropic request carries a prompt-cache checkpoint on its
  * system prompt (`system: [{ type: "text", text, cache_control }]`), which a
  * self-hosted Anthropic-compatible gateway that only accepts a STRING
- * `system` answers with an HTTP 400 — the review would die on request bytes
- * the pre-#1655 request never had. When the 400 body names the checkpoint
+ * `system` answers with a request-shape rejection (HTTP 400, or the 415/422
+ * a validation-style gateway returns) — the review would die on request bytes
+ * the pre-#1655 request never had. When that body names the checkpoint
  * AND this payload carries it, the same request is retried once with the
  * system prompt back as the plain string. It shares the #1047 budget:
  * at most ONE strip retry per request, whichever surface it was.
@@ -253,7 +254,7 @@ async function runChatRequestLoop(
         : null;
       if (checkpoint !== null && followUpAllowed()) {
         report(true);
-        process.stderr.write(`removed ${checkpoint.surface} for one retry (HTTP 400 body named it)\n`);
+        process.stderr.write(`removed ${checkpoint.surface} for one retry (HTTP ${outcome.failure.status} body named it)\n`);
         // The nested loop reported its own wire calls, so this branch reports
         // nothing more. The outcome carries NO structured-output tag: this
         // strip dropped the checkpoint, not the structured-output parameter,
@@ -447,17 +448,24 @@ function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportF
   return null;
 }
 
-// ── Anthropic system cache checkpoint removal on HTTP 400 (#1655 review) ──
+// ── Anthropic system cache checkpoint removal on a shape-rejecting status
+// (#1655 review) ──
 // #1655 gave the corpus-only Anthropic request a prompt-cache checkpoint on
 // the system prompt (`system: [{ type: "text", text, cache_control }]`). A
 // self-hosted Anthropic-compatible gateway that only accepts a STRING
-// `system` — or rejects `cache_control` outright — answers HTTP 400, and the
-// review dies on request bytes the pre-#1655 request never carried. The
-// repair is the posture the #824 clamp and the #1047 strip already take:
-// DEGRADE the request once instead of failing the review.
+// `system` — or rejects `cache_control` outright — answers with a request-
+// shape rejection, and the review dies on request bytes the pre-#1655 request
+// never carried. The repair is the posture the #824 clamp and the #1047 strip
+// already take: DEGRADE the request once instead of failing the review.
+//
+// The status set is the family shape-rejecting gateways actually answer with
+// (review round 3): HTTP 400 Bad Request, 415 Unsupported Media Type, and
+// 422 Unprocessable Content — a validation-style gateway may reject the
+// block-array `system` with any of them. Only these three; 401/403/404 are
+// authorization/routing failures the body gate must not paper over.
 //
 // The gate is evidence-gated on BOTH sides, exactly like the #1047 strip: the
-// 400 body must NAME the checkpoint surface AND the request must actually
+// error body must NAME the checkpoint surface AND the request must actually
 // CARRY it. The body-side gate is deliberately narrow — `cache_control`
 // anywhere in the message, or `system` together with one of
 // `string`/`array`/`type`/`expected` — so an unrelated failure ("internal
@@ -471,17 +479,25 @@ function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportF
 // Like the #1047 strip, this shares the SAME single strip budget: at most
 // ONE strip retry per request, structured-output or checkpoint, never both.
 
+/** The request-shape-rejection statuses a checkpoint-rejecting gateway may
+ * answer with: 400 Bad Request, 415 Unsupported Media Type, and 422
+ * Unprocessable Content (validation-style gateways). Narrow on purpose —
+ * authorization (401/403) and routing (404) failures are never a shape
+ * rejection and must fail as-is. None of these is in RETRYABLE_HTTP_STATUSES,
+ * so the strip and the backoff loop never both fire on one status. */
+const SHAPE_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 415, 422]);
+
 interface SystemCacheCheckpointStripRetry {
   input: ChatRequestInput;
   surface: "system cache checkpoint";
 }
 
 /**
- * Does a 400 body NAME the Anthropic system checkpoint surface? `cache_control`
- * is that surface's own wire field, so its presence is decisive; a body that
- * only says `system` needs a second word that narrows it to the field's TYPE
- * (`string`/`array`/`type`/`expected`), because a bare "system" also shows
- * up in unrelated failures ("internal system error").
+ * Does a shape-rejection error body NAME the Anthropic system checkpoint
+ * surface? `cache_control` is that surface's own wire field, so its presence
+ * is decisive; a body that only says `system` needs a second word that narrows
+ * it to the field's TYPE (`string`/`array`/`type`/`expected`), because a bare
+ * "system" also shows up in unrelated failures ("internal system error").
  */
 function namesSystemCacheCheckpoint(message: string): boolean {
   if (message.includes("cache_control")) return true;
@@ -553,13 +569,13 @@ function carriesCacheControlOutsideSystem(body: Record<string, unknown>): boolea
 
 /**
  * A one-shot same-request retry with the #1655 system cache checkpoint
- * removed, or null when the failure is not a checkpoint-naming 400 on a
- * corpus-only Anthropic body that carries the checkpoint. The retry body is
- * the exact pre-#1655 bytes: the same body with `system` set back to the
- * block's plain text.
+ * removed, or null when the failure is not a checkpoint-naming request-shape
+ * rejection (400/415/422) on a corpus-only Anthropic body that carries the
+ * checkpoint. The retry body is the exact pre-#1655 bytes: the same body with
+ * `system` set back to the block's plain text.
  */
 function systemCacheCheckpointStripRetry(input: ChatRequestInput, failure: TransportFailure): SystemCacheCheckpointStripRetry | null {
-  if (failure.kind !== "http_status" || failure.status !== 400) return null;
+  if (failure.kind !== "http_status" || failure.status === undefined || !SHAPE_REJECTION_STATUSES.has(failure.status)) return null;
   if (failure.body === undefined) return null;
   const message = errorMessageText(failure.body).toLowerCase();
   if (!namesSystemCacheCheckpoint(message)) return null;
