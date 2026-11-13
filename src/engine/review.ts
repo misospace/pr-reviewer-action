@@ -2764,10 +2764,23 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const carriedThreadsSnapshot = safeJsonArray(ws.read("review-threads.json")) as never;
   const reconciliationHeadSha = context.headSha || String(pr.headRefOid ?? "");
   const carriedThreadList = carriedThreads(carriedThreadsSnapshot as unknown[]);
+  // #1645: the SNAPSHOT's own completeness. The context stage wrote it: an
+  // absent file means the thread context did not run (nothing was carried,
+  // nothing to reconcile), "complete" means the listing covered the whole
+  // set, and "incomplete" means it did not — the snapshot may be missing
+  // threads the run never carried, so the review state was established
+  // incompletely and the run says so.
+  const snapshotCompleteness = (ws.readText("review-threads-complete.txt") ?? "").trim();
+  const snapshotIncomplete = snapshotCompleteness === "incomplete";
   const liveThreadListing = carriedThreadList.length === 0
     ? null
     : await adapter.listReviewThreads().catch(() => null);
-  const liveThreadIndex = liveThreadListing !== null && liveThreadListing.ok
+  // An INCOMPLETE listing is not an authoritative one: the enforcement pass
+  // must not read "the forge has no such thread" out of a listing that
+  // could not cover the whole set, so an incomplete listing reads as
+  // UNAVAILABLE (nothing carried from cache alone, and the incomplete
+  // reconciliation is disclosed).
+  const liveThreadIndex = liveThreadListing !== null && liveThreadListing.ok && liveThreadListing.complete !== false
     ? parseLiveThreadIndex(liveThreadListing.data)
     : null;
   const carriedThreadReconciliation = reconcileCarriedThreads(
@@ -2778,6 +2791,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     version: 1,
     head_sha: reconciliationHeadSha,
     listing: carriedThreadReconciliation.listing,
+    snapshot: snapshotCompleteness === "" ? "off" : snapshotCompleteness,
     receipts: carriedThreadReconciliation.receipts,
   })}\n`);
   if (carriedThreadReconciliation.receipts.length > 0) {
@@ -2786,13 +2800,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     log(`  #1645: carried threads reconciled against live listing (${carriedThreadReconciliation.listing}): `
       + `${carriedThreadReconciliation.threads.length} live-unresolved, ${dropped} dropped (resolved/absent/unknown)`);
   }
-  // #1645: the reconciliation was INCOMPLETE — the authoritative listing
-  // could not be established for threads this run carried, so their state
-  // is unknown and none of them was carried into the disposition. The
-  // publish step discloses that in the published review, the metadata
-  // marker and the machine handoff, so a reader never mistakes the
-  // dropped carried state for a proven absence.
-  const threadReconciliation = carriedThreadReconciliation.listing === "unavailable"
+  // #1645: the review state was NOT established completely — either the
+  // authoritative live listing could not be read (so the carried threads'
+  // state is unknown and none of them was carried into the disposition) or
+  // the snapshot itself could not cover the whole set (so the carried set
+  // may be missing threads). The publish step discloses that in the
+  // published review, the metadata marker and the machine handoff, so a
+  // reader never mistakes the dropped carried state for a proven absence.
+  const threadReconciliation = carriedThreadReconciliation.listing === "unavailable" || snapshotIncomplete
     ? "unavailable" as const
     : undefined;
   const enforcementInputs: EnforcementInputs = {

@@ -102,8 +102,17 @@ export interface PlatformAdapter {
 }
 
 /** Outcome of a platform read that the v2 seam can fail: `ok` mirrors the
- * shell function's exit status, `data` its (parsed) stdout. */
-export type ReadResult<T> = { ok: true; data: T } | { ok: false; error: string };
+ * shell function's exit status, `data` its (parsed) stdout.
+ *
+ * #1645: a LIST read that could not cover the whole set says so with
+ * `complete: false` — its `data` is then a PARTIAL listing, not the whole
+ * one. The flag keeps completeness SEPARATE from success, exactly like the
+ * publish-side seam's `complete` (`listManagedInlineComments`): a partial
+ * listing is still usable data, while a failed read is no data at all. The
+ * flag is absent (undefined) when the read covered everything. */
+export type ReadResult<T> =
+  | { ok: true; data: T; complete?: boolean }
+  | { ok: false; error: string };
 
 /** CI-polling bounds for `externalChecks` (#663), taken from config/env by
  * the caller: `CI_API_TIMEOUT_SEC`, `CI_TIMEOUT_SEC`, `CI_DEADLINE_EPOCH`. */

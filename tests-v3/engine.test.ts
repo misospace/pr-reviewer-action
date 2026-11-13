@@ -1657,6 +1657,68 @@ test("#1645: an unavailable live listing drops carried threads as unknown and ne
   } finally { await server.close(); f.cleanup(); }
 });
 
+test("#1645: an INCOMPLETE live listing is never read as an empty one — the carried threads stay unknown and the run discloses it", async () => {
+  // The listing could not cover the whole set (a per-review read failed on
+  // Forgejo, or the fan-out hit its bound). It must not be read as "the
+  // forge has no threads": every carried thread stays unknown, nothing is
+  // carried into the disposition, and the incomplete reconciliation is
+  // disclosed on the published surfaces.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return listingCalls === 1
+          ? { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts")] }
+          : { ok: true, data: [], complete: false };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    assert.equal(result.outputs.verdict, "approve");
+    const findings = (result.reviewArtifact.findings ?? []) as Array<{ thread_id?: string }>;
+    assert.equal(findings.filter((f) => f.thread_id).length, 0, "no carried thread is carried from an incomplete listing");
+    assert.equal(result.threadReconciliation, "unavailable", "the incomplete reconciliation is disclosed");
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.equal(receipt.listing, "unavailable");
+    assert.deepEqual(receipt.receipts.map((r: { reconciliation: string }) => r.reconciliation), ["unknown"]);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("#1645: an INCOMPLETE snapshot is disclosed — the carried set may be missing threads the run never reconciled", async () => {
+  // The context-time listing itself could not cover the whole set, so the
+  // snapshot may be missing prior-round threads. The run carried what it
+  // could see, reconciled that, and says that the review state was not
+  // established completely.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    let listingCalls = 0;
+    const adapter = {
+      ...admissionAdapter(),
+      listReviewThreads: async () => {
+        listingCalls += 1;
+        return listingCalls === 1
+          ? { ok: true, data: [staleMajorThread("PRRT_stale1", "src/auth.ts")], complete: false }
+          : { ok: true, data: [] };
+      },
+    } as unknown as PlatformReadAdapter;
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter },
+    );
+    assert.equal(result.threadReconciliation, "unavailable", "the incomplete snapshot is disclosed");
+    const receipt = JSON.parse(readFileSync(join(f.runDir, "thread-reconciliation.json"), "utf8"));
+    assert.equal(receipt.snapshot, "incomplete");
+    assert.equal(receipt.listing, "live", "the live listing itself was complete");
+  } finally { await server.close(); f.cleanup(); }
+});
+
 // ── #1645: the PUBLISHED surfaces disclose an unavailable reconciliation ───
 //
 // The reconciliation state is a DISCLOSURE: it never changes the verdict, the
@@ -1897,8 +1959,8 @@ test("#1645: a run that carries no thread never reads the live listing twice and
 
 test("#1645: the standalone publish CLI reads the reconciliation state from the run dir's own artifact", async () => {
   const dir = mkdtempSync(join(tmpdir(), "v3-engine-reconciliation-"));
-  const artifact = (listing: unknown): void => {
-    writeFileSync(join(dir, "thread-reconciliation.json"), JSON.stringify({ version: 1, head_sha: "a".repeat(40), listing, receipts: [] }));
+  const artifact = (listing: unknown, snapshot: unknown = "complete"): void => {
+    writeFileSync(join(dir, "thread-reconciliation.json"), JSON.stringify({ version: 1, head_sha: "a".repeat(40), listing, snapshot, receipts: [] }));
   };
   const state = (): string | undefined => publishInputFromEnv(
     { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
@@ -1908,17 +1970,24 @@ test("#1645: the standalone publish CLI reads the reconciliation state from the 
     // An incomplete reconciliation is disclosed.
     artifact("unavailable");
     assert.equal(state(), "unavailable");
+    // An incomplete snapshot is disclosed too: the carried set may be
+    // missing threads the run never reconciled.
+    artifact("no-snapshot", "incomplete");
+    assert.equal(state(), "unavailable");
     // A complete reconciliation discloses nothing — the published bytes stay
     // exactly the pre-#1645 ones.
     artifact("live");
     assert.equal(state(), undefined);
     artifact("no-snapshot");
     assert.equal(state(), undefined);
-    // An unreadable artifact FAILS CLOSED: a reconciliation that cannot be
-    // proven complete is disclosed, because a reader must never read the
-    // dropped carried state as a proven absence.
+    // An unreadable artifact discloses NOTHING: the published surfaces state
+    // facts, and a corrupt local artifact must not make the review claim an
+    // incomplete reconciliation it cannot prove.
     writeFileSync(join(dir, "thread-reconciliation.json"), "{not json");
-    assert.equal(state(), "unavailable");
+    assert.equal(state(), undefined);
+    // A listing value this runtime does not know discloses nothing either.
+    artifact("some-future-state");
+    assert.equal(state(), undefined);
     // An absent artifact means the run never reconciled anything — there is
     // nothing to disclose.
     rmSync(join(dir, "thread-reconciliation.json"));

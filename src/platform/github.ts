@@ -406,6 +406,20 @@ export class GitHubAdapter implements PlatformReadAdapter {
     }
   }
 
+  /** The review-thread listing, one GraphQL document (#1645).
+   *
+   * The query asks for the LAST 100 threads, so a pull request with more
+   * than 100 threads yields a window, not the whole set. The window does not
+   * hide a CARRIED thread: the carried set comes from the same window at
+   * context time, so a carried thread can only fall outside it if ~100
+   * threads arrived during the run. The listing therefore stays COMPLETE
+   * for the reconciliation's purpose, and the read reports no
+   * `complete:false` (the #1645 partial-listing signal, which the Forgejo
+   * adapter raises when its own per-review fan-out cannot finish).
+   *
+   * The corpus's own thread coverage is a separate, pre-existing question:
+   * a pull request with more than 100 threads shows the reviewer only the
+   * newest ones. */
   async listReviewThreads(): Promise<ReadResult<unknown[]>> {
     const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY);
     if (!response.ok) return response;

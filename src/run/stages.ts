@@ -224,11 +224,22 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
   ws.write("review-threads.md", "");
   ws.write("review-threads.json", "");
   ws.write("review-threads-present.txt", "");
+  // #1645: the snapshot's OWN completeness. The artifact is the run's
+  // sentinel: it is written only when the thread context ran, so an absent
+  // file means the feature was off (nothing to reconcile, nothing to
+  // disclose), while "incomplete" says the listing could not cover the
+  // whole set — the snapshot may therefore be missing threads the run never
+  // carried, and the enforcement pass discloses that.
+  ws.write("review-threads-complete.txt", "");
   if ((env.REVIEW_THREADS_CONTEXT ?? "true").toLowerCase() !== "true") return;
   let maxBytes = Number(env.REVIEW_THREADS_MAX_BYTES ?? "8000");
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 200000) maxBytes = 8000;
   const fetched = await adapter.listReviewThreads();
-  if (!fetched.ok) return;
+  if (!fetched.ok) {
+    ws.write("review-threads-complete.txt", "incomplete");
+    return;
+  }
+  ws.write("review-threads-complete.txt", fetched.complete === false ? "incomplete" : "complete");
   ws.write("review-threads.raw.json", pyJsonDumps(fetched.data));
   try {
     const threads = prepareThreads(fetched.data);

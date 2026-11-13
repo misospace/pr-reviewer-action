@@ -595,29 +595,37 @@ test("forgejo review threads: a failed reviews read FAILS the read, never an emp
   assert.deepEqual(seen.map((s) => s.url), ["https://git.example/api/v1/repos/o/r/pulls/5/reviews"]);
 });
 
-test("forgejo review threads: a failed per-review comments read FAILS the read, never a truncated listing", async () => {
+test("forgejo review threads: a failed per-review comments read keeps the other threads and marks the listing INCOMPLETE", async () => {
   const { fetchImpl, seen } = recorder((url) => {
-    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }]);
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: 8 }]);
     if (url.pathname.endsWith("/reviews/4/comments")) return json({ message: "boom" }, 502);
-    return json([]);
+    return json([{ id: 900, path: "src/a.ts", original_position: 3, position: 3, body: "a finding", user: { login: "someone" } }]);
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
   const result = await adapter.listReviewThreads();
-  assert.equal(result.ok, false, "a partially-read listing is never presented as a complete one");
+  // Completeness is separate from success: the threads that WERE read are
+  // still data (the context stage wants as much as possible), and the
+  // listing says it could not cover the whole set (the enforcement pass
+  // must not read "no such thread" out of it).
+  assert.equal(result.ok, true);
+  assert.equal(result.complete, false, "a partially-read listing is never presented as a complete one");
+  assert.equal((result.data as unknown[]).length, 1, "the review that could be read still contributes its threads");
   assert.deepEqual(seen.map((s) => s.url), [
     "https://git.example/api/v1/repos/o/r/pulls/5/reviews",
     "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/8/comments",
   ]);
 });
 
-test("forgejo review threads: a listing past the review bound FAILS the read rather than truncating it", async () => {
+test("forgejo review threads: a listing past the review bound is INCOMPLETE, never truncated into a complete-looking one", async () => {
   const { fetchImpl, seen } = recorder((url) => {
     if (url.pathname.endsWith("/reviews")) return json(Array.from({ length: 101 }, (_v, i) => ({ id: i + 1 })));
     return json([]);
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
   const result = await adapter.listReviewThreads();
-  assert.equal(result.ok, false, "a listing past the bound fails instead of presenting a truncated set as whole");
+  assert.equal(result.ok, true, "a bounded listing is still a usable listing");
+  assert.equal(result.complete, false, "a bounded listing says it could not cover the whole set");
   // The bound stops the fan-out: the 101st review's comments are never fetched.
   assert.equal(seen.filter((s) => s.url.includes("/comments")).length, 100);
 });

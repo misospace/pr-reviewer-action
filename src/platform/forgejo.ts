@@ -45,10 +45,11 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
 const JWT_TTL_SECONDS = 2700;
 /** #1645: the bound on the review-thread listing's per-review comment
- * fan-out (one request per review). A listing larger than the bound FAILS
- * the read rather than being truncated — a truncated listing presented as
- * a complete one is the bug this bound exists to prevent. The magnitude
- * mirrors the GitHub listing's own 100-thread bound. */
+ * fan-out (one request per review). A listing larger than the bound is
+ * returned INCOMPLETE (`complete:false`), never truncated into a
+ * complete-looking one: a truncated listing presented as a complete one is
+ * the bug this bound exists to prevent. The magnitude mirrors the GitHub
+ * listing's own 100-item window. */
 const FORGEJO_REVIEW_THREADS_MAX_REVIEWS = 100;
 
 export interface ForgejoAdapterOptions {
@@ -644,25 +645,34 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   /** `list_review_threads`: every review's comments grouped into threads.
    *
-   * #1645: a FAILED read is never an empty listing. The enforcement pass
-   * reads this listing as AUTHORITATIVE forge state (it decides whether a
-   * carried prior-round thread still exists and is unresolved), so an empty
-   * array read as "the forge has no threads" would receipt every carried
-   * thread `absent` and silently drop a live blocker — the #1619 shape.
-   * A failed reviews read, a malformed payload, and a failed per-review
-   * comments read all FAIL the read (`ok:false`): the enforcement pass then
-   * treats the listing as unavailable, carries no thread from cache alone,
-   * and discloses the incomplete reconciliation. The same reasoning bounds
-   * the fan-out: this read costs one request per review, so a listing
-   * larger than the bound is failed rather than truncated — a truncated
-   * listing presented as a complete one is the same bug.
+   * #1645: completeness is SEPARATE from success, exactly like the
+   * publish-side seam's `listManagedInlineComments` (which already treats a
+   * failed per-review comments read as an INCOMPLETE enumeration, not a
+   * failed one). The two readers of this seam need opposite things:
+   *
+   * - the CONTEXT stage wants as much as possible: more threads make a
+   *   better review, so a review whose comments could not be read is
+   *   skipped and the other reviews' threads are kept;
+   * - the ENFORCEMENT pass reads the listing as AUTHORITATIVE forge state
+   *   (it decides whether a carried prior-round thread still exists and is
+   *   unresolved), so an incomplete listing there would receipt every
+   *   carried thread `absent` and silently drop a live blocker — the #1619
+   *   shape. It therefore treats an incomplete listing as UNAVAILABLE:
+   *   nothing is carried from cache alone, and the incomplete
+   *   reconciliation is disclosed.
+   *
+   * So a partial listing is returned as `ok:true` with `complete:false`, and
+   * only a failed PRIMARY read (the reviews listing itself) fails the read.
+   * A truncated listing is never presented as a complete one: the bound
+   * below ends the fan-out and marks the listing incomplete.
    *
    * The per-review fan-out is the platform's own shape (Forgejo serves one
    * review's comments per request), so the bound is what keeps the cost
    * finite; the enforcement pass additionally skips the read entirely when
    * the run carries no thread to reconcile. */
-  listReviewThreads(): Promise<ReadResult<unknown[]>> {
-    return this.read(async (at) => {
+  async listReviewThreads(): Promise<ReadResult<unknown[]>> {
+    let complete = true;
+    const result = await this.read(async (at) => {
       const { status, text } = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
       if (status !== 200) throw new Error(`forgejo review listing failed with status ${status}`);
       const reviews = pyJsonDecode(text);
@@ -672,18 +682,28 @@ export class ForgejoAdapter implements PlatformReadAdapter {
         const reviewId = forgejoReviewCommentId(review);
         if (reviewId === null) continue;
         if (commentLists.length >= FORGEJO_REVIEW_THREADS_MAX_REVIEWS) {
-          throw new Error(`forgejo review listing exceeds the ${FORGEJO_REVIEW_THREADS_MAX_REVIEWS}-review bound`);
+          // Past the bound the listing is INCOMPLETE, never truncated into a
+          // complete-looking one: the enforcement pass treats it as
+          // unavailable and discloses it.
+          complete = false;
+          break;
         }
         const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
         if (response.status !== 200) {
-          throw new Error(`forgejo review ${reviewId} comments failed with status ${response.status}`);
+          complete = false;
+          continue;
         }
         const comments = pyJsonDecode(response.text);
-        if (!Array.isArray(comments)) throw new Error(`forgejo review ${reviewId} comments are not a list`);
+        if (!Array.isArray(comments)) {
+          complete = false;
+          continue;
+        }
         commentLists.push(comments);
       }
       return groupForgejoReviewThreads(commentLists);
     });
+    if (result.ok && !complete) return { ok: true, data: result.data, complete: false };
+    return result;
   }
 
   /** `list_pr_reviews` (Forgejo serves every review in one response; the v2

@@ -400,20 +400,26 @@ const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "
  * dir's OWN `thread-reconciliation.json` artifact (never cwd, never ambient
  * env) — the same seam and the same discipline as the derived state above.
  *
- * The artifact's `listing` field carries the state the engine reconciled:
- * - `unavailable` — the authoritative live thread listing could not be
- *   established for the threads this run carried, so their state was
- *   reconciled INCOMPLETELY and every carried thread was dropped as unknown
- *   rather than proven absent. The publish step discloses that.
- * - `live` / `no-snapshot` — the reconciliation was complete (or there was
- *   nothing to reconcile): nothing is disclosed, and the published bytes are
- *   exactly the pre-#1645 ones.
+ * The artifact's `listing` field carries the state the enforcement pass
+ * reconciled against the live listing, and its `snapshot` field the
+ * completeness of the context-time snapshot:
+ * - `listing: "unavailable"` — the authoritative live thread listing could
+ *   not be established (or could not cover the whole set) for the threads
+ *   this run carried, so their state was reconciled INCOMPLETELY and every
+ *   carried thread was dropped as unknown rather than proven absent. The
+ *   publish step discloses that.
+ * - `snapshot: "incomplete"` — the snapshot itself could not cover the
+ *   whole set, so the carried set may be missing threads. Disclosed too.
+ * - `live` / `no-snapshot` / `snapshot: "off"` — the reconciliation was
+ *   complete (or there was nothing to reconcile): nothing is disclosed, and
+ *   the published bytes are exactly the pre-#1645 ones.
  *
- * FAIL CLOSED on an unreadable or malformed artifact: a reconciliation that
- * cannot be proven complete is disclosed as `unavailable`, because a reader
- * must never read the dropped carried state as a proven absence. An ABSENT
- * artifact means the run never reconciled anything (an older run), so there
- * is nothing to disclose and the state stays absent.
+ * The state is a DISCLOSURE, never a gate, so an UNREADABLE or malformed
+ * artifact discloses NOTHING: the published surfaces state facts, and a
+ * corrupt local artifact must not make the review claim that a
+ * reconciliation it cannot prove happened was incomplete. An absent
+ * artifact means the run never reconciled anything, so there is nothing to
+ * disclose either.
  */
 function threadReconciliationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
@@ -421,9 +427,9 @@ function threadReconciliationStateFromRunDir(env: NodeJS.ProcessEnv): string | u
   const path = join(runDir, "thread-reconciliation.json");
   if (!existsSync(path)) return undefined;
   const record = readJsonObject(path);
-  const listing = record === null ? undefined : record.listing;
-  if (listing === "live" || listing === "no-snapshot") return undefined;
-  return "unavailable";
+  if (record === null) return undefined;
+  if (record.listing === "unavailable" || record.snapshot === "incomplete") return "unavailable";
+  return undefined;
 }
 
 /**
