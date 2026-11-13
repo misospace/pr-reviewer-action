@@ -18,7 +18,7 @@ import { foldObligationDispositions, candidateRowsToObligations, reviewObligatio
 import { evaluateRequiredCheckCoverage } from "../src/enforcement/required-checks.js";
 import { executedCallEvidenceIndex, type ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
 import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
-import { computeFinalDisposition, dispositionEvidence } from "../src/disposition/final.js";
+import { computeFinalDisposition } from "../src/disposition/final.js";
 import { harnessEvidenceDigest } from "../src/requirements/trace-repair.js";
 import { verdictProofIndexSection } from "../src/tools/harness.js";
 
@@ -363,6 +363,20 @@ test("#1659: a refused/unparseable trace never defers, even with a discharged se
   assert.equal(folded[0]!.reason, "malformed-executed-trace");
 });
 
+test("#1659: an UNRELATED executed call never defers — the deterministic identity refusal stands, receipt or no receipt", () => {
+  const { obligations, executedCalls } = foldFixture();
+  // The lockfile row cites call-2, whose target (unrelated.md) cannot bind
+  // to the row's identity — the allocator refuses with `unrelated`. Even a
+  // discharged settlement with a successful admitted call must NOT flip it:
+  // a real identity objection is never a bookkeeping disagreement.
+  const dispositions = [{ check: citationTexts[0]!, status: "satisfied", rationale: "the read at call-2 confirms it" }];
+  const settlements = new Map([["obligation-1", settlement()]]);
+  const folded = foldObligationDispositions(obligations, dispositions, executedCalls, undefined, settlements);
+  assert.equal(folded[0]!.status, "unresolved");
+  assert.equal(folded[0]!.reason, "unrelated-executed-call");
+  assert.equal(folded[0]!.settledBy, undefined);
+});
+
 test("#1659: the #750 completeness fold defers on the same rows the obligation fold defers", () => {
   const { executedCalls } = foldFixture();
   const dispositions = [
@@ -543,4 +557,21 @@ test("#1659: the standalone repair digest carries the canonical settlement recor
   assert.ok(plain.includes("- read_file"));
   assert.ok(!plain.includes("question "));
   assert.equal(harnessEvidenceDigest({ tool_loop_meta: { required_evidence_settlements: "garbage" } }), "");
+});
+
+test("#1659: many settlement rows cannot push the tool-call digest out of the repair digest", () => {
+  // More tracked rows than the settlement entry share (half of the digest
+  // entry cap): the settlement block saturates and the call digest always
+  // keeps entries after it — the repair never loses the call bulk.
+  const harness = {
+    tool_calls: [{ tool: "read_file", args: { path: "a.ts" }, status: "ok" }],
+    tool_loop_meta: {
+      required_evidence_settlements: settlementsToArtifact(
+        Array.from({ length: 60 }, (_, i) => settlement({ id: `obligation-${i + 1}` })),
+      ),
+    },
+  };
+  const digest = harnessEvidenceDigest(harness);
+  assert.ok(digest.startsWith("- question obligation-1 "), "settlement rows still come first");
+  assert.ok(digest.includes("- read_file"), "the tool-call digest survives a saturated settlement block");
 });

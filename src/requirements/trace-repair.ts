@@ -331,7 +331,10 @@ export function harnessEvidenceDigest(harness: unknown): string {
   // formatting repair must always see (the call digest is the bulk).
   // Parsed fail-closed: a malformed record contributes nothing. Content-
   // free and deterministic: ids, kinds, states, and call-id receipts only —
-  // never tool result bodies, never model prose.
+  // never tool result bodies, never model prose. Settlement rows take at
+  // most half of the entry cap, so a run with many tracked rows can never
+  // push the tool-call digest out of the block entirely.
+  const maxSettlementRows = Math.ceil(MAX_TRACE_REPAIR_EVIDENCE_CALLS / 2);
   const meta = harness !== null && typeof harness === "object" && !Array.isArray(harness)
     ? (harness as Record<string, unknown>).tool_loop_meta
     : null;
@@ -340,7 +343,7 @@ export function harnessEvidenceDigest(harness: unknown): string {
       ? (meta as Record<string, unknown>).required_evidence_settlements
       : null,
   );
-  for (const row of settlements.slice(0, MAX_TRACE_REPAIR_EVIDENCE_CALLS)) {
+  for (const row of settlements.slice(0, maxSettlementRows)) {
     lines.push(
       `- question ${escapeControlChars(row.id.slice(0, 80))} kind=${row.kind} materiality=${row.materiality}`
         + ` state=${row.settledVia} evidence=${row.acquisition}`

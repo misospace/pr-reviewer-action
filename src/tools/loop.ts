@@ -44,7 +44,6 @@ import { MAX_GROUP_NAME_CHARS, MAX_GROUPS_PER_RULE } from "../enforcement/requir
 // authority for the rows it tracks, and finalization consumes these receipts.
 import { executedCallId } from "../enforcement/executed-calls.js";
 import {
-  settlementsToArtifact,
   type LoopEvidenceSettlement,
   type SettlementObligationSource,
 } from "../enforcement/settlement.js";

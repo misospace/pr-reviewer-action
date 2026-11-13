@@ -1117,17 +1117,17 @@ export function reviewObligationsToArtifact(
     // #1627: `reason` rides on every row the #1627 fold produced (a
     // pre-#1627 caller may pass rows without one; the field is then
     // omitted, exactly like the pre-#1449 shape).
- obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy, settledBy }) => {
- const row: Record<string, unknown> = { id, source, text, status, cause };
- if (reason !== undefined) row.reason = reason;
- if (anchors !== undefined) row.anchors = anchors;
- if (resolvedBy !== undefined) row.resolved_by = { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha };
- // #1659: the loop-settlement deferral receipt rides the artifact too —
- // the explainable provenance for a satisfied row the citation
- // allocator did not assign (absent on every other row).
- if (settledBy !== undefined) row.settled_by = { kind: settledBy.kind, call: settledBy.call };
- return row;
- }),
+    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy, settledBy }) => {
+      const row: Record<string, unknown> = { id, source, text, status, cause };
+      if (reason !== undefined) row.reason = reason;
+      if (anchors !== undefined) row.anchors = anchors;
+      if (resolvedBy !== undefined) row.resolved_by = { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha };
+      // #1659: the loop-settlement deferral receipt rides the artifact too —
+      // the explainable provenance for a satisfied row the citation
+      // allocator did not assign (absent on every other row).
+      if (settledBy !== undefined) row.settled_by = { kind: settledBy.kind, call: settledBy.call };
+      return row;
+    }),
   };
   // #1627: the disposition parser's drop receipt rides the fold artifact
   // too — the drops are unattributable by definition (no row can carry
