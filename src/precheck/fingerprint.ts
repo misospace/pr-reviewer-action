@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { extraHeaderFingerprint } from "../transport/headers.js";
 import { ACTION_VERSION } from "../version.js";
-import { CONFIDENCE_RUBRIC_VERSION } from "../confidence/result.js";
+import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../confidence/result.js";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -353,6 +353,7 @@ function credentialDigest(key: string, value: string): string {
 
 /** #1463: the scorer-SEMANTIC action version — the release version and its
  * pre-release marker, with semver build metadata (the `+…` suffix) stripped.
+ * This is RELEASE identity only; it is NOT implementation identity.
  *
  * A dev/dogfood build stamps `vX.Y.Z-dev+<head sha>` (#915): the head sha is
  * WHERE the bundle was built from, not what the scorer does. But the
@@ -362,11 +363,18 @@ function credentialDigest(key: string, value: string): string {
  * PR-owned file. Hashing the raw stamp put that build provenance into the
  * `cfg:` half of the stale-review fingerprint, so the skip-if-diff-unchanged
  * precheck could never match across a base-sync and every no-op
- * synchronization churn burned a full review (#1463). The semantic part —
- * `vX.Y.Z` (release) / `vX.Y.Z-dev` (dogfood) — still invalidates across
- * release boundaries and release-vs-dogfood boundaries, keeping #1073's
- * rule (the scorer's prompt/code ride action releases) exactly where it
- * holds. A pure function of the stamp so tests can pin the strip matrix. */
+ * synchronization churn burned a full review (#1463). Stripping the metadata
+ * keeps #1073's invalidation exactly where it still holds — across release
+ * boundaries (`vX.Y.Z` → `vX.Y+1.Z`) and the release-vs-dogfood boundary
+ * (`vX.Y.Z` vs `vX.Y.Z-dev`) — and nowhere else.
+ *
+ * Within one line the stripped stamp is CONSTANT while the implementation
+ * moves per head, so intra-line scorer/verifier implementation semantics are
+ * carried separately by `CONFIDENCE_VERIFIER_REVISION` (emitted below as
+ * `SCORER_VERIFIER_REVISION`) and the rubric by `CONFIDENCE_RUBRIC_VERSION`.
+ * Build provenance and implementation identity are independent inputs; never
+ * re-join them by hashing the stamp. A pure function of the stamp so tests
+ * can pin the strip matrix. */
 export function scorerSemanticActionVersion(version: string): string {
   return version.replace(/\+[0-9A-Za-z.-]+$/, "");
 }
@@ -376,8 +384,14 @@ export function scorerSemanticActionVersion(version: string): string {
  * action's own namespace except `*_API_KEY` secrets, which re-enter only as
  * one-way digests (#1152, see `CREDENTIAL_AI_KEYS`); every other key is
  * matched by exact name so runner-preset provider vars cannot skew the
- * hash across runner images. */
-export function collectConfigLines(env: Record<string, string>): string[] {
+ * hash across runner images.
+ *
+ * `actionVersion` is the build stamp feeding the scorer-version line — an
+ * explicit input (#1463) so the fingerprint treats build identity as what it
+ * is, an argument, and tests can exercise production-style dogfood stamps
+ * (`vX.Y.Z-dev+<head sha>`) through the real emission path; the default is
+ * this bundle's own stamp. */
+export function collectConfigLines(env: Record<string, string>, actionVersion: string = ACTION_VERSION): string[] {
   const lines: string[] = [];
   const keys = Object.keys(env)
     .filter((key) => (
@@ -506,14 +520,23 @@ export function collectConfigLines(env: Record<string, string>): string[] {
         lines.push(`${key}=${credentialDigest(key, value)}`);
         continue;
       }
-      // #1073: the scorer's prompt/code ride action releases, so while the
-      // scorer is enabled a version change must invalidate the cached review
-      // and force the score to be recomputed. Emitted once per family block,
-      // keyed on the enabled gate above; the over-eager direction only ever
-      // costs a fresh review. Disabled (the default) emits nothing,
-      // preserving baseline fingerprints.
+      // #1073: the scorer's prompt/code ride action releases, so a release
+      // change must invalidate the cached review and force the score to be
+      // recomputed. The line carries the RELEASE identity only — build
+      // metadata is stripped (#1463, see `scorerSemanticActionVersion`).
+      // Emitted once per family block, keyed on the enabled gate above; the
+      // over-eager direction only ever costs a fresh review. Disabled (the
+      // default) emits nothing, preserving baseline fingerprints.
       if (key === "AI_CONFIDENCE_MODEL") {
-        lines.push(`SCORER_ACTION_VERSION=${scorerSemanticActionVersion(ACTION_VERSION)}`);
+        lines.push(`SCORER_ACTION_VERSION=${scorerSemanticActionVersion(actionVersion)}`);
+        // #1463: within one release line the stripped stamp is constant
+        // while the dogfood implementation moves per head, so the line above
+        // cannot see an intra-line implementation change. The explicit
+        // verifier revision (`CONFIDENCE_VERIFIER_REVISION`) is the
+        // implementation-identity input: a semantic scorer/verifier change
+        // bumps it and invalidates the cached score where the release line
+        // deliberately stays put.
+        lines.push(`SCORER_VERIFIER_REVISION=${CONFIDENCE_VERIFIER_REVISION}`);
         // #1369: the rubric version invalidates cached scores when the
         // scoring semantics change, independent of release versioning —
         // a rubric change re-verifies even within one action release.

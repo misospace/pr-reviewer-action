@@ -23,7 +23,9 @@ import {
   EXACT_CONFIG_KEYS,
   parseMarkerFingerprints,
   scorerSemanticActionVersion,
+  fingerprintsMatch,
 } from "../src/precheck/fingerprint.js";
+import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../src/confidence/result.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
 import { extractLinkedIssueRefs, labelsOf } from "../src/precheck/linked-issues.js";
 import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.js";
@@ -2243,6 +2245,13 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
 });
 
 test("#1463: the dogfood head sha is build provenance, never scorer-semantic configuration", () => {
+  const scorerActiveEnv = {
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  };
+
   // The strip matrix: the release stamp passes through untouched; the dev
   // stamp loses ONLY its build-metadata suffix; an unset stamp stays empty.
   assert.equal(scorerSemanticActionVersion("v3.8.0"), "v3.8.0");
@@ -2251,29 +2260,61 @@ test("#1463: the dogfood head sha is build provenance, never scorer-semantic con
   assert.equal(scorerSemanticActionVersion("v3.8.0-rc.1+20261112"), "v3.8.0-rc.1");
   assert.equal(scorerSemanticActionVersion(""), "");
 
-  // The #1463 shape: a pure base-sync (merging main into an already-reviewed
-  // PR branch) changes the PR head sha while the effective PR patch stays
-  // byte-identical. The two dogfood stamps below differ ONLY in that head
-  // sha; the emitted line must be identical for both, so the config hash
-  // cannot see the churn. A release-to-release bump (v3.8.0-dev vs v3.9.0)
-  // still invalidates: #1073's rule holds on the semantic part alone.
-  assert.equal(scorerSemanticActionVersion("v3.8.0-dev+aaaaaaa"), scorerSemanticActionVersion("v3.8.0-dev+bbbbbbb"));
-  assert.notEqual(scorerSemanticActionVersion("v3.8.0-dev+aaaaaaa"), scorerSemanticActionVersion("v3.9.0-dev+aaaaaaa"));
+  // The #1463 shape, at the fingerprint level: a pure base-sync (merging
+  // main into an already-reviewed PR branch) changes the PR head sha while
+  // the effective PR patch stays byte-identical. The two production-style
+  // dogfood stamps below (`vX.Y.Z-dev+<sha>`, the first the #1453 reviewed
+  // head) differ ONLY in that head sha and flow through the real emission
+  // path — the config lines must be byte-identical, so the config hash and
+  // the stored marker cannot see the churn. A release-to-release bump and
+  // the release-vs-dogfood boundary still invalidate: #1073's rule holds on
+  // the release line, and nowhere else.
+  const baseSyncA = collectConfigLines(scorerActiveEnv, "v3.8.0-dev+d7303b8");
+  const baseSyncB = collectConfigLines(scorerActiveEnv, "v3.8.0-dev+e12f4a9");
+  assert.deepEqual(baseSyncB, baseSyncA);
+  assert.equal(computeConfigHash(baseSyncB), computeConfigHash(baseSyncA));
+  assert.notEqual(
+    computeConfigHash(collectConfigLines(scorerActiveEnv, "v3.9.0-dev+d7303b8")),
+    computeConfigHash(baseSyncA),
+  );
+  assert.notEqual(
+    computeConfigHash(collectConfigLines(scorerActiveEnv, "v3.8.0")),
+    computeConfigHash(baseSyncA),
+  );
+
+  // Implementation identity is a SEPARATE input from build provenance: the
+  // emitted SCORER_VERIFIER_REVISION line carries
+  // `CONFIDENCE_VERIFIER_REVISION`, and bumping it — the maintainer contract
+  // for a real scorer/verifier implementation change within one release
+  // line — changes the config hash and the stored marker fingerprint, so
+  // `fingerprintsMatch` fails and the precheck forces a fresh review. The
+  // base-sync pair above still matches, so pure provenance churn keeps the
+  // skip.
+  const revisionLine = baseSyncA.find((line) => line.startsWith("SCORER_VERIFIER_REVISION="));
+  assert.ok(revisionLine, "the enabled config must carry the verifier implementation revision");
+  assert.equal(revisionLine, `SCORER_VERIFIER_REVISION=${CONFIDENCE_VERIFIER_REVISION}`);
+  assert.ok(baseSyncA.some((line) => line === `SCORER_RUBRIC_VERSION=${CONFIDENCE_RUBRIC_VERSION}`));
+  const bumped = baseSyncA.map((line) => (line === revisionLine ? "SCORER_VERIFIER_REVISION=verifier-impl-v2" : line));
+  assert.notEqual(computeConfigHash(bumped), computeConfigHash(baseSyncA));
+  const diffFp = computeDiffFingerprint("unchanged effective PR patch");
+  const markerA = buildMarkerFingerprint(diffFp, computeConfigHash(baseSyncA));
+  assert.ok(
+    !fingerprintsMatch(buildMarkerFingerprint(diffFp, computeConfigHash(bumped)), [markerA]),
+    "a bumped verifier revision must force a fresh review of an unchanged diff",
+  );
+  assert.ok(
+    fingerprintsMatch(buildMarkerFingerprint(diffFp, computeConfigHash(baseSyncB)), [markerA]),
+    "a pure base-sync head-sha change must keep the unchanged-diff skip",
+  );
 
   // End-to-end on the emitted lines: whatever the built-in stamp is, the
   // SCORER_ACTION_VERSION line never carries a build-metadata suffix (a `+`
   // would re-introduce the head sha on dogfood builds), and the enabled
   // gate still emits it.
-  const enabled = collectConfigLines({
-    AI_MODEL: "m",
-    AI_BASE_URL: "https://primary",
-    AI_CONFIDENCE_MODEL: "scorer-model",
-    AI_CONFIDENCE_TIMEOUT_SEC: "120",
-  });
+  const enabled = collectConfigLines(scorerActiveEnv);
   const versionLine = enabled.find((line) => line.startsWith("SCORER_ACTION_VERSION="));
   assert.ok(versionLine, "the enabled config must still carry the scorer action version");
   assert.ok(!versionLine.slice("SCORER_ACTION_VERSION=".length).includes("+"), "the emitted scorer version must never carry build metadata");
-  assert.ok(enabled.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
 });
 
 test("#1368: the scorer's budget/capability controls are fingerprint-conditional", () => {

@@ -40,6 +40,24 @@ export type ConfidenceConcernSeverity = (typeof CONFIDENCE_CONCERN_SEVERITIES)[n
  * apart from merge-readiness verifier results. */
 export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
 
+/** #1463: the verifier implementation revision — the explicit semantic
+ * fingerprint of the scorer/verifier implementation BEYOND the rubric
+ * (`CONFIDENCE_RUBRIC_VERSION`) and the release line (`SCORER_ACTION_VERSION`).
+ *
+ * The precheck stale-review fingerprint must invalidate a cached
+ * score/review when the verifier's implementation semantics change, but the
+ * build stamp it used to ride (`vX.Y.Z-dev+<head sha>`) is provenance, not
+ * semantics — a pure base-sync churns the sha with no semantic change. This
+ * constant is the replacement input: BUMP IT whenever a change to the
+ * confidence implementation alters what the verifier requests or how results
+ * are parsed/shaped (prompt wording, parser bounds, wire schema, result
+ * shaping) — anything a cached score was computed under that the new build
+ * would answer differently. Rubric changes bump `CONFIDENCE_RUBRIC_VERSION`;
+ * everything else semantic bumps this. NOT bumping it after such a change
+ * lets an unchanged-diff PR reuse a stale score — the bug this constant
+ * exists to prevent. */
+export const CONFIDENCE_VERIFIER_REVISION = "verifier-impl-v1";
+
 // Output bounds the parser applies. Declared above the wire schema because
 // the schema mirrors two of them (`maxItems`, and the entry shape the bounds
 // exist to protect) — one source for both, so neither can drift.
