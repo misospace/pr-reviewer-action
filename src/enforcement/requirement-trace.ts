@@ -56,6 +56,14 @@
  * a model-claimed `unmet` is the reviewer's own gap claim, exposed as
  * `unmet_claimed`, never synthesized into a finding here.
  *
+ * Materiality distinction (#1658 review): the deleted lexical rules can no
+ * longer make a row material — a valid location without a comparison is
+ * `evidenced`. What IS material for an in-scope mandatory requirement:
+ * invalid OBJECTIVE provenance (the cited enforcement/test location does
+ * not resolve at reviewed head), a malformed/unusable semantic claim, a
+ * missing claim, or a deterministic refutation. Environmental
+ * unavailability on non-code/external/post-merge criteria stays advisory.
+ *
  * #1658 division of authority: this module STOPS being a publication
  * authority. It does not touch `required_checks`, does not synthesize
  * findings, and does not flip the verdict — the final APPROVE /
@@ -150,9 +158,9 @@ export interface RequirementTraceRow {
   requirement_id: string;
   disposition: string;
   /** #985/#1658: the deterministic proof shape this requirement was validated
-    * against — `runtime_behavior` | `identity_comparison` | `guard` |
-    * `structural_state` | `test_required` | `distributed` | `external_state` |
-    * `documentation` (#1062), or `not_applicable` for an out-of-scope row.
+    * against — `runtime_behavior` | `structural_state` | `test_required` |
+    * `distributed` | `external_state` | `documentation` (#1062), or
+    * `not_applicable` for an out-of-scope row.
     * Derived from the ledger requirement text by this module, never from a
     * model field, so it is explainable from the artifact alone. */
   proof: string;
@@ -167,12 +175,15 @@ export interface RequirementTraceRow {
    * the settled advisory shapes. */
   resolution: string;
   /** #1658: the row's RELEVANCE class — `material` when its unresolved state
-   * could genuinely withhold certification (a deterministic refutation, the
-   * reviewer's own gap claim, a missing claim on an in-scope mandatory
-   * requirement, or an unresolved row in a mechanically derivable class:
-   * structural/distributed/identity/guard/test-demanding), `advisory` when
-   * the row's only failure is proof-shape/bookkeeping on an ordinary
-   * behavior row or the row is already settled. This module EXPOSES the
+   * could genuinely withhold certification: a deterministic refutation, the
+   * reviewer's own gap claim, a missing claim, invalid objective provenance
+   * (the cited enforcement/test location does not resolve at reviewed head),
+   * or a malformed/unusable semantic claim — on an in-scope mandatory
+   * requirement, whatever its proof class. `advisory` when the row is
+   * already settled or its unknown is environmental (non-code/external/
+   * post-merge criteria, #1062). The DELETED lexical predicate/test-shape
+   * rules can no longer produce materiality: a valid location with no
+   * comparison is `evidenced`, clean (#1643). This module EXPOSES the
    * classification; it never decides the final disposition (#1656 does). */
   materiality: string;
   enforcement: TraceLocation[];
@@ -197,7 +208,16 @@ export const TRACE_MATERIALITY: readonly string[] = ["material", "advisory"];
  * consumption surface for the final-disposition layer (#1656). Every list is
  * deduplicated in row order and capped at the shared id cap; `total_rows`
  * counts ALL rows (settled ones included) so a consumer can never mistake a
- * capped list for the whole ledger. */
+ * capped list for the whole ledger.
+ *
+ * Integration contract (#1656 — this module only EXPOSES the classes, it
+ * never wires publication policy itself):
+ * - `confirmed_unmet` → an objectively proven-unmet mandatory requirement
+ *   (REQUEST_CHANGES territory);
+ * - `unmet_claimed` → a material unknown, unless the reviewer backed it with
+ *   an ordinary grounded blocker/major finding;
+ * - `unresolved_material` → a material unknown / INCOMPLETE;
+ * - `unresolved_advisory` → diagnostic only. */
 export interface RequirementTraceSummary {
   /** Deterministic refutations: the validator re-derived the requirement's
    * truth from current-head evidence and found it absent. */
@@ -205,10 +225,13 @@ export interface RequirementTraceSummary {
   /** The reviewer's own well-formed gap claims (#1095) — substantive,
    * never dismissed as bookkeeping, never confirmed here. */
   unmet_claimed: string[];
-  /** Unresolved rows whose relevance class is material. */
+  /** Unresolved rows whose relevance class is material: missing claims,
+   * invalid objective provenance (citations that do not resolve at reviewed
+   * head, including an explicitly-required test), malformed/unusable
+   * semantic claims, and unresolved mechanically decidable rows. */
   unresolved_material: string[];
-  /** Unresolved rows whose only failure is proof-shape/bookkeeping on an
-   * ordinary behavior row (or non-claim environmental unavailability). */
+  /** Unresolved rows whose unknown is environmental — non-code/external/
+   * post-merge criteria (#1062). Diagnostic only for the disposition. */
   unresolved_advisory: string[];
   total_rows: number;
 }
@@ -2553,7 +2576,23 @@ export function validateRequirementTrace(
       resolution = "unresolved";
       materiality = "material";
       unresolvedMaterialIds.push(entry.id);
+    } else if (proof === "runtime_behavior" || proof === "test_required") {
+      // #1658 review: invalid OBJECTIVE provenance on an in-scope mandatory
+      // ordinary row is a material unknown, not advisory bookkeeping. Every
+      // claimed-but-unverifiable state left on these proofs is one of: the
+      // enforcement citation does not resolve at reviewed head
+      // (`downgraded-no-valid-enforcement-location`), an explicitly-required
+      // test citation does not resolve (`downgraded-no-valid-test-location`),
+      // or the semantic disposition itself is malformed/unusable
+      // (`disposition-invalid` / `missing-reason`). The deleted lexical
+      // predicate/test-shape rules never reach this ladder, so a valid
+      // location with no comparison is `evidenced` long before here.
+      resolution = "unresolved";
+      materiality = "material";
+      unresolvedMaterialIds.push(entry.id);
     } else {
+      // Non-code/external/post-merge rows: environmental unavailability is
+      // advisory by design (#1062); the criterion stays pending/advisory.
       resolution = "unresolved";
       materiality = "advisory";
       unresolvedAdvisoryIds.push(entry.id);
