@@ -172,9 +172,10 @@ test("malformed-location regression: met citing an enforcement line that does no
     assert.equal(result.rows[0]?.disposition, "unverifiable");
     assert.ok(result.rows[0]?.notes.includes("downgraded-no-valid-enforcement-location"));
     // #1658: a citation that fails validation is an unresolved advisory on an
-    // ordinary runtime row — a missing proof shape is never a confirmed defect.
+    // Invalid objective provenance on a mandatory runtime row is a material
+    // unknown (#1658 review) — exposure, never a confirmed defect.
     assert.equal(result.rows[0]?.resolution, "unresolved");
-    assert.equal(result.rows[0]?.materiality, "advisory");
+    assert.equal(result.rows[0]?.materiality, "material");
     assert.equal(result.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
@@ -198,7 +199,7 @@ test("#954: an unverifiable in-scope trace is recorded separately while strict r
     assert.equal(trace.incomplete, false);
     assert.equal(trace.rows[0]?.disposition, "unverifiable");
     assert.equal(trace.rows[0]?.resolution, "unresolved");
-    assert.equal(trace.rows[0]?.materiality, "advisory");
+    assert.equal(trace.rows[0]?.materiality, "material");
 
     const art = artifact({ requirement_coverage: claims });
     applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
@@ -2818,10 +2819,11 @@ test("#985: a compound existence-plus-content claim stays on the strict path", (
     }];
     const emptyTrace = validateRequirementTrace(claims, ledger, workspace);
     // An EMPTY file makes the cited line 1 out of range: the citation fails
-    // provenance validation — an advisory unknown (#1658), never a defect.
+    // provenance validation — invalid objective provenance is a material
+    // unknown (#1658 review), never a confirmed defect.
     assert.equal(emptyTrace.rows[0]?.disposition, "unverifiable");
     assert.ok(emptyTrace.rows[0]?.notes.includes("downgraded-no-valid-enforcement-location"));
-    assert.equal(emptyTrace.rows[0]?.materiality, "advisory");
+    assert.equal(emptyTrace.rows[0]?.materiality, "material");
     assert.equal(emptyTrace.rows[0]?.proof, "runtime_behavior");
 
     // Populating the file does not change the classification — the shape is
@@ -3725,12 +3727,12 @@ test("#1062: the model cannot self-declare a code row pending", () => {
     const ledger = ledgerWith([{ id: "req-code", text: CODE_COMPARE_REQUIREMENT, kind: "normative" }]);
     const claims = [{ requirement_id: "req-code", disposition: "pending", reason: "trust me" }];
     const trace = validateRequirementTrace(claims, ledger, workspace);
-    // "pending" is not a model vocabulary; it is rejected and the code row
-    // falls to unverifiable — an exposed unknown, not a self-waiver, and
-    // #1658: never an approval veto by itself.
+    // "pending" is not model vocabulary: the semantic claim is malformed/
+    // unusable, which is a material unknown (#1658 review) — never a
+    // self-waiver and never a fabricated blocker.
     assert.equal(trace.rows[0]?.disposition, "unverifiable");
     assert.equal(trace.rows[0]?.proof, "runtime_behavior");
-    assert.equal(trace.rows[0]?.materiality, "advisory");
+    assert.equal(trace.rows[0]?.materiality, "material");
     assert.equal(trace.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });

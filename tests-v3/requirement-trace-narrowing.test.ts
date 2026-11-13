@@ -43,7 +43,7 @@ function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
   return { verdict: "approve", required_checks: "none", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact;
 }
 
-test("#1643: counter/reporting behavior completes without a comparison predicate", () => {
+test("#1643: a copy-only citation with no predicate anywhere remains evidenced — the deleted lexical rules cannot downgrade it", () => {
   const workspace = makeWorkspace();
   try {
     writeFile(workspace, "src/telemetry/counter.ts", [
@@ -63,12 +63,16 @@ test("#1643: counter/reporting behavior completes without a comparison predicate
       test: [{ file: "tests/telemetry/counter.test.ts", line: 2 }],
       reason: "",
     }];
+    // The cited line is assignment/copy-shaped (summary.add) and nothing in
+    // the fixture compares anything: the deleted #874 proof-shape system
+    // would have rejected exactly this review. It cannot come back.
     const trace = validateRequirementTrace(claims, ledger, workspace);
     assert.equal(trace.rows.length, 1);
     assert.equal(trace.rows[0]!.disposition, "met");
     assert.equal(trace.rows[0]!.proof, "runtime_behavior");
     assert.equal(trace.rows[0]!.resolution, "evidenced");
     assert.equal(trace.rows[0]!.materiality, "advisory");
+    assert.ok(!trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"));
     assert.equal(trace.incomplete, false);
     assert.deepEqual(trace.summary, {
       confirmed_unmet: [], unmet_claimed: [], unresolved_material: [], unresolved_advisory: [], total_rows: 1,
@@ -217,11 +221,13 @@ test("a material unknown feeds the disposition state instead of becoming a fabri
   }
 });
 
-test("an advisory unknown (proof-shape/citation bookkeeping) does not veto approval", () => {
+test("invalid objective provenance for an in-scope mandatory runtime row is a material unknown", () => {
   const workspace = makeWorkspace();
   try {
     writeFile(workspace, "src/view.ts", ["export const view = () => 1;"]);
     const ledger = ledgerWith([{ id: "req-view", text: "The view must render the summary row.", kind: "acceptance" }]);
+    // A met claim whose cited location does NOT exist at reviewed head: the
+    // semantic assertion has no objective provenance behind it.
     const claims = [{
       requirement_id: "req-view",
       disposition: "met",
@@ -232,15 +238,79 @@ test("an advisory unknown (proof-shape/citation bookkeeping) does not veto appro
     const trace = validateRequirementTrace(claims, ledger, workspace);
     assert.equal(trace.rows[0]!.disposition, "unverifiable");
     assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-enforcement-location"));
+    // #1658 review: invalid provenance is a material unknown, not advisory
+    // bookkeeping — the reviewer asserted a state the citation cannot back.
+    // It is exposure, not certification: no incomplete, no veto by itself.
     assert.equal(trace.rows[0]!.resolution, "unresolved");
-    assert.equal(trace.rows[0]!.materiality, "advisory");
-    assert.deepEqual(trace.summary.unresolved_advisory, ["req-view"]);
+    assert.equal(trace.rows[0]!.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-view"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
     assert.equal(trace.incomplete, false);
     const art = artifact({ requirement_coverage: claims });
     applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
     assert.equal(art.required_checks, "none");
     assert.equal(art.verdict, "approve");
     assert.notEqual(art.requirement_trace_incomplete, true);
+    // An out-of-RANGE line on an existing file is the same material case.
+    writeFile(workspace, "src/wide.ts", ["export const a = 1;"]);
+    const ledger2 = ledgerWith([{ id: "req-wide", text: "The wide module must export the value.", kind: "acceptance" }]);
+    const trace2 = validateRequirementTrace([{
+      requirement_id: "req-wide", disposition: "met",
+      enforcement: [{ file: "src/wide.ts", line: 500 }], test: [], reason: "",
+    }], ledger2, workspace);
+    assert.equal(trace2.rows[0]!.materiality, "material");
+    assert.deepEqual(trace2.summary.unresolved_material, ["req-wide"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a test_required row whose explicitly-required test provenance is invalid is a material unknown", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gate.ts", ["export function check(t) {", "  return t === expected;", "}"]);
+    const ledger = ledgerWith([{
+      id: "req-gate-test",
+      text: "The gate must validate the token and must be covered by a regression test.",
+      kind: "acceptance",
+    }]);
+    // Valid enforcement provenance, but the demanded test citation points at
+    // a file that does not exist at head.
+    const claims = [{
+      requirement_id: "req-gate-test",
+      disposition: "met",
+      enforcement: [{ file: "src/gate.ts", line: 2 }],
+      test: [{ file: "tests/gate/missing.test.ts", line: 1 }],
+      reason: "",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-test-location"));
+    assert.equal(trace.rows[0]!.proof, "test_required");
+    assert.equal(trace.rows[0]!.resolution, "unresolved");
+    assert.equal(trace.rows[0]!.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-gate-test"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a malformed semantic disposition on an in-scope mandatory runtime row is a material unknown", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/loop.ts", ["export const step = () => 1;"]);
+    const ledger = ledgerWith([{ id: "req-loop", text: "The loop must advance the session state.", kind: "acceptance" }]);
+    // "pending" is not model vocabulary: the semantic claim is unusable.
+    const trace = validateRequirementTrace(
+      [{ requirement_id: "req-loop", disposition: "pending", reason: "trust me" }],
+      ledger, workspace,
+    );
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("disposition-invalid"));
+    assert.equal(trace.rows[0]!.resolution, "unresolved");
+    assert.equal(trace.rows[0]!.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-loop"]);
+    assert.equal(trace.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

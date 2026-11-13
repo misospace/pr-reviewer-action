@@ -4107,10 +4107,10 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
     assert.equal(trace.rows.length, 1);
     assert.equal(trace.rows[0]!.disposition, "unverifiable");
     assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-enforcement-location"));
-    // #1658: a citation that fails provenance validation is an advisory
-    // unknown — exposed on the artifact, not a certification failure.
+    // #1658 review: invalid objective provenance is a material unknown —
+    // exposed on the artifact, not a certification failure.
     assert.equal(trace.rows[0]!.resolution, "unresolved");
-    assert.equal(trace.rows[0]!.materiality, "advisory");
+    assert.equal(trace.rows[0]!.materiality, "material");
     assert.equal(trace.incomplete, false);
 
     // The trace no longer escalates required_checks; the unknown is exposed
