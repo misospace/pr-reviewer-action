@@ -398,6 +398,20 @@ test("#1662: a failed review-thread page fails the whole read instead of present
   assert.equal(seen.length, 2);
 });
 
+test("#1662: a later page that cannot normalize fails the whole read (the catch covers the merge)", async () => {
+  const { fetchImpl, seen } = recorder((_url, init) => {
+    const cursor = (JSON.parse(String(init?.body)).variables as { cursor?: string }).cursor;
+    return cursor === "C1"
+      ? json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: "not an array" } } } } })
+      : threadsPage(["T1"], true, "C1");
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const result = await adapter.listReviewThreads();
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Cannot iterate over string/);
+  assert.equal(seen.length, 2);
+});
+
 test("#1662: a looping review-thread cursor is bounded by MAX_PAGES and fails closed", async () => {
   const { fetchImpl, seen } = recorder(() => threadsPage(["T1"], true, "C1"));
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
