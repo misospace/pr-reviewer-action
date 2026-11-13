@@ -556,6 +556,83 @@ test("#750: unattributable junk entries are dropped; attributable malformed ones
     { check: "check e", status: "satisfied", rationale: null },
     { check: "check f", status: "unresolved", rationale: "explicitly unresolved stays" },
   ]);
+  // #1627: every drop is receipted, content-free. The three junk shapes
+  // ("bare string", 42, null) are non-object entries; the two unusable
+  // check identities (empty after sanitization, non-string) are
+  // unattributable checks. The four preserved `invalid` entries are NOT
+  // drops, so the receipt names exactly five.
+  assert.deepEqual(verdict.requiredCheckDispositionReceipt, {
+    dropped: [
+      { reason: "non-object-entry" },
+      { reason: "non-object-entry" },
+      { reason: "non-object-entry" },
+      { reason: "unattributable-check" },
+      { reason: "unattributable-check" },
+    ],
+    capReached: false,
+  });
+});
+
+test("#1627: drop receipts are content-free, bounded, and absent for clean answers", () => {
+  // A clean answer (including preserved `invalid` entries) records no
+  // receipt at all — the artifact stays byte-identical.
+  for (const dispositions of [
+    undefined,
+    [{ check: "check a", status: "satisfied", rationale: "ok" }],
+    [{ check: "check a", status: "N/A", rationale: "preserved as invalid — NOT a drop" }],
+  ]) {
+    const payload: Record<string, unknown> = { verdict: "approve", review_markdown: "x" };
+    if (dispositions !== undefined) payload.required_check_dispositions = dispositions;
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
+    assert.equal(verdict.requiredCheckDispositionReceipt ?? null, null, JSON.stringify(dispositions));
+  }
+  // A non-array value is structured-incomplete, not a drop.
+  const nonArray = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", required_check_dispositions: "not a list",
+  })));
+  assert.equal(nonArray.requiredCheckDispositionReceipt ?? null, null);
+  // Each drop shape receipts its own reason.
+  const oversize = "z".repeat(401);
+  const mixed = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      "junk",
+      { check: 7, status: "satisfied" },
+      { check: "", status: "satisfied" },
+      { check: oversize, status: "satisfied", rationale: "too long to be a faithful echo" },
+    ],
+  })));
+  assert.deepEqual(mixed.requiredCheckDispositionReceipt, {
+    dropped: [
+      { reason: "non-object-entry" },
+      { reason: "unattributable-check" },
+      { reason: "unattributable-check" },
+      { reason: "unattributable-check" },
+    ],
+    capReached: false,
+  });
+  // Exactly MAX_REQUIRED_CHECKS valid entries leave no cap flag.
+  const full = Array.from({ length: 50 }, (_, i) => ({ check: `check ${i}`, status: "satisfied" }));
+  const exact = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", required_check_dispositions: full,
+  })));
+  assert.equal(exact.requiredCheckDispositions!.length, 50);
+  assert.equal(exact.requiredCheckDispositionReceipt ?? null, null);
+  // One more entry than the cap truncates — the flag says so, and the
+  // dropped 51st entry is not itself receipted as a drop (it was
+  // truncated, not rejected).
+  const truncated = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", required_check_dispositions: [...full, { check: "one too many", status: "satisfied" }],
+  })));
+  assert.equal(truncated.requiredCheckDispositions!.length, 50);
+  assert.deepEqual(truncated.requiredCheckDispositionReceipt, { dropped: [], capReached: true });
+  // The receipt list is bounded: a pathological answer cannot grow it
+  // without bound.
+  const junk = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", required_check_dispositions: Array.from({ length: 120 }, () => "junk"),
+  })));
+  assert.equal(junk.requiredCheckDispositionReceipt!.dropped.length, 50);
 });
 
 test("#1388: unmet (alias failed) normalizes to the canonical confirmed-negative status; it needs a rationale", () => {

@@ -558,7 +558,9 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: "c1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
       verdict: "approve", review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
-      required_check_dispositions: [{ check: unmetCheck, status: "unmet", rationale: "the dependency removed a exported symbol; breaking change confirmed" }],
+      // #1627: one junk entry rides along — unattributable, dropped by the
+      // parser, receipted end to end without touching any row's fold.
+      required_check_dispositions: ["bare string", { check: unmetCheck, status: "unmet", rationale: "the dependency removed a exported symbol; breaking change confirmed" }],
     }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
   });
   const f = fixture();
@@ -581,7 +583,8 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     // trusted approve but do not force the block themselves.
     assert.equal(result.outputs.verdict, "request_changes");
     const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
-      obligations: Array<{ id: string; source: string; text: string; status: string; cause: string | null }>;
+      obligations: Array<{ id: string; source: string; text: string; status: string; cause: string | null; reason?: string }>;
+      required_check_disposition_receipt?: { dropped: Array<{ reason: string }>; cap_reached: boolean };
     };
     assert.deepEqual(persisted.obligations.map((row) => [row.text, row.status, row.cause]), [
       [unmetCheck, "unmet", null],
@@ -590,11 +593,21 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
       ["inspect the exact old→new upstream release delta for the updated dependency", "unresolved", "tool-capability"],
       ["check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "unresolved", "tool-capability"],
     ]);
-    // The one-line log is honest about the three states and lists every
-    // not-clean id.
+    // #1627: every folded row carries its content-free reason — the unmet
+    // row resolved (ok), the four undisposed rows never matched an answer.
+    assert.deepEqual(persisted.obligations.map((row) => row.reason), ["ok", "no-disposition", "no-disposition", "no-disposition", "no-disposition"]);
+    // #1627: the parser's drop receipt rides the fold artifact — the junk
+    // entry is unattributable, so it can never be a per-row reason.
+    assert.deepEqual(persisted.required_check_disposition_receipt, { dropped: [{ reason: "non-object-entry" }], cap_reached: false });
+    // The one-line log is honest about the three states, and the #1627
+    // reason summary (content-free counts, replacing the per-id detail —
+    // the ids are persisted in review-obligations.json) says WHY the four
+    // rows stayed unresolved: no disposition ever matched their identity.
     const obligationLog = logLines.find((line) => line.includes("Review obligations:"));
     assert.ok(obligationLog);
-    assert.match(obligationLog!, /Review obligations: 5 total, 0 satisfied, 1 unmet, 4 unresolved \(obligation-1=unmet, obligation-2=unresolved, obligation-3=unresolved, obligation-4=unresolved, obligation-5=unresolved\)/);
+    assert.match(obligationLog!, /Review obligations: 5 total, 0 satisfied, 1 unmet, 4 unresolved \(no-disposition=4\)/);
+    // #1627: the drop counts ride the same single line.
+    assert.match(obligationLog!, /\| disposition-drops: non-object-entry=1$/);
   } finally {
     await server.close();
     f.cleanup();
@@ -1523,4 +1536,215 @@ test("engine admission routes precheck diagnostics to the injected error sink on
     "the precheck diagnostic reached the injected error sink",
   );
   assert.deepEqual(stderrChunks, [], "nothing reached process.stderr during admission");
+});
+
+
+// ---------------------------------------------------------------------------
+// #1627: the executed-call citation gate, end to end — on the REAL
+// native-loop run path (`runReview` with `tool-mode: native_loop`), because
+// the corpus stage deliberately clobbers any stale tool-harness.json on the
+// off path (a stale JSON must never escalate a review that ran no tools).
+// The loop's `tool_calls` trace is the executed-call identity surface the
+// engine folds from; a must_check `satisfied` discharges only by citing an
+// executed successful call id from it — in BOTH folds.
+// ---------------------------------------------------------------------------
+
+import { execFileSync } from "node:child_process";
+
+// The engine's own deterministic dependency_upgrade must_check texts
+// (src/classification/classify.ts KIND_CHECKS) — the dispositions below
+// echo these rows exactly. None of them carries a bindable evidence
+// identity in its text (no package slug, version, head, or file): the
+// breaking/advisory rows are absence asks and the suite row reconciles
+// through the #1612 head-bound CI matcher, so NO citation can discharge
+// them (the #1634 human-review rule). Identity-bearing positive shapes
+// are pinned at the fold level and in the entrypoints recompute test.
+const CITATION_CHECKS = [
+  "check for breaking API changes in updated dependencies",
+  "run full test suite after upgrade",
+  "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated dependency",
+  "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+];
+
+function gitInit(dir: string): void {
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { cwd: dir });
+}
+
+/** Scripted native-loop model endpoint: loop turn 1 executes a read (the
+ * scoped dependency plan's lead-claim window admits the lockfile-targeted
+ * read and refuses further untargeted reads — one executed call is the
+ * surface this fixture needs), loop turn 2 stops, then the verdict turn
+ * carries the dispositions. */
+function citationLoopHandler(dispositions: unknown[]) {
+  let loopTurns = 0;
+  return (_req: unknown, body: string, res: { setHeader: (k: string, v: string) => void; end: (b: string) => void }) => {
+    res.setHeader("Content-Type", "application/json");
+    const req = JSON.parse(body) as { tools?: unknown[] };
+    const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
+    if (hasTools) {
+      const turn = loopTurns++;
+      if (turn === 0) {
+        res.end(JSON.stringify({ id: "c0", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"package-lock.json"}' } }] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+        return;
+      }
+      res.end(JSON.stringify({ id: "c2", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "evidence gathered" } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+      return;
+    }
+    res.end(JSON.stringify({ id: "c3", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
+      verdict: "approve", review_markdown: "Recommendation: Approve\n5/5 verified with evidence — all checks pass.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
+      required_check_dispositions: dispositions,
+    }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
+  };
+}
+async function citationRun(dispositions: unknown[]): Promise<{
+  result: Awaited<ReturnType<typeof runReview>>;
+  runDir: string;
+  serverRequests: Array<{ body?: string }>;
+  cleanup: () => void;
+  close: () => Promise<void>;
+}> {
+  const server = await startMockServer(citationLoopHandler(dispositions));
+  const root = mkdtempSync(join(tmpdir(), "v3-engine-citation-"));
+  writeFileSync(join(root, "package-lock.json"), '{\n  "lodash": "4.5.6"\n}\n');
+  gitInit(root);
+  const result = await runReview({
+    env: { IS_FORK_PR: "false" },
+    inputs: {
+      "github-token": "tok", repo: "o/r", "pr-number": "7",
+      "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+      "ai-stream": "false", "review-routing-mode": "auto", "deep-review": "false",
+      "tool-mode": "native_loop", "tool-max-requests": "5",
+    },
+    runDir: root, workspace: root,
+    platformAdapter: {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    } as unknown as PlatformReadAdapter,
+    quiet: true,
+  });
+  return { result, runDir: root, serverRequests: server.requests, cleanup: (): void => rmSync(root, { recursive: true, force: true }), close: (): Promise<void> => server.close() };
+}
+
+test("#1627: the engine withholds the native approval when must_check satisfactions cite no check-specific evidence — both folds agree (the #1623 shape)", async () => {
+  const run = await citationRun([
+    // (a) satisfied + cited to the SUCCESSFUL call — but the breaking-change
+    //     ask is an ABSENCE check (#1627: absence is never established by a
+    //     successful call) → unresolved with its own receipt.
+    { check: CITATION_CHECKS[0], status: "satisfied", rationale: "the lockfile read at head shows no breaking API change — call-1" },
+    // (b) satisfied with prose-only credit, NO citation.
+    { check: CITATION_CHECKS[1], status: "satisfied", rationale: "I read the diff carefully — 5/5 verified with evidence." },
+    // (c) satisfied citing an id the executed-call index does not carry
+    //     (the loop executed exactly one call).
+    { check: CITATION_CHECKS[2], status: "satisfied", rationale: "the provenance read ran as call-2 and confirmed the publisher" },
+    // (d) satisfied citing another NONEXISTENT call id.
+    { check: CITATION_CHECKS[3], status: "satisfied", rationale: "the release delta was inspected as call-99" },
+    // (e) no disposition for the fifth check.
+  ]);
+  try {
+    // The loop executed exactly the one scripted read — the trace the gate
+    // folds from (the scoped dependency plan's enforced window refused the
+    // untargeted follow-up reads, which is exactly why no call-2 exists).
+    const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ status?: string }> };
+    assert.deepEqual((harness.tool_calls ?? []).map((call) => call.status), ["ok"]);
+    // (a) cited-but-unrelated (absence ask — no call establishes it);
+    // (b)-(d) unresolved with the #1627 reasons; (e) the pre-#1627
+    // no-disposition reason — every receipt content-free.
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ status: string; reason?: string }>;
+    };
+    assert.deepEqual(persisted.obligations.map((row) => [row.status, row.reason]), [
+      ["unresolved", "unrelated-executed-call"],
+      ["unresolved", "uncited-satisfaction"],
+      ["unresolved", "uncited-satisfaction"],
+      ["unresolved", "uncited-satisfaction"],
+      ["unresolved", "no-disposition"],
+    ]);
+    // #750 parity: the completeness fold, over the SAME trace and
+    // dispositions, reports the same set — required_checks incomplete.
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "incomplete");
+    // Native approval withheld: the model's approve survives (unresolved
+    // rows are coverage, never a manufactured block) but the review
+    // publishes partial — an abstention, never a native APPROVE event. The
+    // "5/5 verified" PROSE in review_markdown earned nothing.
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.equal(run.result.outputs.reviewResult, "partial");
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
+});
+
+test("#1627: paired positive — the non-gated applicability answers discharge, both folds agree, the run is natively eligible, and the verdict turn carried the proof index", async () => {
+  // None of the engine's organic dependency_upgrade rows carries a bindable
+  // evidence identity in its text (absence asks + the #1612 CI-reconciled
+  // suite ask), so the end-to-end clean shape here is the applicability
+  // path: every row answered `not_applicable` with a rationale — never
+  // citation-gated, both folds agree, no second model call. The cited
+  // check-specific satisfaction shape is pinned end-to-end in
+  // `tests-v3/entrypoints.test.ts` (path-identity row) and at the fold
+  // level in `tests-v3/review-obligations.test.ts`.
+  const dispositions = CITATION_CHECKS.map((check) => ({ check, status: "not_applicable", rationale: "single-version lockfile bump: no test-suite change, no API surface, no upstream network call in scope" }));
+  const run = await citationRun(dispositions);
+  try {
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ status: string; reason?: string }>;
+    };
+    assert.deepEqual(persisted.obligations.map((row) => [row.status, row.reason]), Array.from({ length: 5 }, () => ["satisfied", "ok"]));
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "complete");
+    // Native eligibility affirmative.
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.equal(run.result.outputs.reviewResult, "clean");
+    // The closing verdict turn is the FIRST path's one model verdict: its
+    // request body carried the proof index (must_check rows + executed-call
+    // ids + the citation instruction) so the citations were checkable.
+    const verdictRequest = run.serverRequests.find((request) => !((request as { body?: string }).body ?? "").includes("\"tools\":["));
+    assert.ok(verdictRequest, "the verdict turn request is present");
+    const body = (verdictRequest as { body?: string }).body ?? "";
+    assert.match(body, /# Required-Check Proof Index/);
+    assert.match(body, /- call-1 — `read_file` \(ok\)/);
+    assert.match(body, /Verify the exact must_check check text|must_check/);
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
+});
+
+test("#1634 (review): one executed successful call cannot discharge five satisfactions — the shared allocation keeps exactly one row clean and the approval withheld", async () => {
+  const dispositions = CITATION_CHECKS.map((check) => ({
+    check,
+    status: "satisfied",
+    rationale: "verified against the repository state at head — call-1",
+  }));
+  const run = await citationRun(dispositions);
+  try {
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ status: string; reason?: string }>;
+    };
+    // Check-specific gate over the ONE executed read: NONE of the organic
+    // rows is citation-citable (absence asks, the #1612 CI suite ask, and
+    // rows with no bindable identity), so every cited satisfaction fails
+    // closed as unrelated and the approval is withheld. Both folds agree
+    // (required_checks incomplete).
+    const rows = persisted.obligations.map((row) => [row.status, row.reason]);
+    assert.equal(rows.filter((row) => row[0] === "satisfied").length, 0, JSON.stringify(rows));
+    assert.equal(rows.filter((row) => row[1] === "unrelated-executed-call").length, 5, JSON.stringify(rows));
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "incomplete");
+    assert.equal(run.result.outputs.reviewResult, "partial");
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
 });

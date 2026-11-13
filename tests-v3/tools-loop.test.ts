@@ -7,6 +7,7 @@ import {
   STOP_MAX_ROUNDS,
   STOP_MODEL_DONE,
   STOP_NO_TOOL_CALLS,
+  STOP_OBLIGATIONS_SETTLED,
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   STOP_WALL_CLOCK_RESERVE,
@@ -1514,8 +1515,9 @@ test("reserved window refuses optional calls and admits the obligation call with
   conversation.addUser("corpus");
   // Budget 6, reserve 3: turns 1-3 (optional) run while 4+ requests remain;
   // the window then refuses two optional calls WITHOUT consuming budget and
-  // admits the matrix fetch, which discharges the gating. The final optional
-  // call runs because every obligation was attempted.
+  // admits the matrix fetch, which discharges the gating. #1627: with the
+  // obligation settled the loop stops deterministically instead of running
+  // the would-be optional round — no request is wasted after settlement.
   const responses = [
     openAiCall("c1", "read_file", '{"path":"README.md"}'),
     openAiCall("c2", "read_file", '{"path":"docs/arch.md"}'),
@@ -1523,10 +1525,8 @@ test("reserved window refuses optional calls and admits the obligation call with
     openAiCall("c4", "read_file", '{"path":"docs/nope.md"}'),
     openAiCall("c5", "read_file", '{"path":"docs/other.md"}'),
     openAiCall("c6", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
-    openAiCall("c7", "read_file", '{"path":"docs/after.md"}'),
-    openAiText("done"),
   ];
-  const exec = responses.slice(0, -1).map((_, i) => ({ tool: i === 5 ? "web_fetch" : "read_file", status: "ok", result: { content: String(i) } }));
+  const exec = responses.map((_, i) => ({ tool: i === 5 ? "web_fetch" : "read_file", status: "ok", result: { content: String(i) } }));
   const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -1536,17 +1536,18 @@ test("reserved window refuses optional calls and admits the obligation call with
     requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
     timeFn,
   });
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
   assert.deepEqual(outcome.executed.map((item) => [item.tool, (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url]), [
     ["read_file", "README.md"],
     ["read_file", "docs/arch.md"],
     ["read_file", "docs/history.md"],
     ["web_fetch", "https://talos.dev/docs/v1.14/support-matrix"],
-    ["read_file", "docs/after.md"],
   ]);
   assert.equal(outcome.requiredEvidenceRefusals, 2);
-  // Two refusals consumed nothing: 6 budget − 5 executed = 1 left.
-  assert.equal(outcome.requestsRemaining, 1);
+  // Two refusals consumed nothing: 6 budget − 4 executed = 2 left — the
+  // requests the settled obligations no longer need (#1627 early stop).
+  assert.equal(outcome.requestsRemaining, 2);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
   const toolMessages = conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>;
   assert.ok(toolMessages.filter((m) => m.role === "tool" && m.content.includes("Reserved required-evidence budget")).length === 2);
 });
@@ -1608,18 +1609,14 @@ test("schema argument names and non-boundary substrings never satisfy the obliga
 test("obligation evidence gathered BEFORE the window keeps the window open afterwards", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // The recommended path: the model resolves the obligation EARLY (turn 1),
-  // then explores. The window must not re-demand evidence already attempted
-  // — every later optional call executes and nothing is refused.
+  // The recommended path: the model resolves the obligation EARLY (turn 1).
+  // The window never re-demands evidence already attempted (nothing is ever
+  // refused) — and #1627: once the row discharges, the loop stops
+  // deterministically instead of running the optional rounds after it.
   const responses = [
     openAiCall("c1", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
-    openAiCall("c2", "read_file", '{"path":"docs/a.md"}'),
-    openAiCall("c3", "read_file", '{"path":"docs/b.md"}'),
-    openAiCall("c4", "read_file", '{"path":"docs/c.md"}'),
-    openAiCall("c5", "read_file", '{"path":"docs/d.md"}'),
-    openAiText("done"),
   ];
-  const exec = responses.slice(0, -1).map(() => ({ tool: "read_file", status: "ok", result: { content: "x" } }));
+  const exec = responses.map(() => ({ tool: "web_fetch", status: "ok", result: { content: "x" } }));
   const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -1630,8 +1627,9 @@ test("obligation evidence gathered BEFORE the window keeps the window open after
     timeFn,
   });
   assert.equal(outcome.requiredEvidenceRefusals, 0);
-  assert.equal(outcome.executed.length, 5);
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.executed.length, 1);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
 });
 
 test("catalog commands get no reserved-window exemption: optional run_command is refused without consuming budget", async () => {
@@ -1679,17 +1677,14 @@ test("a catalog command whose name is the obligation evidence stays admissible a
   conversation.addUser("corpus");
   // Budget 5, reserve 3: the window is open from the first call, but the
   // catalog command's name overlaps the obligation's vocabulary, so it is
-  // admitted, consumes budget, and counts as the obligation's attempt —
-  // after which the window is satisfied and optional calls run again.
+  // admitted, consumes budget, and counts as the obligation's attempt.
+  // #1627: the discharge then settles the surface and the loop stops early.
   const { postFn, executeFn, timeFn } = scriptedLoop(
     [
       openAiCall("c1", "run_command", '{"command":"git_diff_stat"}'),
-      openAiCall("c2", "read_file", '{"path":"misc/a.md"}'),
-      openAiText("done"),
     ],
     [
       { tool: "run_command", status: "ok", result: { stdout: "M x" } },
-      { tool: "read_file", status: "ok", result: { content: "a" } },
     ],
   );
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
@@ -1700,9 +1695,10 @@ test("a catalog command whose name is the obligation evidence stays admissible a
     requiredEvidence: [{ id: "obligation-1", tokens: ["diff", "stat"] }],
     timeFn,
   });
-  assert.deepEqual(outcome.executed.map((item) => item.tool), ["run_command", "read_file"]);
+  assert.deepEqual(outcome.executed.map((item) => item.tool), ["run_command"]);
   assert.equal(outcome.requiredEvidenceRefusals, 0);
-  assert.equal(outcome.requestsRemaining, 3);
+  assert.equal(outcome.requestsRemaining, 4);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
 });
 
 // #1388: the reservation pairs reserved REQUESTS with reserved ROUNDS.
@@ -1742,9 +1738,11 @@ test("a complying model stuck on the round ceiling gets extension rounds and spe
     timeFn,
   });
   // Without the extension the loop stops on max-rounds at 4 with the
-  // lockfile request still reserved; with it, round 5 runs.
+  // lockfile request still reserved; with it, round 5 runs. #1627: the
+  // round-5 discharge settles the surface, so the loop reports the early
+  // settled stop instead of the round-ceiling exhaustion.
   assert.equal(outcome.rounds, 5);
-  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
   assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
     "misc/a.md",
     "misc/b.md",
@@ -1818,7 +1816,9 @@ test("round-ceiling extension is hard-bounded at the reservation hint", async ()
     ],
     timeFn,
   });
-  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  // #1627: the final extension round's discharge settles the surface, so
+  // the loop reports the settled early stop — the bound below still holds.
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
   assert.equal(outcome.rounds, 7);
   assert.ok(outcome.rounds <= 4 + 3, "extension never exceeds the hint");
   assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
@@ -2078,9 +2078,6 @@ test("#1379: an evidence call covering every tracked obligation releases the win
   conversation.addUser("corpus");
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
     openAiCall("c1", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
-    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
-    openAiCall("c3", "git_log", "{}"),
-    openAiText("done"),
   ]);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -2090,10 +2087,10 @@ test("#1379: an evidence call covering every tracked obligation releases the win
     reserveForRequiredEvidence: 4,
     requiredEvidence: depRows(4),
   });
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
-  // c3 lands inside the window (requestsLeft 4) but every tracked obligation
-  // was credited in round 1, so nothing is refused.
-  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "read_file", "git_log"]);
+  // #1627: the settling fetch also ENDS the loop — the rounds the released
+  // window used to leave open for optional work are not spent anymore.
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch"]);
   assert.ok(outcome.requiredEvidenceAttempts >= 1);
   assert.equal(outcome.requiredEvidenceRefusals, 0);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
@@ -2127,7 +2124,7 @@ test("#1379: an evidence call covering every tracked obligation releases the win
   assert.equal(outcome2.requiredEvidenceReleased, false);
 });
 
-test("#1379: a failed evidence call still credits its obligation (no lockout)", async () => {
+test("#1379: a failed evidence call still credits its obligation (no lockout) — and #1627 M1: it must NOT fire the settled early stop", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
   // The executor refuses every fetch (e.g. host allowlist). Crediting is
@@ -2139,8 +2136,12 @@ test("#1379: a failed evidence call still credits its obligation (no lockout)", 
     openAiCall("c1", "web_fetch", '{"url":"https://blocked.test/security/changelog"}'),
     openAiCall("c2", "read_file", '{"path":"a.ts"}'),
     openAiCall("c3", "web_fetch", '{"url":"https://blocked.test/homepage"}'),
-    openAiCall("c4", "git_log", "{}"),
-    openAiText("done"),
+    // #1627 M1: every row here was settled by ERROR-status calls only — the
+    // fold's citation gate needs a cited SUCCESSFUL call, so stopping settled
+    // now would strand the model with an unavoidable `uncited-satisfaction`.
+    // The settled early stop must NOT fire: the loop runs on under the
+    // pre-existing stops and ends on the model's own text-only hand.
+    openAiText("done — the evidence fetches all failed"),
   ];
   const executedStatuses: string[] = [];
   const timeFn = () => Number.MAX_SAFE_INTEGER / 2;
@@ -2162,14 +2163,44 @@ test("#1379: a failed evidence call still credits its obligation (no lockout)", 
   );
   assert.ok(outcome.requiredEvidenceAttempts >= 1);
   assert.equal(outcome.requiredEvidenceRefusals, 0);
-  assert.equal(outcome.executed.length, 4);
+  assert.equal(outcome.executed.length, 3);
   // c1 credited security_advisory + release_delta and c3 credited
-  // provenance — all from ERROR-status calls — so the window released and
-  // the inside-window optional calls executed anyway.
+  // provenance — all from ERROR-status calls — so the window released. But
+  // #1627 M1: rows settled with only FAILED executions never fire the
+  // settled early stop (the citation gate would strand the verdict); the
+  // loop continues and ends on the model's text-only hand instead.
   assert.equal(outcome.requiredEvidenceAttempts, 2);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome.requiredEvidenceReleased, true);
-  assert.deepEqual(executedStatuses, ["web_fetch", "read_file", "web_fetch", "git_log"]);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requiredEvidenceSettledStop, false);
+  assert.deepEqual(executedStatuses, ["web_fetch", "read_file", "web_fetch"]);
+});
+
+// #1627 M1 paired pin: the SAME shape with a SUCCESSFUL settling call keeps
+// the settled early stop — the suppression is exactly the stranding case.
+test("#1627 M1: a settled row with a successful attempt among its calls still fires the settled early stop", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://blocked.test/security/changelog"}'),
+    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://blocked.test/homepage"}'),
+    openAiText("never reached — the loop stopped settled first"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: depRows(4),
+  });
+  assert.equal(outcome.requiredEvidenceAttempts, 2);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
 });
 
 test("#1595: the scoped lockfile-only advisory row is claimed by one executed fetch; optional calls stay refused until then", async () => {
@@ -2249,23 +2280,20 @@ test("#1595 (review): lead claim — the scoped plan's obligation window opens f
   // loop's first request: the opening optional read is REFUSED without
   // spending (AC1 — the mandatory obligation gets its disposition before
   // optional requests consume the budget; only 2 of the 6 requests are spent
-  // when the row discharges, not just the reserved tail). The spare
-  // provenance-shaped fetch executes without crediting; the advisory-shaped
-  // fetch credits and discharges; the window then releases and optional
-  // calls run freely again.
+  // when the row discharges). The spare provenance-shaped fetch executes
+  // without crediting; the advisory-shaped fetch credits and discharges.
+  // #1627: the discharge also settles the surface and ends the loop — the
+  // released window no longer keeps running optional rounds afterward.
   const conversation = new Conversation();
   conversation.addUser("corpus");
   const responses = [
     openAiCall("c1", "read_file", '{"path":"a.md"}'),
     openAiCall("c2", "web_fetch", '{"url":"https://blocked.test/provenance"}'),
     openAiCall("c3", "web_fetch", '{"url":"https://blocked.test/security"}'),
-    openAiCall("c4", "read_file", '{"path":"a.md"}'),
-    openAiText("done"),
   ];
   const exec = [
     { tool: "web_fetch", status: "ok", result: { content: "provenance" } },
     { tool: "web_fetch", status: "ok", result: { content: "advisories" } },
-    { tool: "read_file", status: "ok", result: { content: "a" } },
   ];
   const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
@@ -2277,13 +2305,13 @@ test("#1595 (review): lead claim — the scoped plan's obligation window opens f
     requiredEvidence: [{ id: "security_advisory", tokens: [], obligation: "security_advisory" }],
     requiredEvidenceLeadClaim: true,
   });
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
   assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
     "https://blocked.test/provenance",
     "https://blocked.test/security",
-    "a.md",
   ]);
-  // The refusal consumed nothing: 6 budget − 3 executed = 3 left, i.e. the
+  // The refusal consumed nothing: 6 budget − 2 executed = 4 left, i.e. the
   // disposition happened while 4 of 6 requests were still unspent.
   assert.equal(outcome.requiredEvidenceRefusals, 1);
   assert.equal(outcome.requiredEvidenceRequired, 1);
@@ -2293,7 +2321,7 @@ test("#1595 (review): lead claim — the scoped plan's obligation window opens f
   assert.equal(outcome.requiredEvidenceAttempts, 2);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["security_advisory"]);
   assert.equal(outcome.requiredEvidenceReleased, true);
-  assert.equal(outcome.requestsRemaining, 3);
+  assert.equal(outcome.requestsRemaining, 4);
   // The mid-budget lead-claim refusal names the budget's FIRST claim (and
   // the outstanding obligation) — never the reserved tail it has not reached.
   const refusals = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>)
@@ -2399,7 +2427,6 @@ test("#1379: a reserve-refused call retried after an evidence attempt executes (
     openAiCall("c3", "read_file", '{"path":"a.ts"}'),
     openAiCall("c4", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
     openAiCall("c5", "read_file", '{"path":"a.ts"}'),
-    openAiText("done"),
   ]);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -2409,7 +2436,10 @@ test("#1379: a reserve-refused call retried after an evidence attempt executes (
     reserveForRequiredEvidence: 4,
     requiredEvidence: depRows(4),
   });
-  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch", "read_file"]);
+  // The settling fetch covers every tracked obligation; #1627: the loop then
+  // stops settled instead of running the released-window optional round.
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch"]);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
   assert.equal(outcome.requiredEvidenceRefusals, 1);
   const transcript = JSON.stringify(conversation.toRequestPayload("openai", "m", {}));
   assert.ok(!transcript.includes("Duplicate request"));
@@ -2453,8 +2483,10 @@ test("#1379: the reviewer's counterexample — one release-notes fetch no longer
     openAiCall("c5", "git_grep", "{}"),
     openAiCall("c6", "web_fetch", '{"url":"https://osv.dev/vulnerabilities/GHSA-42xa-7z9q"}'),
     openAiCall("c7", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
-    openAiCall("c8", "git_diff_stat", "{}"),
-    openAiText("done"),
+    // #1627 M1: the advisories fetch that settled security_advisory FAILED —
+    // the settled early stop must not fire on that stranding shape, so the
+    // loop runs one more round and ends on the model's text-only hand.
+    openAiText("done — advisories fetch kept failing"),
   ];
   // The advisories fetch FAILS (host unreachable): a failing fetch is still
   // an attempt and still credits its obligation.
@@ -2484,22 +2516,26 @@ test("#1379: the reviewer's counterexample — one release-notes fetch no longer
   // Two optional calls outside the window, then the release-notes fetch
   // (credits ONLY release_delta), then the two refused local-archaeology
   // calls, then the failing advisories fetch (credits security_advisory),
-  // then the bare repository root (credits provenance → released), then the
-  // optional call that finally executes.
+  // then the bare repository root (credits provenance → settled; #1627 ends
+  // the loop there instead of running the released optional call).
   assert.deepEqual(
     executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
-    ["read_file:a.ts", "git_log", "web_fetch", "web_fetch", "web_fetch", "git_diff_stat"],
+    ["read_file:a.ts", "git_log", "web_fetch", "web_fetch", "web_fetch"],
   );
   // The refused calls never reached the executor.
   assert.ok(!executedCalls.some((c) => c.args.path === "b.ts"));
   assert.ok(!executedCalls.some((c) => c.tool === "git_grep"));
   assert.equal(outcome.requiredEvidenceRefusals, 2);
-  // The refusals spent nothing: 6 executed of 7.
-  assert.equal(outcome.requestsRemaining, 1);
+  // The refusals spent nothing: 5 executed of 7.
+  assert.equal(outcome.requestsRemaining, 2);
   // Exhaustion while obligations were open is exactly what the enforcement
-  // makes unreachable: the loop ends on the model's own hand.
+  // makes unreachable: the loop ends on the obligations' own terms.
   assert.notEqual(outcome.stopReason, STOP_BUDGET);
+  // #1627 M1: security_advisory was settled by the FAILED osv.dev fetch, so
+  // the settled early stop does not fire — the model keeps the retry
+  // opportunity, and the loop ends on its text-only hand (no further calls).
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requiredEvidenceSettledStop, false);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome.requiredEvidenceAttempts, 3);
   assert.equal(outcome.requiredEvidenceReleased, true);
@@ -2662,14 +2698,12 @@ test("#1379: the attempts cap releases the window even with zero credits (no loc
 test("#1379: the reserve commits only the obligations its tail can pay for", async () => {
   // Reserve 2: tracked = [provenance, release_delta] — a security_advisory
   // is never required at this reserve, and covering the two tracked
-  // obligations releases the window.
+  // obligations releases the window (and #1627 stops the loop settled).
   const conversation = new Conversation();
   conversation.addUser("corpus");
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
     openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
     openAiCall("c2", "web_fetch", '{"url":"https://upstream.test/releases"}'),
-    openAiCall("c3", "read_file", '{"path":"a.ts"}'),
-    openAiText("done"),
   ]);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -2681,12 +2715,12 @@ test("#1379: the reserve commits only the obligations its tail can pay for", asy
   });
   assert.equal(outcome.requiredEvidenceRequired, 2);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta"]);
-  // c3 lands inside the window (requestsLeft 2) with every tracked obligation
-  // credited — no advisories call needed.
+  // c3 would land inside the window (requestsLeft 2) with every tracked
+  // obligation credited — the #1627 settled stop ends the loop instead.
   assert.equal(outcome.requiredEvidenceRefusals, 0);
   assert.equal(outcome.requiredEvidenceReleased, true);
-  assert.equal(executedCalls.length, 3);
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(executedCalls.length, 2);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
 
   // Reserve 1: required 1, and ANY single IN-WINDOW evidence call releases —
   // the historical one-call release is preserved through the attempts cap.
@@ -2781,6 +2815,10 @@ test("#1379: requiredEvidenceCredits seeding carries obligations across loops; p
   assert.equal(outcome.requiredEvidenceReleased, true);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(executedCalls.length, 3);
+  // #1627: a surface whose every row was seeded discharged was never ACTIVE
+  // this run — the settled early stop never fires for it.
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requiredEvidenceSettledStop, false);
 
   // Partial seed: provenance is already covered, so the window note/refusal
   // name ONLY the two outstanding obligations and only those calls are
@@ -2793,8 +2831,6 @@ test("#1379: requiredEvidenceCredits seeding carries obligations across loops; p
     openAiCall("c3", "read_file", '{"path":"c.ts"}'),
     openAiCall("c4", "web_fetch", '{"url":"https://osv.dev/list"}'),
     openAiCall("c5", "web_fetch", '{"url":"https://upstream.test/releases"}'),
-    openAiCall("c6", "read_file", '{"path":"d.ts"}'),
-    openAiText("done"),
   ]);
   const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
     apiFormat: "openai",
@@ -2816,14 +2852,16 @@ test("#1379: requiredEvidenceCredits seeding carries obligations across loops; p
     ),
   );
   assert.ok(!transcript.includes("owes upstream publisher/source provenance"));
-  // After the advisories + release-delta fetches the window releases and the
-  // inside-window optional call executes.
+  // After the advisories + release-delta fetches every tracked obligation is
+  // discharged; #1627: the loop stops settled instead of running the
+  // released-window optional read.
   assert.deepEqual(
     loop2.executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
-    ["read_file:a.ts", "read_file:b.ts", "web_fetch", "web_fetch", "read_file:d.ts"],
+    ["read_file:a.ts", "read_file:b.ts", "web_fetch", "web_fetch"],
   );
   assert.deepEqual(outcome2.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome2.requiredEvidenceReleased, true);
+  assert.equal(outcome2.stopReason, STOP_OBLIGATIONS_SETTLED);
 });
 
 test("#1396: the repair seam's attempts cap is run-wide — a continuation never re-gates from a reset zero count", async () => {
@@ -2860,15 +2898,17 @@ test("#1396: the repair seam's attempts cap is run-wide — a continuation never
   });
   // c1 (optional, in-window) is refused while the run-wide cap has attempts
   // left; c2 spends that one gated attempt; the cap then fires (4 >= 4),
-  // releases every shape row, and c3 executes.
+  // releasing every shape row — and #1627 stops the settled continuation
+  // instead of running the released optional round.
   assert.equal(outcome.requiredEvidenceRefusals, 1);
   assert.deepEqual(
     executedCalls.map((c) => c.tool),
-    ["web_fetch", "read_file"],
+    ["web_fetch"],
   );
   assert.equal(outcome.requiredEvidenceAttempts, 4);
   assert.equal(outcome.requiredEvidenceWindowAttempts, 4);
   assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
   assert.deepEqual(outcome.requiredEvidenceCredits, []);
   // And the reverse guard: the same continuation WITHOUT the seam threading
   // (the pre-fix shape — reset count, clamped cap) keeps its own
@@ -2922,8 +2962,6 @@ test("#1396 review blocker: pre-window evidence spend cannot deactivate the rese
     openAiCall("c5", "read_file", '{"path":"a.ts"}'),
     openAiCall("c6", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
     openAiCall("c7", "web_fetch", '{"url":"https://example.test/security/advisories"}'),
-    openAiCall("c8", "read_file", '{"path":"b.ts"}'),
-    openAiText("done"),
   ]);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -2941,29 +2979,32 @@ test("#1396 review blocker: pre-window evidence spend cannot deactivate the rese
   // security_advisory are outstanding and the gated patience is untouched.
   assert.equal(outcome.requiredEvidenceRefusals, 1);
   // The tail then pays for the outstanding evidence; once every row is
-  // discharged the window opens and the optional read executes.
+  // discharged the loop is settled (#1627) — the released optional read
+  // never runs.
   assert.deepEqual(
     executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
-    ["web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch", "read_file:b.ts"],
+    ["web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch"],
   );
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome.requiredEvidenceReleased, true);
-  assert.equal(outcome.requestsRemaining, 1);
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requestsRemaining, 2);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
 });
 
-test("#1379: the window note names the outstanding obligations and reverts to the budget note after release", async () => {
+test("#1379: the window note names the outstanding obligations; the settling fetch ends the loop", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
+  // #1627: a full-coverage fetch settles the surface, so the loop stops at
+  // that round — the released window never carries another (optional) turn,
+  // and the note-reversion the pre-#1627 loop showed is unreachable by
+  // design. The reserve note is the last note the loop ever adds.
   const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
     [
       openAiCall("c1", "read_file", '{"path":"a.ts"}'),
       openAiCall("c2", "read_file", '{"path":"b.ts"}'),
       openAiCall("c3", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
-      openAiCall("c4", "read_file", '{"path":"c.ts"}'),
-      openAiText("done"),
     ],
-    Array.from({ length: 4 }, () => ({ tool: "t", status: "ok", result: {} })),
+    Array.from({ length: 3 }, () => ({ tool: "t", status: "ok", result: {} })),
   );
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
@@ -2973,7 +3014,8 @@ test("#1379: the window note names the outstanding obligations and reverts to th
     reserveForRequiredEvidence: 4,
     requiredEvidence: depRows(4),
   });
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
   const newestNote = (payload: Record<string, unknown>): string =>
     (payload.messages as Array<{ content: string }>)
       .map((m) => m.content)
@@ -2986,11 +3028,8 @@ test("#1379: the window note names the outstanding obligations and reverts to th
   assert.ok(windowNote.includes("upstream publisher/source provenance"));
   assert.ok(windowNote.includes("the exact old-to-new upstream release delta"));
   assert.ok(windowNote.includes("upstream security advisories"));
-  // Round 4: the full-coverage fetch released the window, so the note falls
-  // back to the ordinary budget status.
-  const afterRelease = newestNote(payloads[3]!);
-  assert.ok(afterRelease.includes("[loop budget] 3 of 6 tool request(s)"));
-  assert.ok(!afterRelease.includes("reserved"));
+  // The settling round was the last: no round-4 payload ever exists.
+  assert.equal(payloads.length, 3);
 });
 
 // ── #1396: ONE unified obligation window (review-owned rows + dependency shape rows) ──
@@ -3197,4 +3236,80 @@ test("#1635: sustained overflow is stable across rounds — no repeated mutation
   assert.equal(outcome.compactionEvents[1]!.cacheable_prefix_changed, false, "a pass that mutates nothing invalidates no cache");
   assert.equal(events[0]!.content, firstAfterRoundOne, "the floored result is byte-identical on the next round");
   assert.equal(outcome.compactionOverflowProtected, true);
+});
+
+// ── #1627: the deterministic obligations-settled early stop ───────────────
+
+test("#1627: the loop stops settled the round the last obligation row settles — no optional rounds after it", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 12, reserve 2, ONE tracked obligation (provenance). Round 1 runs
+  // outside the window; round 2's fetch discharges the row — the loop stops
+  // THERE with 10 of 12 requests unspent instead of exploring on until the
+  // ceiling.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c3", "git_log", "{}"),
+    openAiText("never reached"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 12, 120),
+    timeFn,
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: depRows(1),
+  });
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
+  assert.equal(outcome.rounds, 2);
+  assert.equal(outcome.toolCallsIssued, 2);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["read_file", "web_fetch"]);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance"]);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.requestsRemaining, 10);
+  assert.equal(outcome.degraded, false);
+});
+
+test("#1627: an active row remaining keeps the loop running — the early stop never fires mid-obligation", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Two tracked rows; the run credits only release_delta and then stops on
+  // the model's own hand — provenance and security stay active, so the loop
+  // must NOT report the settled stop.
+  const { postFn, executeFn, timeFn } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://upstream.test/releases"}'),
+    openAiText("done — evidence still unverified"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: depRows(4),
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requiredEvidenceSettledStop, false);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["release_delta"]);
+  assert.equal(outcome.requiredEvidenceReleased, false);
+});
+
+test("#1627: a run with no obligation surface never fires the settled stop", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.requiredEvidenceSettledStop, false);
+  assert.equal(outcome.requiredEvidenceRequired, 0);
 });

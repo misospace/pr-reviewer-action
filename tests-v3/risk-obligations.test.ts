@@ -665,19 +665,19 @@ const riskRow: ReviewObligation = {
 test("#1577: a satisfied risk row needs evidence naming the flagged location", () => {
   const grounded = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; tests-v3/source-verifier.test.ts pins it" },
-  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  ], undefined, { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(grounded.status, "satisfied");
   const ungrounded = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "I considered symlinks and everything looks fine" },
-  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  ], undefined, { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(ungrounded.status, "unresolved");
   const contradicting = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "satisfied", rationale: "src/context/treeentries.ts:readTreeEntries fails to check the mode" },
-  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  ], undefined, { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(contradicting.status, "unresolved", "a satisfied rationale that asserts failure keeps the row open");
   const notApplicable = foldObligationDispositions([riskRow], [
     { check: "risk-1", status: "not_applicable", rationale: "src/context/treeentries.ts" },
-  ], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  ], undefined, { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(notApplicable.status, "unresolved", "there is no not-applicable for a risk obligation");
 });
 
@@ -694,32 +694,32 @@ test("#1577 (review fix): a path-only assertion without evidence on record stays
   const groundedProse = { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; the symlink scenario was considered and the guard is safe" };
   const noReceipt = foldObligationDispositions([riskRow], [groundedProse])[0]!;
   assert.equal(noReceipt.status, "unresolved", "a caller with no receipt can never discharge a risk row");
-  const emptyReceipt = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set() })[0]!;
+  const emptyReceipt = foldObligationDispositions([riskRow], [groundedProse], undefined, { readPaths: new Set() })[0]!;
   assert.equal(emptyReceipt.status, "unresolved", "an empty receipt is no evidence");
   // A receipt that covers OTHER files does not launder this one.
-  const unrelatedReceipt = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["src/other.ts", "docs/notes.md"]) })[0]!;
+  const unrelatedReceipt = foldObligationDispositions([riskRow], [groundedProse], undefined, { readPaths: new Set(["src/other.ts", "docs/notes.md"]) })[0]!;
   assert.equal(unrelatedReceipt.status, "unresolved");
 });
 
 test("#1577 (review fix): the legitimate verified positive still completes cleanly", () => {
   const groundedProse = { check: "risk-1", status: "satisfied", rationale: "readTreeEntries in src/context/treeentries.ts requires mode 100644/100755 and drops 120000 entries; tests-v3/source-verifier.test.ts pins it" };
-  const toolRead = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
+  const toolRead = foldObligationDispositions([riskRow], [groundedProse], undefined, { readPaths: new Set(["src/context/treeentries.ts"]) })[0]!;
   assert.equal(toolRead.status, "satisfied", "the tool loop actually read the flagged file");
-  const corpusDiff = foldObligationDispositions([riskRow], [groundedProse], { readPaths: new Set(["README.md", "src/context/treeentries.ts"]) })[0]!;
+  const corpusDiff = foldObligationDispositions([riskRow], [groundedProse], undefined, { readPaths: new Set(["README.md", "src/context/treeentries.ts"]) })[0]!;
   assert.equal(corpusDiff.status, "satisfied", "the flagged path's complete head diff rode the certified corpus");
 });
 
 test("#1577 (review fix): an anchor-less risk row discharges only on a read of its cited path", () => {
   const anchorless: ReviewObligation = { ...riskRow, anchors: [] };
   const cited = { check: "risk-1", status: "satisfied", rationale: "read tests-v3/source-verifier.test.ts: the symlink scenarios are pinned there" };
-  const verified = foldObligationDispositions([anchorless], [cited], { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
+  const verified = foldObligationDispositions([anchorless], [cited], undefined, { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
   assert.equal(verified.status, "satisfied", "the cited test file was actually read");
   const unverified = foldObligationDispositions([anchorless], [cited])[0]!;
   assert.equal(unverified.status, "unresolved");
   // Citing a DIFFERENT path than the one read stays unresolved.
   const mismatched = foldObligationDispositions([anchorless], [
     { check: "risk-1", status: "satisfied", rationale: "read tests-v3/other.test.ts: the symlink scenarios are pinned there" },
-  ], { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
+  ], undefined, { readPaths: new Set(["tests-v3/source-verifier.test.ts"]) })[0]!;
   assert.equal(mismatched.status, "unresolved", "the receipt must cover the path the rationale itself cites");
 });
 

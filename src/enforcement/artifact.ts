@@ -107,6 +107,16 @@ export interface ReviewArtifact {
   requirement_trace_incomplete?: boolean;
   /** #750: the model's structured dispositions, when the key was emitted. */
   required_check_dispositions?: Array<Record<string, unknown>>;
+  /** #1627: bounded content-free receipt of the disposition entries the
+   * parser DROPPED (unattributable to any check identity) plus the
+   * MAX_REQUIRED_CHECKS truncation flag. Absent for a clean answer, so a
+   * well-formed run's artifact stays byte-identical. Preserved
+   * `status: "invalid"` entries are never drops. Pure disclosure: no
+   * policy branch reads this field. */
+  required_check_disposition_receipt?: {
+    dropped: Array<{ reason: "non-object-entry" | "unattributable-check" }>;
+    cap_reached: boolean;
+  };
   /** #1337: the model's structured dependency-upgrade coverage accounting
    * answer (fail-closed normalized), when the key was emitted. Purely
    * informational: the deterministic rollup never gates the verdict and
@@ -194,6 +204,14 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
           status: d.status,
           rationale: d.rationale,
         }));
+    // #1627: the drop receipt rides only when the parser actually dropped
+    // something or the cap truncated — a clean answer writes no key.
+    if (parsed.requiredCheckDispositionReceipt) {
+      artifact.required_check_disposition_receipt = {
+        dropped: parsed.requiredCheckDispositionReceipt.dropped.map((drop) => ({ reason: drop.reason })),
+        cap_reached: parsed.requiredCheckDispositionReceipt.capReached,
+      };
+    }
   }
   // #1337: publish the accounting only for a REAL array answer. The strict
   // wire schema always carries the key (null permitted), so key-presence
@@ -230,8 +248,10 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
         }));
   }
   for (const [key, value] of Object.entries(parsed.extra)) {
-    // This field is deterministic enforcement state, never model input.
-    if (key !== "requirement_trace_incomplete" && !(key in artifact)) {
+    // These fields are deterministic state (enforcement/parser-owned),
+    // never model input: a model extra can never forge the trace marker
+    // (#1248-era rule) nor the #1627 disposition drop receipt.
+    if (key !== "requirement_trace_incomplete" && key !== "required_check_disposition_receipt" && !(key in artifact)) {
       artifact[key] = value;
     }
   }

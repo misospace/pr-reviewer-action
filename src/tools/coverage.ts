@@ -66,6 +66,10 @@ export function isIncompleteInvestigationStopReason(stopReason: string): boolean
   // #1464: a `wall-clock-verdict-reserve` stop is a budget stop too — the loop
   // stopped early to hold wall clock for the verdict, so the investigation
   // did not run to the model's own choice.
+  // #1627: the `obligations-settled` early stop is deliberately NOT here —
+  // it is the loop's own deterministic completion (every tracked obligation
+  // row settled with budget unspent), not an investigation cut short, so it
+  // keeps clean coverage semantics like a model-chosen stop.
   return isBudgetStopReason(stopReason) || stopReason === STOP_REQUEST_ERROR || stopReason === STOP_WALL_CLOCK_RESERVE;
 }
 
