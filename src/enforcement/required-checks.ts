@@ -70,8 +70,9 @@ import type { DependencyEvidenceObligation } from "../tools/dependency-evidence.
  *   adequate review partial.
  *
  * Without a ledger (fresh standard-call and fork paths) the fold is
- * byte-identical to the pre-#1627 semantics — the gate exists only on the
- * native tool-loop surface.
+ * inert without a ledger — the receipt gate exists only on the native
+ * tool-loop surface, while producer tags govern which rows are
+ * merge-affecting (only untagged `legacy` rows keep the old gating).
  *
  * This is a faithful mirror of `pr_reviewer/completeness.py::
  * evaluate_structured_coverage`; its serialized artifact stays byte-identical
@@ -151,8 +152,10 @@ function validateDisposition(
  * docs/required-checks.md.
  *
  * `ledger` (optional) is the #1657 evidence-receipt ledger — present only on
- * the native tool-loop surface. With no ledger the fold is byte-identical to
- * pre-#1627.
+ * the native tool-loop surface. Without a ledger the receipt gate is inert
+ * (satisfaction folds on the pre-#1627 presence-and-shape rule); trusted
+ * producer tags still govern which rows are merge-affecting — only untagged
+ * `legacy` rows retain the old gating behavior.
  *
  * `tags` (optional) carries the PRODUCER's trusted evidence tags
  * (`must_check_evidence` from the classification artifact — never inferred

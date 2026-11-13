@@ -132,7 +132,11 @@ trusted-base approval prerequisites. Forcing is **status-based** (#1505):
 an **`unmet`** row — the check was performed and the requirement confirmed
 NOT satisfied — is a confirmed negative and is a real blocking result
 exactly like a blocker/major finding: it forces `request_changes` through
-the enforcement overlays, and a native APPROVE never certifies it. An
+the enforcement overlays, and a native APPROVE never certifies it. #1657
+(review) narrows this by row class: an `unmet` on a tagged review-prompt
+row records the semantic negative for accounting but does NOT force — only
+an explicitly-objective mandatory requirement (and untagged `legacy` rows)
+keeps the forcing semantics. An
 **`unresolved`** row — the evidence was never gathered — is an availability
 failure, never a defect: it marks the review partial/incomplete, withholds
 the trusted native APPROVE at the publish boundary (the native event
@@ -278,15 +282,22 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 #1657 replaces the #1627/#1634 call-ID citation gate (a cited `call-<n>` plus
 argument-token overlap was treated as consumable proof, one executed call
 backed at most one discharge). That machinery is deleted. In its place every
-`must_check` row carries a deterministic **evidence class** — a pure function
-of the check text (`classifyCheckEvidence` in
-`src/enforcement/evidence-receipts.ts`) over closed vocabularies:
+`must_check` row carries an **evidence class** carried as TRUSTED PRODUCER
+METADATA: the classifier tags each row it emits in
+`MUST_CHECK_EVIDENCE_TAGS` (`src/classification/classify.ts`) and the tag
+rides the persisted artifact as `must_check_evidence` into both folds. Row
+class is never inferred from the row's wording downstream:
 
-| class          | which rows                                                                 | merge-affecting? |
-|----------------|----------------------------------------------------------------------------|------------------|
-| `objective`    | rows mapping to a concrete deterministic gate: test-run asks (exact-head CI), upstream provenance / release-delta / security-advisory acquisition asks, and rows naming exact path/version/head/slug identities | **yes** — an unresolved objective row is the merge-affecting incompleteness |
-| `review-prompt`| generic auth/path/security/scrutiny questions and absence asks ("no vulnerability", "no breaking change") | no — disclosed with reason codes, never independently incomplete |
-| `attention`    | the P0/P1 linked-issue sentences ("treat as critical — verify all changes thoroughly", "treat as high priority — verify correctness carefully") | no — attention/routing signals, not propositions |
+| class           | which rows                                                                 | merge-affecting? |
+|-----------------|----------------------------------------------------------------------------|------------------|
+| `objective`     | rows the classifier tags objective with an explicit gate kind at emission: test-run asks (exact-head CI), upstream provenance / release-delta / security-advisory acquisition asks, and rows the producer binds to exact path/version/head/slug identities | **yes** — an unresolved objective row is the merge-affecting incompleteness |
+| `review-prompt` | rows tagged review-prompt at emission: generic auth/path/security/scrutiny questions and absence asks ("no vulnerability", "no breaking change") | no — disclosed with reason codes, never independently incomplete, and an `unmet` answer never manufactures `REQUEST_CHANGES` |
+| `attention`     | rows tagged attention at emission: the P0/P1 linked-issue sentences ("treat as critical — verify all changes thoroughly", "treat as high priority — verify correctness carefully") | no — attention/routing signals, not propositions |
+| `legacy`        | rows without a trusted tag: hand-written/minimal artifacts and dynamic rows | **yes** — untagged rows retain conservative pre-#1657 gating semantics |
+
+Identity extraction from a check's text happens only AFTER a row is tagged
+`objective` — solely to validate the tagged identity against receipts. It
+never decides whether the row is material.
 
 The rules this buys, and their limits:
 
@@ -320,14 +331,15 @@ The rules this buys, and their limits:
   Their dispositions fold on the presence-and-shape rule exactly as before
   the citation gate existed; an unanswered or unresolved one is disclosed
   (row `status`/`reason`/`row_class`/`evidence`) but never gates
-  completeness, never withholds by itself, and never forces. The ONE
-  conservative exception to non-gating is structural: a run that emits no
-  structured dispositions at all still records `structured: false` — the
-  skipped contract is visible, but only an unresolved OBJECTIVE row makes it
-  merge-affecting. Generic questions affect the merge only through a
-  concrete objective gate or the reviewer's own material unknown/finding
-  (a confirmed negative `unmet` still forces, status-based #1505 semantics
-  unchanged).
+  completeness, never withholds by itself, and never forces. A tagged
+  review prompt's `unmet` answer records the semantic negative for
+  accounting but never independently manufactures `REQUEST_CHANGES` — a
+  reviewer-determined semantic defect belongs in an ordinary grounded
+  blocker/major finding, and the final approve/incomplete call is the
+  disposition layer's (#1656/#1659). The one structural disclosure: a run
+  that emits no structured dispositions at all still records
+  `structured: false` — the skipped contract is visible, but only an
+  unresolved OBJECTIVE row makes it merge-affecting.
 - **Narrow deterministic reconciliation stays where truth is mechanical.**
   The #1594 exact-head CI discharge/contradiction above is unchanged — it
   remains the only auto-satisfaction reconciler, and only when the CI
@@ -345,9 +357,12 @@ The rules this buys, and their limits:
   required-evidence sentinel rows carry `row_class`. Nothing here decides
   APPROVE/INCOMPLETE — the disposition layer consumes the reason-coded state.
 - **Compatibility**: without a ledger (fresh standard-call and fork paths)
-  both folds are byte-identical to pre-#1627 semantics; the retired
-  #1627/#1634 reason strings remain readable in persisted artifacts but are
-  no longer written.
+  the receipt gate is INERT — satisfaction folds on the pre-#1627
+  presence-and-shape rule — but trusted producer tags still intentionally
+  govern which rows are merge-affecting: tagged review-prompt/attention rows
+  are non-gating and only untagged `legacy` rows retain the old gating
+  behavior. The retired #1627/#1634 reason strings remain readable in
+  persisted artifacts but are no longer written.
 
 ## Regression coverage
 

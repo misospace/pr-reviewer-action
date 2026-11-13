@@ -351,7 +351,9 @@ export function sharedAdmissionTokens(text: string): string[] | null {
  * history archaeology. `null` when the row names no reviewer-gatherable
  * surface at all — generic checklist prose like "verify correctness
  * carefully" cannot be targeted by any specific call, so it must never gate
- * admission (an unmet row still forces the verdict; an unresolved row is coverage, never a block). */
+ * admission (an unmet row still forces the verdict for legacy/objective
+ * rows; #1657: a tagged review-prompt row's unmet records the negative
+ * without forcing — an unresolved row is coverage, never a block). */
 export function obligationAdmissionTokens(text: string): string[] | null {
   if (!REVIEWER_GATHERABLE_CUE.test(text)) return null;
   return sharedAdmissionTokens(text);
@@ -398,7 +400,9 @@ function pathSegmentStem(segment: string): string {
  *
  * `null` when the row has no usable anchor: a row that names no location
  * has no vocabulary to admit a call by, so it must never gate the reserved
- * window (an unmet row still forces the verdict; an unresolved row is coverage, never a block).
+ * window (an unmet row still forces the verdict for legacy/objective rows;
+ * #1657: a tagged review-prompt row's unmet records the negative without
+ * forcing — an unresolved row is coverage, never a block).
  */
 export function anchorAdmissionTokens(anchors: readonly string[]): string[] | null {
   const tokens = new Set<string>();
@@ -637,8 +641,10 @@ export function foldObligationDispositions(
   // all (dropped at the candidate boundary).
   // The gate is ACTIVE only when a trace was present: `refused` fails every
   // objective satisfaction closed; `unavailable` (no trace) and a missing
-  // ledger keep the pre-#1627 semantics byte-for-byte (fresh standard-call
-  // and fork paths).
+  // ledger leave the receipt gate inert (satisfaction folds on the
+  // pre-#1627 presence-and-shape rule), while trusted producer tags still
+  // govern which rows are merge-affecting — only untagged `legacy` rows
+  // retain the old gating behavior.
   const ledgerActive = ledger !== undefined && ledger.state !== "unavailable";
   const folded: ReviewObligation[] = obligations.map((obligation) => {
     const idAlias = normalized(obligation.id);
@@ -825,11 +831,11 @@ export function foldObligationDispositions(
     return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "missing-rationale" };
   });
   // #1657: the reason-coded provenance disclosure, attached uniformly AFTER
-  // the per-row shape fold. Every `must_check` row carries its deterministic
-  // `rowClass` (a pure function of the check text — attention rows are
-  // disclosed here too when a caller hands one in, though the candidate
-  // boundary normally drops them), and on ledger-active runs every
-  // `must_check` row carries its validated `evidence` state. Disclosure
+  // the per-row shape fold. Every `must_check` row carries its TRUSTED
+  // `rowClass` from the producer metadata (untagged rows are `legacy`;
+  // attention rows are disclosed here too when a caller hands one in,
+  // though the candidate boundary normally drops them), and on ledger-active
+  // runs every `must_check` row carries its validated `evidence` state.
    // only: no policy branch reads these fields to change a status — the
    // #1656 disposition layer consumes them.
   const disclosed = folded.map((obligation) => {

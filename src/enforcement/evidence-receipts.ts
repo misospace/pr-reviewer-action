@@ -55,11 +55,14 @@
  * (`refused` — objective satisfaction is impossible behind a trace this
  * runtime cannot verify, never silently downgraded to "no loop"); the trace
  * list is bounded by prefix truncation so the positional `call-<n>` ids keep
- * their exact alignment. What changed: without a ledger (fresh standard-call
- * and fork paths) the folds keep their pre-#1627 semantics byte-for-byte,
- * and on an active ledger a claimed `satisfied` objective row is credited
- * only by VALIDATED RECEIPTS — never by a cited call id, and never repaired
- * from model prose. Malformed or stale provenance stays reason-coded.
+ * their exact alignment. Without a ledger the receipt gate is INERT —
+ * satisfaction folds on the pre-#1627 presence-and-shape rule — but trusted
+ * producer tags still govern which rows are merge-affecting (tagged
+ * review-prompt/attention rows are non-gating; only untagged `legacy` rows
+ * retain the old gating behavior). On an active ledger a claimed `satisfied`
+ * objective row is credited only by VALIDATED RECEIPTS — never by a cited
+ * call id, and never repaired from model prose. Malformed or stale
+ * provenance stays reason-coded.
  */
 import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";

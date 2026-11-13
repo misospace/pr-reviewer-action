@@ -86,7 +86,8 @@ export function applyRequiredCheckValidation(
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
     /** #1657: the evidence-receipt ledger (native tool-loop surface).
-     * Optional; with no ledger the fold is byte-identical to pre-#1627. */
+     * Optional; with no ledger the receipt gate is inert (satisfaction
+     * folds on the pre-#1627 presence-and-shape rule). */
     ledger?: EvidenceLedger;
     /** #1657 (review): the PRODUCER's trusted evidence tags
      * (`must_check_evidence`) — row classes come from this metadata, never
@@ -117,8 +118,9 @@ export function applyRequiredCheckValidation(
     // reconciliation runs on the gated rows: a validated head-bound green
     // test-execution check still discharges a test-run ask the gate left
     // unresolved, and a validated failed one still contradicts a model
-    // `satisfied`. With no evidence nothing runs; with no ledger the
-    // coverage fold is byte-identical to pre-#1627.
+    // `satisfied`. With no evidence nothing runs; without a ledger the
+    // receipt gate is inert (producer tags still govern which rows are
+    // merge-affecting).
     let coverage = structuredCoverage(mustCheck, artifact, options.ledger, options.mustCheckEvidence);
     // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
     // derivation: a validated head-bound green test-execution check
