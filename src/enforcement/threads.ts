@@ -153,7 +153,6 @@ export function applyReviewThreadEnforcement(
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
   let settledWithdrawn = 0;
-  let demoted = 0;
   const counted = new Set<string>();
   const reemitted: ArtifactFinding[] = [];
   for (const thread of threads) {
@@ -236,25 +235,6 @@ export function applyReviewThreadEnforcement(
     }
   }
 
-  // #1645: a model-authored finding anchored to a carried thread inherits the
-  // thread's reconciliation — the model echoed carried state, so a ghost
-  // thread (resolved/absent from the live listing) cannot lend the finding
-  // blocking force. The claim itself stays, demoted to non-blocking like an
-  // unverified claim; under `unknown` nothing is demoted (fail open).
-  if (reconciliation !== null && reconciliation !== undefined && reconciliation.available) {
-    for (const finding of findings) {
-      if (typeof finding.thread_id !== "string" || finding.thread_reconciliation !== undefined) continue;
-      const state = reconcileThreadState(finding.thread_id, reconciliation);
-      if (state !== "resolved" && state !== "absent") continue;
-      if (isBlockingSeverity(finding.severity)) {
-        finding.capped_from = finding.severity;
-        finding.severity = "minor";
-        demoted += 1;
-      }
-      finding.thread_reconciliation = state;
-    }
-  }
-
   // #1645: persist bounded reconciliation provenance whenever reconciliation
   // ran, independent of whether settlement changed the artifact.
   if (reconciliation !== null && reconciliation !== undefined) {
@@ -273,7 +253,7 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0 || demoted > 0;
+  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
   // review still has to say the live listing could not be proven.

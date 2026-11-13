@@ -504,7 +504,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
   options: { secondListing?: unknown[] } = {},
-): Promise<Record<string, unknown>> {
+): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>> }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict(modelVerdict)));
@@ -532,7 +532,7 @@ async function runStaleThreadVerdict(
       reads += 1;
       return Promise.resolve({ ok: true, data: reads === 1 ? [majorThread] : (options.secondListing ?? [majorThread]) });
     };
-    await runReview({
+    const result = await runReview({
       env: { VERDICT_POLICY: "strict" },
       inputs: {
         "github-token": "tok",
@@ -550,15 +550,58 @@ async function runStaleThreadVerdict(
       persistArtifacts: true,
       quiet: true,
     });
-    return JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
+    return {
+      artifact: JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>,
+      result,
+    };
   } finally {
     await server.close();
     cleanup();
   }
 }
 
+/** Pipe a finished run's machine handoff into the publish step and return
+ * the recorded native reviews — the surface where the #1645 acceptance
+ * clause "handoff/native event/marker agree" is observable. */
+async function publishRunHandoff(
+  result: Awaited<ReturnType<typeof runReview>>,
+): Promise<MinimalPublishApi> {
+  const api = new MinimalPublishApi("a".repeat(40));
+  const published = await publishReview({
+    mode: "review_verdict",
+    reviewMarkdown: result.outputs.reviewMarkdown,
+    verdict: result.outputs.verdict,
+    verdictPolicy: result.verdictPolicy,
+    analysisEngine: result.outputs.analysisEngine,
+    baseSha: "b".repeat(40),
+    headSha: "a".repeat(40),
+    prNumber: "7",
+    commentMarker: "<!-- ai-pr-review -->",
+    requiredChecks: result.outputs.requiredChecks,
+    ...(result.requiredEvidenceState !== undefined ? { requiredEvidenceState: result.requiredEvidenceState } : {}),
+    reviewRoute: result.outputs.reviewRoute,
+    escalationReason: result.outputs.escalationReason,
+    cacheHitRatio: result.outputs.cacheHitRatio,
+    inlineFindings: false,
+    inlineFindingsMax: 5,
+    findings: JSON.parse(result.outputs.findings),
+    cleanupPreviousNativeReviews: "false",
+    allowApprove: true,
+    approveForks: false,
+    isForkPr: false,
+    upstreamLinkMode: "inert",
+    conditionalPresence: {
+      linkedIssue: false, evidenceProvider: false, standards: false,
+      toolHarnessFindings: false, toolHarnessResults: false,
+    },
+    forgejoPositions: false,
+  }, api, { diffText: "" });
+  assert.equal(published.status, "published");
+  return api;
+}
+
 test("#1645: a carried thread absent from the settlement-time listing cannot force REQUEST_CHANGES", async () => {
-  const artifact = await runStaleThreadVerdict({
+  const { artifact, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [
@@ -572,10 +615,23 @@ test("#1645: a carried thread absent from the settlement-time listing cannot for
   assert.equal(reconciliation.absent, 1);
   const findings = artifact.findings as Array<{ thread_id?: string }>;
   assert.ok(!findings.some((f) => f.thread_id === "PRRT_stale1"));
+  // Acceptance clause "handoff/native event/marker agree": the action-output
+  // handoff, the metadata marker, and the native review event the publish
+  // step derives from that handoff must all carry the same reconciled
+  // non-blocking disposition.
+  assert.equal(result.outputs.verdict, artifact.verdict, "the handoff verdict is the reconciled verdict");
+  const marker = parseMetadata(result.marker) as Record<string, unknown> | null;
+  assert.equal(marker?.review_result, result.outputs.reviewResult, "the marker echoes the handoff review result");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.match(api.submitted[0]!.body, new RegExp(`"review_result":"${result.outputs.reviewResult}"`),
+    "the published body marker agrees with the handoff");
 });
 
 test("#1645: a carried thread proven live-unresolved at settlement still blocks", async () => {
-  const artifact = await runStaleThreadVerdict({
+  const { artifact, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [
@@ -589,6 +645,14 @@ test("#1645: a carried thread proven live-unresolved at settlement still blocks"
   const findings = artifact.findings as Array<{ thread_id?: string; thread_reconciliation?: string }>;
   const carried = findings.find((f) => f.thread_id === "PRRT_stale1");
   assert.equal(carried?.thread_reconciliation, "live_unresolved");
+  // Acceptance clause "handoff/native event/marker agree" on the blocking
+  // side too: a live unresolved thread blocks identically on every surface.
+  assert.equal(result.outputs.verdict, "request_changes", "the handoff verdict is the reconciled verdict");
+  const marker = parseMetadata(result.marker) as Record<string, unknown> | null;
+  assert.equal(marker?.review_result, "issues", "the marker reports the block");
+  const api = await publishRunHandoff(result);
+  assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
 });
 
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
