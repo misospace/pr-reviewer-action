@@ -259,7 +259,7 @@ export function checkIdentityKey(check: string): string {
  * rather than a truncating prefix (the deterministic layer never
  * approximates an identity it cannot represent).
  */
-function requirementIdentityTokens(checkKey: string): string[] | null {
+function requirementIdentityTokens(checkKey: string): string[] {
   const stripped = checkKey.replace(URL_PREFIX_RE, " ");
   const tokens = new Set<string>();
   for (const match of stripped.matchAll(REPO_SLUG_RE)) {
@@ -358,6 +358,17 @@ export interface CheckEvidenceTag {
    * `dependency-evidence` row asks to acquire (validated per kind against
    * the ledger's attributed acquisition receipts). */
   obligations: DependencyEvidenceObligation[];
+  /** #1657 (review round 2): the TRUSTED dependency identity scope the
+   * producer parsed for this row's update — the exact dependency-name
+   * slugs (lowercased; scoped names normalized to `scope/pkg`) the
+   * classifier extracted from the PR's own changed dependency surfaces. A
+   * dependency-evidence receipt backs the row only when it carries at
+   * least one scope slug as an EXACT identity (kind-appropriate
+   * boundaries — never a substring), so an acquisition about dependency B
+   * can never back dependency A's row. ABSENT/EMPTY means the producer
+   * could not establish a reliable identity: the row FAILS CLOSED — no
+   * kind-only evidence ever credits it. */
+  dependencyScope: string[];
 }
 
 export interface CheckEvidenceTagWithText extends CheckEvidenceTag {
@@ -373,7 +384,7 @@ export function evidenceTagIndex(tags: readonly CheckEvidenceTagWithText[] | und
   const index = new Map<string, CheckEvidenceTag>();
   for (const tag of tags ?? []) {
     if (typeof tag?.text !== "string") continue;
-    index.set(checkIdentityKey(tag.text), { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations });
+    index.set(checkIdentityKey(tag.text), { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations, dependencyScope: tag.dependencyScope });
   }
   return index;
 }
@@ -692,12 +703,20 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
 function supportedDependencyReceipts(
   ledger: EvidenceLedger,
   kinds: readonly DependencyEvidenceObligation[],
+  scope: readonly string[],
 ): { verified: EvidenceReceipt[]; relevantUnverified: number } {
   const verified: EvidenceReceipt[] = [];
   let relevantUnverified = 0;
   for (const receipt of ledger.receipts) {
     const attribution = receipt.subject.obligations ?? [];
-    const relevant = kinds.some((kind) => attribution.includes(kind));
+    // #1657 (review round 2): a receipt bears on the row only when BOTH the
+    // acquisition obligation kind AND the row's trusted dependency identity
+    // scope match — the receipt's own target (URL/query) must carry at
+    // least one producer-parsed scope slug as an EXACT identity
+    // (kind-appropriate boundaries, never a substring). An acquisition
+    // about dependency B never backs dependency A's row, whatever its kind.
+    const relevant = kinds.some((kind) => attribution.includes(kind))
+      && scope.some((slug) => identityCarriesToken(receiptIdentityString(receipt), slug));
     if (!relevant) continue;
     if (receipt.acquired && receipt.complete && receipt.trust === "web") {
       verified.push(receipt);
@@ -759,7 +778,11 @@ export function evaluateRowEvidence(
   if (ledger.state === "refused") return { ...base, state: "trace-refused" };
   if (tag.gate === "ci-evidence") return { ...base, state: "receipt-absent" };
   if (tag.gate === "dependency-evidence") {
-    const { verified, relevantUnverified } = supportedDependencyReceipts(ledger, tag.obligations);
+    // #1657 (review round 2): without a trusted dependency identity the
+    // producer could not establish WHAT this row's acquisition must be
+    // about — fail closed: kind-only evidence never credits it.
+    if (tag.dependencyScope.length === 0) return { ...base, state: "receipt-absent" };
+    const { verified, relevantUnverified } = supportedDependencyReceipts(ledger, tag.obligations, tag.dependencyScope);
     if (verified.length > 0) {
       return { ...base, state: "receipt-backed", receipts: verified.slice(0, MAX_ROW_RECEIPT_IDS).map((receipt) => receipt.id) };
     }
@@ -769,7 +792,7 @@ export function evaluateRowEvidence(
   // covered JOINTLY by validated head-bound content receipts — one receipt
   // may carry several tokens, several receipts may share the cover, and a
   // receipt that carries none of the row's identity never contributes.
-  const tokens = requirementIdentityTokens(checkIdentityKey(check)) ?? [];
+  const tokens = requirementIdentityTokens(checkIdentityKey(check));
   const { verified, relevant } = supportedIdentityReceipts(ledger, tokens);
   if (verified.length > 0) {
     const covered = tokens.every((token) => verified.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), token)));
@@ -808,7 +831,7 @@ export function checkEvidenceTagsFromArtifact(value: unknown): CheckEvidenceTagW
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
     const record = raw as Record<string, unknown>;
     for (const key of Object.keys(record)) {
-      if (key !== "text" && key !== "row_class" && key !== "gate" && key !== "obligations") continue;
+      if (key !== "text" && key !== "row_class" && key !== "gate" && key !== "obligations" && key !== "dependency_scope") continue;
     }
     if (typeof record.text !== "string" || record.text.trim() === "" || record.text.length > 1000) continue;
     if (typeof record.row_class !== "string" || !REQUIRED_EVIDENCE_ROW_CLASSES.has(record.row_class) || record.row_class === "legacy") continue;
@@ -824,13 +847,29 @@ export function checkEvidenceTagsFromArtifact(value: unknown): CheckEvidenceTagW
       }
       if (!ok) continue;
     }
+    // #1657 (review round 2): the trusted dependency identity scope —
+    // bounded exact slugs; an unparseable scope row is DROPPED (fail
+    // closed), never half-trusted.
+    const dependencyScope: string[] = [];
+    if (record.dependency_scope !== undefined) {
+      if (!Array.isArray(record.dependency_scope)) continue;
+      let ok = true;
+      for (const slug of record.dependency_scope) {
+        // #1657 (round 2): the exact-slug shape, hostile shapes refused —
+        // traversal dots and option-like leads never enter the scope.
+        if (typeof slug !== "string" || !/^[a-z0-9@/._-]{1,214}$/.test(slug)
+          || slug.includes("..") || slug.startsWith(".") || slug.startsWith("-")) { ok = false; break; }
+        dependencyScope.push(slug);
+      }
+      if (!ok || dependencyScope.length === 0 || dependencyScope.length > 20) continue;
+    }
     const rowClass = record.row_class as Exclude<RequiredEvidenceRowClass, "legacy">;
     // A tag claiming objective MUST carry its explicit gate kind; other
     // classes carry none.
     const gate = (record.gate ?? null) as EvidenceGateKind | null;
     if (rowClass === "objective" && gate === null) continue;
     if (rowClass !== "objective" && gate !== null) continue;
-    tags.push({ text: record.text, rowClass, gate, obligations });
+    tags.push({ text: record.text, rowClass, gate, obligations, dependencyScope });
   }
   return tags;
 }

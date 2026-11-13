@@ -3999,6 +3999,12 @@ type MustCheckEvidenceTag = {
   row_class: "attention" | "objective" | "review-prompt";
   gate?: "ci-evidence" | "dependency-evidence" | "source-identity";
   obligations?: ("provenance" | "release_delta" | "security_advisory")[];
+  /** #1657 (review round 2): the npm-dependency rows whose trusted scope
+   * comes from the producer's parse of the PR's own changed dependency
+   * surfaces. Image/chart/platform rows carry NO scope source yet — they
+   * fail closed (never kind-only credit) until a reliable parse exists. */
+  takes_dependency_scope?: boolean;
+  dependency_scope?: string[];
 };
 
 const REVIEW_PROMPT_TAG: MustCheckEvidenceTag["row_class"] = "review-prompt";
@@ -4013,20 +4019,32 @@ const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> =
   // one row per obligation kind (positional — the family arrays are const).
   Object.fromEntries(
     [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS, DEPENDENCY_EVIDENCE_CHECKS, PLATFORM_EVIDENCE_CHECKS].flatMap(
-      ([provenanceRow, deltaRow, advisoryRow]) => [
-        [provenanceRow, { text: provenanceRow, row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"] }],
-        [deltaRow, { text: deltaRow, row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"] }],
-        [advisoryRow, { text: advisoryRow, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
-      ] as Array<[string, MustCheckEvidenceTag]>,
+      (family) => {
+        // #1657 (review round 2): ONLY the npm-dependency family carries a
+        // reliable producer scope parse today — image/chart/platform rows
+        // fail closed (no scope → no kind-only credit) until a reliable
+        // parse exists for their surfaces.
+        const takesScope = family === DEPENDENCY_EVIDENCE_CHECKS;
+        return ([
+          [family[0], { text: family[0], row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"] }],
+          [family[1], { text: family[1], row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"] }],
+          [family[2], { text: family[2], row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
+        ] as Array<[string, MustCheckEvidenceTag]>).map(([text, tag]) => [
+          text,
+          takesScope ? { ...tag, takes_dependency_scope: true } : tag,
+        ]);
+      },
     ),
   ),
   Object.fromEntries([
-    // The security-sensitive flag row names two acquisition kinds.
+    // The security-sensitive flag row names two acquisition kinds, and its
+    // trusted scope is the same npm-dependency parse.
     ["verify the update provenance and any referenced security advisory",
-      { text: "verify the update provenance and any referenced security advisory", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance", "security_advisory"] }],
-    // The #1595 lockfile-refresh aggregate advisory row.
+      { text: "verify the update provenance and any referenced security advisory", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance", "security_advisory"], takes_dependency_scope: true }],
+    // The #1595 lockfile-refresh aggregate advisory row: its trusted scope
+    // is the producer's parse of the PR's own changed dependency surfaces.
     ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
-      { text: "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
+      { text: "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], takes_dependency_scope: true }],
     // Objective CI ask: the test-run requirement settles from exact-head CI.
     ["run full test suite after upgrade", { text: "run full test suite after upgrade", row_class: "objective", gate: "ci-evidence" }],
   ] as Array<[string, MustCheckEvidenceTag]>),
@@ -4059,15 +4077,114 @@ const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> =
   ),
 ) as Readonly<Record<string, MustCheckEvidenceTag>>;
 
+// #1657 (review round 2): bounded caps for the trusted dependency-scope
+// parse. The parse reads the PR's own changed dependency surfaces — never
+// checklist or reviewer prose.
+const DEPENDENCY_SCOPE_MAX_LINES = 4000;
+const DEPENDENCY_SCOPE_MAX_SLUGS = 20;
+const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
+/** npm dependency-section keys whose value shapes make them reliable dep
+ * identities; anything else in the section is skipped, never guessed. */
+const NPM_DEPENDENCY_SECTION_KEYS: ReadonlySet<string> = new Set([
+  "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
+]);
+const LOCKFILE_BLOCK_KEY_CAPTURE_RE = /^[-+]?"(node_modules\/[^"]+)"\s*:\s*\{/;
+const NPM_SECTION_OPEN_RE = /^[-+]?\s*"(dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/;
+const NPM_SECTION_PAIR_RE = /^\s*"([^"]+)"\s*:\s*"[^"]*"\s*,?\s*$/;
+const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
+
+/**
+ * #1657 (review round 2): the TRUSTED dependency identity scope — the exact
+ * dependency-name slugs the producer parsed from the PR's own changed
+ * dependency surfaces (npm lockfile package blocks, npm manifest
+ * dependency-section keys, Chart.yaml `name:`). Lowercased; scoped names
+ * normalized to `scope/pkg`. These slugs bind a dependency-evidence
+ * receipt to the row: a receipt whose own target does not carry one of
+ * them never backs the row, whatever its acquisition kind. NEVER derived
+ * from checklist or reviewer prose. Empty when no reliable identity could
+ * be parsed — the objective rows then fail closed (never kind-only
+ * credit).
+ */
+export function parseDependencyScopeSlugs(fullDiffText: string): string[] {
+  const slugs = new Set<string>();
+  let lines = 0;
+  let currentFile = "";
+  // Per-file npm dependency-section depth (1 = inside a dependency-section
+  // object). Section state resets at each diff file header.
+  let npmSectionDepth = 0;
+  let inChartYaml = false;
+  const pushSlug = (rawName: string): void => {
+    const name = rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
+    if (name === "" || name.length > 214 || name.includes("..") || name.startsWith(".") || name.startsWith("-")) return;
+    if (!DEPENDENCY_SCOPE_SLUG_RE.test(name)) return;
+    if (slugs.size >= DEPENDENCY_SCOPE_MAX_SLUGS) return;
+    slugs.add(name);
+  };
+  for (const line of fullDiffText.split("\n")) {
+    if (++lines > DEPENDENCY_SCOPE_MAX_LINES) break;
+    const fileHeader = /^diff --git a\/(\S+)/.exec(line);
+    if (fileHeader !== null) {
+      currentFile = fileHeader[1] ?? "";
+      inChartYaml = currentFile.endsWith("Chart.yaml");
+      npmSectionDepth = 0;
+      continue;
+    }
+    const sign = line.startsWith("-") && !line.startsWith("---") ? "-"
+      : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
+    const content = line.slice(sign === "" ? 0 : 1).trim();
+    // npm lockfile package blocks: the block key names the dependency.
+    const lockfileBlock = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
+    if (lockfileBlock !== null) {
+      pushSlug(lockfileBlock[1] ?? "");
+      continue;
+    }
+    // npm manifest dependency sections: the section opens on its key, the
+    // changed `"name": "range"` pairs inside name the dependencies, and the
+    // section closes when its own object closes (brace-depth tracked over
+    // ALL lines — a minimal-context diff must not strand the state).
+    const sectionOpen = NPM_SECTION_OPEN_RE.exec(content);
+    if (sectionOpen !== null) {
+      npmSectionDepth = 1;
+      continue;
+    }
+    if (npmSectionDepth > 0) {
+      if (/^[-+]?\s*\}\s*,?\s*$/.test(content)) { npmSectionDepth = 0; continue; }
+      if (sign !== "") {
+        const pair = NPM_SECTION_PAIR_RE.exec(content);
+        if (pair !== null) pushSlug(pair[1] ?? "");
+      }
+      continue;
+    }
+    // Helm chart identity: the Chart.yaml `name:` value on a changed line.
+    if (inChartYaml && sign !== "") {
+      const chartName = CHART_NAME_LINE_RE.exec(content);
+      if (chartName !== null) pushSlug(chartName[1] ?? "");
+    }
+  }
+  return [...slugs];
+}
+
 /** The trusted evidence tags for the emitted must_check rows, in emission
  * order. Every static sentence above is tabled; an untabled row (a future
  * sentence someone added without a tag) contributes NO tag — it stays
- * `legacy` downstream, which fails safe (gating), never non-gating. */
-export function mustCheckEvidenceTags(checks: readonly string[]): MustCheckEvidenceTag[] {
+ * `legacy` downstream, which fails safe (gating), never non-gating.
+ *
+ * #1657 (review round 2): `dependencyScope` is the producer's parse of the
+ * PR's own changed dependency surfaces (exact dependency-name slugs). It is
+ * attached ONLY to the npm-dependency-family rows (`takes_dependency_scope`)
+ * — image/chart/platform rows carry no reliable scope parse yet and FAIL
+ * CLOSED (never kind-only credit). A `dependency-evidence` row whose tag
+ * ends up without a scope cannot be receipt-backed at all. */
+export function mustCheckEvidenceTags(checks: readonly string[], dependencyScope: readonly string[] = []): MustCheckEvidenceTag[] {
   const tags: MustCheckEvidenceTag[] = [];
   for (const text of checks) {
     const tag = MUST_CHECK_EVIDENCE_TAGS[text];
-    if (tag !== undefined) tags.push(tag);
+    if (tag === undefined) continue;
+    tags.push(
+      tag.takes_dependency_scope === true && dependencyScope.length > 0
+        ? { ...tag, dependency_scope: [...dependencyScope] }
+        : tag,
+    );
   }
   return tags;
 }
@@ -4356,7 +4473,12 @@ export function classifyPr(input: ClassifyInput): PRClassification {
       : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles, lockfileOnlyRefresh);
-  const mustCheckEvidence = mustCheckEvidenceTags(mustCheck);
+  // #1657 (review round 2): the trusted dependency identity scope for the
+  // npm-dependency evidence rows — the producer's parse of the PR's own
+  // changed dependency surfaces. Empty (or a family without a reliable
+  // parse) fails closed at the receipt seam.
+  const dependencyScope = parseDependencyScopeSlugs(fullDiffText ?? diffText);
+  const mustCheckEvidence = mustCheckEvidenceTags(mustCheck, dependencyScope);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);

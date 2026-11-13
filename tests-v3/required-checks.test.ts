@@ -416,8 +416,8 @@ test("#1379: missing release notes do not block the delta obligation — compare
 
 /** A trusted producer tag for one check text (#1657 review: row class is
  * producer metadata, never inferred from wording). */
-function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[]): CheckEvidenceTagWithText {
-  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"] };
+function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[], dependencyScope?: string[]): CheckEvidenceTagWithText {
+  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"], dependencyScope: dependencyScope ?? [] };
 }
 
 /** A minimal valid trace: one successful read of src/paths.ts. */
@@ -656,9 +656,9 @@ test("#1657: dependency-evidence rows are receipt-gated acquisition asks — pro
     { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
   ]);
   const depTags = checks.map((text) => {
-    if (text.includes("provenance")) return etag(text, "objective", "dependency-evidence", ["provenance"]);
-    if (text.includes("release delta")) return etag(text, "objective", "dependency-evidence", ["release_delta"]);
-    return etag(text, "objective", "dependency-evidence", ["security_advisory"]);
+    if (text.includes("provenance")) return etag(text, "objective", "dependency-evidence", ["provenance"], ["example-pkg"]);
+    if (text.includes("release delta")) return etag(text, "objective", "dependency-evidence", ["release_delta"], ["example-pkg"]);
+    return etag(text, "objective", "dependency-evidence", ["security_advisory"], ["example-pkg"]);
   });
   const coverage = evaluateRequiredCheckCoverage(
     checks,
@@ -693,7 +693,7 @@ test("#1657: the dependency advisory row keeps its not-performed escape and stay
     [check],
     [d(check, "satisfied", "the advisory database search at call-1")],
     ledgerWith([{ tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" }]),
-    [etag(check, "objective", "dependency-evidence", ["security_advisory"])],
+    [etag(check, "objective", "dependency-evidence", ["security_advisory"], ["example-pkg"])],
   );
   assert.deepEqual(satisfied.checks.map((row) => [row.status, row.evidence?.state]), [["satisfied", "receipt-backed"]]);
   const notPerformed = evaluateRequiredCheckCoverage(

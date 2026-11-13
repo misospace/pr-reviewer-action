@@ -108,7 +108,6 @@ import { computeFinalDisposition, reviewResultFromDisposition, type FinalDisposi
 import { buildDispositionEvidence } from "../disposition/engine-evidence.js";
 import { toolCapabilityFailure, toolMinSuccessfulFloorUnmet } from "../enforcement/enforce.js";
 import { isProvenHeadSha } from "../outcomes/schema.js";
-import { markerReviewResult } from "../publish/publish.js";
 import { loadChangedFilePaths, type PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";

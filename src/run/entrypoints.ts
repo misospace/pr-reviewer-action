@@ -29,7 +29,7 @@ import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../co
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
-import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../enforcement/evidence-receipts.js";
+import { checkEvidenceTagsFromArtifact, evidenceLedgerFromArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
@@ -601,31 +601,41 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
         // classification artifact — the recompute resolves row classes from
         // this metadata, never from prose; untagged rows are `legacy`.
         const mustCheckEvidence = checkEvidenceTagsFromArtifact(classification.must_check_evidence);
-        // #1657 (M2 parity): the engine folds the objective-evidence gate WITH
-        // the evidence-receipt ledger derived from the enforcement harness
-        // artifact's `tool_calls`/`tool_results` traces — the recompute here
-        // must fold the SAME inputs, or a native-loop run's
-        // `receipt-absent` rows read as satisfied on this side and silently
-        // drop out of the published handoff. Same artifact selection as
-        // `partialCoverageFromRunDir` above: the coverage record's
-        // `enforcement_harness` name, allowlisted to the exact filenames
-        // `review.ts` writes, and the same strict ledger builder the engine
-        // folds from.
-        const harnessName = typeof coverageRecord?.enforcement_harness === "string"
-          && ENFORCEMENT_HARNESS_NAMES.has(coverageRecord.enforcement_harness)
-          ? coverageRecord.enforcement_harness
-          : undefined;
-        const harness = harnessName === undefined ? null : readJsonObject(join(runDir, harnessName));
-        const ledger = buildEvidenceLedger({
-          toolCalls: harness?.tool_calls,
-          toolResults: harness?.tool_results,
-        });
-        const checkCoverage = structuredCoverage(mustCheck, output as never, ledger, mustCheckEvidence);
-        fields.unresolvedRequiredChecks = boundedIdList(
-          checkCoverage.checks
-            .filter((row) => row.status === "unresolved" || row.status === "unmet")
-            .map((row) => row.check),
-        );
+        // #1657 (M2 parity): the recompute must fold the SAME evidence the
+        // engine's settled coverage was validated against, or a native-loop
+        // run's `receipt-absent` rows read as satisfied on this side and
+        // silently drop out of the published handoff.
+        // #1657 (review round 2): the recompute reads the ENGINE'S PERSISTED
+        // evidence ledger (`evidence-receipts.json` — the exact receipts the
+        // engine folded: trace, corpus diff, CI/head-bound), never a partial
+        // reconstruction from the harness trace alone, which would make the
+        // publish disclosure disagree with the engine's settled coverage.
+        // - present + parseable → that exact ledger;
+        // - present but malformed → fail closed: omit the uncertain
+        //   disclosure entirely (never a guessed reconstructed story);
+        // - absent (a genuine pre-#1657 legacy run dir) → the legacy path:
+        //   the fold runs WITHOUT a ledger, exactly the pre-#1657 recompute.
+        const receiptsPath = join(runDir, "evidence-receipts.json");
+        let ledger: EvidenceLedger | undefined;
+        let ledgerMalformed = false;
+        if (existsSync(receiptsPath)) {
+          const persisted = evidenceLedgerFromArtifact(readJsonObject(receiptsPath));
+          if (persisted === null) {
+            // Fail closed: omit the uncertain disclosure entirely — never a
+            // guessed reconstructed evidence story.
+            ledgerMalformed = true;
+          } else {
+            ledger = persisted;
+          }
+        }
+        if (!ledgerMalformed) {
+          const checkCoverage = structuredCoverage(mustCheck, output as never, ledger, mustCheckEvidence);
+          fields.unresolvedRequiredChecks = boundedIdList(
+            checkCoverage.checks
+              .filter((row) => row.status === "unresolved" || row.status === "unmet")
+              .map((row) => row.check),
+          );
+        }
       }
     }
   }

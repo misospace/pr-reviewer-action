@@ -16,8 +16,12 @@ import {
 
 /** A trusted producer tag for one check text (#1657 review: row class is
  * producer metadata, never inferred from wording). */
-function tag(text: string, rowClass: CheckEvidenceTag["rowClass"], gate?: CheckEvidenceTag["gate"], obligations?: string[]): CheckEvidenceTagWithText {
-  return { text, rowClass, gate: gate ?? null, obligations: (obligations ?? []) as CheckEvidenceTag["obligations"] };
+function tag(text: string, rowClass: CheckEvidenceTag["rowClass"], gate?: CheckEvidenceTag["gate"], obligations?: string[], dependencyScope?: string[]): CheckEvidenceTagWithText {
+  return {
+    text, rowClass, gate: gate ?? null,
+    obligations: (obligations ?? []) as CheckEvidenceTag["obligations"],
+    dependencyScope: dependencyScope ?? [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -51,12 +55,18 @@ test("#1657 (review): the strict tag parser drops unparseable rows (those checks
     "not an object",
   ]);
   assert.deepEqual(parsed, [
-    { text: "run full test suite after upgrade", rowClass: "objective", gate: "ci-evidence", obligations: [] },
+    { text: "run full test suite after upgrade", rowClass: "objective", gate: "ci-evidence", obligations: [], dependencyScope: [] },
   ]);
   // A gateless non-objective tag is valid.
   assert.deepEqual(checkEvidenceTagsFromArtifact([{ text: "review auth flow for regression", row_class: "review-prompt" }]), [
-    { text: "review auth flow for regression", rowClass: "review-prompt", gate: null, obligations: [] },
+    { text: "review auth flow for regression", rowClass: "review-prompt", gate: null, obligations: [], dependencyScope: [] },
   ]);
+  // #1657 (round 2): a hostile scope slug drops the ROW (fail closed) —
+  // traversal dots never enter the trusted scope.
+  assert.deepEqual(
+    checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: ["../evil"] }]),
+    [],
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -237,6 +247,105 @@ test("#1657: stale/wrong-head provenance is objectively invalid — a relevant-b
 
 const CONFIG_ROW = "verify the config surface in src/config.yaml";
 
+// ── #1657 (review round 2): dependency-evidence receipts bind to the
+// trusted dependency IDENTITY, not the acquisition kind alone ────────────
+
+const DEP_A = "lodash";
+const DEP_B = "chalk";
+test("#1657 (round 2): a dependency-A acquisition receipt backs dependency A's row — kind AND trusted identity both match", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  const state = evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger);
+  assert.deepEqual([state.state, state.gate, state.receipts], ["receipt-backed", "dependency-evidence", ["call-1"]]);
+});
+
+test("#1657 (round 2): a dependency-B release-delta receipt does NOT back dependency A's row — the trusted scope refuses it", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/chalk/chalk/compare/v4.0.0...v5.0.0" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  const state = evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger);
+  assert.equal(state.state, "receipt-absent");
+  assert.deepEqual(state.receipts, []);
+});
+
+test("#1657 (round 2): a dependency-B security-advisory search does NOT back dependency A's advisory row — kind matches, identity does not", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "chalk security advisory CVE" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const advisoryTag = tag("check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "objective", "dependency-evidence", ["security_advisory"], [DEP_A]);
+  const state = evaluateRowEvidence(advisoryTag, "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", ledger);
+  assert.equal(state.state, "receipt-absent");
+});
+
+test("#1657 (round 2): the SAME dependency with the WRONG obligation kind does not back the row — both dimensions must match", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  // A provenance-registry fetch (kind: provenance) cannot back a
+  // release-delta ask, even for the right dependency.
+  const state = evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger);
+  assert.equal(state.state, "receipt-absent");
+});
+
+test("#1657 (round 2): a failed or truncated matching acquisition stays receipt-unverified — identity relevance without verified acquisition", () => {
+  const failed = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "error" }],
+    toolResults: [{ status: "error" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", failed).state, "receipt-unverified");
+  const truncated = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok", truncated: true }],
+  });
+  assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", truncated).state, "receipt-unverified");
+});
+
+test("#1657 (round 2): exact identity collisions stay refused — lodash never carries from lodash-es; scope-less tags fail closed", () => {
+  // lodash-es is a DIFFERENT dependency: the slug boundary refuses it.
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash-es" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger).state, "receipt-absent");
+  // A tag whose producer could not establish an identity FAILS CLOSED:
+  // kind-only evidence never credits it.
+  const scopeless = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], []);
+  const anyLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v1...v2" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(evaluateRowEvidence(scopeless, "inspect the exact old→new upstream release delta for the updated dependency", anyLedger).state, "receipt-absent");
+  // The strict parser drops an unparseable scope (fail closed).
+  assert.deepEqual(
+    checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: ["../evil"] }]),
+    [],
+  );
+});
+
+test("#1657 (round 2): one matching receipt still supports multiple legitimate conclusions — no allocation, scope-matched", () => {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  const deltaTag2 = tag("inspect the exact old→new upstream release delta for the updated sub-dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  assert.deepEqual(
+    [evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger).receipts,
+     evaluateRowEvidence(deltaTag2, "inspect the exact old→new upstream release delta for the updated sub-dependency", ledger).receipts],
+    [["call-1"], ["call-1"]],
+  );
+});
+
 test("#1657: malformed provenance is visible and reason-coded — trace-refused, never silently repaired", () => {
   const refused = buildEvidenceLedger({ toolCalls: [{ tool: "read_file" }], toolResults: [{ status: "ok" }] });
   assert.equal(refused.state, "refused");
@@ -250,6 +359,10 @@ test("#1657: malformed provenance is visible and reason-coded — trace-refused,
 const PROVENANCE_ROW = "establish upstream provenance for the updated dependency: publisher and canonical source repository";
 const DELTA_ROW = "inspect the exact old→new upstream release delta for the updated dependency";
 const ADVISORY_ROW = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+const DEP_SLUG = "example-pkg";
+const provenanceTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [DEP_SLUG]);
+const deltaTag = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [DEP_SLUG]);
+const advisoryTag = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [DEP_SLUG]);
 
 test("#1657: dependency-evidence rows are validated per named acquisition kind — one verified web acquisition per kind, unrelated targets never credit", () => {
   const ledger = buildEvidenceLedger({
@@ -259,9 +372,6 @@ test("#1657: dependency-evidence rows are validated per named acquisition kind �
     ],
     toolResults: [{ status: "ok" }, { status: "ok" }],
   });
-  const provenanceTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"]);
-  const deltaTag = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"]);
-  const advisoryTag = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"]);
   assert.deepEqual(
     [evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).state, evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).receipts],
     ["receipt-backed", ["call-1"]],

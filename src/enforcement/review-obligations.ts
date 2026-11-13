@@ -185,6 +185,10 @@ export interface ReviewObligation {
   /** #1657 (review): the dependency-evidence obligation kinds an
    * explicitly-objective `dependency-evidence` row asks to acquire. */
   obligations?: DependencyEvidenceObligation[];
+  /** #1657 (review round 2): the trusted dependency identity scope an
+   * explicitly-objective `dependency-evidence` row is bound to (the
+   * producer-parsed dependency slugs). Absent/empty fails closed. */
+  dependencyScope?: string[];
   /** #1657: the reason-coded provenance state of a `must_check` row against
    * the evidence ledger, present only on runs with an active ledger. Never
    * model text; the #1656 disposition surface reads it. */
@@ -456,7 +460,7 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
   // Trusted metadata, validated against the closed vocabularies: an
   // unparseable tag is DROPPED (the row falls back to `legacy`), never
   // half-trusted.
-  let metadata: { rowClass: RequiredEvidenceRowClass; gate?: EvidenceGateKind | null; obligations?: DependencyEvidenceObligation[] } | null = null;
+  let metadata: { rowClass: RequiredEvidenceRowClass; gate?: EvidenceGateKind | null; obligations?: DependencyEvidenceObligation[]; dependencyScope?: string[] } | null = null;
   if (source === "must_check"
     && typeof record.row_class === "string"
     && REQUIRED_EVIDENCE_ROW_CLASSES.has(record.row_class)
@@ -466,10 +470,13 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
     const obligations = Array.isArray(record.obligations)
       ? (record.obligations as DependencyEvidenceObligation[])
       : [];
+    const dependencyScope = Array.isArray(record.dependency_scope)
+      ? (record.dependency_scope as string[])
+      : [];
     if (rowClass === "objective" && gate !== null) {
-      metadata = { rowClass, gate, obligations };
+      metadata = { rowClass, gate, obligations, dependencyScope };
     } else if (rowClass !== "objective" && gate === null && obligations.length === 0) {
-      metadata = { rowClass, gate: null, obligations: [] };
+      metadata = { rowClass, gate: null, obligations: [], dependencyScope: [] };
     }
   }
   if (metadata?.rowClass === "attention") return null;
@@ -806,7 +813,7 @@ export function foldObligationDispositions(
     if (ledgerActive && status === "satisfied" && obligation.source === "must_check"
       && obligation.rowClass === "objective") {
       const tag = obligation.gate === undefined ? null
-        : { rowClass: obligation.rowClass, gate: obligation.gate, obligations: obligation.obligations ?? [] };
+        : { rowClass: obligation.rowClass, gate: obligation.gate, obligations: obligation.obligations ?? [], dependencyScope: obligation.dependencyScope ?? [] };
       const evidenceState = evaluateRowEvidence(tag, obligation.text, ledger);
       if (evidenceState.state !== "receipt-backed") {
         return {
@@ -846,7 +853,7 @@ export function foldObligationDispositions(
     const withClass: ReviewObligation = { ...obligation, rowClass: obligation.rowClass ?? "legacy" };
     if (ledger !== undefined && withClass.evidence === undefined) {
       const tag = withClass.rowClass === "objective"
-        ? { rowClass: withClass.rowClass, gate: withClass.gate ?? null, obligations: withClass.obligations ?? [] }
+        ? { rowClass: withClass.rowClass, gate: withClass.gate ?? null, obligations: withClass.obligations ?? [], dependencyScope: withClass.dependencyScope ?? [] }
         : null;
       withClass.evidence = evaluateRowEvidence(tag, obligation.text, ledger);
     }
