@@ -351,6 +351,26 @@ function credentialDigest(key: string, value: string): string {
   return sha256Hex(`${key}\0${value}`).slice(0, 12);
 }
 
+/** #1463: the scorer-SEMANTIC action version — the release version and its
+ * pre-release marker, with semver build metadata (the `+…` suffix) stripped.
+ *
+ * A dev/dogfood build stamps `vX.Y.Z-dev+<head sha>` (#915): the head sha is
+ * WHERE the bundle was built from, not what the scorer does. But the
+ * self-dogfood action is built from each PR head, so a pure base-sync —
+ * merging current main into an already-reviewed PR branch — changes the head
+ * sha while the effective PR patch stays byte-identical across every
+ * PR-owned file. Hashing the raw stamp put that build provenance into the
+ * `cfg:` half of the stale-review fingerprint, so the skip-if-diff-unchanged
+ * precheck could never match across a base-sync and every no-op
+ * synchronization churn burned a full review (#1463). The semantic part —
+ * `vX.Y.Z` (release) / `vX.Y.Z-dev` (dogfood) — still invalidates across
+ * release boundaries and release-vs-dogfood boundaries, keeping #1073's
+ * rule (the scorer's prompt/code ride action releases) exactly where it
+ * holds. A pure function of the stamp so tests can pin the strip matrix. */
+export function scorerSemanticActionVersion(version: string): string {
+  return version.replace(/\+[0-9A-Za-z.-]+$/, "");
+}
+
 /** Collect configuration key=value lines from the environment map and
  * config files (port of `_collect_config_lines`). `AI_*` is swept as this
  * action's own namespace except `*_API_KEY` secrets, which re-enter only as
@@ -493,7 +513,7 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       // costs a fresh review. Disabled (the default) emits nothing,
       // preserving baseline fingerprints.
       if (key === "AI_CONFIDENCE_MODEL") {
-        lines.push(`SCORER_ACTION_VERSION=${ACTION_VERSION}`);
+        lines.push(`SCORER_ACTION_VERSION=${scorerSemanticActionVersion(ACTION_VERSION)}`);
         // #1369: the rubric version invalidates cached scores when the
         // scoring semantics change, independent of release versioning —
         // a rubric change re-verifies even within one action release.

@@ -22,6 +22,7 @@ import {
   EMPTY_DIFF_FINGERPRINT,
   EXACT_CONFIG_KEYS,
   parseMarkerFingerprints,
+  scorerSemanticActionVersion,
 } from "../src/precheck/fingerprint.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
 import { extractLinkedIssueRefs, labelsOf } from "../src/precheck/linked-issues.js";
@@ -2239,6 +2240,40 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
     AI_CONFIDENCE_TIMEOUT_SEC: "45",
   });
   assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
+});
+
+test("#1463: the dogfood head sha is build provenance, never scorer-semantic configuration", () => {
+  // The strip matrix: the release stamp passes through untouched; the dev
+  // stamp loses ONLY its build-metadata suffix; an unset stamp stays empty.
+  assert.equal(scorerSemanticActionVersion("v3.8.0"), "v3.8.0");
+  assert.equal(scorerSemanticActionVersion("v3.8.0-dev+abc1234"), "v3.8.0-dev");
+  assert.equal(scorerSemanticActionVersion("v1.2.3-dev+deadbeef"), "v1.2.3-dev");
+  assert.equal(scorerSemanticActionVersion("v3.8.0-rc.1+20261112"), "v3.8.0-rc.1");
+  assert.equal(scorerSemanticActionVersion(""), "");
+
+  // The #1463 shape: a pure base-sync (merging main into an already-reviewed
+  // PR branch) changes the PR head sha while the effective PR patch stays
+  // byte-identical. The two dogfood stamps below differ ONLY in that head
+  // sha; the emitted line must be identical for both, so the config hash
+  // cannot see the churn. A release-to-release bump (v3.8.0-dev vs v3.9.0)
+  // still invalidates: #1073's rule holds on the semantic part alone.
+  assert.equal(scorerSemanticActionVersion("v3.8.0-dev+aaaaaaa"), scorerSemanticActionVersion("v3.8.0-dev+bbbbbbb"));
+  assert.notEqual(scorerSemanticActionVersion("v3.8.0-dev+aaaaaaa"), scorerSemanticActionVersion("v3.9.0-dev+aaaaaaa"));
+
+  // End-to-end on the emitted lines: whatever the built-in stamp is, the
+  // SCORER_ACTION_VERSION line never carries a build-metadata suffix (a `+`
+  // would re-introduce the head sha on dogfood builds), and the enabled
+  // gate still emits it.
+  const enabled = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  });
+  const versionLine = enabled.find((line) => line.startsWith("SCORER_ACTION_VERSION="));
+  assert.ok(versionLine, "the enabled config must still carry the scorer action version");
+  assert.ok(!versionLine.slice("SCORER_ACTION_VERSION=".length).includes("+"), "the emitted scorer version must never carry build metadata");
+  assert.ok(enabled.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
 });
 
 test("#1368: the scorer's budget/capability controls are fingerprint-conditional", () => {
