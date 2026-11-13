@@ -685,6 +685,33 @@ test("#1645: a capped settlement-time listing never proves absence — the unsee
   assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
 });
 
+test("#1645: a capped settlement-time listing proves no state — a thread it reports is not a proven live blocker", async () => {
+  // A capped window (GitHub's 100-thread GraphQL window) or a partial Forgejo
+  // enumeration cannot prove that a thread it DOES report is live-unresolved:
+  // the enumeration does not cover the whole set, so historical state must
+  // never block on it (maintainer review 5885372900). Only a proven-complete
+  // listing may yield a proven state.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "a thread a capped listing reports is not a proven live blocker");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete");
+  assert.equal(reconciliation.unknown, 1, "the reported thread reconciles as unknown too");
+  assert.equal(reconciliation.live_unresolved, 0, "an incomplete listing proves no live thread");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the capped listing is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
 test("#1645: a carried thread the listing still reports but cannot parse is unknown, never absent", async () => {
   // The settlement read DOES contain the carried thread's row, but the row
   // has no parseable comments — its live resolved/unresolved state cannot be

@@ -141,12 +141,14 @@ export interface ReviewArtifact {
      * thread reconciled a proven state (live_unresolved, resolved, or
      * absent); "incomplete" iff one or more reconciled unknown — the live
      * listing could not establish a carried thread's state (an unreadable
-     * read, a partial listing that leaves it unseen, or a listed row that
+     * read, a listing that is not provably complete, or a listed row that
      * could not be parsed). The same authority that renders the review's
      * incomplete-reconciliation disclosure, so the artifact and the
-     * disclosure cannot disagree. The listing's own completeness flag is
-     * separate provenance: it decides whether an unseen thread may be
-     * called absent, not this field. */
+     * disclosure cannot disagree. The listing's own completeness flag gates
+     * EVERY carried thread's state, not only the unseen ones: an
+     * incomplete enumeration reconciles them all to `unknown`, so this
+     * field reads `incomplete` whenever the enumeration was not provably
+     * complete (#1645, maintainer review 5885372900). */
     state: "complete" | "incomplete";
     head_sha: string;
     live_unresolved: number;

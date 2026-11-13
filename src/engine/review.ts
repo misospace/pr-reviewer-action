@@ -949,11 +949,13 @@ export function claimsPrepassGate(
  * or unsupported read fails open — every listed thread becomes `unknown`,
  * disclosed, never promoted into a blocker. A read that succeeds but declares
  * the listing incomplete (a capped window or a failed sub-read) carries
- * `complete: false` through, so a carried thread the partial listing omits
- * reconciles as `unknown`, never as a proven `absent`. The same holds for a
- * listed row whose live state could not be parsed into a thread: its id is
- * positively carried by the listing (`listedThreadIds`), so it reconciles
- * `unknown` — a listing cannot prove a thread absent while it contains it. */
+ * `complete: false` through, so EVERY carried thread reconciles as `unknown`:
+ * a partial enumeration proves neither that a thread is live-unresolved nor
+ * that it is resolved or gone, and historical state must never block on it
+ * (maintainer review 5885372900). The same holds for a listed row whose
+ * live state could not be parsed into a thread: its id is positively carried
+ * by the listing (`listedThreadIds`), so it reconciles `unknown` — a listing
+ * cannot prove a thread absent while it contains it. */
 async function buildThreadReconciliation(adapter: PlatformReadAdapter, headSha: string): Promise<ThreadReconciliationInput> {
   const empty: ThreadReconciliationInput = { available: false, unresolvedIds: new Set(), resolvedIds: new Set(), headSha };
   try {

@@ -88,15 +88,18 @@ export type ThreadReconciliationState = "live_unresolved" | "resolved" | "absent
  * is false when the read failed or the platform cannot serve it — every
  * listed thread is then `unknown`. `complete` is false when the read
  * succeeded but the listing is known to be partial (a capped thread window
- * or a skipped failed sub-read): a thread the listing omits is then
- * `unknown`, never `absent`, because absence from an incomplete listing is
- * not proof of absence (#1645). `unparsedIds` carries the ids a listing
- * still positively reports but whose live state could not be parsed into a
- * thread (a row without parseable comments); they reconcile `unknown` too —
- * a listing cannot prove a thread absent while it still contains it. When
- * no input is provided at all (unit callers without a listing), each listed
- * thread is treated as `live_unresolved`, preserving the historical
- * contract that the enforcement view IS the live listing. */
+ * or a skipped failed sub-read). ONLY a proven-complete listing may yield a
+ * proven state (#1645, maintainer review 5885372900): an incomplete
+ * enumeration reconciles EVERY carried thread to `unknown`, because a
+ * partial listing can prove neither presence nor absence — it cannot show a
+ * thread live-unresolved, resolved, or gone, so no historical state may
+ * block on it. `unparsedIds` carries the ids a listing still positively
+ * reports but whose live state could not be parsed into a thread (a row
+ * without parseable comments); they reconcile `unknown` too — a listing
+ * cannot prove a thread absent while it still contains it. When no input is
+ * provided at all (unit callers without a listing), each listed thread is
+ * treated as `live_unresolved`, preserving the historical contract that the
+ * enforcement view IS the live listing. */
 export interface ThreadReconciliationInput {
   available: boolean;
   unresolvedIds: ReadonlySet<string>;
@@ -109,10 +112,17 @@ export interface ThreadReconciliationInput {
 function reconcileThreadState(threadId: string, reconciliation: ThreadReconciliationInput | null | undefined): ThreadReconciliationState {
   if (reconciliation === null || reconciliation === undefined) return "live_unresolved";
   if (!reconciliation.available) return "unknown";
+  // #1645 (maintainer review 5885372900): only a PROVEN-COMPLETE listing may
+  // yield a proven state. An incomplete enumeration (a capped window, a
+  // failed sub-read, a skipped page) reconciles every carried thread to
+  // `unknown` — it can prove neither that a thread is live-unresolved nor
+  // that it is resolved or gone, so historical state must never block on a
+  // listing that does not enumerate the whole set.
+  if (reconciliation.complete === false) return "unknown";
   if (reconciliation.unresolvedIds.has(threadId)) return "live_unresolved";
   if (reconciliation.resolvedIds.has(threadId)) return "resolved";
   if (reconciliation.unparsedIds?.has(threadId)) return "unknown";
-  return reconciliation.complete === false ? "unknown" : "absent";
+  return "absent";
 }
 
 /**
@@ -132,10 +142,14 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
  * longer exists as an open review thread); such a record never supplies a
  * disposition to a later settlement, so a thread that reappears live settles
  * from the model's fresh answer alone. An `unknown` thread (live state
- * unreadable) settles bookkeeping but is never re-emitted, so unverifiable
- * historical state cannot force REQUEST_CHANGES — the incompleteness is
- * disclosed instead. Bounded per-run provenance is persisted on the artifact
- * whenever reconciliation ran.
+ * unreadable, or the listing is not provably complete) settles bookkeeping
+ * but is never re-emitted, so unverifiable historical state cannot force
+ * REQUEST_CHANGES — the incompleteness is disclosed instead. Only a
+ * proven-complete listing yields a proven state at all: an incomplete
+ * enumeration reconciles EVERY carried thread to `unknown`, so a thread the
+ * partial listing positively reports is not treated as proven-live either
+ * (maintainer review 5885372900). Bounded per-run provenance is persisted on
+ * the artifact whenever reconciliation ran.
  */
 export function applyReviewThreadEnforcement(
   artifact: ReviewArtifact,

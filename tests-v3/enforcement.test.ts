@@ -891,7 +891,12 @@ test("#1645: unreadable live listing fails open — no blocker invented, incompl
   assert.match(String(a.review_markdown), /PRRT_stale1/, "carried threads stay visible as bookkeeping");
 });
 
-test("#1645: a capped (incomplete) listing never proves absence — unseen threads stay unknown, proven ones still block", () => {
+test("#1645: a capped (incomplete) listing proves NO state — every carried thread reconciles unknown and none blocks", () => {
+  // Only a proven-complete listing may yield a proven state (maintainer
+  // review 5885372900). A partial enumeration cannot show that a thread is
+  // live-unresolved, resolved, or gone, so even the thread it positively
+  // reports reconciles `unknown`: historical state never blocks on a
+  // listing that does not enumerate the whole set.
   const a = artifact({
     verdict: "approve",
     findings: [],
@@ -905,15 +910,17 @@ test("#1645: a capped (incomplete) listing never proves absence — unseen threa
     complete: false,
   });
   const carried = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
-  assert.equal(carried.length, 1, "a thread the partial listing reports unresolved is still live evidence");
-  assert.equal(carried[0]!.thread_reconciliation, "live_unresolved");
+  assert.equal(carried.length, 0, "a thread the partial listing reports is not a proven live thread");
   assert.ok(!a.findings.some((f) => f.thread_id === "PRRT_stale2"), "a thread the partial listing omits is not proven absent");
   assert.equal(a.thread_reconciliation?.state, "incomplete");
-  assert.equal(a.thread_reconciliation?.unknown, 1, "the unseen thread reconciles as unknown");
+  assert.equal(a.thread_reconciliation?.unknown, 2, "both carried threads reconcile as unknown");
+  assert.equal(a.thread_reconciliation?.live_unresolved, 0, "an incomplete listing proves no live thread");
   assert.equal(a.thread_reconciliation?.absent, 0);
   applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
-  assert.equal(a.verdict, "request_changes", "the thread proven live still blocks under strict policy");
+  assert.equal(a.verdict, "approve", "unverifiable historical state never forces REQUEST_CHANGES");
   assert.match(String(a.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.deepEqual(settled.map((record) => record.reconciliation), ["unknown", "unknown"]);
 });
 
 test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
@@ -1010,10 +1017,12 @@ test("#1645: a thread the listing still carries but cannot parse reconciles unkn
   assert.match(String(a.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
 });
 
-test("#1645: a partial listing that positively proves every carried thread reconciles complete", () => {
-  // A globally partial listing (a capped window, a failed sub-read) does not
-  // by itself make the reconciliation incomplete: state describes the
-  // CARRIED THREAD SET, and here every carried thread is positively proven.
+test("#1645: a partial listing reconciles every carried thread unknown — only a complete listing proves a state", () => {
+  // A globally partial listing (a capped window, a failed sub-read) proves NO
+  // state at all (maintainer review 5885372900): a thread the partial listing
+  // positively reports as live is not a proven live thread, and a thread it
+  // reports as resolved is not a proven resolution — the enumeration does
+  // not cover the whole set, so every carried thread is unverifiable.
   const live = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(live, staleThreads.slice(0, 1), "strict", {
     available: true,
@@ -1022,10 +1031,10 @@ test("#1645: a partial listing that positively proves every carried thread recon
     headSha: "3".repeat(40),
     complete: false,
   });
-  assert.equal(live.findings.length, 1, "the positively-proven live thread still re-emits (blocker recall)");
-  assert.equal(live.thread_reconciliation?.state, "complete", "every carried thread is proven — complete despite the partial listing");
-  assert.equal(live.thread_reconciliation?.unknown, 0);
-  assert.doesNotMatch(String(live.review_markdown), /reconciliation incomplete/, "no disclosure is owed when nothing is unknown");
+  assert.equal(live.findings.length, 0, "a positively-reported thread is not proven live on a partial listing");
+  assert.equal(live.thread_reconciliation?.state, "incomplete", "a partial listing never reconciles the carried set complete");
+  assert.equal(live.thread_reconciliation?.unknown, 1);
+  assert.match(String(live.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
 
   const resolved = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(resolved, staleThreads.slice(0, 1), "strict", {
@@ -1036,9 +1045,10 @@ test("#1645: a partial listing that positively proves every carried thread recon
     complete: false,
   });
   assert.equal(resolved.findings.length, 0);
-  assert.equal(resolved.thread_reconciliation?.state, "complete", "a positively-proven resolved thread also reconciles complete");
-  assert.equal(resolved.thread_reconciliation?.unknown, 0);
-  assert.doesNotMatch(String(resolved.review_markdown), /reconciliation incomplete/, "no disclosure for a fully proven carried set");
+  assert.equal(resolved.thread_reconciliation?.state, "incomplete", "a positively-reported resolution is not a proven resolution");
+  assert.equal(resolved.thread_reconciliation?.unknown, 1);
+  assert.equal(resolved.thread_reconciliation?.resolved, 0);
+  assert.match(String(resolved.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
 });
 
 test("#1645: a listing that proves every carried thread's state owes no disclosure", () => {
