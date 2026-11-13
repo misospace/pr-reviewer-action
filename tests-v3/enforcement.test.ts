@@ -942,6 +942,50 @@ test("#1645: incomplete reconciliation is disclosed even when nothing changed", 
   assert.equal(a.thread_reconciliation?.state, "incomplete");
 });
 
+test("#1645: a thread the live listing dropped is persisted withdrawn, never with a null disposition", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "a".repeat(40),
+  });
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    settled.map((record) => [record.thread_id, record.reconciliation, record.disposition]),
+    [
+      ["PRRT_stale1", "resolved", "withdrawn"],
+      ["PRRT_stale2", "absent", "withdrawn"],
+    ],
+    "a dropped thread carries the terminal disposition and its reconciliation reason",
+  );
+  assert.ok(
+    settled.every((record) => record.disposition !== null),
+    "no dropped record reads back as 'no disposition given'",
+  );
+});
+
+test("#1645: a dropped thread's stale record never supplies a disposition to a later settlement", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", reconciliation: "absent", disposition: "withdrawn", evidence: null }],
+  });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "b".repeat(40),
+  });
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.disposition, "open", "the stale withdrawn record supplied no disposition");
+  assert.equal(settled[0]!.reconciliation, "live_unresolved");
+  assert.equal(settled[0]!.enforced, "no disposition given");
+  const reemitted = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(reemitted.length, 1, "the reappearing live thread is re-emitted");
+  assert.match(String(reemitted[0]!.message), /\(review thread PRRT_stale1: open\)$/, "it re-emits as an open thread, not a withdrawn one");
+});
+
 // ---------------------------------------------------------------------------
 // #812: the publish path records the folded external-CI conclusion in the
 // managed marker so the next diff-unchanged skip can compare it.

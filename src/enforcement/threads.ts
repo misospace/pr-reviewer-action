@@ -122,12 +122,15 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
  * #1645: before a listed thread can settle into the finding set it must
  * reconcile against the authoritative live thread listing. Only a
  * `live_unresolved` thread is re-emitted; a `resolved`/`absent` thread is
- * recorded with its reconciliation state and dropped (its disposition is
- * moot — the thread no longer exists as an open review thread); an
- * `unknown` thread (live state unreadable) settles bookkeeping but is never
- * re-emitted, so unverifiable historical state cannot force REQUEST_CHANGES
- * — the incompleteness is disclosed instead. Bounded per-run provenance is
- * persisted on the artifact whenever reconciliation ran.
+ * dropped, recorded with its reconciliation state and the terminal
+ * `withdrawn` disposition (its own disposition is moot — the thread no
+ * longer exists as an open review thread); such a record never supplies a
+ * disposition to a later settlement, so a thread that reappears live settles
+ * from the model's fresh answer alone. An `unknown` thread (live state
+ * unreadable) settles bookkeeping but is never re-emitted, so unverifiable
+ * historical state cannot force REQUEST_CHANGES — the incompleteness is
+ * disclosed instead. Bounded per-run provenance is persisted on the artifact
+ * whenever reconciliation ran.
  */
 export function applyReviewThreadEnforcement(
   artifact: ReviewArtifact,
@@ -146,7 +149,14 @@ export function applyReviewThreadEnforcement(
   };
   const given = new Map<string, Record<string, unknown>>();
   for (const entry of (artifact.thread_dispositions ?? []) as Array<Record<string, unknown>>) {
-    if (entry && typeof entry.thread_id === "string" && !given.has(entry.thread_id)) {
+    if (!entry || typeof entry.thread_id !== "string") continue;
+    // #1645: a record for a thread the live listing dropped is bookkeeping,
+    // not a disposition — it must never supply one to a later settlement.
+    // A thread that reappears live settles from the model's fresh answer
+    // alone (no disposition given ⇒ open ⇒ re-emitted), never silently
+    // withdrawn by its own stale record.
+    if (entry.reconciliation === "resolved" || entry.reconciliation === "absent") continue;
+    if (!given.has(entry.thread_id)) {
       given.set(entry.thread_id, entry);
     }
   }
@@ -173,11 +183,16 @@ export function applyReviewThreadEnforcement(
     const entry = given.get(threadId) ?? {};
     // #1645: a thread the live listing no longer reports as open cannot be
     // settled into the finding set — record why it was dropped and move on.
+    // The record carries the terminal "withdrawn" disposition (the dropped
+    // thread's own disposition is moot — it is no longer an open review
+    // thread) plus its reconciliation state, which carries the reason; a
+    // null disposition would read back as "no disposition given" and could
+    // withdraw the thread if it ever reappeared live.
     if (state === "resolved" || state === "absent") {
       settled.push({
         thread_id: threadId,
         reconciliation: state,
-        disposition: typeof entry.disposition === "string" ? entry.disposition : null,
+        disposition: "withdrawn",
         evidence: typeof entry.evidence === "string" ? entry.evidence : null,
       });
       continue;

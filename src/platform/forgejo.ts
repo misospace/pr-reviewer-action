@@ -45,6 +45,116 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
 const JWT_TTL_SECONDS = 2700;
 
+/** #1645: the page size and the page cap of a paginated Forgejo list read.
+ * Page size 50 is the page convention the conversation-comment read already
+ * uses; the cap (20 pages, 1000 items) bounds the request loop so a huge
+ * listing cannot turn the read into an unbounded fan-out. */
+const FORGEJO_LIST_PAGE_SIZE = 50;
+const FORGEJO_LIST_MAX_PAGES = 20;
+
+/** #1645: the shared page-request budget of ONE `listReviewThreads` read —
+ * the reviews list AND every review's comment pages draw from it. The
+ * per-list page cap alone multiplies by the review count, so a PR with 1000
+ * reviews could drive ~20,000 requests (25 s each). Exhausting the budget
+ * stops the read and leaves the listing incomplete (fail closed). */
+const FORGEJO_THREAD_LIST_REQUEST_BUDGET = 200;
+
+/** The shared page-request budget of one `listReviewThreads` read. */
+interface ForgejoRequestBudget {
+  remaining: number;
+}
+
+/** One page of a Forgejo list endpoint, as the adapter's private `curl`
+ * reports it. */
+interface ForgejoListPage {
+  status: number;
+  text: string;
+  headers: Headers | null;
+}
+
+/** The item ids of a page, or `null` when the page carries no comparable
+ * ids (a non-object item, or an item without a string/number `id`). A page
+ * without comparable ids can never be proven to repeat its predecessor. */
+function listPageIds(items: readonly unknown[]): string[] | null {
+  const ids: string[] = [];
+  for (const item of items) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    const id = (item as { id?: unknown }).id;
+    if (typeof id !== "string" && typeof id !== "number") return null;
+    ids.push(String(id));
+  }
+  return ids;
+}
+
+/**
+ * #1645: one paginated Forgejo list read, drawn from a shared page-request
+ * budget.
+ *
+ * The completeness flag is fail-closed. An EMPTY page proves the listing is
+ * exhausted (the server has nothing more) — that is the only page-level
+ * proof of exhaustion. A page REPEATING its predecessor's ids proves the
+ * server ignored `page` (it does not paginate); it does NOT prove the
+ * collection is exhausted — a server that honors `limit` but ignores `page`
+ * returns the same first window forever, and the rest of the collection is
+ * then unseen — so the repeat branch claims completeness only when the
+ * `x-total-count` cross-check confirms we hold every item. A failed or
+ * undecodable page, the page cap and an exhausted request budget keep
+ * whatever was collected but declare the listing incomplete, because a
+ * thread missing from an incomplete listing is not proven absent. The
+ * `x-total-count` cross-check may only turn "complete" into "incomplete" —
+ * it never stops paging early and never proves completeness the pages did
+ * not.
+ */
+async function readPaginatedForgejoList(
+  readPage: (page: number) => Promise<ForgejoListPage>,
+  budget: ForgejoRequestBudget,
+): Promise<{ items: unknown[]; complete: boolean }> {
+  const items: unknown[] = [];
+  let complete = false;
+  let totalCount: number | null = null;
+  let previousIds: string[] | null = null;
+  for (let page = 1; page <= FORGEJO_LIST_MAX_PAGES; page += 1) {
+    if (budget.remaining <= 0) {
+      // The shared request budget is spent: no further page is requested and
+      // the collection is not proven exhausted.
+      return { items, complete: false };
+    }
+    budget.remaining -= 1;
+    const response = await readPage(page);
+    if (response.status !== 200) return { items, complete: false };
+    const decoded = pyJsonDecode(response.text);
+    if (!Array.isArray(decoded)) return { items, complete: false };
+    if (totalCount === null) {
+      const header = response.headers?.get("x-total-count");
+      const parsed = header === undefined || header === null || header.trim() === "" ? Number.NaN : Number(header);
+      if (Number.isFinite(parsed) && parsed >= 0) totalCount = parsed;
+    }
+    if (decoded.length === 0) {
+      // An empty page ends the listing: the server has nothing more.
+      complete = true;
+      break;
+    }
+    const ids = listPageIds(decoded);
+    const previous: string[] | null = previousIds;
+    if (
+      ids !== null && previous !== null
+      && ids.length === previous.length
+      && ids.every((id, index) => id === previous[index])
+    ) {
+      // The server ignored `page`: it repeats the same window. That proves
+      // the server does NOT paginate, not that the listing is exhausted —
+      // completeness is claimed only when the total count confirms we hold
+      // every item.
+      complete = totalCount !== null && items.length >= totalCount;
+      break;
+    }
+    items.push(...decoded);
+    previousIds = ids;
+  }
+  if (totalCount !== null && items.length < totalCount) complete = false;
+  return { items, complete };
+}
+
 export interface ForgejoAdapterOptions {
   repo: string;
   prNumber: string;
@@ -566,21 +676,24 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     }
   }
 
-  /** `_curl` semantics for a read: `{status, text}`, with a transport
-   * failure reported as status 0 (v2: curl's nonzero exit code stands in
-   * for the HTTP status, so it is never 200). A credential failure (the
-   * authorized-integration JWT exchange) throws: v2's CLI raises there. */
-  private async curl(url: string, timeoutMs?: number, preserveRedirectStatus = false): Promise<{ status: number; text: string }> {
+  /** `_curl` semantics for a read: `{status, text, headers}`, with a
+   * transport failure reported as status 0 (v2: curl's nonzero exit code
+   * stands in for the HTTP status, so it is never 200). The response
+   * headers ride along for the paginated list reads (the `x-total-count`
+   * completeness cross-check); a failure carries none. A credential failure
+   * (the authorized-integration JWT exchange) throws: v2's CLI raises
+   * there. */
+  private async curl(url: string, timeoutMs?: number, preserveRedirectStatus = false): Promise<{ status: number; text: string; headers: Headers | null }> {
     const options = await this.options();
     try {
-      const { status, text } = await requestText(url, { ...options, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
-      return { status, text };
+      const { status, text, headers } = await requestText(url, { ...options, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+      return { status, text, headers };
     } catch (error) {
       if (preserveRedirectStatus && error instanceof PlatformRequestError
         && error.kind === "redirect-blocked" && error.status !== null) {
-        return { status: error.status, text: "" };
+        return { status: error.status, text: "", headers: null };
       }
-      return { status: 0, text: "" };
+      return { status: 0, text: "", headers: null };
     }
   }
 
@@ -639,34 +752,41 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   /** `list_review_threads`: every review's comments grouped into threads.
    * The read still succeeds like before, but a failed reviews page or a
    * skipped review's comments read marks the listing incomplete (#1645): a
-   * thread missing from an incomplete listing is not proven absent. */
+   * thread missing from an incomplete listing is not proven absent. Both
+   * lists are read page by page (#1645): a reviews list or a review's
+   * comment list that exceeds one page would otherwise lose threads while
+   * the listing still claimed to be complete. Every page request — the
+   * reviews list AND each review's comment pages — draws from ONE shared
+   * request budget, so the fan-out stays bounded however many reviews the
+   * PR has; an exhausted budget stops the read and leaves the listing
+   * incomplete (fail closed). */
   listReviewThreads(): Promise<ReadResult<unknown[]>> {
     return this.read(async (at) => {
-      const { status, text } = await this.curl(at("/pulls/", `${this.prNumber}/reviews`));
-      if (status !== 200) return { threads: [], complete: false };
-      const reviews = pyJsonDecode(text);
-      if (!Array.isArray(reviews)) return { threads: [], complete: false };
+      const budget: ForgejoRequestBudget = { remaining: FORGEJO_THREAD_LIST_REQUEST_BUDGET };
+      const reviews = await readPaginatedForgejoList((page) =>
+        this.curl(at("/pulls/", `${this.prNumber}/reviews?page=${page}&limit=${FORGEJO_LIST_PAGE_SIZE}`)), budget);
       const commentLists: unknown[][] = [];
-      let complete = true;
-      for (const review of reviews) {
+      let complete = reviews.complete;
+      for (const review of reviews.items) {
+        if (budget.remaining <= 0) {
+          // The shared request budget is spent: no further review is read and
+          // the listing is incomplete (a truncated enumeration proves
+          // nothing).
+          complete = false;
+          break;
+        }
         const reviewId = forgejoReviewCommentId(review);
         // The v2 id gate skips unaddressable review rows; a skipped row is
         // a data-shape gate, not a failed read, and does not mark the
         // listing incomplete.
         if (reviewId === null) continue;
-        const response = await this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments`));
-        if (response.status !== 200) {
-          complete = false;
-          continue;
-        }
-        const comments = pyJsonDecode(response.text);
-        if (Array.isArray(comments)) {
-          commentLists.push(comments);
-        } else {
-          // An undecodable comments payload means this review's threads were
-          // not enumerated — the listing cannot prove any unseen thread absent.
-          complete = false;
-        }
+        const comments = await readPaginatedForgejoList((page) =>
+          this.curl(at("/pulls/", `${this.prNumber}/reviews/${reviewId}/comments?page=${page}&limit=${FORGEJO_LIST_PAGE_SIZE}`)), budget);
+        // A failed, undecodable or capped comments page means this review's
+        // threads were not enumerated — the listing cannot prove any unseen
+        // thread absent.
+        if (!comments.complete) complete = false;
+        commentLists.push(comments.items);
       }
       return { threads: groupForgejoReviewThreads(commentLists), complete };
     }).then((result) => {

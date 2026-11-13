@@ -594,26 +594,42 @@ test("#1299: a failed forgejo comment page fails the read instead of silently tr
 
 test("forgejo review threads fetch each integer review's comments; externalChecks reads only the commit status", async () => {
   const { fetchImpl, seen } = recorder((url) => {
-    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: "x" }, { id: 8 }]);
+    // A server that paginates: the reviews list ends on an empty page 2.
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "1" ? json([{ id: 4 }, { id: "x" }, { id: 8 }]) : json([]);
+    }
     if (url.pathname.endsWith("/status")) return json({ state: "success", statuses: [{ context: "ci", status: "success" }] });
     return json([]);
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example/sub/", token: "t", fetchImpl });
   assert.deepEqual(await adapter.listReviewThreads(), { ok: true, data: [] });
   assert.deepEqual(await adapter.externalChecks("abc"), [{ name: "ci", state: "success", conclusion: "success" }]);
+  // The reviews list is read page by page (page 2 is empty, so the listing
+  // ends exhausted); the non-integer review id is still skipped.
   assert.deepEqual(seen.map((s) => s.url), [
-    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews",
-    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/4/comments",
-    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/8/comments",
+    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+    "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/8/comments?page=1&limit=50",
     "https://git.example/sub/api/v1/repos/o/r/commits/abc/status",
   ]);
 });
 
 test("#1645: a Forgejo listing with a failed per-review comments read declares itself incomplete", async () => {
   const { fetchImpl } = recorder((url) => {
-    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: 8 }]);
+    // Every list except review 8's comments ends exhausted (an empty page),
+    // so the failed comments read is the ONLY reason the listing is
+    // incomplete.
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "1" ? json([{ id: 4 }, { id: 8 }]) : json([]);
+    }
     if (url.pathname.includes("/reviews/8/")) return json({}, 500);
-    return json([{ id: 1, body: "kept thread", path: "a.ts", line: 1 }]);
+    if (url.pathname.includes("/reviews/4/")) {
+      return url.searchParams.get("page") === "1"
+        ? json([{ id: 1, body: "kept thread", path: "a.ts", line: 1 }])
+        : json([]);
+    }
+    return json([]);
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
   const read = await adapter.listReviewThreads();
@@ -626,6 +642,195 @@ test("#1645: a Forgejo reviews-page failure is an incomplete empty listing, not 
   const { fetchImpl } = recorder((url) => (url.pathname.endsWith("/reviews") ? json({}, 502) : json([])));
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
   assert.deepEqual(await adapter.listReviewThreads(), { ok: true, data: [], complete: false });
+});
+
+test("#1645: a Forgejo reviews list spanning two pages is read in full", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) {
+      const page = url.searchParams.get("page");
+      if (page === "1") return json([{ id: 4 }]);
+      if (page === "2") return json([{ id: 8 }]);
+      return json([]);
+    }
+    if (url.pathname.includes("/reviews/4/comments")) {
+      return url.searchParams.get("page") === "1"
+        ? json([{ id: 41, path: "a.ts", position: 1, created_at: "2026-09-01T00:00:00Z" }])
+        : json([]);
+    }
+    if (url.pathname.includes("/reviews/8/comments")) {
+      return url.searchParams.get("page") === "1"
+        ? json([{ id: 81, path: "b.ts", position: 2, created_at: "2026-09-01T00:00:01Z" }])
+        : json([]);
+    }
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.complete, undefined, "a fully enumerated listing asserts completeness");
+  const threads = read.data as Array<Record<string, unknown>>;
+  assert.deepEqual(threads.map((t) => t.thread_id), ["a.ts:1", "b.ts:2"], "threads from both review pages are present");
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=3&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/8/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/8/comments?page=2&limit=50",
+  ]);
+});
+
+test("#1645: a Forgejo listing whose page read fails mid-way stays a successful but incomplete read", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "2" ? json({}, 500) : json([{ id: 4 }]);
+    }
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true, "the read still succeeds like before");
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "the failed page leaves the listing incomplete");
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+  ]);
+});
+
+test("#1645: a Forgejo review's comment list spanning two pages is read in full", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "1" ? json([{ id: 4 }]) : json([]);
+    }
+    if (url.pathname.includes("/reviews/4/comments")) {
+      const page = url.searchParams.get("page");
+      if (page === "1") return json([{ id: 41, path: "a.ts", position: 1, created_at: "2026-09-01T00:00:00Z" }]);
+      if (page === "2") return json([{ id: 42, path: "b.ts", position: 2, created_at: "2026-09-01T00:00:01Z" }]);
+      return json([]);
+    }
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.complete, undefined, "a fully enumerated comments listing asserts completeness");
+  const threads = read.data as Array<Record<string, unknown>>;
+  assert.deepEqual(threads.map((t) => t.thread_id), ["a.ts:1", "b.ts:2"], "comments from both pages are grouped into threads");
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=3&limit=50",
+  ]);
+});
+
+test("#1645: a Forgejo review's comments read that fails on a later page leaves the listing incomplete", async () => {
+  const { fetchImpl } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "1" ? json([{ id: 4 }]) : json([]);
+    }
+    if (url.pathname.includes("/reviews/4/comments")) {
+      return url.searchParams.get("page") === "2"
+        ? json({}, 503)
+        : json([{ id: 41, path: "a.ts", position: 1 }]);
+    }
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true, "the read still succeeds like before");
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "the skipped comments page leaves the listing incomplete");
+});
+
+test("#1645: a Forgejo listing whose x-total-count promises more items than were collected is incomplete", async () => {
+  // The listing ends on an EMPTY page (the only proof of exhaustion), so the
+  // total-count cross-check is the ONLY thing that can turn this complete
+  // read into an incomplete one — a repeat page is not involved.
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) {
+      return url.searchParams.get("page") === "1"
+        ? json([{ id: 4 }], 200, { "x-total-count": "5" })
+        : json([]);
+    }
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  // The listing ends on an EMPTY page (page 2), so the exhaustion itself is
+  // proven — the total-count cross-check is what turns it incomplete.
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+  ]);
+  assert.equal(read.complete, false, "the total-count cross-check turns a complete read into an incomplete one");
+});
+
+test("#1645: a Forgejo listing whose pages repeat without a total count is incomplete", async () => {
+  // The server ignores `page` and repeats the same window. That proves it
+  // does NOT paginate — it does NOT prove the collection is exhausted: a
+  // server that honors `limit` but ignores `page` returns the same first
+  // window forever, and the rest of the collection would be unseen. Without
+  // a total count the listing stays incomplete (fail closed).
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: 8 }]);
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "a repeated page alone never proves exhaustion");
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews?page=2&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/4/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/pulls/5/reviews/8/comments?page=1&limit=50",
+  ], "the repeat ends the listing, the rest is still enumerated");
+});
+
+test("#1645: a Forgejo listing that hits the page cap is incomplete", async () => {
+  // A distinct, non-empty page for every request: neither an empty page nor
+  // a repeated page ever ends the listing, so the per-list page cap does.
+  const { fetchImpl, seen } = recorder((url) => {
+    const page = Number(url.searchParams.get("page") ?? "1");
+    if (url.pathname.endsWith("/reviews")) return json([{ id: page }]);
+    return json([]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "a capped listing never claims completeness");
+  const reviewPages = seen.filter((s) => s.url.includes("/pulls/5/reviews?page="));
+  assert.equal(reviewPages.length, 20, "the page cap (20) bounds the reviews list read");
+});
+
+test("#1645: a Forgejo listing that exhausts the shared request budget is incomplete and stops requesting", async () => {
+  // A distinct, non-empty page for every request: the read keeps asking.
+  // The whole read shares ONE page-request budget (200), so the fan-out
+  // stays bounded however many reviews the PR has.
+  const { fetchImpl, seen } = recorder((url) => {
+    const page = Number(url.searchParams.get("page") ?? "1");
+    if (url.pathname.endsWith("/reviews")) return json([{ id: page }]);
+    return json([{ id: page, path: `f${page}.ts`, position: page }]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "a budget-exhausted enumeration never claims completeness");
+  assert.ok(seen.length <= 200, `the shared request budget bounds the read, got ${seen.length} requests`);
+  assert.equal(seen.length, 200, "the budget is spent exactly, and no further request is issued");
 });
 
 test("forgejo externalChecks: a hung status read is bounded and folds like a failed read", async () => {

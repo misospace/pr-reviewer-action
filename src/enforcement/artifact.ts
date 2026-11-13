@@ -137,7 +137,9 @@ export interface ReviewArtifact {
    * the artifact, so a future reader can tell a current-head finding from a
    * carried thread finding and why the latter was allowed to block. */
   thread_reconciliation?: {
-    /** "complete" when the live listing was read; "incomplete" otherwise. */
+    /** "complete" only when the live listing was read AND proven complete
+     * (available and not declared partial); "incomplete" when the listing
+     * could not be read or is known to be partial. */
     state: "complete" | "incomplete";
     head_sha: string;
     live_unresolved: number;
