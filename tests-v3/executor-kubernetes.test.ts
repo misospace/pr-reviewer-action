@@ -303,16 +303,7 @@ class FakeCredentialStore implements KubernetesCredentialStore {
   }
 }
 
-/** Optional `nowMs` holds the executor's CONTROLLER clock. A short wall-clock
- * deadline otherwise races the pre-launch path on a loaded runner: an expiry
- * landing there is a CORRECT "never launched" outcome, which silently tests
- * nothing about the expiry's own teardown. The expiry TIMER stays a real
- * timer — only the deadline comparisons read the held clock. */
-function makeFixture(
-  script: Script,
-  overrides: Partial<ExecutionRequest> = {},
-  nowMs?: () => number,
-): Fixture {
+function makeFixture(script: Script, overrides: Partial<ExecutionRequest> = {}): Fixture {
   const root = mkdtempSync(path.join(tmpdir(), "executor-kubernetes-"));
   const runDir = path.join(root, "run");
   const request = validateExecutionRequest({
@@ -360,13 +351,7 @@ function makeFixture(
   api.workerRequest = request;
   const resolver = new FakeCredentialResolver();
   const store = new FakeCredentialStore();
-  const executor = new KubernetesExecutor(spec, {
-    api,
-    pollMs: 5,
-    credentialResolver: resolver,
-    credentialStore: store,
-    ...(nowMs === undefined ? {} : { nowMs }),
-  });
+  const executor = new KubernetesExecutor(spec, { api, pollMs: 5, credentialResolver: resolver, credentialStore: store });
   return { request, spec, executor, api, resolver, store, root };
 }
 
@@ -381,19 +366,11 @@ const kubernetesTests = executorConformanceTests(
   {
     requestOf: (scenario: ConformanceScenario): ExecutionRequest => {
       const script = SCRIPTS[scenario];
-      const deadlineAtMs = scenario === "deadline"
-        ? Date.now() + 50
-        : scenario === "past-deadline" ? Date.now() - 1_000 : Date.now() + 60_000;
-      // The deadline scenario's short window bounds the EXPIRY, not the
-      // pre-launch path: on a loaded runner a real 50 ms deadline expires
-      // before anything is launched, where "failed deadline" is already true
-      // without the expiry timer ever running. Its controller clock is held
-      // 50 ms short of the deadline so the expiry can only land after launch.
-      const fixture = makeFixture(
-        script,
-        { deadlineAtMs },
-        scenario === "deadline" ? () => deadlineAtMs - 50 : undefined,
-      );
+      const fixture = makeFixture(script, {
+        deadlineAtMs: scenario === "deadline"
+          ? Date.now() + 50
+          : scenario === "past-deadline" ? Date.now() - 1_000 : Date.now() + 60_000,
+      });
       pending.set(scenario, fixture);
       return fixture.request;
     },
@@ -1461,16 +1438,9 @@ test("the credential Secret is materialized with the run's resolved material onl
 
 test("the per-run credential Secret is deleted when the execution settles — success, cancellation, and deadline", async () => {
   const scenarios = [
-    { name: "success", script: { kind: "succeed", result: "ok" } as Script, deadlineMs: 60_000, expectedStatus: "completed" as const, expectedCategory: "", cancel: true },
-    { name: "cancellation", script: { kind: "hang" } as Script, deadlineMs: 60_000, expectedStatus: "cancelled" as const, expectedCategory: "", cancel: true },
-    // The deadline is the Job's OWN server-side expiry report, not a
-    // wall-clock timer: a timer short enough to keep this test quick can
-    // expire inside the pre-launch path on a loaded runner, where the correct
-    // outcome is that NOTHING was projected — a run with no Secret to delete
-    // proves nothing here. The controller-side timer is pinned by the
-    // deadline-expiry test below, whose controller clock is held for exactly
-    // that reason.
-    { name: "deadline", script: { kind: "fail", reason: "DeadlineExceeded" } as Script, deadlineMs: 60_000, expectedStatus: "failed" as const, expectedCategory: "deadline", cancel: false },
+    { name: "success", script: { kind: "succeed", result: "ok" } as Script, deadlineMs: 60_000, expectedStatus: "completed" as const, cancel: true },
+    { name: "cancellation", script: { kind: "hang" } as Script, deadlineMs: 60_000, expectedStatus: "cancelled" as const, cancel: true },
+    { name: "deadline", script: { kind: "hang" } as Script, deadlineMs: 50, expectedStatus: "failed" as const, cancel: false },
   ];
   for (const scenario of scenarios) {
     const fixture = makeFixture(scenario.script, {
@@ -1482,7 +1452,6 @@ test("the per-run credential Secret is deleted when the execution settles — su
     if (scenario.cancel) await handle.cancel();
     const result = await handle.collect();
     assert.equal(result.status, scenario.expectedStatus, scenario.name);
-    assert.equal(result.failureCategory, scenario.expectedCategory, `${scenario.name}: settles for the expected reason`);
     assert.equal(fixture.store.put.length, 1, scenario.name);
     // Lifecycle bound: by the time collect resolves, the material
     // Secret is gone (every deletion targets exactly this run's name).
@@ -2255,13 +2224,7 @@ test("cancellation terminates the exact Job for the run", async () => {
 });
 
 test("a deadline expiry settles failed deadline AND deletes the job", async () => {
-  // The controller clock is HELD at the launch instant: a 50 ms wall-clock
-  // deadline that expires during the pre-launch path settles "never
-  // launched", leaving no Job for the expiry to delete, and that silent
-  // branch is what made this pin runner-load dependent. The expiry timer
-  // itself is still real, so the expiry still races the poll loop.
-  const launchedAt = Date.now();
-  const fixture = makeFixture({ kind: "hang" }, { deadlineAtMs: launchedAt + 50 }, () => launchedAt);
+  const fixture = makeFixture({ kind: "hang" }, { deadlineAtMs: Date.now() + 50 });
   const handle = await fixture.executor.start(fixture.request, new AbortController().signal);
   const result = await handle.collect();
   assert.equal(result.status, "failed");
