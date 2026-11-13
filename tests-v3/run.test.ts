@@ -1578,7 +1578,9 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
     writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
     gitInit(runDir);
     const platform = requirementTracePlatform();
-    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    // #1658: the diff must touch the linked requirement's affected boundary,
+    // or applicability narrows the row out before the trace validates it.
+    platform.getPrDiff = async () => `diff --git a/src/context.ts b/src/context.ts\n--- /dev/null\n+++ b/src/context.ts\n@@ -0 +1 @@\n+// resolution must compare the source SHA against the resolved pull\n`;
     const result = await runReview({
       env: { IS_FORK_PR: "false" },
       inputs: {
@@ -1600,12 +1602,13 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
     assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
     assert.equal(result.outputs.verdict, "request_changes");
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    // #1095: the trace fabricates no finding — but the unmet row still marks
-    // requirement_trace_incomplete, which is itself a deterministic block.
+    // #1095: the trace fabricates no finding. #1658: the unmet gap claim is
+    // exposure only — it no longer marks requirement_trace_incomplete, so
+    // the model-authored request_changes stays bypass-eligible (#978).
     assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")));
-    assert.equal(result.outputs.degradedGateBypass, false, "the incomplete trace is a deterministic block");
-    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
-    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+    assert.equal(result.outputs.degradedGateBypass, true, "a model-authored request_changes is bypass-eligible; the trace gap is exposure only");
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 0);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, true, "eligible bypass state persists");
   } finally {
     await primaryServer.close();
     await fallbackServer.close();
@@ -1644,7 +1647,9 @@ test("#978: fallback no-evidence unverifiable trace blocks bypass without synthe
     writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
     gitInit(runDir);
     const platform = requirementTracePlatform();
-    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    // #1658: the diff must touch the linked requirement's affected boundary,
+    // or applicability narrows the row out before the trace validates it.
+    platform.getPrDiff = async () => `diff --git a/src/context.ts b/src/context.ts\n--- /dev/null\n+++ b/src/context.ts\n@@ -0 +1 @@\n+// resolution must compare the source SHA against the resolved pull\n`;
     const result = await runReview({
       env: { IS_FORK_PR: "false" },
       inputs: {
@@ -1662,18 +1667,21 @@ test("#978: fallback no-evidence unverifiable trace blocks bypass without synthe
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string }>; incomplete: boolean };
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string; resolution: string }>; incomplete: boolean };
     assert.equal(harness.native_loop_degraded, "no-tool-calls");
-    assert.equal(trace.incomplete, true);
+    // #1658: the unverifiable row is a material unknown on the trace
+    // artifact, not an incomplete that blocks.
+    assert.equal(trace.incomplete, false);
     assert.equal(trace.rows[0]?.disposition, "unverifiable");
-    assert.equal(result.reviewArtifact.requirement_trace_incomplete, true);
+    assert.equal(trace.rows[0]?.resolution, "unresolved");
+    assert.notEqual(result.reviewArtifact.requirement_trace_incomplete, true);
     assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
     assert.equal(result.outputs.verdict, "request_changes");
     const findings = JSON.parse(result.outputs.findings) as Array<{ message: string }>;
     assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")), "unverifiable claims do not synthesize unmet findings");
-    assert.equal(result.outputs.degradedGateBypass, false);
-    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
-    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+    assert.equal(result.outputs.degradedGateBypass, true);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 0);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, true);
   } finally {
     await primaryServer.close();
     await fallbackServer.close();
@@ -4000,6 +4008,11 @@ const REQUIREMENT_TRACE_MARKER = "the source SHA and the target branch";
  * acceptance line: the #584/#854 shape. */
 function requirementTracePlatform(): PlatformReadAdapter {
   const platform = mockPlatform({ body: "Closes #824.\n\nResolve review context from the right identity.\n" });
+  // #1658: the linked requirement's affected boundary is touched by the
+  // change, so applicability keeps the row in scope and these tests exercise
+  // trace validation itself.
+  platform.getPrDiff = async () =>
+    `diff --git a/src/context.ts b/src/context.ts\n--- /dev/null\n+++ b/src/context.ts\n@@ -0 +1 @@\n+// resolution must compare the source SHA against the resolved pull\n`;
   platform.getIssue = async () => ({
     ok: true,
     data: {
@@ -4088,24 +4101,22 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
     });
 
     const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
+      rows: Array<{ disposition: string; resolution: string; materiality: string; notes: string[] }>;
       incomplete: boolean;
     };
     assert.equal(trace.rows.length, 1);
     assert.equal(trace.rows[0]!.disposition, "unverifiable");
     assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-enforcement-location"));
-    assert.equal(trace.incomplete, true);
+    // #1658: a citation that fails provenance validation is an advisory
+    // unknown — exposed on the artifact, not a certification failure.
+    assert.equal(trace.rows[0]!.resolution, "unresolved");
+    assert.equal(trace.rows[0]!.materiality, "advisory");
+    assert.equal(trace.incomplete, false);
 
-    // required_checks escalated to incomplete, feeding review_result=partial
-    // (verdict_policy defaults to strict) — #873/#878 is what will later
-    // make that non-approving; this only guarantees the signal is correct.
-    assert.equal(result.outputs.requiredChecks, "incomplete");
+    // The trace no longer escalates required_checks; the unknown is exposed
+    // for the final-disposition layer instead.
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
     assert.equal(result.outputs.verdict, "approve");
-    const output = readFileSync(join(runDir, "gh-output.txt"), "utf8");
-    assert.match(output, /required-checks=incomplete/);
-    assert.match(result.marker, /"required_checks":"incomplete"/);
-    assert.match(result.marker, /"review_result":"partial"/);
-
     assert.match(result.outputs.reviewMarkdown, /Requirement trace/);
   } finally {
     await server.close();
@@ -4150,13 +4161,12 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     });
 
     const coverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-    assert.equal(result.outputs.incompleteReason, "requirement_trace");
-    const ghOutput = readFileSync(join(runDir, "gh-output.txt"), "utf8");
-    assert.match(ghOutput, /^incomplete-reason=requirement_trace$/m);
-    assert.equal(result.outputs.reviewResult, "partial");
-    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
-    assert.equal(coverage.incomplete_reason, "requirement_trace");
+    // #1658: the unverifiable requirement is exposed on the trace artifact
+    // (unresolved/material) — no incomplete_reason, no partial review_result.
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+    assert.notEqual(result.outputs.incompleteReason, "requirement_trace");
+    assert.equal(result.outputs.reviewResult, "clean");
+    assert.notEqual(coverage.incomplete_reason, "requirement_trace");
     // #1543: the published dimension reads `incomplete` from the trace flip
     // alone — the #750 fold itself never validated (README-only diff, empty
     // must_check list), and the record says so, so the standalone publish
@@ -4168,7 +4178,7 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
   }
 });
 
-test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded to a repairable coverage gap — no confirmed-unmet escalation", async () => {
+test("#1658: a 'met' claim citing a real line that only copies the value is the reviewer's evidence — the lexical anti-copy gate is deleted", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -4240,24 +4250,20 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
     });
 
     const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
+      rows: Array<{ disposition: string; resolution: string; proof: string; notes: string[] }>;
       incomplete: boolean;
     };
     assert.equal(trace.rows.length, 1);
-    assert.equal(trace.rows[0]!.disposition, "unverifiable");
-    assert.ok(trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows[0]));
-    assert.equal(trace.incomplete, true);
+    // The lexical predicate gate is deleted: the ordinary runtime row is
+    // settled by the reviewer's location-valid citation. Whether an
+    // evidenced-met over a copy-only citation is adequate is the
+    // final-disposition layer's call (#1656), never a hidden trace veto.
+    assert.equal(trace.rows[0]!.disposition, "met");
+    assert.equal(trace.rows[0]!.resolution, "evidenced");
+    assert.equal(trace.rows[0]!.proof, "runtime_behavior");
+    assert.equal(trace.incomplete, false);
 
-    // #854 protection intact: the row still stops coverage, so the run is
-    // NOT a clean approval — but the copies-without-comparing note is not a
-    // confirmed-unmet refutation, so nothing is synthesized and the verdict
-    // is not flipped.
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-    assert.equal(result.outputs.incompleteReason, "requirement_trace");
-    assert.match(result.marker, /"required_checks":"incomplete"/);
-    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
-    assert.match(result.marker, /"review_result":"partial"/);
-    assert.ok(!result.marker.includes('"review_result":"clean"'));
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.verdictSource, "model");
     const findings = JSON.parse(result.outputs.findings) as Array<{
@@ -4272,10 +4278,9 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
       !result.outputs.reviewMarkdown.includes("confirmed unmet by deterministic repository-state proof"),
       result.outputs.reviewMarkdown,
     );
-    // The row stays an unresolved coverage gap, visibly disclosed in the
-    // review body (not silently dropped).
-    assert.match(result.outputs.reviewMarkdown, /### Requirement trace/);
-    assert.match(result.outputs.reviewMarkdown, /\*\*unverifiable\*\*/);
+    // #1658: a fully evidenced met row renders nothing — the trace section
+    // only discloses unresolved rows.
+    assert.equal(result.outputs.reviewMarkdown.includes("### Requirement trace"), false);
   } finally {
     await server.close();
     cleanup();
@@ -4327,8 +4332,11 @@ test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, nev
     assert.equal(findings.length, 0);
 
     assert.equal(result.outputs.verdict, "approve");
-    assert.match(result.marker, /"review_result":"partial"/);
-    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
+    assert.match(result.marker, /"review_result":"clean"/);
+    assert.doesNotMatch(result.marker, /"incomplete_reason":"requirement_trace"/);
+    const traceArtifact = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ resolution: string }>; summary: { unmet_claimed: string[] } };
+    assert.equal(traceArtifact.summary.unmet_claimed.length, 1);
+    assert.equal(traceArtifact.rows[0]!.resolution, "unmet_claimed");
   } finally {
     await server.close();
     cleanup();
@@ -4374,15 +4382,12 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
     assert.equal(findings.length, 0);
 
-    // #1095: no synthesized finding under any verdict policy. The trace is
-    // still a coverage stop: required_checks=incomplete is what withholds
-    // approval (#878 guard) and keeps the marker from reading clean under
-    // this policy.
+    // #1095: no synthesized finding under any verdict policy. #1658: the
+    // trace is not a coverage stop — required_checks stays untouched and the
+    // marker reads clean; the unmet_claimed exposure feeds #1656 instead.
     assert.equal(result.outputs.verdict, "approve");
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-    assert.match(result.marker, /"required_checks":"incomplete"/);
-    assert.match(result.marker, /"review_result":"partial"/);
-    assert.ok(!result.marker.includes('"review_result":"clean"'));
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"review_result":"clean"/);
   } finally {
     await server.close();
     cleanup();
@@ -4428,498 +4433,12 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
     assert.equal(findings.length, 0);
 
-    // #1095: no synthesized finding under any verdict policy. The trace is
-    // still a coverage stop: required_checks=incomplete is what withholds
-    // approval (#878 guard) and keeps the marker from reading clean under
-    // this policy.
+    // #1095: no synthesized finding under any verdict policy. #1658: the
+    // trace is not a coverage stop — required_checks stays untouched and the
+    // marker reads clean; the unmet_claimed exposure feeds #1656 instead.
     assert.equal(result.outputs.verdict, "approve");
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-    assert.match(result.marker, /"required_checks":"incomplete"/);
-    assert.match(result.marker, /"review_result":"partial"/);
-    assert.ok(!result.marker.includes('"review_result":"clean"'));
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#959: a verdict with no trace claim at all gets one bounded repair pass and the trace goes met", async () => {
-  const repairRequests: string[] = [];
-  const server = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) {
-      repairRequests.push(text);
-      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
-      res.end(verdictBody({
-        requirement_coverage: [{
-          requirement_id: reqId,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }));
-      return;
-    }
-    // The primary review verdict: the #947 shape, zero trace claims.
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-        "",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-
-    assert.equal(repairRequests.length, 1, "exactly one bounded repair pass");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
-      incomplete: boolean;
-    };
-    assert.equal(trace.rows.length, 1);
-    assert.equal(trace.rows[0]!.disposition, "met");
-    assert.deepEqual(trace.rows[0]!.notes, []);
-    assert.equal(trace.incomplete, false);
     assert.notEqual(result.outputs.requiredChecks, "incomplete");
-    assert.doesNotMatch(result.outputs.reviewMarkdown, /reported no trace/);
-
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; missing_ids: string[];
-    };
-    assert.equal(repairRecord.status, "ok");
-    assert.equal(repairRecord.claims, 1);
-    assert.equal(repairRecord.missing_ids.length, 1);
-
-    // #1044: the persisted artifact carries the bounded repair summary —
-    // the full merge filled every missing id, so `missing_ids` is empty.
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
-    assert.equal(persisted.requirement_trace_repair?.claims, 1);
-    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#1552: the standalone repair pass targets present-but-unverifiable rows, not just missing ids", async () => {
-  const repairRequests: string[] = [];
-  const server = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) {
-      repairRequests.push(text);
-      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
-      res.end(verdictBody({
-        requirement_coverage: [{
-          requirement_id: reqId,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }));
-      return;
-    }
-    // Primary review verdict: the row EXISTS but its claim is unverifiable
-    // (bare disposition, no reason) — the #1539 shape the old missing-only
-    // targeting left stranded with `no_missing_ids`.
-    res.end(verdictBody({
-      ...baseVerdict(),
-      requirement_coverage: [{
-        requirement_id: /req-[0-9a-f]{12}/.exec(String(body))?.[0] ?? "",
-        disposition: "unverifiable",
-      }],
-    }));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-        "",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-    assert.equal(repairRequests.length, 1, "the unverifiable row earns the bounded repair pass");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
-      incomplete: boolean;
-    };
-    assert.equal(trace.rows.length, 1);
-    assert.equal(trace.rows[0]!.disposition, "met", "the fresh claim replaced the unverifiable row");
-    assert.deepEqual(trace.rows[0]!.notes, []);
-    assert.equal(trace.incomplete, false);
-    assert.notEqual(result.outputs.requiredChecks, "incomplete");
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; rows_merged: number; missing_ids: string[]; targeted_ids: string[]; targeted_row_states: Record<string, string>;
-    };
-    assert.equal(repairRecord.status, "ok");
-    assert.equal(repairRecord.claims, 1);
-    assert.equal(repairRecord.rows_merged, 1, "the replacement is counted, not just the parsed claim");
-    assert.equal(repairRecord.missing_ids.length, 0, "the row was never missing — it was present-but-unverifiable");
-    assert.equal(repairRecord.targeted_ids.length, 1);
-    assert.deepEqual(repairRecord.targeted_row_states, {
-      [repairRecord.targeted_ids[0]!]: "insufficient_claim",
-    });
-    // #1044: the persisted summary carries the repair states too.
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; targeted_row_states?: Record<string, string>; rows_merged?: number };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
-    assert.equal(persisted.requirement_trace_repair?.claims, 1);
-    assert.equal(persisted.requirement_trace_repair?.rows_merged, 1);
-    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
-    assert.deepEqual(
-      persisted.requirement_trace_repair?.targeted_row_states,
-      { [repairRecord.targeted_ids[0]!]: "insufficient_claim" },
-    );
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#959: when the repair pass also yields nothing, the section says so instead of implying no enforcement exists", async () => {
-  let repairAttempts = 0;
-  const server = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    if (String(body).includes("Requirements to trace:")) {
-      repairAttempts += 1;
-      // A well-formed repair response that still omits the requirement.
-      res.end(verdictBody({ requirement_coverage: [] }));
-      return;
-    }
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-
-    // #1502 follow-up: TWO model calls — the well-formed no-claims response
-    // is a REJECTED response with validator feedback wired, so the bounded
-    // retry re-asks once (and this scripted model omits it again).
-    assert.equal(repairAttempts, 2, "first attempt plus the validator-feedback retry");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
-      incomplete: boolean;
-    };
-    assert.equal(trace.rows[0]!.disposition, "unverifiable");
-    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
-    assert.equal(trace.incomplete, true);
-    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
-    assert.doesNotMatch(result.outputs.reviewMarkdown, /no valid enforcement location/);
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; validation_retried?: boolean;
-    };
-    assert.equal(repairRecord.status, "empty");
-    assert.equal(repairRecord.claims, 0);
-    assert.equal(repairRecord.validation_retried, true);
-
-    // #1044: the row is now marked as repair-attempted, the rendered section
-    // says the retry also failed, and the persisted artifact carries the
-    // bounded summary.
-    assert.ok(trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
-    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/);
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; validation_retried?: boolean };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
-    assert.equal(persisted.requirement_trace_repair?.claims, 0);
-    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
-    assert.equal(persisted.requirement_trace_repair?.validation_retried, true);
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#1044: a gated-off repair pass records skipped_by_gate and keeps the original wording", async () => {
-  let repairAttempts = 0;
-  const server = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    if (String(body).includes("Requirements to trace:")) {
-      repairAttempts += 1;
-      res.end(verdictBody({ requirement_coverage: [] }));
-      return;
-    }
-    // The #947 shape: zero trace claims, and a replace-mode prompt means the
-    // #959 repair (the trace fragment's retry) never runs.
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "true",
-        "system-prompt": "Operator-supplied review prompt.",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-
-    assert.equal(repairAttempts, 0, "the gated-off pass must never issue a model request");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>;
-    };
-    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
-    assert.ok(!trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
-    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
-    assert.doesNotMatch(result.outputs.reviewMarkdown, /bounded repair pass/);
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, false);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "skipped_by_gate");
-    assert.equal(persisted.requirement_trace_repair?.claims, 0);
-    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#1044: a partial merge leaves the still-missing row noted and the summary names only it", async () => {
-  let repairAttempts = 0;
-  const server = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) {
-      repairAttempts += 1;
-      if (repairAttempts > 1) {
-        // The validator-feedback retry (the first attempt returned a claim
-        // for only the first id, so the omitted id was rejected): this
-        // scripted model again fails to produce it — a well-formed payload
-        // with no claims. The still-missing row is what the retry targeted.
-        res.end(verdictBody({ requirement_coverage: [] }));
-        return;
-      }
-      // The pass asks for BOTH missing ids but returns ok with a claim for
-      // only the first — the partial-merge shape that must not mislabel the
-      // other row as "the reviewer reported no trace" without the repair
-      // context.
-      const ids = [...new Set(text.match(/req-[0-9a-f]{12}/g) ?? [])];
-      res.end(verdictBody({
-        requirement_coverage: [{
-          requirement_id: ids[0] ?? "",
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }));
-      return;
-    }
-    // The primary review verdict: the #947 shape, zero trace claims.
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: twoRequirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-
-    // #1502 follow-up: TWO model calls now — the first attempt returns a
-    // claim for only the first id, and the validator-feedback retry re-asks
-    // for the omitted second id (which the scripted handler again fails to
-    // provide). The still-missing row is what the retry targeted.
-    assert.equal(repairAttempts, 2, "first attempt plus the one validator-feedback retry");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ requirement_id: string; disposition: string; notes: string[] }>;
-    };
-    assert.equal(trace.rows.length, 2);
-    const noted = trace.rows.filter((row) => row.notes.includes("trace-repair-ran-no-claims"));
-    assert.equal(noted.length, 1, JSON.stringify(trace.rows));
-    const filled = trace.rows.find((row) => !row.notes.includes("not-traced-by-reviewer"));
-    assert.ok(filled, JSON.stringify(trace.rows));
-    // #1044 review follow-up: the summary's missing_ids are the ids the pass
-    // did NOT fill — the partial merge keeps only the still-missing id, even
-    // though the outcome is "merged".
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; validation_retried?: boolean; validation_rejections?: Record<string, string> };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
-    assert.equal(persisted.requirement_trace_repair?.claims, 1);
-    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, [noted[0]!.requirement_id]);
-    assert.notEqual(noted[0]!.requirement_id, filled.requirement_id);
-    // #1502 follow-up: the retry's rejection telemetry names the omitted id
-    // with the validator's own deterministic label.
-    assert.equal(persisted.requirement_trace_repair?.validation_retried, true);
-    assert.deepEqual(
-      persisted.requirement_trace_repair?.validation_rejections,
-      { [noted[0]!.requirement_id]: "not-traced-by-reviewer" },
-    );
-    assert.match(result.outputs.reviewMarkdown, /and a bounded repair pass also returned no usable claim/);
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
-
-test("#1044: a model-forged requirement_trace_repair key is stripped when the feature is off", async () => {
-  const server = await startMockServer((_req, _body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    // The model controls its own artifact fields — a forged summary must not
-    // survive persistence when requirement-trace is disabled.
-    res.end(verdictBody(baseVerdict({
-      requirement_trace_repair: { attempted: true, outcome: "merged", missing_ids: [], claims: 9 },
-    })));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok",
-        repo: "o/r",
-        "pr-number": "7",
-        "ai-base-url": server.url,
-        "ai-model": "m",
-        "ai-stream": "false",
-        "ai-api-key": "k",
-        "ci-status-check": "false",
-        "requirement-trace": "false",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      quiet: true,
-    });
-
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: unknown;
-    };
-    assert.equal("requirement_trace_repair" in persisted, false);
-    assert.match(result.outputs.reviewMarkdown, /Looks fine/);
+    assert.match(result.marker, /"review_result":"clean"/);
   } finally {
     await server.close();
     cleanup();
@@ -4930,26 +4449,11 @@ test("#1044: a model-forged requirement_trace_repair key is stripped when the fe
 
 /** A plain-text chat.completion body (the shape the native loop's scripted
  * turns return over the mock wire). */
-function openAiText(content: string): Record<string, unknown> {
-  return { id: "c1", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
-}
-
 /** A single-tool-call chat.completion body. */
-function openAiToolCall(id: string, name: string, args: string): Record<string, unknown> {
-  return { id: "c2", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
-}
-
 /** The requirement id the requirement-trace fragment rendered for its
  * `- req-… (normative, …): <text>` line containing `marker` — the shape the
  * native-loop planning turn carries (the JSON-escaped body keeps each
  * fragment line backslash-free). */
-function traceFragmentId(requestBody: string, marker: string): string {
-  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(String.raw`req-([0-9a-f]{12}) \([^)]*\): [^\\]*` + escaped).exec(requestBody);
-  assert.ok(match, `no trace-fragment id rendered for marker ${JSON.stringify(marker)}`);
-  return `req-${match[1]}`;
-}
-
 /** The SSE-chunk wire shape an OpenAI-format streaming response carries for
  * one full-content delta, then the closing finish chunk with usage. */
 function openAiStreamChunks(content: string): string[] {
@@ -4959,558 +4463,6 @@ function openAiStreamChunks(content: string): string[] {
     "data: [DONE]",
   ];
 }
-
-test("#1504: a fallback-authored review repairs on the fallback lane and never retries the terminal primary", async () => {
-  // The #1513 repro: the primary goes terminal (MiniMax HTTP 429), the
-  // fallback produces the authoritative approve-with-missing-row review, and
-  // the repair must ride the FALLBACK profile — the primary endpoint must
-  // receive no repair request after its terminal failure.
-  const primaryBodies: string[] = [];
-  const primaryServer = await startMockServer((_req, body, res) => {
-    primaryBodies.push(String(body));
-    res.statusCode = 429;
-    res.end('{"error":{"message":"rate limited"}}');
-  });
-  let fallbackReviewRequests = 0;
-  let fallbackRepairBodies: string[] = [];
-  const fallbackServer = await startMockServer((_req, body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) {
-      fallbackRepairBodies.push(text);
-      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
-      res.end(verdictBody({
-        requirement_coverage: [{
-          requirement_id: reqId,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }));
-      return;
-    }
-    fallbackReviewRequests += 1;
-    // The fallback's authoritative review: approve but with NO trace claims.
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok", repo: "o/r", "pr-number": "7",
-        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
-        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
-        "ai-stream": "false", "ai-api-format": "openai",
-        "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
-        "ci-status-check": "false", "requirement-trace": "true", "deep-review": "false",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      sleep: async () => {},
-      quiet: true,
-    });
-
-    assert.equal(result.outputs.verdict, "approve");
-    // Route ownership: every request the primary endpoint saw was a review
-    // attempt — none carried the repair contract.
-    assert.ok(primaryBodies.length >= 1, "the primary was dialed for the review");
-    assert.ok(
-      primaryBodies.every((body) => !body.includes("Requirements to trace:")),
-      "the terminal primary endpoint must receive no repair request",
-    );
-    // The fallback owned both the review and its repair.
-    assert.equal(fallbackReviewRequests, 1);
-    assert.equal(fallbackRepairBodies.length, 1, "exactly one bounded repair pass, on the fallback lane");
-    // The fallback repair sees the PR body (the authored context) — here the
-    // platform body "Closes #824.\n\nResolve review context from the right identity.".
-    assert.match(fallbackRepairBodies[0]!, /Resolve review context from the right identity/);
-    assert.match(fallbackRepairBodies[0]!, /navigation hints/);
-
-    // Telemetry: the repair route is the fallback lane, with the invocation
-    // reason recorded.
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; route?: string; invocation_reason?: string; serialization_retry?: boolean;
-    };
-    assert.equal(repairRecord.status, "ok");
-    assert.equal(repairRecord.claims, 1);
-    assert.equal(repairRecord.route, "fallback");
-    assert.equal(repairRecord.invocation_reason, "no_native_loop_repair");
-    assert.equal(repairRecord.serialization_retry, false);
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; route?: string; invocation_reason?: string };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
-    assert.equal(persisted.requirement_trace_repair?.route, "fallback");
-    assert.equal(persisted.requirement_trace_repair?.invocation_reason, "no_native_loop_repair");
-    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
-
-    // The merged trace validates: the repair filled the row the fallback's
-    // own review omitted.
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ disposition: string; notes: string[] }>; incomplete: boolean;
-    };
-    assert.equal(trace.rows.length, 1);
-    assert.equal(trace.rows[0]!.disposition, "met");
-    assert.equal(trace.incomplete, false);
-    assert.notEqual(result.outputs.requiredChecks, "incomplete");
-  } finally {
-    await primaryServer.close();
-    await fallbackServer.close();
-    cleanup();
-  }
-});
-
-test("#1504 (review): the fallback repair streams on the fallback lane's own setting, not the global one", async () => {
-  // Divergent transport profile: the global ai-stream is false but the
-  // fallback lane resolves ai-fallback-stream=true. The authoritative
-  // fallback review streams on its lane profile (callTier reads
-  // profile.stream), and the repair must ride the SAME complete tier/profile
-  // — a global `env.AI_STREAM` read would silently regress the repair to
-  // the primary's transport profile.
-  const primaryBodies: string[] = [];
-  const primaryServer = await startMockServer((_req, body, res) => {
-    primaryBodies.push(String(body));
-    res.statusCode = 429;
-    res.end('{"error":{"message":"rate limited"}}');
-  });
-  const fallbackStreams: boolean[] = [];
-  let fallbackRepairRequests = 0;
-  const fallbackServer = await startMockServer((req, body, res) => {
-    fallbackStreams.push((JSON.parse(String(body)) as { stream?: boolean }).stream === true);
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) {
-      fallbackRepairRequests += 1;
-      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
-      // The streamed delta carries the model's message CONTENT — the verdict
-      // JSON itself, not a chat.completion envelope around it.
-      sseResponse(openAiStreamChunks(JSON.stringify({
-        requirement_coverage: [{
-          requirement_id: reqId,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      })))(req, body, res);
-      return;
-    }
-    sseResponse(openAiStreamChunks(JSON.stringify(baseVerdict())))(req, body, res);
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-
-    const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
-      inputs: {
-        "github-token": "tok", repo: "o/r", "pr-number": "7",
-        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
-        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
-        "ai-stream": "false", "ai-fallback-stream": "true", "ai-api-format": "openai",
-        "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
-        "ci-status-check": "false", "requirement-trace": "true", "deep-review": "false",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      sleep: async () => {},
-      quiet: true,
-    });
-
-    assert.equal(result.outputs.verdict, "approve");
-    assert.equal(fallbackRepairRequests, 1, "exactly one repair pass, on the fallback lane");
-    assert.equal(fallbackStreams.length, 2, "one review request + one repair request on the fallback lane");
-    assert.ok(
-      fallbackStreams.every((stream) => stream === true),
-      "both the fallback review and its repair must ride the fallback lane's stream=true, not the global ai-stream=false",
-    );
-    // The primary lane rode the global setting, and never saw the repair.
-    assert.ok(primaryBodies.length >= 1, "the primary was dialed for the review");
-    assert.ok(
-      primaryBodies.every((body) => (JSON.parse(body) as { stream?: boolean }).stream === false),
-      "the primary lane's requests rode the global stream=false",
-    );
-    assert.ok(
-      primaryBodies.every((body) => !body.includes("Requirements to trace:")),
-      "the terminal primary endpoint must receive no repair request",
-    );
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; route?: string;
-    };
-    assert.equal(repairRecord.status, "ok");
-    assert.equal(repairRecord.claims, 1);
-    assert.equal(repairRecord.route, "fallback");
-    assert.notEqual(result.outputs.requiredChecks, "incomplete");
-  } finally {
-    await primaryServer.close();
-    await fallbackServer.close();
-    cleanup();
-  }
-});
-
-test("#1504 (review): the escalated repair digests the smart loop's evidence, not the stale primary loop's", async () => {
-  // The primary loop reads src/primary-evidence.ts, the escalated smart loop
-  // reads src/smart-evidence.ts; neither file is in the diff or the PR body,
-  // so the repair prompt's evidence digest is the only way either path could
-  // appear in the repair request. The accepted artifact is the SMART
-  // review's, so the digest must come from tool-harness.smart.json — reading
-  // tool-harness.json would feed the repair the superseded primary-loop
-  // evidence instead.
-  let primaryToolTurn = 0;
-  let primaryPlainTurn = 0;
-  let primaryRepairTurn = false;
-  const primaryServer = await startMockServer((_req, body, res) => {
-    const text = String(body);
-    const request = JSON.parse(text) as { tools?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      const scripted = [
-        openAiToolCall("p1", "read_file", '{"path":"src/primary-evidence.ts"}'),
-        openAiText("primary investigation complete"),
-      ];
-      const response = scripted[primaryToolTurn];
-      primaryToolTurn += 1;
-      if (response === undefined) {
-        res.statusCode = 500;
-        res.end('{"error":"script exhausted (primary tools)"}');
-        return;
-      }
-      res.end(JSON.stringify(response));
-      return;
-    }
-    // Tool-less turns: the in-conversation verdict (requesting escalation),
-    // then the loop's own trace-only repair turn (no claims — the escalated
-    // artifact is the one the standalone pass must recover).
-    const scriptedPlain = [
-      openAiText(JSON.stringify(baseVerdict({ smart_review_requested: true, smart_review_reason: "tool coverage gap" }))),
-      openAiText("no trace claims"),
-    ];
-    const response = scriptedPlain[primaryPlainTurn];
-    primaryPlainTurn += 1;
-    if (response === undefined) {
-      primaryRepairTurn = true;
-      res.statusCode = 500;
-      res.end('{"error":"script exhausted (primary plain)"}');
-      return;
-    }
-    res.end(JSON.stringify(response));
-  });
-  const smartRepairBodies: string[] = [];
-  let smartToolTurn = 0;
-  const smartServer = await startMockServer((_req, body, res) => {
-    const text = String(body);
-    const request = JSON.parse(text) as { tools?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (text.includes("Requirements to trace:")) {
-      smartRepairBodies.push(text);
-      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
-      res.end(verdictBody({
-        requirement_coverage: [{
-          requirement_id: reqId,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }));
-      return;
-    }
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      const scripted = [
-        openAiToolCall("s1", "read_file", '{"path":"src/smart-evidence.ts"}'),
-        openAiText("smart investigation complete"),
-      ];
-      const response = scripted[smartToolTurn];
-      smartToolTurn += 1;
-      if (response === undefined) {
-        res.statusCode = 500;
-        res.end('{"error":"script exhausted (smart tools)"}');
-        return;
-      }
-      res.end(JSON.stringify(response));
-      return;
-    }
-    // The smart loop's in-conversation verdict: accepted, no trace claims,
-    // no further escalation.
-    res.end(verdictBody(baseVerdict()));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-    writeFileSync(join(runDir, "src", "primary-evidence.ts"), "export const PRIMARY_LOOP_EVIDENCE = 'primary';\n");
-    writeFileSync(join(runDir, "src", "smart-evidence.ts"), "export const SMART_LOOP_EVIDENCE = 'smart';\n");
-    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
-    gitInit(runDir);
-
-    const result = await runReview({
-      env: { IS_FORK_PR: "false" },
-      inputs: {
-        "github-token": "tok", repo: "o/r", "pr-number": "7",
-        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
-        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
-        "ai-stream": "false", "review-routing-mode": "auto", "tool-mode": "native_loop",
-        "tool-max-requests": "8", "deep-review": "false",
-        "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
-        "ci-status-check": "false", "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: requirementTracePlatform(),
-      persistArtifacts: true,
-      sleep: async () => {},
-      quiet: true,
-    });
-
-    assert.equal(result.outputs.reviewRoute, "escalated");
-    assert.equal(result.outputs.verdict, "approve");
-    // Both loops gathered their own evidence; the smart loop's artifact is
-    // the authoritative one.
-    const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
-      tool_calls?: Array<{ tool?: string; args?: Record<string, unknown> }>;
-    };
-    const smartHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.smart.json"), "utf8")) as {
-      stop_reason?: string; native_loop_verdict_status?: string;
-      tool_calls?: Array<{ tool?: string; args?: Record<string, unknown> }>;
-    };
-    assert.ok(
-      (primaryHarness.tool_calls ?? []).some((call) => JSON.stringify(call.args ?? {}).includes("src/primary-evidence.ts")),
-      "the primary loop must have gathered its own evidence",
-    );
-    assert.equal(smartHarness.stop_reason, "model-stopped");
-    assert.equal(smartHarness.native_loop_verdict_status, "accepted");
-    assert.ok(
-      (smartHarness.tool_calls ?? []).some((call) => JSON.stringify(call.args ?? {}).includes("src/smart-evidence.ts")),
-      "the smart loop must have gathered its own evidence",
-    );
-
-    // The repair rode the smart lane, and its prompt's evidence digest is the
-    // smart loop's — never the superseded primary loop's.
-    assert.equal(smartRepairBodies.length, 1, "exactly one bounded repair pass, on the smart lane");
-    assert.match(smartRepairBodies[0]!, /src\/smart-evidence\.ts/);
-    assert.ok(
-      !smartRepairBodies[0]!.includes("src/primary-evidence.ts"),
-      "the repair must not digest the stale primary-loop evidence",
-    );
-    assert.ok(!primaryRepairTurn, "no unscripted primary-lane request after the loop's trace-only repair turn");
-    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number; route?: string; invocation_reason?: string;
-    };
-    assert.equal(repairRecord.status, "ok");
-    assert.equal(repairRecord.claims, 1);
-    assert.equal(repairRecord.route, "smart");
-    assert.equal(repairRecord.invocation_reason, "native_loop_no_trace_claims");
-    assert.notEqual(result.outputs.requiredChecks, "incomplete");
-  } finally {
-    await primaryServer.close();
-    await smartServer.close();
-    cleanup();
-  }
-});
-
-test("#1502: a native-loop repair that merged claims but left a row unresolved recovers via the bounded fallback and still fails closed", async () => {
-  // The #1559 production shape: the loop's trace-only repair merged a claim
-  // for the FIRST requirement; the second requirement's row is still
-  // unresolved. A merged claim the validator still rejects is a FAILED
-  // repair, so the standalone fallback now fires for it
-  // (native_loop_repair_left_unresolved) instead of standing down — and when
-  // the fallback also produces nothing, the row fails closed and #1492
-  // still withholds the APPROVE.
-  const unexpected: string[] = [];
-  let toolTurn = 0;
-  let plainTurn = 0;
-  let repairMarkerRequests = 0;
-  let idFirst = "";
-  let idSecond = "";
-  const server = await startMockServer((_req, body, res) => {
-    const text = String(body);
-    if (text.includes("Requirements to trace:")) repairMarkerRequests += 1;
-    const request = JSON.parse(text) as { tools?: unknown[]; messages?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      // Native-loop planning/repair rounds carry tool declarations.
-      const scripted = [
-        openAiToolCall("c1", "read_file", '{"path":"README.md"}'),
-        openAiText("evidence gathered"),
-        // The repair round rides the enforced evidence reserve: only a call
-        // that advances an outstanding trace slot executes. A test-path read
-        // credits the first row's unmet test slot without vocabulary.
-        openAiToolCall("c2", "read_file", '{"path":"tests/context-resolution.test.ts"}'),
-        openAiText("repair round done"),
-      ];
-      const response = scripted[toolTurn];
-      toolTurn += 1;
-      if (response === undefined) {
-        unexpected.push(text.slice(0, 200));
-        res.statusCode = 500;
-        res.end('{"error":"script exhausted (tools)"}');
-        return;
-      }
-      // Extract the two ledger ids from the FIRST planning turn's trace
-      // fragment (the corpus carries the ids in the `- req-… (normative, …):`
-      // fragment shape on the native-loop planning turn).
-      if (toolTurn === 1) {
-        idFirst = traceFragmentId(text, "repository identity plus the source SHA");
-        idSecond = traceFragmentId(text, "publish timestamp against the gate timestamp");
-      }
-      res.end(JSON.stringify(response));
-      return;
-    }
-    // Tool-less turns: the in-conversation verdict, then the trace-only
-    // repair turn, then the standalone fallback pass — which returns a
-    // well-formed payload with no claims (the fail-closed twin shape), gets
-    // the one validator-feedback retry for the omitted id, and returns no
-    // claims again.
-    const scriptedPlain = [
-      openAiText(JSON.stringify(baseVerdict())),
-      openAiText("```json\n" + JSON.stringify({
-        requirement_coverage: [{
-          requirement_id: idFirst,
-          disposition: "met",
-          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
-          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
-        }],
-      }) + "\n```"),
-      openAiText(JSON.stringify({ requirement_coverage: [] })),
-      openAiText(JSON.stringify({ requirement_coverage: [] })),
-    ];
-    const response = scriptedPlain[plainTurn];
-    plainTurn += 1;
-    if (response === undefined) {
-      unexpected.push(text.slice(0, 200));
-      res.statusCode = 500;
-      res.end('{"error":"script exhausted (plain)"}');
-      return;
-    }
-    res.end(JSON.stringify(response));
-  });
-  const { runDir, cleanup } = withRunDir();
-  try {
-    mkdirSync(join(runDir, "src"), { recursive: true });
-    mkdirSync(join(runDir, "tests"), { recursive: true });
-    writeFileSync(
-      join(runDir, "src", "context-resolution.ts"),
-      [
-        "export function resolveContext(ctx, record) {",
-        "  if (record.sourceSha !== ctx.sourceSha) {",
-        "    throw new Error('source sha mismatch');",
-        "  }",
-        "  return record;",
-        "}",
-      ].join("\n"),
-    );
-    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
-    gitInit(runDir);
-
-    const result = await runReview({
-      env: { IS_FORK_PR: "false" },
-      inputs: {
-        "github-token": "tok", repo: "o/r", "pr-number": "7",
-        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "k",
-        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop",
-        "tool-max-requests": "8", "deep-review": "false",
-        "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
-        "ci-status-check": "false", "requirement-trace": "true",
-      },
-      runDir,
-      workspace: runDir,
-      platformAdapter: twoRequirementTracePlatform(),
-      persistArtifacts: true,
-      sleep: async () => {},
-      quiet: true,
-    });
-
-    assert.equal(unexpected.length, 0, `unscripted model requests: ${JSON.stringify(unexpected)}`);
-    assert.ok(idFirst && idSecond, "both ledger ids extracted from the planning corpus");
-    // The loop's trace-only repair merged exactly one claim (the first id).
-    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
-      trace_repair_continuation?: { outcome?: string; claims_merged?: number; trace_claims_merged?: boolean; unresolved_ids?: string[] };
-    };
-    assert.equal(harness.trace_repair_continuation?.outcome, "continued");
-    assert.equal(harness.trace_repair_continuation?.claims_merged, 1);
-    assert.equal(harness.trace_repair_continuation?.trace_claims_merged, true);
-    // Recovery: the standalone fallback fired for the row the loop's merged
-    // claim left unresolved — and produced nothing across its first attempt
-    // AND the validator-feedback retry for the omitted id, so the summary
-    // reports the no-claims outcome under the new invocation reason.
-    assert.equal(repairMarkerRequests, 2, "first attempt plus the validator-feedback retry for the omitted id");
-    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; route?: string; invocation_reason?: string; claims: number; missing_ids: string[]; validation_retried?: boolean };
-    };
-    assert.equal(persisted.requirement_trace_repair?.attempted, true);
-    assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
-    assert.equal(persisted.requirement_trace_repair?.route, "primary");
-    assert.equal(persisted.requirement_trace_repair?.invocation_reason, "native_loop_repair_left_unresolved");
-    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, [idSecond]);
-    assert.equal(persisted.requirement_trace_repair?.claims, 0);
-    assert.equal(persisted.requirement_trace_repair?.validation_retried, true);
-
-    // The leftover row still fails closed: the trace is incomplete and #1492
-    // withholds the APPROVE.
-    assert.equal(result.outputs.requiredChecks, "incomplete");
-    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
-      rows: Array<{ requirement_id: string; disposition: string; notes: string[] }>; incomplete: boolean;
-    };
-    assert.equal(trace.incomplete, true);
-    const filled = trace.rows.find((row) => row.requirement_id === idFirst);
-    const leftover = trace.rows.find((row) => row.requirement_id === idSecond);
-    assert.equal(filled?.disposition, "met");
-    assert.equal(leftover?.disposition, "unverifiable");
-    assert.ok(leftover?.notes.includes("not-traced-by-reviewer"));
-    assert.ok(leftover?.notes.includes("trace-repair-ran-no-claims"), "the fallback that ran and produced nothing is reported");
-  } finally {
-    await server.close();
-    cleanup();
-  }
-});
 
 test("#899: a native loop whose harness artifact is unreadable records partial coverage, never complete", () => {
   assert.equal(resolvePartialCoverage(null, true, true)?.stop_reason, "harness-unreadable");
@@ -5592,6 +4544,11 @@ for (const direction of ["added", "removed"] as const) {
     const platform = mockPlatform();
     const base = platform.getPr.bind(platform);
     platform.getPr = async () => ({ ...(await base() as Record<string, unknown>), body: prBody }) as never;
+    // #1658: the refreshed requirement's affected boundary is touched by
+    // the change, so applicability keeps it in scope and the prompt is
+    // scoped to it.
+    platform.getPrDiff = async () =>
+      `diff --git a/src/context.ts b/src/context.ts\n--- /dev/null\n+++ b/src/context.ts\n@@ -0 +1 @@\n+// resolution must compare the source SHA\n`;
     platform.getIssue = (async () => ({
       ok: true,
       data: { number: 40, title: "Resolver", state: "open", labels: [], body: "## Acceptance criteria\n- [ ] Resolution MUST compare the source SHA.\n" },

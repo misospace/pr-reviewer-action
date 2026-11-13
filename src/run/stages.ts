@@ -53,7 +53,7 @@ import { enforcementView as humanEnforcementView, prepareReviews, renderOutstand
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { runEvidenceProvidersPhase } from "../evidence/index.js";
-import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapProbe } from "../tools/harness.js";
+import { runToolHarness, type HarnessDeps, type HarnessTransport } from "../tools/harness.js";
 import { GOVERNOR_PRIORITY_AUTHORITATIVE, GOVERNOR_PRIORITY_RECOVERY, GovernorCancelledError, inferenceEndpointKey, sharedRunInferenceGovernor } from "../model/governor.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describedTransportFailure, TransportFailure } from "../transport/http.js";
@@ -844,8 +844,8 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
  * keeps the loop byte-for-byte pre-#1145. #1210: likewise `ghApi` — the
  * run's configured forge read capability, bound to the native loop's
  * gh_api/repo_contents executors. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number, fallbackLane?: HarnessDeps["fallbackLane"]): Promise<void> {
-  const deps: HarnessDeps & { signal?: AbortSignal, traceGapProbe?: TraceGapProbe } = {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number, fallbackLane?: HarnessDeps["fallbackLane"]): Promise<void> {
+  const deps: HarnessDeps & { signal?: AbortSignal } = {
     env,
     cwd: runDir,
     readText: (name) => ws.readText(name),
@@ -857,7 +857,6 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     transport: harnessTransportAdapter(env, signal),
     ...(signal !== undefined ? { signal } : {}),
     log,
-    ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
     ...(ghApi !== undefined ? { ghApi } : {}),
     // #1598 (review): the evidence-failover phase passes the remaining share
     // of the loop wall-clock envelope, so the second investigation can never

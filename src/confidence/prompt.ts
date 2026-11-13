@@ -221,8 +221,8 @@ const MINIMUM_SHAPE_PINS = {
 
 /** The smallest serializations the shipped call sites actually produce: no
  * findings renders `[]`, and `src/engine/review.ts`'s `reviewCoverage` always
- * carries its six fixed keys (the conditional `incomplete_reason` /
- * `trace_repair_continuation` keys only ever ADD bytes, and a request above the
+ * carries its six fixed keys (the conditional `incomplete_reason` key only
+ * ever ADDS bytes, and a request above the
  * floor that does not fit is refused, never sent), so the measurement below is
  * the smallest request the ENGINE can send rather than a shorter fiction, with
  * its fields at their longest realistic tokens (`route: "escalated"`,
