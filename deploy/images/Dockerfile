@@ -17,7 +17,7 @@
 # repository and the build stage output changes between runs — the
 # run-summary digest of a published image is the only exact reference to
 # it. A mutable tag must never be published from.
-FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS build
+FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS build
 WORKDIR /build
 
 # Dependency lock first for layer caching.
@@ -38,7 +38,7 @@ RUN npm run build
 # and kept in both targets for image parity. Lists are cleaned and
 # recommendations dropped to keep the surface minimal. Same digest pin as
 # the build stage (one base revision for the whole file).
-FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS runtime
+FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
