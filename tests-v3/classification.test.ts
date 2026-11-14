@@ -2126,6 +2126,16 @@ test("#1653: relative-link loop counterexamples keep firing symlink_sensitive", 
     ],
     // Head-level rules still apply to the case shape.
     ["loop reads another variable", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
+    [
+      "hop cap folded into the guard",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 1, '+while [ -L "$_src" ] && [ "$hops" -lt 40 ]; do'),
+    ],
+    // Fail-closed boundaries of the tail lines themselves.
+    ["unquoted case opener", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 3, "+  case $_link in")],
+    ["braced link in the absolute arm", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="${_link}" ;;')],
+    ["relative arm joins the anchor", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/$_src" ;;')],
+    ["fallthrough terminator", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_link" ;&')],
     // Declared limits: false positives that exist today and stay.
     [
       "single-line compound case",
