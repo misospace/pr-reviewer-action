@@ -866,7 +866,11 @@ test("#1248: required-check fail mode updates verdict_source when forcing back a
   const result = applyRequiredCheckValidation(relaxed, {
     enabled: "true",
     mode: "fail",
-    mustCheck: ["verify route access controls are in place"],
+    // An OBJECTIVE must_check row (a concrete identity the gate binds): only
+    // objective rows are merge-affecting under #1657, and this one has no
+    // disposition, so the fail mode still forces and the #1248 provenance
+    // flip fires. A generic review-prompt row would no longer gate.
+    mustCheck: ["review the path resolution in src/paths.ts"],
   });
   assert.equal(result.status, "incomplete");
   assert.equal(relaxed.verdict, "request_changes");

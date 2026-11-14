@@ -207,7 +207,7 @@ async function readCommittedFileBytes(
   filePath: string,
   sourceRevision: string | null | undefined,
   ctx: ToolContext,
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; text: string; truncated: boolean } | { ok: false; error: string }> {
   if (typeof sourceRevision !== "string" || !SOURCE_REVISION_SHA_RE.test(sourceRevision)) {
     return { ok: false, error: "no exact revision bound to the source tool call" };
   }
@@ -220,7 +220,7 @@ async function readCommittedFileBytes(
     const stderr = toText(r.stderr).trim();
     return { ok: false, error: stderr || `git show exited with code ${r.exitCode}` };
   }
-  return { ok: true, text: toText(r.stdout) };
+  return { ok: true, text: toText(r.stdout), truncated: r.stdoutTruncated === true };
 }
 
 /** #1015: the helper `readCommittedFileBytes` calls into, distinguished so a
@@ -687,8 +687,10 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
   const committed = await readCommittedFileBytes(relative, ctx.sourceRevision, ctx);
   const bound = committed.ok;
   let content: string;
+  let captureTruncated = false;
   if (bound) {
     content = committed.text;
+    captureTruncated = committed.truncated;
   } else {
     try {
       content = fs.readFileSync(guarded.path!, "utf8");
@@ -697,7 +699,14 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
     }
   }
   if (offset == null && limit == null) {
-    return { content: pyCodepointSlice(content, 12000), committed: bound };
+    // A default whole-file read that the 12k-codepoint slice actually
+    // discards bytes from is a clipped observation, not a complete one:
+    // the receipt layer records only the path (no window identity), so an
+    // unflagged slice would credit whole-file acquisition the reviewer
+    // never saw (#1657 round 11). Transport loss on the git-committed read
+    // is the same kind of discarding and already flags (#1657 round 10).
+    const retained = pyCodepointSlice(content, 12000);
+    return { content: retained, committed: bound, truncated: captureTruncated || retained !== content };
   }
   const lines = splitKeepEnds(content);
   const start = Math.max((offset || 1) - 1, 0);
@@ -707,6 +716,7 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
     content: pyCodepointSlice(window, 12000),
     range: { offset: start + 1, lines: end - start, total_lines: lines.length },
     committed: bound,
+    truncated: captureTruncated,
   };
 }
 
@@ -1005,6 +1015,9 @@ export async function gitGrep(pattern: string, ctx: ToolContext, scope?: unknown
   const records = parseGrepZRecords(toText(r.stdout));
   const matches = records.map((rec) => redactGrepRecord(rec, ctx.workspaceRoot));
   const out: Obj = { matches: matches.slice(0, cap) };
+  // The record cap is bounded-read semantics (not flagged); transport
+  // capture loss of the git output itself is (#1657 round 10).
+  out.truncated = r.stdoutTruncated === true;
   if (note) out.note = note;
   return out;
 }
@@ -1026,7 +1039,7 @@ export async function gitLog(scope: string, ctx: ToolContext, maxCount = 20): Pr
   const r = await processOutput(ctx, argv, t);
   const error = processError(r, t, "git log");
   if (error) return { error };
-  return { log: toText(r.stdout).trim().split(/\r?\n/).slice(0, maxCount) };
+  return { log: toText(r.stdout).trim().split(/\r?\n/).slice(0, maxCount), truncated: r.stdoutTruncated === true };
 }
 
 export async function gitBlame(input: string, ctx: ToolContext, start?: number | null, end?: number | null): Promise<Obj> {
@@ -1053,7 +1066,7 @@ export async function gitBlame(input: string, ctx: ToolContext, start?: number |
   const r = await processOutput(ctx, argv, t);
   const error = processError(r, t, "git blame");
   if (error) return { error };
-  return { blame: toText(r.stdout) };
+  return { blame: toText(r.stdout), truncated: r.stdoutTruncated === true };
 }
 
 export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
@@ -1108,8 +1121,11 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
       return { error: `HTTP Error ${res.status}: ${httpReason(res.status)}` };
     }
     // Node's text() decoding replaces invalid sequences, matching v2's
-    // errors="replace" decode.
-    return { content: pyCodepointSlice(res.body, 10000) };
+    // errors="replace" decode. The fixed 10k-codepoint slice discards
+    // fetched bytes when the body is longer: report it so the executor
+    // envelope's payload carries the incomplete state (#1657 round 10).
+    const sliced = pyCodepointSlice(res.body, 10000);
+    return { content: sliced, truncated: sliced !== res.body };
   }
   return { error: "Too many redirects" };
 }
@@ -1180,9 +1196,12 @@ export async function runCommand(command: string, ctx: ToolContext): Promise<Obj
     };
   }
   if (r.status === "spawn_error") return { error: r.launchError ?? "Command failed to start", command: name };
+  // The subprocess capture caps its own pipes: when output bytes were
+  // discarded there, the payload must carry that state too (#1657 round 10).
   return {
     stdout: maskAndTruncate(toText(r.stdout).trim(), Number.MAX_SAFE_INTEGER).text,
     stderr: maskAndTruncate(toText(r.stderr).trim(), Number.MAX_SAFE_INTEGER).text,
+    truncated: r.stdoutTruncated === true || r.stderrTruncated === true,
     exit_code: r.exitCode,
     command: name,
   };
@@ -1203,11 +1222,12 @@ const pyCompactJson = pyDumpsCompact;
 export async function executeToolRequest(tool: string, args: Obj, ctx: ToolContext): Promise<Obj> {
   const toolResult: Obj = { tool, status: "error", result: {} };
   const cap = ctx.maxResponseBytes ?? 12000;
-  const bounded = (s: string, n = cap) => maskAndTruncate(s, n).text;
-  // Repository source content (file reads, grep matches, blame) uses the
-  // source-safe policy (#876): it must survive structurally, masking only
-  // literal credential values, never identifier/property/assignment syntax.
-  const boundedSource = (s: string, n = cap, filePath?: string | null) => maskAndTruncateSource(s, n, filePath).text;
+  // Every wrapper cap reports its own clipping into the result payload, so
+  // completeness is decided at the executor boundary and never guessed by
+  // downstream evidence layers (#1657 round 10). Repository source content
+  // (file reads, grep matches, blame) uses the source-safe policy (#876): it
+  // must survive structurally, masking only literal credential values, never
+  // identifier/property/assignment syntax.
   try {
     let result: Obj;
     let provenance: EvidenceProvenance | undefined;
@@ -1258,8 +1278,13 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         // Mask over the FULL pre-truncation text (#926), then truncate the
         // masked text; provenance counts the redactions the masker made.
         const full = maskAndTruncateSourceDetailed(res.content, Number.MAX_SAFE_INTEGER, p);
-        const text = boundedSource(full.text, cap, p);
-        const payload: Obj = { content: text };
+        // The cap pass reports its own clipping into the payload so completeness
+        // is readable at the layer the cap was applied (#1657 round 10); the
+        // second detailed pass re-masks already-masked text (no-op) then applies
+        // the byte cap, keeping the #926 mask-then-truncate order. Provenance
+        // still counts only the full-pass redactions.
+        const capped = maskAndTruncateSourceDetailed(full.text, cap, p);
+        const payload: Obj = { content: capped.text, truncated: capped.truncated || res.truncated === true };
         if (res.range) payload.range = res.range;
         result = payload;
         // #1015: `readFile` reads from the committed tree at `sourceRevision`
@@ -1313,7 +1338,8 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const maxCount = Math.max(1, Math.min(optInt(args.max_count) || 20, 100));
         const res = await gitLog(args.path || "", ctx, maxCount);
         if (res.error) throw new Error(res.error);
-        result = { log: bounded(res.log.join("\n")) };
+        const log = maskAndTruncate(res.log.join("\n"), cap);
+        result = { log: log.text, truncated: log.truncated || res.truncated === true };
         break;
       }
       case "git_blame": {
@@ -1322,7 +1348,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const res = await gitBlame(p, ctx, optInt(args.start), optInt(args.end));
         if (res.error) throw new Error(res.error);
         const det = maskAndTruncateSourceDetailed(res.blame, cap, p);
-        result = { blame: det.text };
+        result = { blame: det.text, truncated: det.truncated || res.truncated === true };
         // #1015: blame bound to the committed tree at `sourceRevision` is
         // byte-true to that revision; without a SHA, blame ran against the
         // working tree and cannot claim literal authority.
@@ -1339,7 +1365,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const res = await gitGrep(pattern, ctx, args.path, maxResults);
         if (res.error) throw new Error(res.error);
         const det = maskAndTruncateSourceDetailed(res.matches.join("\n"), cap);
-        result = { matches: det.text.split(/\r?\n/), truncated: det.truncated };
+        result = { matches: det.text.split(/\r?\n/), truncated: det.truncated || res.truncated === true };
         if (res.note) result.note = res.note;
         // #1015: grep bound to the committed tree at `sourceRevision` returns
         // matches that exist at that revision; without a SHA, the matches came
@@ -1419,14 +1445,17 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
           throw new Error("Refusing response with base64-encoded content payload");
         }
         let text = "";
+        let responseTruncated = false;
         if (data !== null && typeof data === "object") {
           // The module invariant: every result passes secret redaction + a
           // byte cap before it reaches the conversation (#1210 review). The
           // forge payload is untrusted data — mask the FULL text first so a
           // credential straddling the cap is masked whole (#926 order).
-          text = bounded(pyCompactJson(data));
+          const body = maskAndTruncate(pyCompactJson(data), cap);
+          text = body.text;
+          responseTruncated = body.truncated;
         }
-        result = { response: text };
+        result = { response: text, truncated: responseTruncated };
         break;
       }
       case "web_fetch": {
@@ -1434,7 +1463,12 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!url) throw new Error("Missing 'url' argument");
         const res = await webFetch(url, ctx);
         if (res.error) throw new Error(res.error);
-        result = { content: bounded(res.content) };
+        const fetched = maskAndTruncate(res.content, cap);
+        // Completeness ORs every actual clip stage: webFetch's fixed
+        // codepoint slice of the fetched body plus this wrapper byte cap
+        // (#1657 round 10 — fetched-and-discarded bytes must not read as
+        // a complete acquisition receipt).
+        result = { content: fetched.text, truncated: res.truncated === true || fetched.truncated };
         break;
       }
       case "web_search": {
@@ -1442,7 +1476,8 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!query) throw new Error("Missing 'query' argument");
         const res = await webSearch(query, ctx);
         if (res.error) throw new Error(res.error);
-        result = { results: bounded(pyCompactJson(res.results)) };
+        const listed = maskAndTruncate(pyCompactJson(res.results), cap);
+        result = { results: listed.text, truncated: listed.truncated };
         break;
       }
       case "run_command": {
@@ -1450,9 +1485,12 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!command) throw new Error("Missing 'command' argument");
         const res = await runCommand(command, ctx);
         if (res.error) throw new Error(res.error);
+        const out = maskAndTruncate(res.stdout, cap);
+        const err = maskAndTruncate(res.stderr, cap);
         result = {
-          stdout: bounded(res.stdout),
-          stderr: bounded(res.stderr),
+          stdout: out.text,
+          stderr: err.text,
+          truncated: res.truncated === true || out.truncated || err.truncated,
           exit_code: res.exit_code,
           command: res.command,
         };

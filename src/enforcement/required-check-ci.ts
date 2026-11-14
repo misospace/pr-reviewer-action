@@ -38,6 +38,7 @@
  */
 import type { RequiredCheckRow } from "./required-checks.js";
 import type { ReviewObligation } from "./review-obligations.js";
+import type { RowEvidenceState } from "./evidence-receipts.js";
 
 export interface CiEvidenceCheck {
   name: string;
@@ -380,11 +381,22 @@ export function reconcileObligationsWithCiEvidence(
     if (obligation.source !== "must_check" && obligation.source !== "trusted_base_guidance") return obligation;
     const discharge = ciDischargeForCheckText(obligation.text, evidence, reviewedHeadSha);
     if (obligation.status === "unresolved" && discharge.outcome === "satisfied" && discharge.check !== null && evidence !== null) {
+      // #1657: the CI discharge is itself receipt-backed provenance — stamp
+      // the row's evidence state so the obligation artifact and the ledger's
+      // CI receipts tell one story (the id scheme matches the ledger's
+      // `ci:<check name>` receipts).
+      const ciEvidenceState: RowEvidenceState = {
+        rowClass: obligation.rowClass ?? "objective",
+        gate: "ci-evidence",
+        state: "receipt-backed",
+        receipts: [`ci:${discharge.check.name.slice(0, 100)}`],
+      };
       return {
         ...obligation,
         status: "satisfied" as const,
         cause: null,
         resolvedBy: { kind: "ci-evidence" as const, check: discharge.check.name, headSha: evidence.headSha },
+        ...(obligation.source === "must_check" ? { evidence: ciEvidenceState } : {}),
       };
     }
     if (obligation.status === "satisfied" && obligation.cause === null && discharge.outcome === "contradicted") {

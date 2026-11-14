@@ -12,6 +12,7 @@
  * persisted v2-identical snake_case `classification.json` schema. */
 
 import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
+import type { DependencyScopeEntry, DependencyScopeResult } from "../enforcement/evidence-receipts.js";
 
 /** The authoritative pr_kind enumeration (order = documentation order). */
 export const PR_KINDS: readonly string[] = [
@@ -2326,6 +2327,11 @@ export interface PRClassification {
   changedFilesSummary: string[];
   linkedIssueLabels: string[];
   mustCheck: string[];
+  /** #1657 (review): the producer's trusted evidence tags for the must_check
+   * rows (see `MUST_CHECK_EVIDENCE_TAGS`) — row class is this metadata, never
+   * inferred from wording downstream. Rows without a tag are absent here and
+   * stay `legacy` (gating) at every consumer. */
+  mustCheckEvidence: MustCheckEvidenceTag[];
   /** #633: true when a selection-relevant metadata source (GitHub
    * linked-issue labels, configured Linear priority/labels) was EXPECTED but
    * could not be determined — missing signals must not be read as absent
@@ -2405,6 +2411,15 @@ export function classificationToArtifact(classification: PRClassification): Reco
     changed_files_summary: classification.changedFilesSummary,
     linked_issue_labels: classification.linkedIssueLabels,
     must_check: classification.mustCheck,
+    // #1657 (review): trusted per-row evidence tags — additive; a pre-#1657
+    // consumer ignores the field, and a row missing from it stays `legacy`
+    // (gating) at every fold.
+    // #1657 (review): trusted per-row evidence tags — additive; a pre-#1657
+    // consumer ignores the field, and a row missing from it stays `legacy`
+    // (gating) at every fold. Serialized strictly to the artifact shape
+    // (the producer-internal `takes_dependency_scope` marker never rides
+    // the artifact — the strict tag parser would drop such a row).
+    must_check_evidence: mustCheckEvidenceTagsToArtifact(classification.mustCheckEvidence),
     linked_metadata_uncertain: classification.linkedMetadataUncertain,
     linked_metadata_uncertainty: classification.linkedMetadataUncertainty,
     path_handling_provenance: {
@@ -3976,6 +3991,472 @@ const PLATFORM_EVIDENCE_CHECKS: readonly string[] = [
 // issue thread: the spec names no dedicated family for action_update).
 const ACTION_EVIDENCE_CHECKS = DEPENDENCY_EVIDENCE_CHECKS;
 
+// #1657 (review): TRUSTED EVIDENCE-CLASS TAGS — the producer declares, next
+// to the rows it emits, whether a check is an attention signal, an
+// explicitly-objective mechanical gate (with its gate kind and acquisition
+// obligations), or an ordinary semantic review question. Row class is THIS
+// metadata, never inferred from the row's wording downstream: an untagged
+// row is `legacy` and keeps pre-#1657 gating semantics, so a newly added
+// sentence without a tag fails safe (gating), and a dynamic/hand-written
+// check can never become non-gating because its text happens to look like
+// a review prompt. Keys are the exact static sentences above.
+type MustCheckEvidenceTag = {
+  text: string;
+  row_class: "attention" | "objective" | "review-prompt";
+  gate?: "ci-evidence" | "dependency-evidence" | "source-identity";
+  obligations?: ("provenance" | "release_delta" | "security_advisory")[];
+  /** #1657 (review round 2): the npm-dependency rows whose trusted scope
+   * comes from the producer's parse of the PR's own changed dependency
+   * surfaces. Image/chart/platform rows carry NO scope source yet — they
+   * fail closed (never kind-only credit) until a reliable parse exists. */
+  takes_dependency_scope?: boolean;
+  dependency_scope?: DependencyScopeEntry[];
+};
+
+const REVIEW_PROMPT_TAG: MustCheckEvidenceTag["row_class"] = "review-prompt";
+
+const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> = Object.assign(
+  Object.fromEntries([
+    // Attention/routing rows: attention signals, not propositions.
+    ["treat as critical — verify all changes thoroughly", { text: "treat as critical — verify all changes thoroughly", row_class: "attention" }],
+    ["treat as high priority — verify correctness carefully", { text: "treat as high priority — verify correctness carefully", row_class: "attention" }],
+  ] as Array<[string, MustCheckEvidenceTag]>),
+  // The upstream-evidence families: explicitly-objective acquisition gates,
+  // one row per obligation kind (positional — the family arrays are const).
+  Object.fromEntries(
+    [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS, DEPENDENCY_EVIDENCE_CHECKS, PLATFORM_EVIDENCE_CHECKS].flatMap(
+      (family) => {
+        // #1657 (review round 2): ONLY the npm-dependency family carries a
+        // reliable producer scope parse today — image/chart/platform rows
+        // fail closed (no scope → no kind-only credit) until a reliable
+        // parse exists for their surfaces.
+        const takesScope = family === DEPENDENCY_EVIDENCE_CHECKS;
+        return ([
+          [family[0], { text: family[0], row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"] }],
+          [family[1], { text: family[1], row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"] }],
+          [family[2], { text: family[2], row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"] }],
+        ] as Array<[string, MustCheckEvidenceTag]>).map(([text, tag]) => [
+          text,
+          takesScope ? { ...tag, takes_dependency_scope: true } : tag,
+        ]);
+      },
+    ),
+  ),
+  Object.fromEntries([
+    // The security-sensitive flag row names two acquisition kinds, and its
+    // trusted scope is the same npm-dependency parse.
+    ["verify the update provenance and any referenced security advisory",
+      { text: "verify the update provenance and any referenced security advisory", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance", "security_advisory"], takes_dependency_scope: true }],
+    // The #1595 lockfile-refresh aggregate advisory row: its trusted scope
+    // is the producer's parse of the PR's own changed dependency surfaces.
+    ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+      { text: "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], takes_dependency_scope: true }],
+    // Objective CI ask: the test-run requirement settles from exact-head CI.
+    ["run full test suite after upgrade", { text: "run full test suite after upgrade", row_class: "objective", gate: "ci-evidence" }],
+  ] as Array<[string, MustCheckEvidenceTag]>),
+  // Every remaining static sentence is an ordinary semantic review question:
+  // tagged review-prompt by the producer (never left to a downstream guess).
+  Object.fromEntries(
+    [
+      "verify no functional changes beyond lockfile hashes",
+      "verify only image digests changed; repository and tag unchanged",
+      "verify only image tags/digests changed; repository unchanged",
+      "verify only chart/version values changed",
+      "check for breaking API changes in updated dependencies",
+      "validate manifest against target cluster version",
+      "check for resource quota / limit changes",
+      "review auth flow for regression",
+      "verify session token handling is correct",
+      "verify route access controls are in place",
+      "check for unintended public endpoints",
+      "verify file path sanitization",
+      "check for directory traversal vulnerabilities",
+      "review for path traversal vulnerabilities",
+      "test with edge-case paths (null bytes, symlinks)",
+      "verify secrets are not logged or exposed in diffs",
+      "check secret rotation impact",
+      "review migration for data loss risk",
+      "test migration on a copy of production schema",
+      "explicitly address the linked security issue",
+      "verify audit findings are addressed",
+    ].map((text) => [text, { text, row_class: REVIEW_PROMPT_TAG }] as [string, MustCheckEvidenceTag]),
+  ),
+) as Readonly<Record<string, MustCheckEvidenceTag>>;
+
+// #1657 (review round 3): bounded caps for the trusted dependency-scope
+// parse. The parse reads the PR's own changed dependency surfaces — never
+// checklist or reviewer prose. Every cap FAILS THE SCOPE CLOSED
+// (unavailable): a truncated scan or a partial entry set is never trusted
+// as complete.
+const DEPENDENCY_SCOPE_MAX_LINES = 4000;
+const DEPENDENCY_SCOPE_MAX_ENTRIES = 20;
+const DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS = 16;
+const DEPENDENCY_SCOPE_MAX_LINE_VERSIONS = 8;
+const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
+/** Exact version tokens only — the same x.y.z(+-suffix) shape the evidence
+ * seam's version-boundary matcher treats as a version identity, so a
+ * recorded version is checkable against receipts and a partial numeric run
+ * never stands in for one. */
+const DEPENDENCY_SCOPE_VERSION_TOKEN_RE = /\b\d+(?:\.\d+){2,}(?:[-+][0-9A-Za-z.-]+)?\b/g;
+/** The same shape anchored for EXACT whole-value validation — a lockfile
+ * `"version"` field value must be exactly one version token, never a range
+ * or a value merely containing one. */
+const DEPENDENCY_SCOPE_EXACT_VERSION_RE = /^\d+(?:\.\d+){2,}(?:[-+][0-9A-Za-z.-]+)?$/;
+/** #1657 (review round 3): trusted scope comes ONLY from producer-
+ * recognized dependency surfaces — an npm lockfile, an npm manifest, or a
+ * Helm chart manifest. Dependency-shaped text in any other changed file
+ * (source, docs, tests) never enters trusted scope, whatever it looks
+ * like. */
+const NPM_LOCKFILE_SHAPE_RE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json)$/;
+const NPM_MANIFEST_SHAPE_RE = /(^|\/)package\.json$/;
+const CHART_MANIFEST_SHAPE_RE = /(^|\/)Chart\.yaml$/;
+/** Dependency surfaces this parser does NOT read. When one of them changes,
+ * the complete changed-dependency identity set is not provable (an
+ * ecosystem this runtime cannot scope) — the scope fails closed rather
+ * than pretending an npm-only view is the whole update. */
+const UNPARSED_DEPENDENCY_SURFACE_RES: readonly RegExp[] = [
+  /(^|\/)(yarn\.lock|pnpm-lock\.yaml|composer\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|mix\.lock)$/,
+  /(^|\/)(go\.mod|Cargo\.toml|composer\.json|Pipfile|pyproject\.toml|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?)$/,
+  /(^|\/)requirements[^/]*\.txt$/,
+];
+const LOCKFILE_BLOCK_KEY_CAPTURE_RE = /"(node_modules\/[^"]+)"\s*:\s*\{/;
+const NPM_SECTION_OPEN_RE = /^\s*"(dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/;
+const NPM_SECTION_PAIR_RE = /^\s*"([^"]+)"\s*:\s*"([^"]*)"\s*,?\s*$/;
+const NPM_BLOCK_VERSION_LINE_RE = /^\s*"version"\s*:\s*"([^"]*)"/;
+const NPM_SECTION_CLOSE_RE = /^\s*\}\s*,?\s*$/;
+const NPM_STRUCTURAL_LINE_RE = /^[{}[\],]+$/;
+/** The npm lockfile root object's OWN keys — changed inside the attributed
+ * root (brace depth exactly 1), these are provably not package-entry
+ * content and stay non-scope metadata. Package-entry content comes in every
+ * JSON value shape (string, boolean, number, null, object, array), so
+ * string-valued pairs alone never bound what could belong to a package. */
+const NPM_ROOT_METADATA_KEYS: ReadonlySet<string> = new Set(["name", "version", "lockfileVersion", "requires", "packages"]);
+const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
+const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][A-Za-z0-9._+-]*)\s*$/;
+
+/**
+ * #1657 (review rounds 3+8): the TRUSTED dependency update identity scope —
+ * the COMPLETE set of dependency updates this diff actually changes,
+ * parsed only from producer-recognized dependency surfaces (npm lockfile
+ * package blocks, npm manifest dependency sections, Helm chart
+ * manifests). Each entry names the dependency exactly (lowercased,
+ * `scope/pkg` normalized) and carries the exact version tokens from the
+ * CHANGED lines that introduced it — the trustworthy old→new identity
+ * where the diff shape carries one. A package enters scope only when THIS
+ * diff changes a line attributable to that package (its own block header,
+ * a version line inside its block, or its manifest dependency pair);
+ * unchanged hunk-context neighbors never enter scope. Identity is NEVER
+ * derived from checklist or reviewer prose.
+ *
+ * #1657 (review round 8): attribution is HUNK-LOCAL. Every `@@` hunk header
+ * resets the lockfile brace/package state, the manifest dependency-section
+ * state, and the chart identity: context lines INSIDE the hunk may
+ * re-establish attribution, but a previous hunk's block header, section,
+ * or chart identity never carries into this one. A changed
+ * dependency-shaped line this hunk cannot confidently attribute fails the
+ * scope CLOSED — never a silent omission from an otherwise-available scope.
+ * Version identity is EXACT: a lockfile version comes only from the
+ * package block's actual `"version"` field (validated as one exact version
+ * token — never from relation values, ranges, resolved URLs, engines or
+ * integrity hashes); a manifest version comes from the dependency pair's
+ * own value; a chart version from the `version`/`appVersion` field value.
+ *
+ * #1657 (review round 9): a changed field line in an npm lockfile with NO
+ * package identity established in this hunk fails the WHOLE scope closed —
+ * package-entry content comes in EVERY JSON value shape (boolean, number,
+ * null, object, array), not only string pairs, so one unattributable
+ * mid-package line can never yield a partial scope beside another hunk's
+ * attributable update. The only changed lines that stay non-scope metadata
+ * while unattributed are structural punctuation and the lockfile ROOT
+ * object's own keys (lockfileVersion, name, version, requires, packages)
+ * changed inside the attributed root at brace depth exactly 1.
+ *
+ * `{ available: false }` is the fail-closed outcome: the producer could
+ * not establish the COMPLETE trustworthy identity set — a recognized
+ * dependency surface carried changed lines this parser cannot attribute
+ * exactly (unrecognized shape, hostile identity, malformed version, state
+ * unresolvable inside the hunk), an entry/version cap overflowed, or the
+ * scan budget ended mid-diff. The objective dependency rows then stay
+ * unresolved — never kind-only credit, never a partial-scope certificate.
+ * An available-but-empty scope means no dependency change could be
+ * attributed at all; the rows fail closed the same way at the receipt seam.
+ */
+export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
+  const entries = new Map<string, Set<string>>();
+  let scopeComplete = true;
+  let lines = 0;
+  let currentFile = "";
+  // Per-file attribution state (reset at each diff file header AND at every
+  // `@@` hunk header): the npm JSON brace depth, the `node_modules/<name>`
+  // package block a line belongs to, the npm dependency-section nesting
+  // depth, and the Chart.yaml identity a changed line belongs to. Context
+  // lines KEEP the attribution state (they anchor changed lines to their
+  // package within this hunk) but NEVER create scope entries themselves.
+  let braceDepth = 0;
+  let currentBlockSlug: string | null = null;
+  let npmSectionDepth = 0;
+  let chartSlug: string | null = null;
+  const resetAttribution = (): void => {
+    braceDepth = 0;
+    currentBlockSlug = null;
+    npmSectionDepth = 0;
+    chartSlug = null;
+  };
+  const normalizeSlug = (rawName: string): string =>
+    rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
+  const usableSlug = (name: string): boolean =>
+    name !== "" && name.length <= 214 && !name.includes("..") && !name.startsWith(".") && !name.startsWith("-")
+    && DEPENDENCY_SCOPE_SLUG_RE.test(name);
+  const recordVersion = (slug: string, version: string): void => {
+    const versions = entries.get(slug);
+    if (versions === undefined) return;
+    if (!versions.has(version)) {
+      if (versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) { scopeComplete = false; return; }
+      versions.add(version);
+    }
+  };
+  // Version tokens are extracted ONLY from an exact field VALUE this parser
+  // chose deliberately (a manifest dependency pair value, a chart version
+  // field value) — never from arbitrary line content.
+  const recordVersions = (slug: string, value: string): void => {
+    if (!entries.has(slug)) return;
+    let taken = 0;
+    for (const match of value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
+      if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS || entries.get(slug)!.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
+        scopeComplete = false;
+        return;
+      }
+      recordVersion(slug, match[0].toLowerCase());
+    }
+  };
+  // A lockfile package block's `"version"` field: the exact version token,
+  // or a fail-closed malformed version. Any other changed line inside the
+  // block proves the package's entry changed without a version identity.
+  const lockfileVersionFieldValue = (content: string): string | null => {
+    const field = NPM_BLOCK_VERSION_LINE_RE.exec(content);
+    if (field === null) return null;
+    const value = (field[1] ?? "").trim().toLowerCase();
+    if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(value)) { scopeComplete = false; return null; }
+    return value;
+  };
+  const recordChangedEntry = (rawName: string, versionSource: string | null): void => {
+    const name = normalizeSlug(rawName);
+    if (!usableSlug(name)) { scopeComplete = false; return; }
+    if (!entries.has(name)) {
+      if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
+      entries.set(name, new Set<string>());
+    }
+    if (versionSource !== null) recordVersions(name, versionSource);
+  };
+  // A changed pair-shaped manifest line outside any dependency section THIS
+  // hunk established carries dependency identity this parser cannot
+  // attribute, and fails the scope closed instead of being omitted.
+  const npmDependencyShapedPair = (content: string): boolean => NPM_SECTION_PAIR_RE.test(content);
+  // #1657 (review round 9): a changed line in an npm lockfile this hunk
+  // cannot attribute to a package block. Package-block content is any field
+  // line (every JSON value shape) or array element; the only content
+  // confidently NOT package identity is structural punctuation and the
+  // root object's own metadata keys changed inside the attributed root at
+  // depth exactly 1 (at any deeper point the enclosing object is unknown —
+  // an unattributed package block is equally possible). Conservative: a
+  // shape this rule cannot place fails the WHOLE scope closed, never a
+  // silent omission from an otherwise-available scope.
+  const lockfileContentUnattributable = (content: string, depthBeforeLine: number): boolean => {
+    if (NPM_STRUCTURAL_LINE_RE.test(content)) return false;
+    const field = /^\s*"([^"]+)"\s*:/.exec(content);
+    if (field === null) return content.includes('"');
+    return !(depthBeforeLine === 1 && NPM_ROOT_METADATA_KEYS.has(field[1] ?? ""));
+  };
+  for (const line of fullDiffText.split("\n")) {
+    if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
+    const fileHeader = /^diff --git a\/(\S+)/.exec(line);
+    if (fileHeader !== null) {
+      currentFile = fileHeader[1] ?? "";
+      resetAttribution();
+      // A changed dependency surface this parser does not read breaks the
+      // completeness of the identity set — fail closed, never an npm-only
+      // approximation of a mixed-ecosystem update.
+      if (UNPARSED_DEPENDENCY_SURFACE_RES.some((pattern) => pattern.test(currentFile))) scopeComplete = false;
+      continue;
+    }
+    // Trusted scope comes ONLY from recognized dependency surfaces.
+    const inLockfile = NPM_LOCKFILE_SHAPE_RE.test(currentFile);
+    const inManifest = NPM_MANIFEST_SHAPE_RE.test(currentFile);
+    const inChartYaml = CHART_MANIFEST_SHAPE_RE.test(currentFile);
+    if (!inLockfile && !inManifest && !inChartYaml) continue;
+    if (line.startsWith("index ")) continue;
+    if (line.startsWith("@@")) {
+      // #1657 (review round 8): hunk-local attribution. A previous hunk's
+      // block header, dependency section, or chart identity proves nothing
+      // about the lines in THIS hunk — reset, and let this hunk's own
+      // context re-establish what it shows.
+      resetAttribution();
+      continue;
+    }
+    const sign = line.startsWith("-") && !line.startsWith("---") ? "-"
+      : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
+    const content = line.slice(sign === "" ? 0 : 1).trim();
+    if (sign === "") {
+      // Context anchors the attribution state; it is never itself a
+      // change, so it never creates or extends a scope entry.
+      if (inLockfile) {
+        for (const ch of content) {
+          if (ch === "{") braceDepth += 1;
+          else if (ch === "}") braceDepth -= 1;
+        }
+        if (braceDepth <= 0) {
+          braceDepth = 0;
+          currentBlockSlug = null;
+        } else {
+          const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
+          if (block !== null) {
+            const name = normalizeSlug(block[1] ?? "");
+            currentBlockSlug = usableSlug(name) ? name : null;
+          }
+        }
+      } else if (inManifest) {
+        // The dependency section's structural lines anchor the pair state
+        // (context or changed); only the pairs themselves must change.
+        if (NPM_SECTION_OPEN_RE.test(content)) npmSectionDepth = 1;
+        else if (NPM_SECTION_CLOSE_RE.test(content)) npmSectionDepth = 0;
+      } else {
+        // The chart's own unchanged identity line anchors this hunk's
+        // version lines to the chart — without entering the scope itself.
+        const contextName = CHART_NAME_LINE_RE.exec(content);
+        if (contextName !== null) {
+          const name = normalizeSlug(contextName[1] ?? "");
+          chartSlug = usableSlug(name) ? name : null;
+        }
+      }
+      continue;
+    }
+    if (inLockfile) {
+      // The package's own block header changed: the dependency enters
+      // scope (an added or removed block) and anchors the lines after it.
+      const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
+      if (block !== null) {
+        recordChangedEntry(block[1] ?? "", null);
+        const name = normalizeSlug(block[1] ?? "");
+        currentBlockSlug = usableSlug(name) ? name : null;
+        for (const ch of content) { if (ch === "{") braceDepth += 1; }
+        continue;
+      }
+      if (braceDepth > 0 && currentBlockSlug !== null) {
+        // A changed line inside the package's own attributed block proves
+        // the package's entry changed (a version edit or a re-resolution).
+        // Its version identity comes ONLY from the actual `"version"`
+        // field value — never from relation values, resolved URLs, engines
+        // or integrity hashes that merely contain version-shaped text.
+        if (!NPM_STRUCTURAL_LINE_RE.test(content)) {
+          recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content));
+        }
+      } else if (lockfileContentUnattributable(content, braceDepth)) {
+        // #1657 (review round 9): a changed field line this hunk cannot
+        // attribute to a package block (hunk opens mid-package without its
+        // header, or a hostile/unrecognized block key) COULD be package
+        // entry content in any value shape. The changed-dependency set is
+        // not provably complete — fail the WHOLE scope closed, never a
+        // partial scope beside another hunk's attributable update.
+        scopeComplete = false;
+      }
+      // The only changed lines outside package attribution that stay
+      // non-scope metadata: structural punctuation and root object's own
+      // keys inside the attributed root (see lockfileContentUnattributable).
+      for (const ch of content) {
+        if (ch === "{") braceDepth += 1;
+        else if (ch === "}") braceDepth -= 1;
+      }
+      if (braceDepth <= 0) { braceDepth = 0; currentBlockSlug = null; }
+      continue;
+    }
+    if (inManifest) {
+      if (NPM_SECTION_OPEN_RE.test(content)) { npmSectionDepth = 1; continue; }
+      if (npmSectionDepth > 0) {
+        if (NPM_SECTION_CLOSE_RE.test(content)) { npmSectionDepth = 0; continue; }
+        const pair = NPM_SECTION_PAIR_RE.exec(content);
+        if (pair !== null) recordChangedEntry(pair[1] ?? "", pair[2] ?? "");
+        else scopeComplete = false;
+      } else if (npmDependencyShapedPair(content)) {
+        // A changed dependency pair outside any dependency section THIS hunk
+        // established (a section opened in an earlier hunk never carries
+        // over): unattributable identity — fail closed, never an omission.
+        scopeComplete = false;
+      }
+      continue;
+    }
+    // Helm chart manifest: the chart's own identity on a changed line.
+    const chartName = CHART_NAME_LINE_RE.exec(content);
+    if (chartName !== null) {
+      recordChangedEntry(chartName[1] ?? "", null);
+      const name = normalizeSlug(chartName[1] ?? "");
+      chartSlug = usableSlug(name) ? name : null;
+      continue;
+    }
+    const chartVersion = CHART_IDENTITY_VERSION_LINE_RE.exec(content);
+    if (chartVersion !== null) {
+      if (chartSlug === null) {
+        // A changed chart version with no chart identity established in THIS
+        // hunk: the version identity is unattributable — fail closed.
+        scopeComplete = false;
+        continue;
+      }
+      recordChangedEntry(chartSlug, chartVersion[1] ?? "");
+    }
+  }
+  if (!scopeComplete) return { available: false };
+  return {
+    available: true,
+    entries: [...entries].map(([slug, versions]) => ({ slug, versions: [...versions] })),
+  };
+}
+
+/** The trusted evidence tags for the emitted must_check rows, in emission
+ * order. Every static sentence above is tabled; an untabled row (a future
+ * sentence someone added without a tag) contributes NO tag — it stays
+ * `legacy` downstream, which fails safe (gating), never non-gating.
+ *
+ * #1657 (review round 3): `dependencyScope` is the producer's parse of the
+ * PR's own changed dependency surfaces — the COMPLETE trustworthy entry
+ * set, or unavailable. It is attached ONLY to the rows that take a scope
+ * (`takes_dependency_scope`) and ONLY when the parse is available and
+ * non-empty; an unavailable/empty parse leaves the rows scope-less, and
+ * they FAIL CLOSED at the receipt seam (never kind-only credit, never a
+ * partial-scope certificate). */
+export function mustCheckEvidenceTags(
+  checks: readonly string[],
+  dependencyScope: DependencyScopeResult = { available: true, entries: [] },
+): MustCheckEvidenceTag[] {
+  const scopeEntries = dependencyScope.available ? dependencyScope.entries : [];
+  const tags: MustCheckEvidenceTag[] = [];
+  for (const text of checks) {
+    const tag = MUST_CHECK_EVIDENCE_TAGS[text];
+    if (tag === undefined) continue;
+    tags.push(
+      tag.takes_dependency_scope === true && scopeEntries.length > 0
+        ? { ...tag, dependency_scope: scopeEntries.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+        : tag,
+    );
+  }
+  return tags;
+}
+
+/** #1657 (review round 3): the PERSISTED tag rows — strictly the artifact
+ * shape (`text`/`row_class`/`gate`/`obligations`/`dependency_scope`). The
+ * producer-internal `takes_dependency_scope` marker never rides the
+ * artifact: the strict tag parser refuses rows with unknown keys, so
+ * emitting it would silently drop the row to `legacy` at every fold. */
+export function mustCheckEvidenceTagsToArtifact(tags: readonly MustCheckEvidenceTag[]): Array<Record<string, unknown>> {
+  return tags.map((tag) => ({
+    text: tag.text,
+    row_class: tag.row_class,
+    ...(tag.gate !== undefined ? { gate: tag.gate } : {}),
+    ...(tag.obligations !== undefined && tag.obligations.length > 0 ? { obligations: [...tag.obligations] } : {}),
+    ...(tag.dependency_scope !== undefined && tag.dependency_scope.length > 0
+      ? { dependency_scope: tag.dependency_scope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+      : {}),
+  }));
+}
+
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
   image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
@@ -4260,6 +4741,12 @@ export function classifyPr(input: ClassifyInput): PRClassification {
       : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles, lockfileOnlyRefresh);
+  // #1657 (review round 2): the trusted dependency identity scope for the
+  // npm-dependency evidence rows — the producer's parse of the PR's own
+  // changed dependency surfaces. Empty (or a family without a reliable
+  // parse) fails closed at the receipt seam.
+  const dependencyScope = parseDependencyScope(fullDiffText ?? diffText);
+  const mustCheckEvidence = mustCheckEvidenceTags(mustCheck, dependencyScope);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);
@@ -4284,6 +4771,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     changedFilesSummary,
     linkedIssueLabels,
     mustCheck,
+    mustCheckEvidence,
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,

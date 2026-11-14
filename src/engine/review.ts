@@ -108,7 +108,7 @@ import { computeFinalDisposition, reviewResultFromDisposition, type FinalDisposi
 import { buildDispositionEvidence } from "../disposition/engine-evidence.js";
 import { toolCapabilityFailure, toolMinSuccessfulFloorUnmet } from "../enforcement/enforce.js";
 import { isProvenHeadSha } from "../outcomes/schema.js";
-import type { PartialCoverage } from "../tools/coverage.js";
+import { loadChangedFilePaths, type PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
@@ -118,7 +118,7 @@ import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obl
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
-import { executedCallEvidenceIndex, type ExecutedCallEvidenceIndex } from "../enforcement/executed-calls.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -564,13 +564,17 @@ function resolveReviewObligations(
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceIndex } {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; ledger: EvidenceLedger } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
     ? candidates.obligations as unknown[]
     : []).filter((row) => includeMustCheck || (row as { source?: unknown } | null)?.source !== "must_check");
-  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : []);
+  // #1657 (review): the producer's trusted evidence tags flow from the
+  // classification artifact into the obligation rows — row class is this
+  // metadata, never inferred from wording. Rows without a tag are `legacy`.
+  const mustCheckEvidenceTags = checkEvidenceTagsFromArtifact(classification.must_check_evidence);
+  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : [], mustCheckEvidenceTags);
   // #1449: the derived rows join the contract before the fold. The feature
   // gate is the operator-only `derived-obligations` input — off means no
   // rows, no coverage claim, and byte-identical behavior.
@@ -642,15 +646,16 @@ function resolveReviewObligations(
   // (`ai-output.json`) and joins the fold's own disclosure — the drops are
   // unattributable by definition, so they are never per-row reasons.
   const dispositionReceipt = dispositionReceiptFromArtifact(review.required_check_disposition_receipt);
-  // #1627: the executed-call evidence index — derived STRICTLY from the
-  // enforcement harness artifact's `tool_calls` trace (the executed-call
-  // records the native loop already persists in execution order; the same
-  // surface `verdictHarnessFindingsBody` renders from). The gate is INERT
-  // only when the artifact is absent (fresh standard-call and fork paths)
-  // or carries no executed calls; a PRESENT-but-malformed trace REFUSES the
-  // index, which keeps the gate active with nothing citable (#1634 review).
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown } | null;
-  const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
+  // #1657: the evidence-receipt ledger — derived STRICTLY from the
+  // enforcement harness artifact's `tool_calls`/`tool_results` traces, the
+  // assembler-certified corpus-diff payloads, and the CI gate's head-bound
+  // evidence (the acquisitions the run itself recorded; the same surface
+  // `verdictHarnessFindingsBody` renders from). The gate is INERT only when
+  // the artifact is absent (fresh standard-call and fork paths); a
+  // PRESENT-but-malformed trace REFUSES the ledger, which keeps the gate
+  // active with nothing usable (#1634 review's fail-closed rule, carried
+  // over). No model prose, no tool result bodies: objective fields only.
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown } | null;
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
     for (const anchor of row.anchors ?? []) {
@@ -669,17 +674,40 @@ function resolveReviewObligations(
       if (normalized !== "") candidatePaths.push(normalized);
     }
   }
+  // Corpus-diff credit candidates: every changed file is eligible (a path
+  // with no chunk in the raw diff earns nothing, so widening the candidate
+  // set can never credit a file the corpus did not actually carry).
+  for (const path of loadChangedFilePaths((name) => ws.readText(name))) {
+    if (path !== "") candidatePaths.push(path);
+  }
+  const certifiedDiffPayloads = [
+    ws.readText(CORPUS_DIFF_SECTION_ARTIFACT),
+    ws.readText(CORPUS_DIFF_SECTION_SMART_ARTIFACT),
+    ws.readText(CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT),
+  ].filter((payload): payload is string => payload !== null && payload !== "");
+  const ledger = buildEvidenceLedger({
+    toolCalls: harness?.tool_calls,
+    toolResults: harness?.tool_results,
+    certifiedDiffPayloads,
+    rawDiff: ws.readText("pr.diff"),
+    candidatePaths,
+    ciEvidence,
+    reviewedHeadSha,
+  });
+  // #1577 (review fix): the risk discharge must be backed by the run's OWN
+  // evidence receipt — deterministic records, never model output. Two
+  // sources, both records the run already wrote: the harness result's
+  // executed-call log (a successful read of the path) and the
+  // assembler-certified corpus-diff payload (#921's byte-exact rule — the
+  // path's complete head diff rode the review corpus, so the actual changed
+  // lines were in the reviewer's context).
   const readPaths = riskEvidenceReadPaths({
     harness,
     rawDiff: ws.readText("pr.diff"),
-    certifiedDiffPayloads: [
-      ws.readText(CORPUS_DIFF_SECTION_ARTIFACT),
-      ws.readText(CORPUS_DIFF_SECTION_SMART_ARTIFACT),
-      ws.readText(CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT),
-    ].filter((payload): payload is string => payload !== null && payload !== ""),
+    certifiedDiffPayloads,
     candidatePaths,
   });
-  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths });
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, ledger, { readPaths });
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
@@ -721,10 +749,11 @@ function resolveReviewObligations(
     // #1627: the parser's drop receipt, re-recorded on the fold artifact
     // and in the log line (null when the parser reported nothing).
     dispositionReceipt,
-    // #1627: the executed-call evidence index the fold was given, so the
-    // #750 completeness fold (applied later, over the same artifact) can
-    // gate the very same satisfied answers — the two folds agree.
-    executedCalls,
+    // #1657: the evidence-receipt ledger the folds were given, so the #750
+    // completeness fold (applied later, over the same artifact) validates
+    // the very same satisfied answers against the very same receipts — the
+    // two folds agree.
+    ledger,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
@@ -860,7 +889,18 @@ function requiredEvidenceObligationState(
   obligations: readonly ReviewObligation[],
 ): RequiredEvidenceState | "" {
   if (!contractActive) return "";
-  const rows = obligations.filter((obligation) => obligation.source !== "derived");
+  // #1657: a must_check row the evidence layer classified as a REVIEW PROMPT
+  // (generic auth/path/security/scrutiny or absence ask) is not required
+  // evidence — its unresolved disposition is disclosed reason-coded but it
+  // never withholds the trusted approval on its own (a generic high-priority
+  // scrutiny row cannot independently poison an adequate review; a concrete
+  // objective gate or the reviewer's material unknown/finding is what
+  // affects the merge, and #1656 owns that disposition). Rows with no
+  // rowClass (pre-#1657 callers) keep today's semantics. Attention rows
+  // never reach the contract at all.
+  const rows = obligations.filter((obligation) =>
+    obligation.source !== "derived"
+    && !(obligation.source === "must_check" && obligation.rowClass === "review-prompt"));
   return rows.every((obligation) => obligation.status === "satisfied") ? "complete" : "unresolved";
 }
 
@@ -877,7 +917,13 @@ function persistRequiredEvidenceState(
   if (!contractActive) return;
   const rows = obligations
     .filter((obligation) => obligation.source !== "derived")
-    .map(({ id, source, text, status, cause }) => ({ id, source, text, status, cause }));
+    .map(({ id, source, text, status, cause, rowClass }) => ({
+      id, source, text, status, cause,
+      // #1657: the must_check evidence class rides the sentinel additively
+      // so the publish-side reader can see WHY a row is (or is not) part of
+      // the withhold set.
+      ...(rowClass !== undefined ? { row_class: rowClass } : {}),
+    }));
   ws.write("required-evidence-state.json", `${pyJsonDumps({
     version: 1,
     enabled: true,
@@ -2743,6 +2789,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     enabled: env.VALIDATE_REQUIRED_CHECKS ?? "auto",
     mode: env.REQUIRED_CHECK_VALIDATION_MODE ?? "warn",
     mustCheck: stringList(classificationArtifact.must_check),
+    // #1657 (review): the #750 fold resolves row classes from the same
+    // trusted producer tags the #1381 fold carries — never from prose.
+    mustCheckEvidence: checkEvidenceTagsFromArtifact(classificationArtifact.must_check_evidence),
     ciEvidence: ciGateEvidence,
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
@@ -2777,18 +2826,25 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     completenessBaseOptions.reviewedHeadSha,
     riskObligationsEnabled,
   );
-  // #1627: the #750 completeness fold gates the SAME satisfied answers with
-  // the SAME executed-call index the #1381 fold was given, so the two folds
-  // can never disagree on a cited satisfaction. When the gate is inert (no
-  // trace at all) the option is omitted and the fold is byte-identical; a
-  // REFUSED trace passes the active-but-uncitable index, failing every
-  // gated satisfaction closed on both folds.
+  // #1657: the #750 completeness fold validates the SAME satisfied answers
+  // against the SAME evidence ledger the #1381 fold was given, so the two
+  // folds can never disagree on an objective satisfaction. When the ledger
+  // is unavailable (no trace at all) the option is omitted and the fold is
+  // byte-identical; a REFUSED trace passes the active-but-unusable ledger,
+  // failing every objective satisfaction closed on both folds.
   const completenessOptions = {
     ...completenessBaseOptions,
-    ...(resolvedObligations.executedCalls.gate ? { executedCalls: resolvedObligations.executedCalls } : {}),
+    ...(resolvedObligations.ledger.state !== "unavailable" ? { ledger: resolvedObligations.ledger } : {}),
   };
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, resolvedObligations.dispositionReceipt, log);
+  // #1657: the bounded evidence-receipt ledger rides the run dir — the
+  // publish-side process (and the #1656 disposition layer) reads the same
+  // validated objective provenance the folds used, through the strict
+  // round-trip reader. Written whenever the contract resolution ran, so the
+  // `unavailable` state (no native-loop surface) is explicit, never inferred
+  // from a missing file.
+  ws.write("evidence-receipts.json", `${pyJsonDumps(evidenceLedgerToArtifact(resolvedObligations.ledger))}\n`);
   // #1449: the run's derived-obligation state — "" when the feature is off,
   // so a disabled run's coverage record and marker keep their pre-#1449
   // bytes exactly.
