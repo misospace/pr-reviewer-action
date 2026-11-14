@@ -2833,6 +2833,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // review event — reads from THIS object; nothing else decides the event,
   // and kind `approve` always means a certified APPROVE (the full APPROVE
   // floor lives inside the disposition, #1656 audit delta).
+  // #1658: the trace artifact's reason-coded summary is the disposition's
+  // consumption surface (null when the trace never ran or never applied).
+  const requirementTraceSummary = requirementTraceResult !== null && requirementTraceResult.applied
+    ? requirementTraceResult.trace.summary
+    : null;
   const dispositionBuild = buildDispositionEvidence({
     completenessChecks: Array.isArray(completenessResult?.result?.checks)
       ? (completenessResult!.result.checks as Array<{ check?: unknown; status?: unknown; reason?: unknown }>)
@@ -2855,10 +2860,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // The loop stopping early is disclosure, not a blanket veto (#1656
     // audit delta).
     partialCoverageStopReason: partialCoverage !== undefined ? partialCoverage.stop_reason : null,
-    // The trace's remaining incompleteness is proof-shape/coverage-repair
-    // territory — a compatibility diagnostic while #1658 is in flight
-    // (#1656 audit delta).
-    requirementTraceIncomplete: traceIncomplete,
+    // The trace settles by PROVENANCE (#1658): the artifact's summary
+    // classes feed the single disposition. The old flag can never carry
+    // them after the narrowing (`requirement_trace_incomplete` is
+    // confirmed-unmet-only), and the proven class already arrived via
+    // the mechanical refutation count above. An `unmet_claimed` row is
+    // NOT wired here at all: it blocks only through an ordinary grounded
+    // blocker/major finding (#1643's counter/report shape stays
+    // APPROVE-able — golden case9).
+    traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
     // The exact-head CI floor: the CI gate's already-paid conclusion — a
     // KNOWN failure can never certify an approval; a PENDING one withholds
     // only when the #1594 head-bound evidence contract proves CI materially

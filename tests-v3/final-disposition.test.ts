@@ -341,7 +341,7 @@ test("the engine evidence builder maps the exact-head CI floor per the audit del
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
   };
   // KNOWN failing: material, always.
@@ -370,7 +370,7 @@ const DISPOSITION_BASE = {
   toolFloorUnmet: false,
   noEvidenceReason: null as string | null,
   partialCoverageStopReason: null as string | null,
-  requirementTraceIncomplete: false,
+  traceUnresolvedMaterial: false,
   mechanicallyProvenUnmetRequirements: 0,
   ciConclusion: null as string | null,
   ciEvidenceContractActive: false,
@@ -459,17 +459,16 @@ test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; t
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
   };
   // #1656 audit round 2: the configured COUNT floor is the one engine-fed
-  // advisory signal. Unresolved required-check rows — call-ID allocation
-  // refusals included — and the trace's incompleteness stay TRANSITIONAL
-  // CONSERVATIVE material unknowns (#1634/#1488 safety contracts; #1657/
-  // #1658 have not landed), and there is no prose/wording matching
-  // anywhere.
+  // advisory signal. Unresolved required-check rows — receipt-refusal
+  // states included — stay conservative material unknowns (#1634/#1488
+  // safety contracts; #1657/#1658 settled their own classes below), and
+  // there is no prose/wording matching anywhere.
   const bookkeeping = buildDispositionEvidence({
     ...base,
     completenessChecks: [
@@ -477,7 +476,7 @@ test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; t
       { check: "verify schema migration rollback", status: "unresolved", reason: "uncited-satisfaction" },
       { check: "treat as high priority — verify correctness carefully", status: "unresolved", reason: "no-disposition" },
     ],
-    requirementTraceIncomplete: true,
+    traceUnresolvedMaterial: true,
     toolFloorUnmet: true,
   });
   const byCode = new Map(bookkeeping.evidence.map((entry) => [entry.code, entry.materiality]));
@@ -520,7 +519,7 @@ test("the engine evidence builder keeps capability failures material and confirm
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -975,7 +974,7 @@ test("pin: must_check `unmet` from the model, no grounded finding/objective refu
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -997,7 +996,7 @@ test("pin: trusted-base `unmet` from the model, no grounded finding/objective re
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1030,7 +1029,7 @@ test("pin: an explicit mechanical proven-unmet input still => REQUEST_CHANGES", 
     toolFloorUnmet: false,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 1,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1052,7 +1051,7 @@ test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane
     toolFloorUnmet: false,
     noEvidenceReason: "no-tool-calls",
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1072,7 +1071,7 @@ test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane
     toolFloorUnmet: true,
     noEvidenceReason: null,
     partialCoverageStopReason: null,
-    requirementTraceIncomplete: false,
+    traceUnresolvedMaterial: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1156,4 +1155,94 @@ test("the evidence vocabularies are closed and disjoint", () => {
   const advisory = new Set<string>(ADVISORY_DISPOSITION_CODES);
   for (const code of material) assert.equal(advisory.has(code), false);
   for (const code of advisory) assert.equal(material.has(code), false);
+});
+
+// ---------------------------------------------------------------------------
+// #1658: the requirement trace settles by provenance — the artifact's
+// reason-coded summary classes, not the old broad incompleteness flag.
+// ---------------------------------------------------------------------------
+
+test("#1658 trace summary classes settle the disposition with no second authority", () => {
+  const base = {
+    completenessChecks: [] as const,
+    obligations: [] as const,
+    findings: [] as const,
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  } as const;
+  // unresolved_material rows: a material unknown withholds approval
+  // (INCOMPLETE/COMMENT), never a proven violation.
+  const unresolved = buildDispositionEvidence({
+    ...base,
+    traceUnresolvedMaterial: true,
+  });
+  assert.deepEqual(unresolved.evidence.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
+  assert.deepEqual(unresolved.evidence.map((entry) => entry.materiality), ["material"]);
+  assert.equal(unresolved.provenUnmetRequirement, false, "an unresolved row never proves unmet");
+  const withheld = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: unresolved.provenUnmetRequirement,
+    verdictBearing: true, approvalScopeAllowed: true, evidence: unresolved.evidence,
+  });
+  assert.equal(withheld.kind, "incomplete");
+  assert.equal(withheld.nativeEvent, "COMMENT");
+  // A bare `unmet_claimed` row contributes NOTHING at this seam (#1643,
+  // golden case9: a counter/report-shaped gap claim with no grounded
+  // finding stays APPROVE-able — the trace must not re-enter the veto
+  // through a material unknown either). A substantiated claim blocks
+  // through the ordinary grounded finding (golden case10).
+  const claimed = buildDispositionEvidence({
+    ...base,
+    traceUnresolvedMaterial: false,
+  });
+  assert.deepEqual(claimed.evidence, [], "the seam never manufactures an unknown from a claim");
+  assert.equal(claimed.provenUnmetRequirement, false, "a claim never becomes proof through this seam");
+  const claimApproved = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true, evidence: claimed.evidence,
+  });
+  assert.equal(claimApproved.kind, "approve");
+  assert.equal(claimApproved.nativeEvent, "APPROVE");
+  const claimBlocked = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "request_changes", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: true,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true, evidence: claimed.evidence,
+  });
+  assert.equal(claimBlocked.kind, "request_changes", "the grounded finding — not the trace row — carries a substantiated claim");
+  // unresolved_advisory (the seam receives neither flag) contributes
+  // NOTHING: an environmental unknown can never veto approval.
+  const advisoryOnly = buildDispositionEvidence({
+    ...base,
+    traceUnresolvedMaterial: false,
+  });
+  assert.deepEqual(advisoryOnly.evidence, []);
+  assert.equal(advisoryOnly.provenUnmetRequirement, false);
+  // confirmed_unmet rows arrive ONLY as the mechanical refutation count
+  // (re-derived at head in the enforcement stage): that sets
+  // provenUnmetRequirement and must not also masquerade as an unresolved
+  // unknown — the summary flags stay false for a purely-refuted trace.
+  const refuted = buildDispositionEvidence({
+    ...base,
+    traceUnresolvedMaterial: false,
+    mechanicallyProvenUnmetRequirements: 1,
+  });
+  assert.deepEqual(refuted.evidence, []);
+  assert.equal(refuted.provenUnmetRequirement, true);
+  const blocked = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: refuted.provenUnmetRequirement,
+    verdictBearing: true, approvalScopeAllowed: true, evidence: refuted.evidence,
+  });
+  assert.equal(blocked.kind, "request_changes", "a deterministically refuted mandatory requirement is REQUEST_CHANGES territory");
+  assert.equal(blocked.nativeEvent, "REQUEST_CHANGES");
 });

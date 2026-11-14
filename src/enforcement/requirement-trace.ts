@@ -213,9 +213,12 @@ export const TRACE_MATERIALITY: readonly string[] = ["material", "advisory"];
  * Integration contract (#1656 — this module only EXPOSES the classes, it
  * never wires publication policy itself):
  * - `confirmed_unmet` → an objectively proven-unmet mandatory requirement
- *   (REQUEST_CHANGES territory);
- * - `unmet_claimed` → a material unknown, unless the reviewer backed it with
- *   an ordinary grounded blocker/major finding;
+ *   (REQUEST_CHANGES territory, through the mechanical refutation count);
+ * - `unmet_claimed` → NEVER an independent veto at the disposition seam:
+ *   it blocks only through an ordinary grounded blocker/major finding
+ *   (golden case10), and a bare claim must stay APPROVE-able (#1643,
+ *   golden case9) — the row's materiality is exposure information, not a
+ *   disposition instruction;
  * - `unresolved_material` → a material unknown / INCOMPLETE;
  * - `unresolved_advisory` → diagnostic only. */
 export interface RequirementTraceSummary {

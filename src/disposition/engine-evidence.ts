@@ -25,12 +25,16 @@
  *   only — a count must never define adequacy. No prose/wording matching
  *   exists anywhere in this module: lexical materiality inference is
  *   forbidden (#1656 audit round 2).
- * - TRANSITIONAL CONSERVATIVE (material, until #1657/#1658/#1659 replace
- *   them with principled settlement): the requirement trace's remaining
- *   incompleteness, unresolved required-check rows, and the #810
- *   loop-stopped-early record. #1656 must not raise native APPROVE merely
- *   because the old proof machinery could not settle them (#1656 audit
- *   round 2).
+ * - TRANSITIONAL CONSERVATIVE (material, until #1657/#1659 replace
+ *   them with principled settlement): unresolved required-check rows
+ *   and the #810 loop-stopped-early record. #1656 must not raise native
+ *   APPROVE merely because the old proof machinery could not settle
+ *   them (#1656 audit round 2). The requirement trace is NO LONGER
+ *   transitional — #1658 settled it by provenance: the artifact's
+ *   reason-coded summary classes feed this seam (material unresolved →
+ *   material unknown; environmental advisory → diagnostic; mechanical
+ *   refutation → the proven count; a bare claim → the ordinary
+ *   grounded-finding path).
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
@@ -56,11 +60,15 @@ export interface DispositionEvidenceParts {
    * CONSERVATIVE material unknown until #1657 settles it (#1656 audit
    * round 2). */
   partialCoverageStopReason: string | null;
-  /** The #874 requirement-trace incompleteness flag — a TRANSITIONAL
-   * CONSERVATIVE material unknown while #1658 is in flight; the trace's
-   * mechanically refuted rows escalate as synthesized blockers BEFORE
-   * this builder runs. */
-  requirementTraceIncomplete: boolean;
+  /** #1658 summary class: at least one unresolved requirement-trace row
+   * whose relevance class is MATERIAL (missing claim, invalid objective
+   * provenance, malformed/unusable semantic claim, or an unresolved
+   * mechanically decidable row on an in-scope mandatory requirement) — a
+   * material unknown that withholds approval (INCOMPLETE). Replaces the
+   * pre-#1658 TRANSITIONAL flag mapping: #1658 narrowed
+   * `requirement_trace_incomplete` to deterministic refutations only, so
+   * the artifact's summary classes, not the flag, settle these rows. */
+  traceUnresolvedMaterial: boolean;
   /** The harness's recorded zero-evidence degradation reason
    * (`native_loop_degraded` — the loop ran and the model issued no tool
    * calls), or null. A recorded zero-evidence degradation is MATERIAL in
@@ -219,15 +227,22 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   if (parts.partialCoverageStopReason !== null) {
     evidence.push(dispositionEvidence("investigation_unavailable", "deterministic", "material", parts.partialCoverageStopReason));
   }
-  // The requirement trace's remaining incompleteness is a TRANSITIONAL
-  // CONSERVATIVE material unknown (#1656 audit round 2): #1658 has not
-  // landed, so the disposition must not certify an approve while the trace
-  // could not settle its rows — the refuted rows already escalated as
-  // synthesized blockers before this builder runs. #1658 will replace this
-  // with provenance-based settlement (the seam's `proof_shape_mismatch`
-  // advisory code stands ready for trusted provenance).
-  if (parts.requirementTraceIncomplete) {
-    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace"));
+  // The requirement trace settles by PROVENANCE (#1658 replaced the
+  // TRANSITIONAL flag mapping): the artifact's reason-coded summary
+  // classes decide materiality — this module consumes the classes and
+  // never re-derives them. `confirmed_unmet` rows are NOT an unknown
+  // here: they are the mechanical current-head refutation counted above
+  // (`provenUnmetRequirement`). Material unresolved rows (missing
+  // claims, invalid objective provenance, malformed claims) withhold
+  // approval as a MATERIAL unknown. An `unmet_claimed` row NEVER withholds
+  // by itself: the reviewer's well-formed gap claim travels the ordinary
+  // grounded-finding path (a substantiated claim blocks through an open
+  // blocker/major finding — golden case10), and #1643's counter/report
+  // shape must stay APPROVE-able without a comparison-shaped predicate
+  // (golden case9). `unresolved_advisory` (environmental unknowns, #1062)
+  // stays a diagnostic on the artifact and can never veto approval.
+  if (parts.traceUnresolvedMaterial) {
+    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace:unresolved-material"));
   }
 
   // The exact-head CI floor (#1656 audit delta): a KNOWN failing conclusion
