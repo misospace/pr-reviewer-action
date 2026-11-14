@@ -2003,6 +2003,19 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     ["shell loop reads another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
     ["shell loop copies another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('_src="$_link"', '_src="$target"'))],
     ["statement between anchor and guard", "scripts/run.sh", [SH_SELF_LOCATION_LOOP[0] ?? "", '+_src="$1"', ...SH_SELF_LOCATION_LOOP.slice(1)]],
+    // The link is written into the anchor: the walk overwrites the path it
+    // started from, which no template covers.
+    [
+      "shell loop whose readlink overwrites the anchor",
+      "scripts/run.sh",
+      [
+        '+_src="${BASH_SOURCE[0]}"',
+        '+while [ -L "$_src" ]; do',
+        '+  _src="$(readlink "$_src")"',
+        '+  _src="$_src"',
+        "+done",
+      ],
+    ],
     ["second readlink on the line, shell", "scripts/run.sh", ['+readlink "$0"; readlink "$1"']],
     ["unbalanced outer quote", "scripts/run.sh", ['+SCRIPT="$(readlink -f "$0")']],
     ["second readlink on the line, python", "tools/tool.py", ["+x = os.readlink(__file__) or os.readlink(p)"]],
@@ -2014,21 +2027,9 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     // family (.sh, .zsh) and extensionless scripts still recover it.
     ["shell loop in a .zsh file", "scripts/run.zsh", SH_SELF_LOCATION_LOOP],
     ["os.lstat", "src/app.py", ["+os.lstat(path)"]],
+    // The canonical relative-link `case` wrapper moved to the #1653 no-fire
+    // table below; its counterexamples stay pinned there.
     // Declared limits: false positives that exist today and stay.
-    [
-      "relative-link wrapper loop",
-      "scripts/run.sh",
-      [
-        '+_src="${BASH_SOURCE[0]}"',
-        '+while [ -L "$_src" ]; do',
-        '+  _link="$(readlink "$_src")"',
-        '+  case "$_link" in',
-        '+    /*) _src="$_link" ;;',
-        '+    *) _src="$(dirname "$_src")/$_link" ;;',
-        "+  esac",
-        "+done",
-      ],
-    ],
     ["comment in an extensionless file", "bin/tool", ["+# follow readlink until the real file", ...SH_SELF_LOCATION_LOOP]],
     ["single-line compound", "scripts/run.sh", ['+[ -L "$0" ] && readlink "$0"']],
     ["braced ${0}", "scripts/run.sh", ['+readlink "${0}"']],
@@ -2036,6 +2037,392 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     ["readlink -e", "scripts/run.sh", ['+readlink -e "$0"']],
     ["CRLF line", "scripts/run.sh", ['+readlink "$0"\r']],
     ["suffix with a variable", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")/$1"']],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
+  }
+});
+
+// ── #1653: the relative-link `case` shape of the shell self-location loop ──
+
+const SH_RELATIVE_LINK_LOOP = [
+  '+_src="${BASH_SOURCE[0]}"',
+  '+while [ -L "$_src" ]; do',
+  '+  _link="$(readlink "$_src")"',
+  '+  case "$_link" in',
+  '+    /*) _src="$_link" ;;',
+  '+    *) _src="$(dirname "$_src")/$_link" ;;',
+  "+  esac",
+  "+done",
+];
+const SH_RELATIVE_LINK_LOOP_UNQUOTED = [
+  '+_src=${BASH_SOURCE[0]}',
+  '+while [ -L "$_src" ]; do',
+  '+  _link=$(readlink "$_src")',
+  '+  case "$_link" in',
+  "+    /*) _src=$_link ;;",
+  '+    *) _src=$(dirname "$_src")/$_link ;;',
+  "+  esac",
+  "+done",
+];
+/** The canonical loop with the line at `index` replaced by `line`. */
+function withLoopLine(lines: string[], index: number, line: string): string[] {
+  return lines.map((l, i) => (i === index ? line : l));
+}
+/** #1653 hop cap: the counter is initialized between the anchor and the
+ * guard, and the cap test and the counter increment are the loop's first two
+ * body lines. */
+const SH_RELATIVE_LINK_LOOP_HOP = [
+  '+_src="${BASH_SOURCE[0]}"',
+  "+_hops=0",
+  '+while [ -L "$_src" ]; do',
+  '+  [ "$_hops" -ge 40 ] && exit 1',
+  "+  _hops=$((_hops + 1))",
+  '+  _link="$(readlink "$_src")"',
+  '+  case "$_link" in',
+  '+    /*) _src="$_link" ;;',
+  '+    *) _src="$(dirname "$_src")/$_link" ;;',
+  "+  esac",
+  "+done",
+];
+
+test("#1653: relative-link self-location loop no longer fires symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The false positive from the issue.
+    ["canonical case variant", "scripts/run.sh", SH_RELATIVE_LINK_LOOP],
+    // The variants the basic loop already recognises apply to the case shape.
+    ["[[ -L ]] guard", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace('[ -L "$_src" ]', '[[ -L "$_src" ]]'))],
+    ["-h guard", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace("-L", "-h"))],
+    ["uppercase loop variables", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace(/_src/g, "SRC").replace(/_link/g, "LINK"))],
+    ["unquoted assignments", "scripts/run.sh", SH_RELATIVE_LINK_LOOP_UNQUOTED],
+    ['anchor "$0"', "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace("${BASH_SOURCE[0]}", "$0"))],
+    // Ordinary neighbours in the same file.
+    ["strict mode beside the loop", "scripts/run.sh", ["+set -euo pipefail", ...SH_RELATIVE_LINK_LOOP]],
+    // The extensionless bin/ wrapper.
+    ["extensionless wrapper", "bin/tool", SH_RELATIVE_LINK_LOOP],
+    // Diff shapes.
+    ["loop in context, unrelated line added", "scripts/run.sh", ["@@ -1,8 +1,9 @@", ...asContext(SH_RELATIVE_LINK_LOOP), "+set -e"]],
+    // The issue's hop cap: the counter is initialized between the anchor and
+    // the guard, and the cap test and the increment are the first two body
+    // lines. The counter's name, threshold and exit code are its own.
+    ["hop-capped case variant", "scripts/run.sh", SH_RELATIVE_LINK_LOOP_HOP],
+    [
+      "hop cap whose initializer is outside the diff",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.filter((_, i) => i !== 1),
+    ],
+    [
+      "hop cap with a -gt threshold",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace("-ge 40", "-gt 40")),
+    ],
+    [
+      "hop cap with a bare exit",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace("&& exit 1", "&& exit")),
+    ],
+    [
+      "hop cap with an exit code",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace("&& exit 1", "&& exit 2")),
+    ],
+    [
+      "hop cap with uppercase counter",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace(/_hops/g, "HOPS")),
+    ],
+    // The extensionless bin/ wrapper and an ordinary neighbour.
+    ["hop-capped extensionless wrapper", "bin/tool", SH_RELATIVE_LINK_LOOP_HOP],
+    [
+      "hop-capped loop with strict mode beside it",
+      "scripts/run.sh",
+      ["+set -euo pipefail", ...SH_RELATIVE_LINK_LOOP_HOP],
+    ],
+    // Diff shapes.
+    [
+      "hop-capped loop in context, unrelated line added",
+      "scripts/run.sh",
+      ["@@ -1,11 +1,12 @@", ...asContext(SH_RELATIVE_LINK_LOOP_HOP), "+set -e"],
+    ],
+    // A NUL byte in a line the template does not read leaves the loop
+    // recognisable: only the template's own lines decide it.
+    [
+      "NUL byte in an unrelated line",
+      "scripts/run.sh",
+      ["+set -e\u0000", ...SH_RELATIVE_LINK_LOOP_HOP],
+    ],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", label);
+    assert.equal(result.pathHandlingProvenance.fired, false, label);
+    assert.ok(!firesSymlinkSensitive(result), `${label}: unexpected symlink_sensitive`);
+  }
+
+  // A traversal surface beside the recognised loop still fires
+  // traversal_literal, a separate class; only the readlink stops counting.
+  const traversal = classifyPr({
+    prFiles: files("scripts/run.sh"),
+    diffText: selfLocationDiff("scripts/run.sh", [...SH_RELATIVE_LINK_LOOP_HOP, '+cat "../../etc/passwd"']),
+    linkedIssues: [],
+  });
+  assert.ok(!firesSymlinkSensitive(traversal));
+  assert.ok(traversal.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "traversal_literal" && s.source === "diff",
+  ));
+});
+
+test("#1653: relative-link loop counterexamples keep firing symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // Arm reassigns a different variable than the anchor.
+    ["absolute arm reassigns another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _other="$_link" ;;')],
+    // Arm reads a different variable than the link.
+    ["absolute arm reads another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_other" ;;')],
+    ["relative arm joins another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/$_other" ;;')],
+    // `case` opens on the wrong variable.
+    ["case opens on the anchor", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 3, '+  case "$_src" in')],
+    // Relative arm takes the dirname of the wrong variable.
+    ["relative arm dirnames the link", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_link")/$_link" ;;')],
+    // The issue's own keep-firing rows: the relative branch joined onto
+    // anything but the loop variable's directory, and a branch that assigns
+    // from another variable.
+    [
+      "relative branch joined onto a positional",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$1/$_link" ;;'),
+    ],
+    [
+      "absolute branch assigning another variable",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$target" ;;'),
+    ],
+    // Non-canonical arm order.
+    [
+      "arms swapped",
+      "scripts/run.sh",
+      [
+        ...SH_RELATIVE_LINK_LOOP.slice(0, 4),
+        SH_RELATIVE_LINK_LOOP[5] ?? "",
+        SH_RELATIVE_LINK_LOOP[4] ?? "",
+        ...SH_RELATIVE_LINK_LOOP.slice(6),
+      ],
+    ],
+    // The hop cap in the issue's shape no longer fires; these near-misses do.
+    // A cap line alone, a cap that breaks instead of exiting, a counter that
+    // is not the one the cap reads, and a counter at the end of the body are
+    // all another statement in the loop body.
+    [
+      "hop cap as the first body line",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 2), '+  [ "$hops" -gt 40 ] && break', ...SH_RELATIVE_LINK_LOOP.slice(2)],
+    ],
+    [
+      "hop counter at the end of the body",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 7), "+  hops=$((hops + 1))", ...SH_RELATIVE_LINK_LOOP.slice(7)],
+    ],
+    [
+      "hop cap without the counter increment",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.filter((_, i) => i !== 4),
+    ],
+    [
+      "hop cap that breaks instead of exiting",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_hops" -ge 40 ] && break'),
+    ],
+    // The cap line also reassigns the loop's own variable.
+    [
+      "hop cap that also reassigns the anchor",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_hops" -ge 40 ] && _src=""'),
+    ],
+    // The counter the cap reads is not the counter the loop increments.
+    [
+      "hop cap on another counter",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_other" -ge 40 ] && exit 1'),
+    ],
+    [
+      "hop counter increment on another variable",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 4, "+  _other=$((_hops + 1))"),
+    ],
+    [
+      "hop cap whose initializer binds another counter",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 1, "+_other=0"),
+    ],
+    // The counter is the loop's own variable.
+    [
+      "hop cap on the anchor",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace(/_hops/g, "_src")),
+    ],
+    // The cap's own shape.
+    [
+      "hop cap with a non-integer threshold",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_hops" -ge "many" ] && exit 1'),
+    ],
+    [
+      "hop cap with an unquoted counter",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, "+  [ $_hops -ge 40 ] && exit 1"),
+    ],
+    [
+      "hop cap with a second statement",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_hops" -ge 40 ] && exit 1; echo done'),
+    ],
+    [
+      "hop counter increment before the cap test",
+      "scripts/run.sh",
+      [
+        ...SH_RELATIVE_LINK_LOOP_HOP.slice(0, 3),
+        SH_RELATIVE_LINK_LOOP_HOP[4] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[3] ?? "",
+        ...SH_RELATIVE_LINK_LOOP_HOP.slice(5),
+      ],
+    ],
+    [
+      "hop cap after the readlink line",
+      "scripts/run.sh",
+      [
+        SH_RELATIVE_LINK_LOOP_HOP[0] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[1] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[2] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[5] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[3] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[4] ?? "",
+        ...SH_RELATIVE_LINK_LOOP_HOP.slice(6),
+      ],
+    ],
+    [
+      "hop counter initialized after the guard",
+      "scripts/run.sh",
+      [
+        SH_RELATIVE_LINK_LOOP_HOP[0] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[2] ?? "",
+        SH_RELATIVE_LINK_LOOP_HOP[1] ?? "",
+        ...SH_RELATIVE_LINK_LOOP_HOP.slice(3),
+      ],
+    ],
+    // The hop-capped loop reads its own path, like every other row here.
+    [
+      "hop cap with an unanchored readlink",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"')),
+    ],
+    [
+      "hop cap whose guard tests another variable",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 2, '+while [ -L "$_other" ]; do'),
+    ],
+    [
+      "hop cap whose readlink reads the anchor",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 5, '+  _src="$(readlink "$_src")"'),
+    ],
+    // The counter is the link variable, which the walk already writes.
+    [
+      "hop cap whose counter is the link variable",
+      "scripts/run.sh",
+      withLoopLine(
+        withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_link" -ge 40 ] && exit 1'),
+        4,
+        "+  _link=$((_link + 1))",
+      ),
+    ],
+    [
+      "hop cap whose counter is the link variable, without the initializer",
+      "scripts/run.sh",
+      withLoopLine(
+        withLoopLine(SH_RELATIVE_LINK_LOOP_HOP.filter((_, i) => i !== 1), 2, '+  [ "$_link" -ge 40 ] && exit 1'),
+        3,
+        "+  _link=$((_link + 1))",
+      ),
+    ],
+    // The link is written into the anchor: the walk overwrites the path it
+    // started from, which no template covers.
+    [
+      "hop cap whose readlink overwrites the anchor",
+      "scripts/run.sh",
+      [
+        ...SH_RELATIVE_LINK_LOOP_HOP.slice(0, 5),
+        '+  _src="$(readlink "$_src")"',
+        '+  case "$_src" in',
+        '+    /*) _src="$_src" ;;',
+        '+    *) _src="$(dirname "$_src")/$_src" ;;',
+        "+  esac",
+        "+done",
+      ],
+    ],
+    // The cap's own shape: only an integer threshold with -ge or -gt, and a
+    // counter that starts at zero.
+    [
+      "hop cap with an -eq threshold",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 3, '+  [ "$_hops" -eq 40 ] && exit 1'),
+    ],
+    [
+      "hop counter initialized to a non-zero value",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 1, "+_hops=1"),
+    ],
+    [
+      "hop cap and increment on different counters",
+      "scripts/run.sh",
+      SH_RELATIVE_LINK_LOOP_HOP.filter((_, i) => i !== 1).map((l) =>
+        l.replace('[ "$_hops" -ge 40 ]', '[ "$_other" -ge 40 ]'),
+      ),
+    ],
+    // `break` inside an arm body.
+    ["break in the absolute arm", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_link"; break ;;')],
+    // Missing `esac`.
+    [
+      "missing esac",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 6), ...SH_RELATIVE_LINK_LOOP.slice(7)],
+    ],
+    // Head-level rules still apply to the case shape.
+    ["loop reads another variable", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
+    [
+      "hop cap folded into the guard",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 1, '+while [ -L "$_src" ] && [ "$hops" -lt 40 ]; do'),
+    ],
+    // Fail-closed boundaries of the tail lines themselves.
+    ["unquoted case opener", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 3, "+  case $_link in")],
+    ["braced link in the absolute arm", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="${_link}" ;;')],
+    ["relative arm joins the anchor", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/$_src" ;;')],
+    ["fallthrough terminator", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_link" ;&')],
+    // Declared limits: false positives that exist today and stay.
+    [
+      "single-line compound case",
+      "scripts/run.sh",
+      [
+        SH_RELATIVE_LINK_LOOP[0] ?? "",
+        SH_RELATIVE_LINK_LOOP[1] ?? "",
+        SH_RELATIVE_LINK_LOOP[2] ?? "",
+        '+  case "$_link" in /*) _src="$_link" ;; *) _src="$(dirname "$_src")/$_link" ;; esac',
+        SH_RELATIVE_LINK_LOOP[7] ?? "",
+      ],
+    ],
+    [
+      "braced link in the relative arm",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/${_link}" ;;'),
+    ],
+    // A NUL byte in a diff line carries no meaning for a whole-line template:
+    // the readlink line stops being a line the template can match, so the
+    // classification stays what it was before the template existed.
+    [
+      "NUL byte in the readlink line",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP_HOP, 5, '+  _link="$(readlink "$_src")"\u0000'),
+    ],
   ];
   for (const [label, file, lines] of cases) {
     const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
