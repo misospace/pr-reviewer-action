@@ -29,7 +29,8 @@ import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../co
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
-import { checkEvidenceTagsFromArtifact, evidenceLedgerFromArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { checkEvidenceTagsFromArtifact, evidenceLedgerFromArtifact, type EvidenceLedger, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
+import { isMergeAffectingRowClass } from "../enforcement/required-checks.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
@@ -409,12 +410,12 @@ const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "
  * in the row vocabulary, a `string | null` rationale, and a non-empty
  * reason.
  */
-function readReconciledRequiredCheckCoverage(path: string): { status: string; checks: Array<{ check: string; status: string }> } | null {
+function readReconciledRequiredCheckCoverage(path: string): { status: string; checks: Array<{ check: string; status: string; rowClass: RequiredEvidenceRowClass }> } | null {
   const record = readJsonObject(path);
   if (record === null || record.version !== 1) return null;
   if (typeof record.status !== "string" || !REQUIRED_CHECKS_VALUES.has(record.status)) return null;
   if (!Array.isArray(record.checks)) return null;
-  const rows: Array<{ check: string; status: string }> = [];
+  const rows: Array<{ check: string; status: string; rowClass: RequiredEvidenceRowClass }> = [];
   for (const raw of record.checks) {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
@@ -429,7 +430,10 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
     if (row.row_class !== undefined
       && !(typeof row.row_class === "string" && REQUIRED_CHECK_ROW_CLASSES.has(row.row_class))) return null;
     if (row.evidence !== undefined && !rowEvidenceProjectionReadable(row.evidence)) return null;
-    rows.push({ check: row.check, status: row.status });
+    // #1657 (publish parity): the validated row class is PRESERVED — the
+    // merge-affecting filter needs it, and a pre-#1657 artifact without
+    // the field at all is exactly the all-legacy case (pre-#1657 gating).
+    rows.push({ check: row.check, status: row.status, rowClass: (row.row_class as RequiredEvidenceRowClass) ?? "legacy" });
   }
   return { status: record.status, checks: rows };
 }
@@ -586,7 +590,13 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
       if (reconciled.status === rawFoldStatus) {
         fields.unresolvedRequiredChecks = boundedIdList(
           reconciled.checks
-            .filter((row) => row.status === "unresolved" || row.status === "unmet")
+            // #1657 (publish parity): only MERGE-AFFECTING rows (tagged
+            // objective, or untagged legacy) enter the handoff list —
+            // exactly the engine's `notClean` filter in completeness.ts.
+            // Tagged attention and review-prompt rows are disclosed on
+            // their own coverage rows and never gate the handoff.
+            .filter((row) => isMergeAffectingRowClass(row.rowClass)
+              && (row.status === "unresolved" || row.status === "unmet"))
             .map((row) => row.check),
         );
       }
@@ -632,7 +642,12 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
           const checkCoverage = structuredCoverage(mustCheck, output as never, ledger, mustCheckEvidence);
           fields.unresolvedRequiredChecks = boundedIdList(
             checkCoverage.checks
-              .filter((row) => row.status === "unresolved" || row.status === "unmet")
+              // #1657 (publish parity): the same merge-affecting filter as
+              // the engine fold — structuredCoverage resolves row classes
+              // from the trusted producer tags (untagged ⇒ legacy), so a
+              // tagged review-prompt or attention row never appears here.
+              .filter((row) => isMergeAffectingRowClass(row.rowClass)
+                && (row.status === "unresolved" || row.status === "unmet"))
               .map((row) => row.check),
           );
         }

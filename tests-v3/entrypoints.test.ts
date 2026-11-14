@@ -10,6 +10,8 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { parseInlineFindingsMax } from "../src/publish/inline-findings.js";
+import { checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
+import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
@@ -1621,6 +1623,115 @@ test("#1657 (round 2): the persisted ledger survives a missing harness trace —
     }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.deepEqual(input.unresolvedRequiredChecks, []);
+  });
+});
+
+test("#1657 (round 12): reconciled readback lists only merge-affecting rows — engine/publish parity over mixed row classes", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    const objectiveRow = "verify the auth path in src/auth.ts";
+    const reviewPromptRow = "review the auth flow for regression risk";
+    const attentionRow = "treat the retry backoff change as critical priority and verify it carefully";
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: [objectiveRow, reviewPromptRow, attentionRow],
+      must_check_evidence: [
+        { text: objectiveRow, row_class: "objective", gate: "source-identity" },
+        { text: reviewPromptRow, row_class: "review-prompt" },
+        { text: attentionRow, row_class: "attention" },
+      ],
+    }));
+    const dispositions = [
+      { check: objectiveRow, status: "unresolved", rationale: "could not establish the path" },
+      { check: reviewPromptRow, status: "unresolved", rationale: "ran out of budget" },
+      { check: attentionRow, status: "unmet", rationale: "the backoff was not verified" },
+    ];
+    // The ENGINE side, from the same trusted metadata: the fold the engine
+    // settles and persists. No ledger — the receipt gate is inert and each
+    // row keeps the reviewer's honest disposition.
+    const tags = checkEvidenceTagsFromArtifact([
+      { text: objectiveRow, row_class: "objective", gate: "source-identity" },
+      { text: reviewPromptRow, row_class: "review-prompt" },
+      { text: attentionRow, row_class: "attention" },
+    ]);
+    const engineCoverage = evaluateRequiredCheckCoverage([objectiveRow, reviewPromptRow, attentionRow], dispositions as never, undefined, tags);
+    assert.equal(engineCoverage.status, "incomplete"); // the objective row gates
+    // Persist the reconciled coverage exactly as the engine serializes it
+    // (its own artifact writer, row_class fields included).
+    writeFileSync(join(dir, "required-check-coverage.json"), JSON.stringify(requiredCheckCoverageToArtifact(engineCoverage)));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: dispositions,
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    // Parity: the publish handoff lists exactly the engine's merge-affecting
+    // set — the tagged review-prompt and attention rows never appear even
+    // though their dispositions are unresolved/unmet.
+    assert.deepEqual(input.unresolvedRequiredChecks, [objectiveRow]);
+    const engineNotClean = engineCoverage.checks
+      .filter((row) => isMergeAffectingRowClass(row.rowClass)
+        && (row.status === "unresolved" || row.status === "unmet"))
+      .map((row) => row.check);
+    assert.deepEqual(input.unresolvedRequiredChecks, engineNotClean);
+  });
+});
+
+test("#1657 (round 12): legacy recompute path filters row classes too — pre-#1594 run dirs gain no extra handoff rows", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+    });
+    const objectiveRow = "verify the config surface in src/config.yaml";
+    const reviewPromptRow = "review the config loading flow for regression";
+    const legacyRow = "confirm the migration plan landed in this release";
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: [objectiveRow, reviewPromptRow, legacyRow],
+      must_check_evidence: [
+        { text: objectiveRow, row_class: "objective", gate: "source-identity" },
+        { text: reviewPromptRow, row_class: "review-prompt" },
+        // legacyRow deliberately UNTAGGED: pre-#1657 gating is preserved.
+      ],
+    }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: objectiveRow, status: "unresolved", rationale: "not established" },
+        { check: reviewPromptRow, status: "unmet", rationale: "checked; the requirement does not hold" },
+        { check: legacyRow, status: "unresolved", rationale: "not covered" },
+      ],
+    }));
+    // NO required-check-coverage.json (pre-#1594 run dir) and NO
+    // evidence-receipts.json: the raw recompute path, gate inert.
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, [objectiveRow, legacyRow]);
+    // Parity with the engine fold over identical inputs: untagged legacy
+    // rows keep their merge-affecting role; the tagged review-prompt row —
+    // even dispositioned `unmet` — never enters the handoff.
+    const tags = checkEvidenceTagsFromArtifact([
+      { text: objectiveRow, row_class: "objective", gate: "source-identity" },
+      { text: reviewPromptRow, row_class: "review-prompt" },
+    ]);
+    const engineCoverage = evaluateRequiredCheckCoverage(
+      [objectiveRow, reviewPromptRow, legacyRow],
+      (JSON.parse(readFileSync(join(dir, "ai-output.json"), "utf8")).required_check_dispositions) as never,
+      undefined,
+      tags,
+    );
+    const engineNotClean = engineCoverage.checks
+      .filter((row) => isMergeAffectingRowClass(row.rowClass)
+        && (row.status === "unresolved" || row.status === "unmet"))
+      .map((row) => row.check);
+    assert.deepEqual(input.unresolvedRequiredChecks, engineNotClean);
+    assert.ok(engineCoverage.checks.some((row) => row.check === legacyRow && row.rowClass === "legacy"));
   });
 });
 
