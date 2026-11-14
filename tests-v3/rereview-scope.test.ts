@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildReviewCorpus, type CorpusWorkspace } from "../src/corpus/index.js";
-import { buildReReviewScopeMd, computeReReviewDelta, MAX_DELTA_COMMITS, type ReReviewScopeDelta } from "../src/context/rereview-scope.js";
+import { buildReReviewScopeMd, computeReReviewDelta, MAX_DELTA_COMMITS, runGit, type ReReviewScopeDelta } from "../src/context/rereview-scope.js";
 import { runPrecheck } from "../src/precheck/decide.js";
 import { FixtureAdapter, type PrecheckFixture } from "../src/precheck/fixture.js";
 import { buildMarkerFingerprint, collectConfigLines, computeConfigHash, computeDiffFingerprint } from "../src/precheck/fingerprint.js";
@@ -575,6 +575,35 @@ test("#1426 corpus: the scope section survives a body truncation that eats tail 
   const corpus = dec(result.artifacts.get("review-corpus.md")!);
   assert.ok(corpus.includes("# Re-Review Scope"), "the scope framing cannot be truncated away");
   assert.ok(!corpus.includes("# Repository History"), "low-value tail sections are still dropped first");
+});
+
+test("#1426/#1516 shared probe: a non-positive caller cap degrades to the module default", async () => {
+  const repo = forcePushRepo();
+  try {
+    for (const cap of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const outcome = await runGit(repo.root, ["rev-parse", "HEAD"], cap);
+      assert.equal(outcome.ok, true, `cap ${cap} must not fail the probe`);
+      assert.equal(outcome.truncated, false, `cap ${cap} must not make every capture read as truncated`);
+      assert.match(outcome.stdout, /^[0-9a-f]{40,64}\n$/);
+    }
+    // A valid positive cap still reports truncation honestly.
+    const capped = await runGit(repo.root, ["rev-parse", "HEAD"], 1);
+    assert.equal(capped.ok, true);
+    assert.equal(capped.truncated, true);
+    // A non-finite cap must engage the fallback bound, not disable capping:
+    // output beyond 64 KiB reads as truncated (pre-change, NaN reached the
+    // subprocess unvalidated and reported a full uncapped capture as
+    // complete).
+    writeFileSync(join(repo.root, "big.txt"), `${"x".repeat(70_000)}\n`);
+    execSync("git -c user.email=test@example.com -c user.name=test add -A", { cwd: repo.root, stdio: "ignore" });
+    execSync("git -c user.email=test@example.com -c user.name=test commit -qm big", { cwd: repo.root, stdio: "ignore" });
+    const unbounded = await runGit(repo.root, ["cat-file", "blob", "HEAD:big.txt"], Number.NaN);
+    assert.equal(unbounded.ok, true);
+    assert.equal(unbounded.truncated, true);
+    assert.equal(Buffer.byteLength(unbounded.stdout, "utf8"), 65_536);
+  } finally {
+    repo.cleanup();
+  }
 });
 
 // Keep the commit-cap constant honest: the probe reads one past it so an

@@ -18,7 +18,16 @@
  * is present there and FAILS SOFT when it is not: a shallow Action checkout
  * may no longer contain a force-pushed-away commit, and the honest answer is
  * "the delta could not be enumerated" with the identities still stated —
- * never a guessed delta and never a failure of the review. */
+ * never a guessed delta and never a failure of the review.
+ *
+ * This module is also the SHARED home of the read-only bounded git probe
+ * (the twin-helper dedupe collapsed the #1426 and #1516 copies into one):
+ * `runGit`, `GitOutcome` and `hasControlChar` are exported for the #1516
+ * re-review evidence renderer (src/context/rereview-evidence.ts), as is
+ * `fencedList`. The evidence renderer imports these directly as a sibling
+ * module; they are deliberately NOT re-exported through
+ * `src/context/index.ts` — the index keeps publishing only the scope-delta
+ * API. */
 
 import { runProcess } from "../runtime/subprocess.js";
 import { endsWithNewline, fenceDelimiterFor } from "./fence.js";
@@ -79,14 +88,25 @@ export interface GitOutcome {
   stdout: string;
 }
 
-/** Read-only git probe in the reviewed checkout, bounded and fail-soft. The
- * restricted environment matches `generatedAttributePaths` (src/run/stages.ts):
- * no tenant-controlled git config, no hooks on a read path. */
+/** Read-only git probe in the reviewed checkout, bounded and fail-soft.
+ * Shared by this module's delta enumeration (#1426) and the #1516 re-review
+ * evidence renderer. The restricted environment matches
+ * `generatedAttributePaths` (src/run/stages.ts): no tenant-controlled git
+ * config, no hooks on a read path. */
 export async function runGit(
   workspace: string,
   args: readonly string[],
   maxOutputBytes: number,
 ): Promise<GitOutcome> {
+  // The cap is caller-supplied: a zero, negative, fractional, or non-finite
+  // value would corrupt the probe's honesty — a `0` cap suppresses capture
+  // entirely, a fractional cap is not a byte count, and any cap at or below
+  // the output size would make the capture read as truncated. Degrade to
+  // this module's own bounded default instead of trusting the argument;
+  // the probe is advisory evidence and must stay honest about truncation.
+  const cap = Number.isInteger(maxOutputBytes) && maxOutputBytes > 0
+    ? maxOutputBytes
+    : MAX_GIT_OUTPUT_BYTES;
   try {
     const handle = runProcess({
       file: "git",
@@ -94,7 +114,7 @@ export async function runGit(
       cwd: workspace,
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
       timeoutMs: GIT_TIMEOUT_MS,
-      maxOutputBytes,
+      maxOutputBytes: cap,
       terminateGraceMs: TERMINATE_GRACE_MS,
     });
     const result = await handle.result;
@@ -103,7 +123,10 @@ export async function runGit(
     }
     return {
       ok: true,
-      truncated: result.stdout.length >= maxOutputBytes,
+      // The subprocess capture's own flag is the authoritative "bytes were
+      // dropped" signal — a length-derived comparison would over-report a
+      // complete capture that lands exactly on the cap.
+      truncated: result.stdoutTruncated,
       stdout: result.stdout.toString("utf8"),
     };
   } catch {
