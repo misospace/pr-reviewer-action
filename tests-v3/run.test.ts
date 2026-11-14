@@ -2354,14 +2354,22 @@ class MinimalPublishApi implements PublishPlatformApi {
 }
 
 test("#873: required-check coverage incomplete + a model approve never publishes APPROVE (PR #854 regression)", async () => {
-  // src/auth.ts deterministically classifies as an auth change (#750/#680
-  // classification), which mandates must_check items; the model — exactly
-  // like PR #854's published marker (review_result: partial, required_
-  // checks: incomplete) — emits no required_check_dispositions at all, so
-  // coverage stays conservatively unresolved (#750 key-absence semantics).
+  // A dependency lockfile bump deterministically classifies as a
+  // dependency_upgrade (#750/#680 classification), whose must_check rows
+  // are OBJECTIVE (#1657: mapped to concrete deterministic gates — the
+  // head-bound CI suite ask and the upstream-evidence acquisition asks);
+  // the model — exactly like PR #854's published marker (review_result:
+  // partial, required_checks: incomplete) — emits no
+  // required_check_dispositions at all, so the objective rows stay
+  // conservatively unresolved and coverage stays incomplete. (#1657 audit
+  // delta: the original auth fixture's rows were generic review prompts,
+  // which no longer gate merge-affecting completeness — the invariant is
+  // re-pinned where it is mechanically grounded.)
   const platform = mockPlatform({
-    files: [{ filename: "src/auth.ts", status: "modified", additions: 4, deletions: 1, changes: 5 }],
-    diff: "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1,2 @@\n old\n+new line\n",
+    title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+    body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+    files: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }],
+    diff: "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
   });
   const result = await runWithVerdictOn(platform, { verdict: "approve", findings: [] });
 
@@ -3288,14 +3296,17 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
     const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
     assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
     assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);
-    // #1543 writer side: this run mandates must_check items and the scripted
-    // verdict emits no `required_check_dispositions`, so the #750 fold itself
-    // ends `incomplete` (conservative key absence) — and its OWN status is
-    // recorded in the coverage artifact, which is what the standalone
-    // publish read-back (#1537) gates its required-check id recomputation on.
-    assert.equal(result.outputs.requiredChecks, "incomplete");
+    // #1543 writer side: this run mandates one must_check item — the linked
+    // P1 flag's attention row. #1657 (audit delta): attention rows are
+    // attention/routing signals, never merge-affecting, so the #750 fold
+    // itself ends `complete` (the row's unresolved disposition is disclosed
+    // on the artifact rows, not in the merge-gating status) — and its OWN
+    // status is recorded in the coverage artifact, which is what the
+    // standalone publish read-back (#1537) gates its required-check id
+    // recomputation on.
+    assert.equal(result.outputs.requiredChecks, "complete");
     const foldCoverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
-    assert.equal(foldCoverage.required_check_fold_status, "incomplete");
+    assert.equal(foldCoverage.required_check_fold_status, "complete");
   } finally {
     await server.close();
     cleanup();

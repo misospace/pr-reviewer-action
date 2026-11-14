@@ -69,7 +69,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
-import { executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/executed-calls.js";
+import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry } from "../enforcement/evidence-receipts.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
@@ -1733,19 +1733,53 @@ export function buildPlanningContext(
   const regions = extractCorpusRegions(corpusText);
   const classifications = deps.readText("classification.json");
   let mustCheck: string[] = [];
+  // #1657 (review): the producer's trusted evidence tags ride the
+  // classification artifact next to the rows they belong to; candidate rows
+  // carry them verbatim into the obligation contract. Unparseable rows are
+  // dropped (those checks stay `legacy`/gating), never guessed.
+  let mustCheckEvidence: ReturnType<typeof checkEvidenceTagsFromArtifact> = [];
   try {
-    const parsed = classifications ? JSON.parse(classifications) as { must_check?: unknown } : null;
+    const parsed = classifications ? JSON.parse(classifications) as { must_check?: unknown; must_check_evidence?: unknown } : null;
     if (Array.isArray(parsed?.must_check)) mustCheck = parsed.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+    mustCheckEvidence = checkEvidenceTagsFromArtifact(parsed?.must_check_evidence);
   } catch {
     mustCheck = [];
+    mustCheckEvidence = [];
   }
   const guidance = extractApprovalPrerequisites(regions.standards ?? "");
   // VALIDATE_REQUIRED_CHECKS=false keeps deterministic must_check items out
   // of the obligation contract at BOTH layers (#1381): the model is not
   // shown rows the engine has agreed not to enforce.
   const includeMustCheck = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS);
-  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string }> = [
-    ...(includeMustCheck ? mustCheck.map((text) => ({ source: "must_check" as const, text })) : []),
+  // #1657 (review): each must_check row carries its producer's trusted
+  // evidence tag (`row_class`/`gate`/`obligations`, snake_case — the same
+  // shape classification.json persists); untagged rows carry none and stay
+  // `legacy` downstream.
+  const mustCheckTags = new Map(mustCheckEvidence.map((tag) => [tag.text, tag]));
+  const candidates: Array<{ id: string; source: ReviewObligationSource; text: string; row_class?: string; gate?: string; obligations?: string[]; dependency_scope?: DependencyScopeEntry[] }> = [
+    ...(includeMustCheck
+      ? mustCheck.map((text) => {
+          const tag = mustCheckTags.get(text);
+          return {
+            source: "must_check" as const,
+            text,
+            ...(tag !== undefined
+              ? {
+                  row_class: tag.rowClass,
+                  ...(tag.gate !== null ? { gate: tag.gate } : {}),
+                  ...(tag.obligations.length > 0 ? { obligations: tag.obligations } : {}),
+                  // #1657 (review round 3): the trusted dependency update
+                  // identity rides the row too — the strict `{slug,
+                  // versions}` entry set, the same shape classification.json
+                  // persists; absent/empty fails closed downstream.
+                  ...(tag.dependencyScope.length > 0
+                    ? { dependency_scope: tag.dependencyScope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+                    : {}),
+                }
+              : {}),
+          };
+        })
+      : []),
     ...guidance.map((text) => ({ source: "trusted_base_guidance" as const, text })),
   ].map((item, index) => ({ ...item, id: `obligation-${index + 1}` }));
   // #1449: the derived obligations ride the SAME planning section. The rows
@@ -1767,7 +1801,16 @@ export function buildPlanningContext(
       deps.writeArtifact("review-obligations-candidates.json", JSON.stringify({
         version: 1,
         injected,
-        obligations: candidates.map(({ id, source, text }) => ({ id, source, text })),
+        // #1657 (review): the producer's trusted evidence tags ride the
+        // candidates rows into the obligation contract — row class is this
+        // metadata, never inferred from wording downstream.
+        obligations: candidates.map(({ id, source, text, row_class, gate, obligations: rowObligations, dependency_scope }) => ({
+          id, source, text,
+          ...(row_class !== undefined ? { row_class } : {}),
+          ...(gate !== undefined ? { gate } : {}),
+          ...(rowObligations !== undefined && rowObligations.length > 0 ? { obligations: rowObligations } : {}),
+          ...(dependency_scope !== undefined && dependency_scope.length > 0 ? { dependency_scope } : {}),
+        })),
       }, null, 2) + "\n");
     }
   };
@@ -2195,53 +2238,55 @@ const PROOF_INDEX_MAX_ROWS = 50;
 /** Same bounded args digest the harness findings body renders. */
 const PROOF_INDEX_MAX_ARGS_CHARS = 300;
 
-/** The #1627 proof-index preamble + citation instruction, byte-for-byte.
- * Carries its OWN instruction (the shared VERDICT_CLOSING_INSTRUCTION is
- * never touched — paths without the index must not promise one). */
+/** The #1657 evidence-index preamble, byte-for-byte. Carries its OWN
+ * instruction (the shared VERDICT_CLOSING_INSTRUCTION is never touched —
+ * paths without the index must not promise one). It replaces #1627's
+ * citation instruction: a call id is a POINTER for disclosure, never proof —
+ * satisfaction is settled by the reviewer's honest disposition, validated
+ * against the run's own objective evidence for the rows that name a
+ * concrete deterministic gate. */
 const PROOF_INDEX_INSTRUCTION =
-  "A `satisfied` disposition for a must_check check listed above is accepted "
-  + "only when that disposition's `rationale` cites, by id, at least one "
-  + "executed call from the index whose status is ok (for example: `call-7`). "
-  + "A `satisfied` rationale that cites no executed successful call id does "
-  + "not discharge the check — the deterministic fold will keep it unresolved. "
-  + "The cited call must also actually bear on the check: cite a call whose "
-  + "tool and arguments match the check's own subject — the exact repository, "
-  + "release, version, head, or file the check names. A successful call about "
-  + "an unrelated target does not discharge the check; the deterministic fold "
-  + "verifies the match against the call's rendered identity above and keeps "
-  + "a non-matching satisfaction unresolved. Checks that ask for a test-suite "
-  + "or CI run are settled from the run's head-bound CI evidence, not from a "
-  + "cited call; checks about the absence of a security or breaking-change "
-  + "issue are not discharged by a call citation at all. "
-  + "Cite call ids exactly as rendered; do not invent, renumber, or guess ids. "
-  + "One executed call id can back at most one `satisfied` disposition: if "
-  + "two checks rely on the same call, each still needs a DIFFERENT "
-  + "executed successful call id, or the fold keeps one of them "
-  + "unresolved. "
-  + "Keep the citation inside the rationale's bounded length: a rationale is "
-  + "truncated at 500 characters, so place the `call-<n>` id early enough "
-  + "(for example, in the first sentence) that the citation survives the cap "
-  + "— a citation past 500 characters is silently lost.";
+  "This index is the run's objective evidence surface: the executed calls and "
+  + "their bounded targets, as the run itself recorded them. It exists for "
+  + "disclosure — citing a call id in a rationale is a pointer, never proof, "
+  + "and one piece of evidence may legitimately support several conclusions. "
+  + "Answer each required check with its honest disposition and a concrete "
+  + "rationale. Checks that ask for a test-suite or CI run are settled from "
+  + "the run's head-bound CI evidence, not from a cited call. Checks about "
+  + "the absence of a security or breaking-change issue are review "
+  + "judgments — report them honestly (`unresolved` when you could not "
+  + "establish the answer, `unmet` when you checked and the requirement does "
+  + "NOT hold; a confirmed negative belongs in the ordinary findings too). "
+  + "The deterministic fold validates objective evidence claims against the "
+  + "run's own records and keeps an unsupported `satisfied` on an objective "
+  + "check unresolved; it does not repair or rewrite any disposition. "
+  + "Reference call ids exactly as rendered; do not invent, renumber, or "
+  + "guess ids. Keep any citation inside the rationale's bounded length: a "
+  + "rationale is truncated at 500 characters, so place a `call-<n>` id "
+  + "early enough (for example, in the first sentence) that it survives the "
+  + "cap.";
 
 /**
- * #1627: the compact proof index injected into the verdict-turn corpus when
- * the native tool-loop surface exists. Deterministic and content-free:
+ * #1627/#1657: the compact evidence index injected into the verdict-turn
+ * corpus when the native tool-loop surface exists. Deterministic and
+ * content-free:
  *  - each must_check obligation row, verbatim (id + exact check text — the
  *    identity the #1388 folds match on), inside a fence like the planning
  *    section's (untrusted repository data, never instructions);
  *  - the executed-call identity list (`call-<n>` ids in execution order,
  *    tool name, executor status, bounded args digest — no model prose, no
  *    tool result bodies);
- *  - the citation instruction above.
+ *  - the #1657 evidence-index instruction above (a citation is a pointer
+ *    for disclosure, never proof).
  *
- * Returns "" when the loop executed nothing (the gate and the section are
- * inert on every path without executed calls) and when no must_check rows
- * gate (#1627 n2: the calls-only case — an index with nothing to discharge
- * renders a citation instruction with no subject; the section stays
- * byte-absent there). The ids are assigned by
- * `executedCallId` — the exact scheme the engine's enforcement-side index
- * parses back from the harness artifact's `tool_calls` trace, so what the
- * model saw is exactly what the folds verify.
+ * Returns "" when the loop executed nothing (the section is inert on every
+ * path without executed calls) and when no must_check rows gate (#1627 n2:
+ * the calls-only case — an index with nothing to answer renders an
+ * instruction with no subject; the section stays byte-absent there). The
+ * ids are assigned by `executedCallId` — the exact scheme the engine's
+ * enforcement-side evidence ledger parses back from the harness artifact's
+ * `tool_calls` trace, so what the model saw is exactly what the folds
+ * validate against.
  */
 export function verdictProofIndexSection(
   mustCheckRows: ReadonlyArray<{ id: string; text: string }>,

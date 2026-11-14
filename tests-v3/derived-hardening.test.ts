@@ -684,6 +684,29 @@ test("#1449: the verdict schema describes the derived dispositions without chang
   );
 });
 
+test("#1657: the disposition schema retired the call-id citation demand — a citation is a disclosure pointer, never proof", () => {
+  const schema = (OPENAI_VERDICT_JSON_SCHEMA as { json_schema: { schema: Record<string, unknown> } }).json_schema.schema;
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  const items = properties.required_check_dispositions!.items as { description?: string; properties: Record<string, unknown> };
+  const description = items.description ?? "";
+  // The provider-facing wording now states: the citation is OPTIONAL, a
+  // disclosure pointer, never proof, and never one-per-disposition — the
+  // deterministic fold validates objective claims against run records
+  // (#1657 replaced #1627's citation choreography; PROOF_INDEX_INSTRUCTION
+  // in the harness carries the same semantics).
+  assert.match(description, /MAY cite one of its executed call ids/);
+  assert.match(description, /purely as a disclosure pointer/);
+  assert.match(description, /never proof of satisfaction/);
+  assert.match(description, /may back several 'satisfied' dispositions/);
+  // The retired provider-facing demands must never reach a model again —
+  // no citation obligation, no one-call-per-disposition budget.
+  assert.doesNotMatch(description, /must cite at least one executed successful call id/);
+  assert.doesNotMatch(description, /back at most one 'satisfied' disposition/);
+  // Shape is still untouched by the description rewrite: the lockstep
+  // deepEqual in the #1449 test covers conversation.ts parity.
+  assert.deepEqual(Object.keys(items.properties), ["check", "status", "rationale"]);
+});
+
 test("#1449: the corpus section asks for the structured disposition too", () => {
   assert.match(DERIVED_FRAMING, /Emit one structured disposition per obligation in 'required_check_dispositions'/);
   assert.match(DERIVED_FRAMING, /echoing the row id \(derived-<n>\)/);

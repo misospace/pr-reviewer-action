@@ -14,7 +14,7 @@ import {
   type FinalDisposition,
   type FinalDispositionInput,
 } from "../src/disposition/final.js";
-import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
+import { buildDispositionEvidence, type DispositionEvidenceParts } from "../src/disposition/engine-evidence.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import {
   applyAllEnforcement,
@@ -358,6 +358,96 @@ test("the engine evidence builder maps the exact-head CI floor per the audit del
   // Success and a gate that never ran contribute nothing.
   assert.deepEqual(buildDispositionEvidence({ ...base, ciConclusion: "success", ciEvidenceContractActive: true }).evidence, []);
   assert.deepEqual(buildDispositionEvidence({ ...base, ciConclusion: null, ciEvidenceContractActive: false }).evidence, []);
+});
+
+// ── #1657: trusted row metadata drives materiality on the seam ───────────
+
+const DISPOSITION_BASE = {
+  completenessChecks: [] as Array<{ check?: unknown; status?: unknown; reason?: unknown; row_class?: unknown }>,
+  obligations: [] as DispositionEvidenceParts["obligations"],
+  findings: [] as unknown[],
+  toolCapabilityFailure: null as string | null,
+  toolFloorUnmet: false,
+  noEvidenceReason: null as string | null,
+  partialCoverageStopReason: null as string | null,
+  requirementTraceIncomplete: false,
+  mechanicallyProvenUnmetRequirements: 0,
+  ciConclusion: null as string | null,
+  ciEvidenceContractActive: false,
+};
+
+test("#1657: producer-tagged review-prompt rows are ADVISORY diagnostics on the disposition seam — never material, never proven-unmet", () => {
+  const base = { ...DISPOSITION_BASE };
+  const rows = [
+    // An unresolved tagged review prompt: a non-gating diagnostic.
+    { check: "review auth flow for regression", status: "unresolved", reason: "no-disposition", row_class: "review-prompt" },
+    // A semantic negative (`unmet`) on a tagged review prompt: recorded for
+    // accounting, never an objective proven-unmet requirement (#1657
+    // review issue 3) — and it does not set provenUnmetRequirement.
+    { check: "verify session token handling is correct", status: "unmet", reason: "ok", row_class: "review-prompt" },
+    // A tagged attention row: the same non-gating treatment.
+    { check: "treat as high priority — verify correctness carefully", status: "unresolved", reason: "no-disposition", row_class: "attention" },
+  ];
+  const build = buildDispositionEvidence({ ...base, completenessChecks: rows });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["generic_scrutiny_row_missing", "advisory"],
+    ["generic_scrutiny_row_missing", "advisory"],
+    ["generic_scrutiny_row_missing", "advisory"],
+  ]);
+  assert.equal(build.provenUnmetRequirement, false);
+  // The subjects stay the bounded check identities (provenance, not prose).
+  assert.deepEqual(build.evidence.map((entry) => entry.subject), [
+    "review auth flow for regression",
+    "verify session token handling is correct",
+    "treat as high priority — verify correctness carefully",
+  ]);
+});
+
+test("#1657: untagged LEGACY rows keep the conservative material mapping — wording alone can never de-gate a row", () => {
+  const base = { ...DISPOSITION_BASE };
+  const rows = [
+    // Looks exactly like a generic review prompt, but the producer did not
+    // tag it: `legacy` — pre-#1657 gating semantics preserved.
+    { check: "review auth flow for regression", status: "unresolved", reason: "no-disposition" },
+    { check: "check secret rotation impact", status: "unmet", reason: "ok" },
+  ];
+  const build = buildDispositionEvidence({ ...base, completenessChecks: rows });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["mandatory_requirement_unresolved", "material"],
+    ["mandatory_requirement_unresolved", "material"],
+  ]);
+  assert.equal(build.provenUnmetRequirement, false);
+});
+
+test("#1657: an unresolved explicitly-OBJECTIVE row stays a MATERIAL unknown (objective unresolved receipt state remains material)", () => {
+  const base = { ...DISPOSITION_BASE };
+  const rows = [
+    { check: "review the path resolution in src/paths.ts", status: "unresolved", reason: "receipt-absent", row_class: "objective" },
+  ];
+  const build = buildDispositionEvidence({ ...base, completenessChecks: rows });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["mandatory_requirement_unresolved", "material"],
+  ]);
+  // A model-authored `unmet` on an objective row is likewise a material
+  // unknown — never `provenUnmetRequirement` (only the mechanical
+  // refutation count proves a requirement false).
+  const unmet = buildDispositionEvidence({
+    ...base,
+    completenessChecks: [{ check: "review the path resolution in src/paths.ts", status: "unmet", reason: "ok", row_class: "objective" }],
+    mechanicallyProvenUnmetRequirements: 0,
+  });
+  assert.deepEqual(unmet.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["mandatory_requirement_unresolved", "material"],
+  ]);
+  assert.equal(unmet.provenUnmetRequirement, false);
+  // The MECHANICAL refutation count remains the only proven-requirement
+  // signal (#1145 escalation).
+  const mechanical = buildDispositionEvidence({
+    ...base,
+    completenessChecks: [{ check: "review the path resolution in src/paths.ts", status: "unmet", reason: "ok", row_class: "objective" }],
+    mechanicallyProvenUnmetRequirements: 1,
+  });
+  assert.equal(mechanical.provenUnmetRequirement, true);
 });
 
 test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; trace/coverage rows stay conservative", () => {
