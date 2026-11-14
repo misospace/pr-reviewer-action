@@ -430,12 +430,13 @@ function diffMarker(line: string): string {
  * `readlink "$0"`, the portable symlink-resolution loop) is self-location
  * bookkeeping like `realpath(__file__)`, not a symlink-sensitive surface.
  * Recognition is closed and line-whole: a handful of complete statements and
- * three loop templates of consecutive lines — the Python loop, the shell loop,
- * and the shell loop's relative-link `case` variant (#1653) — matched by static
- * patterns, so an untrusted operand, an intervening reassignment or a second
- * operation on the line keeps firing. It reads each line as ordinary code: a
- * rebound anchor, a template line that is really string content, or a second
- * file that changes what the anchor means can evade it. */
+ * four loop templates of consecutive lines — the Python loop, the shell loop,
+ * and the shell loop's relative-link `case` variant with and without its hop
+ * cap (#1653) — matched by static patterns, so an untrusted operand, an
+ * intervening reassignment or a second operation on the line keeps firing. It
+ * reads each line as ordinary code: a rebound anchor, a template line that is
+ * really string content, or a second file that changes what the anchor means
+ * can evade it. */
 type SelfLocationFamilies = { python: boolean; shell: boolean };
 
 /** Language gate: `.py`/`.pyw` Python, `.sh`/`.bash` shell, an extensionless
@@ -497,8 +498,8 @@ const SH_LOOP_DONE = /^[ \t]*done[ \t]*$/;
 /** #1653 relative-link variant: the loop body's `case` on the `readlink`
  * result. `case "$L" in`, an absolute arm `/*) T="$L" ;;`, a relative arm
  * `*) T="$(dirname "$T")/$L" ;;`, then `esac`. Arm bodies are whole-line and
- * identifier-consistent with the loop head, so a hop cap, a `break`, a
- * rebound arm target or a different link variable keeps firing. */
+ * identifier-consistent with the loop head, so a `break`, a rebound arm target
+ * or a different link variable keeps firing. */
 const SH_LOOP_CASE = new RegExp(
   String.raw`^[ \t]*case[ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+in[ \t]*$`,
 );
@@ -509,6 +510,21 @@ const SH_LOOP_CASE_REL = new RegExp(
   String.raw`^[ \t]*\*\)[ \t]*(${SELF_LOCATION_IDENT})=("?)\$\(dirname[ \t]+"\$(${SELF_LOCATION_IDENT})"\)/\$(${SELF_LOCATION_IDENT})\2[ \t]*;;[ \t]*$`,
 );
 const SH_LOOP_CASE_END = /^[ \t]*esac[ \t]*$/;
+/** #1653 hop cap: the wrapper's own hop counter, which bounds the walk. The
+ * counter is one identifier across three whole lines: the optional `H=0`
+ * initializer between the anchor and the guard, the `[ "$H" -ge N ] && exit 1`
+ * test and the `H=$((H + 1))` increment. The threshold is an integer compared
+ * with `-ge` or `-gt` and the cap's own action is the exit, so a `break`
+ * instead of an exit, another comparison, a non-integer threshold, a cap line
+ * that also reassigns the anchor, a second statement on the line or a counter
+ * bound to another variable keeps firing. */
+const SH_HOP_INIT = new RegExp(String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=[ \t]*0[ \t]*$`);
+const SH_HOP_CAP = new RegExp(
+  String.raw`^[ \t]*\[[ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+-(?:ge|gt)[ \t]+[0-9]+[ \t]*\][ \t]+&&[ \t]+exit(?:[ \t]+[0-9]+)?[ \t]*$`,
+);
+const SH_HOP_INC = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=\$\(\(\1[ \t]*\+[ \t]*1[ \t]*\)\)[ \t]*$`,
+);
 
 /** Python template at run position k: `T = __file__`, `while os.path.islink(T):`
  * at the same indentation, one body line `T = os.readlink(T)` indented under
@@ -533,29 +549,85 @@ function pythonSelfLocationLoop(codes: readonly string[], k: number): number | n
   return k + 2;
 }
 
+/** The hop counter's line positions: the cap test, the increment and the
+ * optional initializer. */
+type HopSlots = { cap: number; inc: number; init: number };
+
 /** Shell template, five consecutive lines: `T="${BASH_SOURCE[0]}"` (or `"$0"`),
  * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, then either `T="$L"` and
- * `done`, or the #1653 relative-link `case` tail and `done`. Returns the
- * readlink line's position, or null. */
+ * `done`, or the #1653 relative-link `case` tail and `done`. The #1653 hop cap
+ * wraps the relative-link variant: an optional `H=0` between the anchor and
+ * the guard, then the cap test and the counter increment as the loop's first
+ * two body lines. Returns the readlink line's position, or null. */
 function shellSelfLocationLoop(codes: readonly string[], k: number): number | null {
   const anchor = SH_LOOP_ANCHOR.exec(codes[k] ?? "");
-  const guard = SH_LOOP_GUARD.exec(codes[k + 1] ?? "");
-  const read = SH_LOOP_READ.exec(codes[k + 2] ?? "");
-  if (!anchor || !guard || !read) return null;
+  if (!anchor) return null;
   const ident = anchor[1] ?? "";
-  const link = read[1] ?? "";
-  if (link === ident || (guard[1] ?? guard[2]) !== ident || read[3] !== ident) return null;
-  const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
-  if (copy) return copy[1] === ident && copy[3] === link && SH_LOOP_DONE.test(codes[k + 4] ?? "") ? k + 2 : null;
-  return shellRelativeLinkCaseTail(codes, k + 3, ident, link) ? k + 2 : null;
+  // Each layout is a fixed set of consecutive lines. The plain loop reads the
+  // link right after the guard; the hop-capped loop reads it after the cap
+  // test and the increment, and the counter's initializer sits between the
+  // anchor and the guard when the diff shows it.
+  const layouts: { guard: number; read: number; tail: number; hop: HopSlots | null }[] = [
+    { guard: k + 1, read: k + 2, tail: k + 3, hop: null },
+    { guard: k + 1, read: k + 4, tail: k + 5, hop: { cap: k + 2, inc: k + 3, init: -1 } },
+    { guard: k + 2, read: k + 5, tail: k + 6, hop: { cap: k + 3, inc: k + 4, init: k + 1 } },
+  ];
+  for (const layout of layouts) {
+    const guard = SH_LOOP_GUARD.exec(codes[layout.guard] ?? "");
+    if (!guard || (guard[1] ?? guard[2]) !== ident) continue;
+    const read = SH_LOOP_READ.exec(codes[layout.read] ?? "");
+    if (!read) continue;
+    const link = read[1] ?? "";
+    if (link === ident || read[3] !== ident) continue;
+    const copy = SH_LOOP_COPY.exec(codes[layout.tail] ?? "");
+    if (copy) {
+      // The hop cap belongs to the relative-link variant; the #1042 copy
+      // template keeps its own five-line shape.
+      if (
+        !layout.hop &&
+        copy[1] === ident &&
+        copy[3] === link &&
+        SH_LOOP_DONE.test(codes[layout.tail + 1] ?? "")
+      ) {
+        return layout.read;
+      }
+      continue;
+    }
+    if (!shellRelativeLinkCaseTail(codes, layout.tail, ident, link)) continue;
+    if (layout.hop && !shellHopCap(codes, layout.hop, ident, link)) continue;
+    return layout.read;
+  }
+  return null;
+}
+
+/** #1653 hop cap: the counter is one identifier across its lines — the
+ * optional `H=0` initializer, the `[ "$H" -ge N ] && exit 1` test and the
+ * `H=$((H + 1))` increment — and it is neither the anchor nor the link, so a
+ * cap on the loop's own variable keeps firing. */
+function shellHopCap(
+  codes: readonly string[],
+  slots: HopSlots,
+  ident: string,
+  link: string,
+): boolean {
+  const cap = SH_HOP_CAP.exec(codes[slots.cap] ?? "");
+  const inc = SH_HOP_INC.exec(codes[slots.inc] ?? "");
+  if (!cap || !inc) return false;
+  const hop = cap[1] ?? "";
+  if (hop !== inc[1] || hop === ident || hop === link) return false;
+  if (slots.init < 0) return true;
+  const init = SH_HOP_INIT.exec(codes[slots.init] ?? "");
+  if (!init) return false;
+  return init[1] === hop;
 }
 
 /** #1653 relative-link tail: four consecutive lines after the readlink line —
  * `case "$L" in`, `/*) T="$L" ;;`, `*) T="$(dirname "$T")/$L" ;;`, `esac` —
  * then `done`. The opener must read the link variable; the absolute arm must
  * reassign the anchor from the link; the relative arm must reassign the anchor
- * from the anchor's own `dirname` joined with the link. A hop cap, `break`,
- * second statement or rebound variable anywhere in the tail keeps firing. */
+ * from the anchor's own `dirname` joined with the link. A `break`, a second
+ * statement or a rebound variable anywhere in the tail keeps firing. The hop
+ * cap that may wrap the loop lives in its head, before this tail. */
 function shellRelativeLinkCaseTail(
   codes: readonly string[],
   k: number,
