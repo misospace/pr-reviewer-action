@@ -125,7 +125,10 @@ export const ADVISORY_DISPOSITION_CODES = [
    * itself (#1656 audit delta). */
   "investigation_floor_unmet",
   /** The tool loop stopped early, established by trusted provenance
-   * (#1657 feeds this). Until then the engine maps the #810 stop record
+   * (#1657 feeds this). Since #1659 the engine also feeds it for a
+   * CAP-RELEASED non-material settlement row — the reserved evidence window
+   * was released by the attempts cap, which is a partial investigation, not a
+   * capability failure. Until then the engine maps the #810 stop record
    * conservatively to MATERIAL `investigation_unavailable` — the run
    * cannot prove the affected behavior had adequate available evidence. */
   "investigation_partial",

@@ -31,8 +31,12 @@
  *
  * Disposition consumption: a cap-released MATERIAL question becomes a named
  * material unknown (`investigation_unavailable`) — never "settled clean" —
- * and a cap-released ADVISORY question becomes an advisory entry that never
- * vetoes. For every other unknown state the existing per-question fold entry
+ * and a cap-released NON-material question becomes the ADVISORY
+ * `investigation_partial` diagnostic, which never vetoes. The code choice is
+ * not cosmetic: `parseFinalDisposition` refuses a material code carrying
+ * advisory materiality, so reusing `investigation_unavailable` would turn a
+ * certified APPROVE into an UNAVAILABLE abstention at the publisher. For
+ * every other unknown state the existing per-question fold entry
  * (completeness text or obligation id) is the single disclosed result; the
  * record never duplicates it.
  *
@@ -217,24 +221,30 @@ export function reconcileSettlements(
 
 /**
  * Strict fail-closed reader for the persisted `required_evidence_settlements`
- * field. Malformed rows are DROPPED — never repaired, never thrown — so no
- * fabricated receipt can enter the record. Dropping is not silent: callers
- * that make a materiality decision use `parseLoopSettlementsReport` and
- * disclose the drop count, so a corrupted record can never degrade into
- * "no gaps found" (the exact pre-#1659 failure this record exists to close).
- * Receipt ids must match the shared `call-<n>` scheme (the scheme
- * `executedCallId` assigns in `src/enforcement/evidence-receipts.ts`); the
- * id↔trace existence check is a WRITE-time guarantee — the loop records ids
- * from the same counter that numbers the persisted trace — because this
- * reader has no trace to compare against.
+ * field. Absent (`undefined`/`null` — every legacy artifact and every
+ * non-native path) is a genuine NO record: no rows, no drops, the
+ * byte-identical pre-#1659 behavior. A record that is PRESENT but not an
+ * array is corruption, and is reported as one drop so the caller discloses it
+ * rather than reading it as "no gaps". Individual malformed entries are
+ * DROPPED — never repaired, never thrown — so no fabricated receipt can enter
+ * the record. Dropping is never silent: callers that make a materiality
+ * decision use `parseLoopSettlementsReport` and disclose the drop count (the
+ * exact pre-#1659 failure was a gap reading as a clean settlement). Receipt
+ * ids must match the shared `call-<n>` scheme (the scheme `executedCallId`
+ * assigns in `src/enforcement/evidence-receipts.ts`); the id↔trace existence
+ * check is a WRITE-time guarantee — the loop records ids from the same
+ * counter that numbers the persisted trace — because this reader has no trace
+ * to compare against.
  */
 export function parseLoopSettlements(value: unknown): LoopEvidenceSettlement[] {
   return parseLoopSettlementsReport(value).rows;
 }
 
-/** The reader plus the count of entries it refused (dropped whole). */
+/** The reader plus the count of things it refused: a malformed top-level
+ * record counts as one drop, and so does every malformed entry. */
 export function parseLoopSettlementsReport(value: unknown): { rows: LoopEvidenceSettlement[]; dropped: number } {
-  if (!Array.isArray(value)) return { rows: [], dropped: 0 };
+  if (value === undefined || value === null) return { rows: [], dropped: 0 };
+  if (!Array.isArray(value)) return { rows: [], dropped: 1 };
   const rows: LoopEvidenceSettlement[] = [];
   let dropped = 0;
   for (const entry of value) {

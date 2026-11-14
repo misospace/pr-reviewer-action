@@ -22,7 +22,7 @@ import {
 } from "../src/enforcement/settlement.js";
 import { persistedLoopSettlements } from "../src/engine/review.js";
 import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
-import { computeFinalDisposition, reviewResultFromDisposition } from "../src/disposition/final.js";
+import { computeFinalDisposition, parseFinalDisposition, reviewResultFromDisposition } from "../src/disposition/final.js";
 import { buildToolLoopTelemetry } from "../src/tools/harness.js";
 
 // ---------------------------------------------------------------------------
@@ -466,7 +466,11 @@ test("#1659: a cap-released ADVISORY question never vetoes the approval", () => 
       final({ id: "obligation-9", source: "trusted_base_guidance", materiality: "advisory", evidenceState: "cap-released", semantic: "unknown", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
     ],
   }));
-  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "advisory"]]);
+  // ADVISORY code, not `investigation_unavailable`: that code is MATERIAL-only
+  // and `parseFinalDisposition` refuses a cross-pairing, so an advisory entry
+  // carrying it would turn this certified APPROVE into an UNAVAILABLE
+  // abstention at the standalone publisher.
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_partial", "advisory"]]);
   const disposition = computeFinalDisposition({
     reviewProduced: true,
     validVerdict: true,
@@ -482,6 +486,119 @@ test("#1659: a cap-released ADVISORY question never vetoes the approval", () => 
     evidence: build.evidence,
   });
   assert.equal(disposition.kind, "approve");
+});
+
+test("#1659: both cap-release dispositions survive the serialized-artifact round trip", () => {
+  // The standalone publisher reads `final-disposition.json` back with
+  // `parseFinalDisposition`; a disposition that survives the decision table
+  // but fails that reader is published as an UNAVAILABLE abstention. So the
+  // acceptance check is the REAL artifact, not the in-memory object.
+  const roundTrip = (build: ReturnType<typeof buildDispositionEvidence>) => {
+    const disposition = computeFinalDisposition({
+      reviewProduced: true,
+      validVerdict: true,
+      verdict: "approve",
+      degraded: false,
+      exactHead: true,
+      publicationHeadBound: true,
+      blockingFindingOpen: false,
+      evidenceProviderBlocker: false,
+      provenUnmetRequirement: build.provenUnmetRequirement,
+      verdictBearing: true,
+      approvalScopeAllowed: true,
+      evidence: build.evidence,
+    });
+    const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
+    assert.ok(parsed !== null, "the published artifact must be readable by the standalone publisher");
+    assert.equal(parsed.kind, disposition.kind);
+    assert.equal(parsed.reason, disposition.reason);
+    // The native event the marker/attestation/native review all project.
+    assert.equal(parsed.nativeEvent, disposition.nativeEvent);
+    assert.deepEqual(parsed.advisoryDiagnostics, disposition.advisoryDiagnostics);
+    assert.deepEqual(parsed.materialUnknowns, disposition.materialUnknowns);
+    return disposition;
+  };
+
+  const materialRelease = buildDispositionEvidence(dispositionParts({
+    finalSettlements: [
+      final({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released", semantic: "unknown", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    ],
+  }));
+  assert.equal(roundTrip(materialRelease).kind, "incomplete");
+  assert.equal(roundTrip(materialRelease).nativeEvent, "COMMENT");
+
+  const advisoryRelease = buildDispositionEvidence(dispositionParts({
+    finalSettlements: [
+      final({ id: "obligation-9", source: "trusted_base_guidance", materiality: "advisory", evidenceState: "cap-released", semantic: "unknown", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    ],
+  }));
+  assert.equal(roundTrip(advisoryRelease).kind, "approve");
+  assert.equal(roundTrip(advisoryRelease).nativeEvent, "APPROVE");
+
+  // A corrupted record discloses through the same artifact path.
+  const corrupted = buildDispositionEvidence(dispositionParts({ settlementRecordDroppedRows: 1 }));
+  assert.equal(roundTrip(corrupted).kind, "incomplete");
+});
+
+test("#1659: an ABSENT settlement field stays legacy-clean; a PRESENT malformed one withholds", () => {
+  // Paired at the engine's reader seam, where the distinction is made.
+  // Absent telemetry / absent budget / explicit null: no record, no gap.
+  assert.deepEqual(persistedLoopSettlements({}), { settlements: [], dropped: 0 });
+  assert.deepEqual(persistedLoopSettlements({ tool_loop_telemetry: null }), { settlements: [], dropped: 0 });
+  assert.deepEqual(persistedLoopSettlements({ tool_loop_telemetry: { budget: {} } }), { settlements: [], dropped: 0 });
+  assert.deepEqual(persistedLoopSettlements({ tool_loop_telemetry: { budget: { required_evidence_settlements: null } } }), { settlements: [], dropped: 0 });
+  assert.deepEqual(persistedLoopSettlements({ tool_loop_telemetry: { budget: { required_evidence_settlements: [] } } }), { settlements: [], dropped: 0 });
+  // Present-but-invalid at ANY level of the record: a drop, hence a material
+  // unknown — never a silent "no record".
+  for (const corrupted of [
+    { tool_loop_telemetry: { budget: { required_evidence_settlements: "stripped" } } },
+    { tool_loop_telemetry: { budget: { required_evidence_settlements: { id: "provenance" } } } },
+    { tool_loop_telemetry: { budget: { required_evidence_settlements: 7 } } },
+    { tool_loop_telemetry: { budget: "gone" } },
+    { tool_loop_telemetry: "gone" },
+  ]) {
+    assert.equal(persistedLoopSettlements(corrupted).dropped, 1, JSON.stringify(corrupted));
+  }
+  // The material case end-to-end: same clean review, corrupted record ⇒
+  // INCOMPLETE rather than a certified APPROVE.
+  const corruptedBuild = buildDispositionEvidence(dispositionParts({
+    settlementRecordDroppedRows: persistedLoopSettlements({ tool_loop_telemetry: { budget: { required_evidence_settlements: "stripped" } } }).dropped,
+  }));
+  const corruptedDisposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: corruptedBuild.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: corruptedBuild.evidence,
+  });
+  assert.equal(corruptedDisposition.kind, "incomplete");
+  // The legacy control: no record at all ⇒ the certified APPROVE stands.
+  const legacyBuild = buildDispositionEvidence(dispositionParts({
+    settlementRecordDroppedRows: persistedLoopSettlements({ tool_loop_telemetry: { budget: {} } }).dropped,
+  }));
+  assert.equal(legacyBuild.evidence.length, 0);
+  const legacyDisposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: legacyBuild.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: legacyBuild.evidence,
+  });
+  assert.equal(legacyDisposition.kind, "approve");
 });
 
 test("#1659: a resolved/cap-released row the fold credited feeds nothing, and trace rows stay with #1658", () => {

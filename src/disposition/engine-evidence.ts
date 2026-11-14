@@ -109,8 +109,9 @@ export interface DispositionEvidenceParts {
    * call never certifies a semantic resolution (#1657), and a cap/budget
    * release is never a clean settlement. The record adds the ONE
    * disclosure the folds cannot represent — a cap-released material question
-   * as MATERIAL `investigation_unavailable` (advisory for non-material) — and
-   * never duplicates a question the folds already decided.
+   * as MATERIAL `investigation_unavailable`, a cap-released non-material
+   * question as ADVISORY `investigation_partial` — and never duplicates a
+   * question the folds already decided.
    */
   finalSettlements?: ReadonlyArray<FinalSettlementRow>;
   /** #1659: how many persisted settlement rows the strict reader refused
@@ -297,26 +298,39 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   // means the evidence window is ready — and the folds cannot see it, so a
   // cap-released MATERIAL question becomes a named material unknown
   // (`investigation_unavailable`) here, never "settled clean". A cap-released
-  // ADVISORY question becomes an advisory entry that never vetoes the
-  // approval. Every other semantic state is already carried by the folds
-  // below (`unknown` rows have their one completeness/obligation entry;
-  // `resolved`/`finding` carry no unknown; `not-tracked` objective shape rows
-  // are the required-check fold's business), so the record never duplicates a
-  // question. Trace-kind rows are skipped: the requirement trace settles by
-  // PROVENANCE (#1658) through the summary classes above. This join is what
-  // keeps the canonical record and the disposition from disagreeing — the
-  // semantic state is derived from these same fold outcomes.
+  // NON-material question becomes an ADVISORY `investigation_partial` entry
+  // that never vetoes the approval — the loop's evidence window was cut short,
+  // which is exactly that code's meaning. The code polarity is not
+  // decorative: `parseFinalDisposition` refuses a material code carrying
+  // advisory materiality, so an advisory `investigation_unavailable` would
+  // make the published run read as an UNAVAILABLE abstention instead of
+  // preserving its certified result. Every other semantic state is already
+  // carried by the folds below (`unknown` rows have their one
+  // completeness/obligation entry; `resolved`/`finding` carry no unknown;
+  // `not-tracked` objective shape rows are the required-check fold's
+  // business), so the record never duplicates a question. Trace-kind rows are
+  // skipped: the requirement trace settles by PROVENANCE (#1658) through the
+  // summary classes above. This join is what keeps the canonical record and
+  // the disposition from disagreeing — the semantic state is derived from
+  // these same fold outcomes.
   for (const settlement of parts.finalSettlements ?? []) {
     if (settlement.kind === "trace") continue;
     if (settlement.semantic !== "unknown") continue;
     if (settlement.evidenceState !== "cap-released") continue;
     evidence.push(
-      dispositionEvidence(
-        "investigation_unavailable",
-        "deterministic",
-        settlement.materiality,
-        `cap-released unprovable: ${settlement.id}`,
-      ),
+      settlement.materiality === "material"
+        ? dispositionEvidence(
+          "investigation_unavailable",
+          "deterministic",
+          "material",
+          `cap-released unprovable: ${settlement.id}`,
+        )
+        : dispositionEvidence(
+          "investigation_partial",
+          "deterministic",
+          "advisory",
+          `cap-released non-material: ${settlement.id}`,
+        ),
     );
   }
 

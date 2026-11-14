@@ -529,19 +529,25 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
 /** #1659: the persisted loop EVIDENCE record — read from the harness
  * artifact's telemetry budget block (`tool_loop_telemetry.budget`) with the
  * strict fail-closed reader. The raw `tool_loop_meta` is consumed at write
- * time, so the telemetry block is the persisted surface. Absent ⇒ no rows and
- * no drops (the byte-identical pre-#1659 behavior); malformed entries are
- * dropped AND counted, so the disposition can disclose a corrupted record as
- * a material unknown instead of reading it as "no gaps". The caller
- * reconciles the rows against the fold's semantic outcomes
+ * time, so the telemetry block is the persisted surface. An ABSENT telemetry
+ * block, budget block or field is the legacy/non-native shape: no rows and no
+ * drops (the byte-identical pre-#1659 behavior). A PRESENT but structurally
+ * invalid one (a telemetry/budget value that is not an object, a settlement
+ * field that is not an array) is corruption and reports a drop, so the
+ * disposition discloses it as a material unknown instead of reading it as
+ * "no gaps". Malformed entries are dropped AND counted for the same reason.
+ * The caller reconciles the rows against the fold's semantic outcomes
  * (`reconcileSettlements`) before the disposition consumes them. Exported
  * for the integration test of the harness → engine join. */
 export function persistedLoopSettlements(harness: unknown): { settlements: LoopEvidenceSettlement[]; dropped: number } {
   if (harness === null || typeof harness !== "object" || Array.isArray(harness)) return { settlements: [], dropped: 0 };
-  const telemetry = (harness as Record<string, unknown>).tool_loop_telemetry;
-  if (telemetry === null || typeof telemetry !== "object" || Array.isArray(telemetry)) return { settlements: [], dropped: 0 };
-  const budget = (telemetry as Record<string, unknown>).budget;
-  if (budget === null || typeof budget !== "object" || Array.isArray(budget)) return { settlements: [], dropped: 0 };
+  const record = (harness as Record<string, unknown>).tool_loop_telemetry;
+  // Absent telemetry is the legacy/non-native shape: no record, no gap.
+  if (record === undefined || record === null) return { settlements: [], dropped: 0 };
+  if (typeof record !== "object" || Array.isArray(record)) return { settlements: [], dropped: 1 };
+  const budget = (record as Record<string, unknown>).budget;
+  if (budget === undefined || budget === null) return { settlements: [], dropped: 0 };
+  if (typeof budget !== "object" || Array.isArray(budget)) return { settlements: [], dropped: 1 };
   const report = parseLoopSettlementsReport((budget as Record<string, unknown>).required_evidence_settlements);
   return { settlements: report.rows, dropped: report.dropped };
 }

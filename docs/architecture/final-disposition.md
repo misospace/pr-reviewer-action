@@ -124,7 +124,11 @@ settle a state:
   the SAME obligation rows this disposition consumes, so the record and the
   disposition cannot disagree. A CAP-RELEASED material question becomes a
   MATERIAL `investigation_unavailable` unknown (never "settled clean"), a
-  cap-released advisory question never vetoes, and every question the folds
+  cap-released non-material question becomes an ADVISORY
+  `investigation_partial` diagnostic that never vetoes — never a material
+  code carrying advisory materiality, which `parseFinalDisposition` refuses
+  as a cross-pairing and the standalone publisher would publish as an
+  UNAVAILABLE abstention — and every question the folds
   already decided keeps its single entry — the record never duplicates it.
   Admission alone never overrides this disposition, and trace-kind rows stay
   with #1658's provenance settlement. A persisted record the strict reader
