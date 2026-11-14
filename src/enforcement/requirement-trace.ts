@@ -214,11 +214,13 @@ export const TRACE_MATERIALITY: readonly string[] = ["material", "advisory"];
  * never wires publication policy itself):
  * - `confirmed_unmet` → an objectively proven-unmet mandatory requirement
  *   (REQUEST_CHANGES territory, through the mechanical refutation count);
- * - `unmet_claimed` → NEVER an independent veto at the disposition seam:
- *   it blocks only through an ordinary grounded blocker/major finding
- *   (golden case10), and a bare claim must stay APPROVE-able (#1643,
- *   golden case9) — the row's materiality is exposure information, not a
- *   disposition instruction;
+ * - `unmet_claimed` → a MATERIAL unknown on an in-scope row (withholds
+ *   approval as INCOMPLETE, never synthesized into a blocker and never a
+ *   refutation); when an ordinary grounded blocker/major finding already
+ *   carries the claim, the disposition's fixed precedence yields
+ *   REQUEST_CHANGES through the finding path. An OUT-OF-SCOPE claim
+ *   (`out-of-scope-reported-unmet` marker) is disclosure-only and must
+ *   never independently prevent APPROVE;
  * - `unresolved_material` → a material unknown / INCOMPLETE;
  * - `unresolved_advisory` → diagnostic only. */
 export interface RequirementTraceSummary {
@@ -2911,5 +2913,26 @@ export function confirmedUnmetRows(trace: RequirementTraceArtifact): Requirement
   return trace.rows.filter((row) =>
     row.disposition === "unverifiable"
     && row.notes.some((note) => CONFIRMED_UNMET_REFUTATION_NOTES.includes(note)),
+  );
+}
+
+/** The trusted out-of-scope marker on an out-of-scope row that still
+ * disclosed a well-formed model `unmet` claim (#935/#1658). The claim
+ * rides the artifact for disclosure only — it names a requirement the
+ * applicability scope (#1600) already settled, so it must never gate
+ * certification the way an in-scope claim does. */
+export const OUT_OF_SCOPE_UNMET_NOTE = "out-of-scope-reported-unmet";
+
+/** #1658 review: the in-scope `unmet_claimed` rows — the reviewer's own
+ * well-formed gap claims (#1095) on requirements the applicability scope
+ * kept in scope. These are the claims the final-disposition layer weighs
+ * as MATERIAL unknowns (withholding certification as INCOMPLETE, never a
+ * synthesized blocker and never a refutation); an out-of-scope claim
+ * (`OUT_OF_SCOPE_UNMET_NOTE`) stays disclosure-only so it can never
+ * independently prevent APPROVE. */
+export function traceUnmetClaimedInScopeRows(trace: RequirementTraceArtifact): RequirementTraceRow[] {
+  return trace.rows.filter((row) =>
+    row.resolution === "unmet_claimed"
+    && !row.notes.includes(OUT_OF_SCOPE_UNMET_NOTE),
   );
 }

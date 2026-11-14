@@ -411,3 +411,136 @@ test("no trace-only model pass or validator tutoring exists to make an adequate 
   assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-enforcement-location"));
   assert.equal(trace.incomplete, false);
 });
+
+// ---------------------------------------------------------------------------
+// #1658 review round: an IN-SCOPE `unmet_claimed` row is a material unknown
+// at the single FinalDisposition seam — validator → scope marker → seam →
+// disposition composition (no mocked flags, no synthesized blocker).
+// ---------------------------------------------------------------------------
+
+import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
+import { computeFinalDisposition } from "../src/disposition/final.js";
+import { confirmedUnmetRows, traceUnmetClaimedInScopeRows } from "../src/enforcement/requirement-trace.js";
+
+/** The EXACT part derivation review.ts performs over an applied trace —
+ * one seam, exercised against real validator output. */
+function dispositionFromTrace(trace: RequirementTraceArtifact): ReturnType<typeof buildDispositionEvidence> {
+  return buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    traceUnresolvedMaterial: trace.summary.unresolved_material.length > 0,
+    traceUnmetClaimed: traceUnmetClaimedInScopeRows(trace).length > 0,
+    mechanicallyProvenUnmetRequirements: confirmedUnmetRows(trace).length,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+}
+
+function dispositionInput(evidence: ReturnType<typeof buildDispositionEvidence>["evidence"], overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true, evidence, ...overrides,
+  };
+}
+
+test("an in-scope unmet claim with model approve and no grounded finding withholds as INCOMPLETE (real composition)", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gate.ts", ["export const gate = (ok: boolean) => ok;"]);
+    const ledger = ledgerWith([{ id: "req-gate", text: "The gate must validate the account identity.", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-gate",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the gate never validates anything",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.summary.unmet_claimed.length, 1);
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the claim is in scope");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
+    assert.deepEqual(build.evidence.map((entry) => entry.materiality), ["material"]);
+    assert.equal(build.provenUnmetRequirement, false, "a claim is never a refutation");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "incomplete");
+    assert.equal(disposition.reason, "material_unknown");
+    assert.equal(disposition.nativeEvent, "COMMENT");
+    assert.equal(disposition.approvalCertified, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("the same claim with a grounded major finding is REQUEST_CHANGES through the finding path", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gate.ts", ["export const gate = (ok: boolean) => ok;"]);
+    const ledger = ledgerWith([{ id: "req-gate", text: "The gate must validate the account identity.", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-gate",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the gate never validates anything",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    const build = dispositionFromTrace(trace);
+    // The existing finding path: a grounded open blocker/major finding is
+    // the input `blockingFindingOpen` — the disposition's fixed precedence
+    // (step 2, proven defects) outranks the material unknown (step 3), so
+    // the native event is REQUEST_CHANGES without any trace machinery.
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence, { blockingFindingOpen: true }) as never);
+    assert.equal(disposition.kind, "request_changes");
+    assert.equal(disposition.reason, "blocker_proven");
+    assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+    assert.equal(disposition.blockerProven, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an out-of-scope unmet claim alone never prevents APPROVE (scope marker composition)", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/unrelated/widget.ts", ["export const widget = () => 1;"]);
+    const ledger = ledgerWith([
+      { id: "req-posting", text: "The changelog must be posted to the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+    ]);
+    // The affected boundary is NOT touched, so the linked row narrows out;
+    // the model still claims `unmet` on it — a well-formed gap claim on a
+    // scope-settled requirement.
+    const claims = [{
+      requirement_id: "req-posting",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "no changelog posting exists yet",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+ export const widget = () => 1;", {
+      paths: ["src/unrelated/widget.ts"],
+      fileLines: [{ path: "src/unrelated/widget.ts", lines: ["+ export const widget = () => 1;"] }],
+    });
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-posting");
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(row?.notes.includes("out-of-scope-reported-unmet"), "the out-of-scope claim carries the trusted disclosure marker");
+    assert.deepEqual(trace.summary.unmet_claimed, ["req-posting"], "the claim stays disclosed on the artifact");
+    // The scope marker keeps it OUT of the seam: no material evidence.
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 0);
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence, [], "an out-of-scope claim is disclosure-only");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "approve", "approval eligibility is unchanged");
+    assert.equal(disposition.nativeEvent, "APPROVE");
+    assert.equal(disposition.approvalCertified, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

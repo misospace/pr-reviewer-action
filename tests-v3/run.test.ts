@@ -4359,14 +4359,16 @@ test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, nev
 
     // #1095: the enforcement pass fabricates no finding from the ledger text
     // alone — the model's unsubstantiated unmet stays disclosed in the trace
-    // and keeps coverage incomplete, but a blocking review must rest on a
-    // substantiated violation (the model's own finding), which this payload
-    // does not carry.
+    // (never synthesized into a blocker); a blocking review must rest on a
+    // substantiated violation (the model's own finding). #1658 review
+    // round: the IN-SCOPE claim reaches the single FinalDisposition as a
+    // material unknown, so the marker reads partial (INCOMPLETE surface)
+    // and the native event can never certify the approve.
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
     assert.equal(findings.length, 0);
 
     assert.equal(result.outputs.verdict, "approve");
-    assert.match(result.marker, /"review_result":"clean"/);
+    assert.match(result.marker, /"review_result":"partial"/);
     assert.doesNotMatch(result.marker, /"incomplete_reason":"requirement_trace"/);
     const traceArtifact = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ resolution: string }>; summary: { unmet_claimed: string[] } };
     assert.equal(traceArtifact.summary.unmet_claimed.length, 1);
@@ -4417,11 +4419,12 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     assert.equal(findings.length, 0);
 
     // #1095: no synthesized finding under any verdict policy. #1658: the
-    // trace is not a coverage stop — required_checks stays untouched and the
-    // marker reads clean; the unmet_claimed exposure feeds #1656 instead.
+    // trace is not a coverage stop — required_checks stays untouched; the
+    // IN-SCOPE unmet_claimed exposure feeds #1656 and withholds as the
+    // material unknown it is, so the marker reads partial.
     assert.equal(result.outputs.verdict, "approve");
     assert.notEqual(result.outputs.requiredChecks, "incomplete");
-    assert.match(result.marker, /"review_result":"clean"/);
+    assert.match(result.marker, /"review_result":"partial"/);
   } finally {
     await server.close();
     cleanup();
@@ -4468,11 +4471,12 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     assert.equal(findings.length, 0);
 
     // #1095: no synthesized finding under any verdict policy. #1658: the
-    // trace is not a coverage stop — required_checks stays untouched and the
-    // marker reads clean; the unmet_claimed exposure feeds #1656 instead.
+    // trace is not a coverage stop — required_checks stays untouched; the
+    // IN-SCOPE unmet_claimed exposure feeds #1656 and withholds as the
+    // material unknown it is, so the marker reads partial.
     assert.equal(result.outputs.verdict, "approve");
     assert.notEqual(result.outputs.requiredChecks, "incomplete");
-    assert.match(result.marker, /"review_result":"clean"/);
+    assert.match(result.marker, /"review_result":"partial"/);
   } finally {
     await server.close();
     cleanup();

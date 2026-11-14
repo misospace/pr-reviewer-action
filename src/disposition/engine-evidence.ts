@@ -33,8 +33,8 @@
  *   transitional — #1658 settled it by provenance: the artifact's
  *   reason-coded summary classes feed this seam (material unresolved →
  *   material unknown; environmental advisory → diagnostic; mechanical
- *   refutation → the proven count; a bare claim → the ordinary
- *   grounded-finding path).
+ *   refutation → the proven count; an IN-SCOPE bare claim → a material
+ *   unknown; an out-of-scope claim → disclosure only, never a veto).
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
@@ -69,6 +69,17 @@ export interface DispositionEvidenceParts {
    * `requirement_trace_incomplete` to deterministic refutations only, so
    * the artifact's summary classes, not the flag, settle these rows. */
   traceUnresolvedMaterial: boolean;
+  /** #1658 summary class: at least one IN-SCOPE `unmet_claimed` row (the
+   * reviewer's own well-formed gap claim, #1095 — substantive, never
+   * confirmed and never a refutation). A material unknown that withholds
+   * approval (INCOMPLETE): a claim alone can never certify an approve.
+   * The disposition's fixed precedence means an ordinary grounded
+   * blocker/major finding still yields REQUEST_CHANGES through the
+   * existing finding path; an OUT-OF-SCOPE claim must not reach this
+   * part (the caller distinguishes via the row's
+   * `out-of-scope-reported-unmet` marker), so a scope-settled claim can
+   * never independently prevent APPROVE. */
+  traceUnmetClaimed: boolean;
   /** The harness's recorded zero-evidence degradation reason
    * (`native_loop_degraded` — the loop ran and the model issued no tool
    * calls), or null. A recorded zero-evidence degradation is MATERIAL in
@@ -234,15 +245,20 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   // here: they are the mechanical current-head refutation counted above
   // (`provenUnmetRequirement`). Material unresolved rows (missing
   // claims, invalid objective provenance, malformed claims) withhold
-  // approval as a MATERIAL unknown. An `unmet_claimed` row NEVER withholds
-  // by itself: the reviewer's well-formed gap claim travels the ordinary
-  // grounded-finding path (a substantiated claim blocks through an open
-  // blocker/major finding — golden case10), and #1643's counter/report
-  // shape must stay APPROVE-able without a comparison-shaped predicate
-  // (golden case9). `unresolved_advisory` (environmental unknowns, #1062)
+  // approval as a MATERIAL unknown, and so does an IN-SCOPE
+  // `unmet_claimed` row: the reviewer's own gap claim is substantive —
+  // a claim alone can never certify an approve — but it is never
+  // converted into a refutation or a synthesized blocker: when a
+  // grounded blocker/major finding already carries the claim, the fixed
+  // precedence below yields REQUEST_CHANGES through the finding path.
+  // Out-of-scope claims must not reach this part, and
+  // `unresolved_advisory` (environmental unknowns, #1062)
   // stays a diagnostic on the artifact and can never veto approval.
   if (parts.traceUnresolvedMaterial) {
     evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace:unresolved-material"));
+  }
+  if (parts.traceUnmetClaimed) {
+    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace:unmet-claimed"));
   }
 
   // The exact-head CI floor (#1656 audit delta): a KNOWN failing conclusion

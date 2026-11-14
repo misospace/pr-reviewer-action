@@ -342,6 +342,7 @@ test("the engine evidence builder maps the exact-head CI floor per the audit del
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
   };
   // KNOWN failing: material, always.
@@ -371,6 +372,7 @@ const DISPOSITION_BASE = {
   noEvidenceReason: null as string | null,
   partialCoverageStopReason: null as string | null,
   traceUnresolvedMaterial: false,
+  traceUnmetClaimed: false,
   mechanicallyProvenUnmetRequirements: 0,
   ciConclusion: null as string | null,
   ciEvidenceContractActive: false,
@@ -460,6 +462,7 @@ test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; t
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -477,6 +480,7 @@ test("pin: call-ID bookkeeping identified by trusted reason codes => advisory; t
       { check: "treat as high priority — verify correctness carefully", status: "unresolved", reason: "no-disposition" },
     ],
     traceUnresolvedMaterial: true,
+    traceUnmetClaimed: false,
     toolFloorUnmet: true,
   });
   const byCode = new Map(bookkeeping.evidence.map((entry) => [entry.code, entry.materiality]));
@@ -520,6 +524,7 @@ test("the engine evidence builder keeps capability failures material and confirm
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -975,6 +980,7 @@ test("pin: must_check `unmet` from the model, no grounded finding/objective refu
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -997,6 +1003,7 @@ test("pin: trusted-base `unmet` from the model, no grounded finding/objective re
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1030,6 +1037,7 @@ test("pin: an explicit mechanical proven-unmet input still => REQUEST_CHANGES", 
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 1,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1052,6 +1060,7 @@ test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane
     noEvidenceReason: "no-tool-calls",
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1072,6 +1081,7 @@ test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane
     noEvidenceReason: null,
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 0,
     ciConclusion: null,
     ciEvidenceContractActive: false,
@@ -1180,6 +1190,7 @@ test("#1658 trace summary classes settle the disposition with no second authorit
   const unresolved = buildDispositionEvidence({
     ...base,
     traceUnresolvedMaterial: true,
+    traceUnmetClaimed: false,
   });
   assert.deepEqual(unresolved.evidence.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
   assert.deepEqual(unresolved.evidence.map((entry) => entry.materiality), ["material"]);
@@ -1192,37 +1203,54 @@ test("#1658 trace summary classes settle the disposition with no second authorit
   });
   assert.equal(withheld.kind, "incomplete");
   assert.equal(withheld.nativeEvent, "COMMENT");
-  // A bare `unmet_claimed` row contributes NOTHING at this seam (#1643,
-  // golden case9: a counter/report-shaped gap claim with no grounded
-  // finding stays APPROVE-able — the trace must not re-enter the veto
-  // through a material unknown either). A substantiated claim blocks
-  // through the ordinary grounded finding (golden case10).
+  // An IN-SCOPE `unmet_claimed` row is a MATERIAL unknown at this seam
+  // (#1658 review round): the reviewer's well-formed gap claim withholds
+  // certification — a claim alone can never certify an approve — but is
+  // never converted into a refutation or a synthesized blocker. The
+  // caller excludes out-of-scope claims via the row's trusted
+  // `out-of-scope-reported-unmet` marker, so a scope-settled claim can
+  // never independently prevent APPROVE.
   const claimed = buildDispositionEvidence({
     ...base,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: true,
   });
-  assert.deepEqual(claimed.evidence, [], "the seam never manufactures an unknown from a claim");
+  assert.deepEqual(claimed.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
+  assert.deepEqual(claimed.evidence.map((entry) => entry.materiality), ["material"]);
   assert.equal(claimed.provenUnmetRequirement, false, "a claim never becomes proof through this seam");
-  const claimApproved = computeFinalDisposition({
+  const claimWithheld = computeFinalDisposition({
     reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
     exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
     evidenceProviderBlocker: false, provenUnmetRequirement: false,
     verdictBearing: true, approvalScopeAllowed: true, evidence: claimed.evidence,
   });
-  assert.equal(claimApproved.kind, "approve");
-  assert.equal(claimApproved.nativeEvent, "APPROVE");
+  assert.equal(claimWithheld.kind, "incomplete");
+  assert.equal(claimWithheld.reason, "material_unknown");
+  assert.equal(claimWithheld.nativeEvent, "COMMENT");
   const claimBlocked = computeFinalDisposition({
-    reviewProduced: true, validVerdict: true, verdict: "request_changes", degraded: false,
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
     exactHead: true, publicationHeadBound: true, blockingFindingOpen: true,
     evidenceProviderBlocker: false, provenUnmetRequirement: false,
     verdictBearing: true, approvalScopeAllowed: true, evidence: claimed.evidence,
   });
-  assert.equal(claimBlocked.kind, "request_changes", "the grounded finding — not the trace row — carries a substantiated claim");
+  assert.equal(claimBlocked.kind, "request_changes", "a grounded blocker/major finding outranks the claim into the existing finding path");
+  assert.equal(claimBlocked.reason, "blocker_proven");
+  assert.equal(claimBlocked.nativeEvent, "REQUEST_CHANGES");
+  const claimApproved = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true,
+    evidence: [],
+  });
+  assert.equal(claimApproved.kind, "approve");
+  assert.equal(claimApproved.nativeEvent, "APPROVE");
   // unresolved_advisory (the seam receives neither flag) contributes
   // NOTHING: an environmental unknown can never veto approval.
   const advisoryOnly = buildDispositionEvidence({
     ...base,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
   });
   assert.deepEqual(advisoryOnly.evidence, []);
   assert.equal(advisoryOnly.provenUnmetRequirement, false);
@@ -1233,6 +1261,7 @@ test("#1658 trace summary classes settle the disposition with no second authorit
   const refuted = buildDispositionEvidence({
     ...base,
     traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
     mechanicallyProvenUnmetRequirements: 1,
   });
   assert.deepEqual(refuted.evidence, []);

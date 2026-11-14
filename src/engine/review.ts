@@ -120,7 +120,7 @@ import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2838,6 +2838,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const requirementTraceSummary = requirementTraceResult !== null && requirementTraceResult.applied
     ? requirementTraceResult.trace.summary
     : null;
+  // #1658 review round: an IN-SCOPE `unmet_claimed` row is a material
+  // unknown at the same seam — a claim alone can never certify an
+  // approve (and a grounded blocker/major finding outranks it into
+  // REQUEST_CHANGES by the disposition's fixed precedence). The scope
+  // distinction uses the row's own trusted marker, so an out-of-scope
+  // claim stays disclosure-only.
+  const traceUnmetClaimed = requirementTraceResult !== null && requirementTraceResult.applied
+    && traceUnmetClaimedInScopeRows(requirementTraceResult.trace).length > 0;
   const dispositionBuild = buildDispositionEvidence({
     completenessChecks: Array.isArray(completenessResult?.result?.checks)
       ? (completenessResult!.result.checks as Array<{ check?: unknown; status?: unknown; reason?: unknown }>)
@@ -2864,11 +2872,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // classes feed the single disposition. The old flag can never carry
     // them after the narrowing (`requirement_trace_incomplete` is
     // confirmed-unmet-only), and the proven class already arrived via
-    // the mechanical refutation count above. An `unmet_claimed` row is
-    // NOT wired here at all: it blocks only through an ordinary grounded
-    // blocker/major finding (#1643's counter/report shape stays
-    // APPROVE-able — golden case9).
+    // the mechanical refutation count above. An IN-SCOPE `unmet_claimed`
+    // row withholds as a material unknown (never a synthesized blocker:
+    // a grounded finding outranks it into REQUEST_CHANGES); out-of-scope
+    // claims are excluded by the helper's marker so they can never
+    // independently prevent APPROVE.
     traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
+    traceUnmetClaimed: traceUnmetClaimed,
     // The exact-head CI floor: the CI gate's already-paid conclusion — a
     // KNOWN failure can never certify an approval; a PENDING one withholds
     // only when the #1594 head-bound evidence contract proves CI materially

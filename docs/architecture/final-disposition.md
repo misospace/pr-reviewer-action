@@ -105,10 +105,13 @@ settle a state:
 - the requirement trace settles by PROVENANCE (#1658): the artifact's
   reason-coded summary classes feed the seam — `unresolved_material` rows
   are a MATERIAL unknown (INCOMPLETE), `unresolved_advisory` rows are
-  diagnostics that can never veto approval, and an `unmet_claimed` row
-  withholds nothing by itself: it blocks only through an ordinary grounded
-  blocker/major finding (#1643's counter/report shape must stay
-  APPROVE-able — golden case9);
+  diagnostics that can never veto approval, and an IN-SCOPE
+  `unmet_claimed` row is likewise a MATERIAL unknown: a claim alone can
+  never certify an approve, yet is never converted into a refutation or a
+  synthesized blocker — a grounded blocker/major finding outranks it into
+  REQUEST_CHANGES through the existing finding path, while an
+  OUT-OF-SCOPE claim (the row's `out-of-scope-reported-unmet` marker)
+  stays disclosure-only and can never independently prevent APPROVE;
 - a tool CAPABILITY failure (planning/execution error, every call failed)
   and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
   lane-independent — never a route/tier name) are MATERIAL;
