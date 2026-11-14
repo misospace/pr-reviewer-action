@@ -119,6 +119,7 @@ import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { parseLoopSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -525,6 +526,21 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * artifact and the demotion note reflect every pass. Findings the first
  * pass processed are skipped inside the boundary itself, so the second
  * pass only reports newly settled findings. */
+/** #1659: the persisted loop settlement record — read from the harness
+ * artifact's telemetry budget block (`tool_loop_telemetry.budget`) with the
+ * strict fail-closed reader. The raw `tool_loop_meta` is consumed at write
+ * time, so the telemetry block is the persisted surface. Absent/malformed/
+ * fully-dropped ⇒ [] — the byte-identical pre-#1659 behavior (the disposition
+ * then has no loop settlement to disclose). */
+function persistedLoopSettlements(harness: unknown): LoopEvidenceSettlement[] {
+  if (harness === null || typeof harness !== "object" || Array.isArray(harness)) return [];
+  const telemetry = (harness as Record<string, unknown>).tool_loop_telemetry;
+  if (telemetry === null || typeof telemetry !== "object" || Array.isArray(telemetry)) return [];
+  const budget = (telemetry as Record<string, unknown>).budget;
+  if (budget === null || typeof budget !== "object" || Array.isArray(budget)) return [];
+  return parseLoopSettlements((budget as Record<string, unknown>).required_evidence_settlements);
+}
+
 /**
  * Fold the run's review-owned required-evidence obligations (#1381).
  *
@@ -653,7 +669,7 @@ function resolveReviewObligations(
   // PRESENT-but-malformed trace REFUSES the ledger, which keeps the gate
   // active with nothing usable (#1634 review's fail-closed rule, carried
   // over). No model prose, no tool result bodies: objective fields only.
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown; tool_loop_telemetry?: unknown } | null;
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
     for (const anchor of row.anchors ?? []) {
@@ -2885,6 +2901,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // required (#1656 audit delta). No new forge call.
     ciConclusion: traceCiState,
     ciEvidenceContractActive: ciGateEvidence !== null,
+    // #1659: the native loop's own settlement record (provenance only —
+    // never a semantic certification). A cap-released material question is
+    // disclosed as a material unknown; a cap-released advisory question
+    // stays non-gating; `open` rows are already covered by the fold evidence
+    // above. Absent/legacy artifact ⇒ [] (pre-#1659 behavior).
+    loopSettlements: persistedLoopSettlements(enforcementInputs.toolHarness),
   });
   // The objective approval scope gates (fork policy, publish mode): the
   // same fail-closed rule `evaluateApprovalGuardrails` applies (an unknown

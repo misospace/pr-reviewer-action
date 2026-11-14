@@ -44,6 +44,9 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
     requiredEvidenceSettledStop: false,
+    // #1659: the canonical settlement record — empty on the synthetic
+    // outcomes these coverage tests build (no loop settlement surfaced).
+    requiredEvidenceSettlements: [],
     ...overrides,
   };
 }
