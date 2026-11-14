@@ -425,13 +425,28 @@ function etag(text: string, rowClass: "attention" | "objective" | "review-prompt
 }
 
 /** A minimal valid trace: one successful read of src/paths.ts. The
- * production envelope nests tool fields under `result` — truncation is a
- * payload flag, never an envelope field (#1657 round 10). */
+ * production envelope nests tool fields under `result`, truncation is a
+ * payload flag, and the nested payload must carry the tool's real output
+ * shape — empty or args-only payloads REFUSE the ledger (#1657 rounds
+ * 10 + 11). */
 function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
   return buildEvidenceLedger({
     toolCalls: entries.map((entry) => ({ tool: entry.tool, args: entry.args, status: entry.status })),
-    toolResults: entries.map((entry) => ({ status: entry.status, result: entry.truncated !== undefined ? { truncated: entry.truncated } : {} })),
+    toolResults: entries.map((entry) => ({ status: entry.status, result: alignedResultPayload(entry) })),
   });
+}
+
+/** The minimum production payload for each tool this suite exercises. */
+function alignedResultPayload(entry: { tool: string; status: string; truncated?: boolean }): Record<string, unknown> {
+  const payload: Record<string, unknown> = entry.status === "error"
+    ? { error: `${entry.tool}: simulated executor failure` }
+    : entry.tool === "web_search"
+      ? { results: '[{"title":"upstream security advisory"}]' }
+      : entry.tool === "web_fetch"
+        ? { content: "upstream comparison page\n" }
+        : { content: "const sanitized = resolve(p);\n" };
+  if (entry.truncated !== undefined) payload.truncated = entry.truncated;
+  return payload;
 }
 
 const PATH_ROW = "review the path resolution in src/paths.ts";

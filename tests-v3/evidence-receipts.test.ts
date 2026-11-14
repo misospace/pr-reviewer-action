@@ -90,7 +90,11 @@ test("#1657: a valid trace yields bounded receipts with objective fields only �
       { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
       { tool: "run_command", args: { command: "git_status_short" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { content: "value: 1\n", truncated: false } },
+      { status: "ok", result: { content: "example-pkg 4.17.21\n", truncated: false } },
+      { status: "ok", result: { stdout: " M src/config.yaml\n", stderr: "", truncated: false, exit_code: 0 } },
+    ],
     reviewedHeadSha: HEAD,
   });
   assert.equal(ledger.state, "valid");
@@ -114,7 +118,10 @@ test("#1657: a failed or truncated acquisition is recorded, never credited", () 
       { tool: "read_file", args: { path: "src/config.yaml" }, status: "error" },
       { tool: "read_file", args: { path: "src/other.yaml" }, status: "ok" },
     ],
-    toolResults: [{ status: "error" }, { status: "ok", result: { content: "value: 1", truncated: true } }],
+    toolResults: [
+      { status: "error", result: { error: "no such file or directory: 'src/config.yaml'" } },
+      { status: "ok", result: { content: "value: 1", truncated: true } },
+    ],
   });
   assert.equal(ledger.state, "valid");
   assert.equal(ledger.receipts[0]!.acquired, false);
@@ -132,7 +139,7 @@ test("#1657: git_grep receipts carry the file-scoped path AND the matched paths"
 test("#1657: a forge read is head-bound only when it carries the exact reviewed head — stale reads stay unbound", () => {
   const base = {
     toolCalls: [{ tool: "gh_api", args: { endpoint: "/repos/o/r/contents/src/config.yaml" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "8ba9876cb113f4", size: 10, content: "value: 1\n", truncated: false } }],
   };
   const pinned = buildEvidenceLedger({ ...base, reviewedHeadSha: HEAD, toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/contents/src/config.yaml?ref=${HEAD}` }, status: "ok" }] });
   assert.equal(pinned.receipts[0]!.freshness, "head-bound");
@@ -144,7 +151,7 @@ test("#1657: corpus-diff credit and head-bound CI rows join the ledger as receip
   const rawDiff = "diff --git a/src/config.yaml b/src/config.yaml\n--- a/src/config.yaml\n+++ b/src/config.yaml\n@@ -1 +1 @@\n-x\n+y\n";
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "read_file", args: { path: "README.md" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "# pr-reviewer-action\n", truncated: false } }],
     certifiedDiffPayloads: [rawDiff],
     rawDiff,
     candidatePaths: ["src/config.yaml", "src/absent.yaml"],
@@ -185,6 +192,18 @@ test("#1657 (round 8): a malformed aligned result REFUSES the ledger — tool_ca
     [{ status: "ok", result: { truncated: "false" } }],
     [{ status: "ok", result: { truncated: {} } }],
     [{ status: "ok", result: { truncated: null } }],
+    // Round-11: production executeToolRequest ALWAYS nests an object
+    // payload under `result` (envelope init and catch arm alike), so a
+    // record whose nested payload is absent, null, a primitive, or an
+    // array is one the runtime cannot read an observation from — refused
+    // for either status. Arguments never stand in for the result.
+    [{ status: "ok" }],
+    [{ status: "error" }],
+    [{ status: "ok", result: null }],
+    [{ status: "error", result: null }],
+    [{ status: "ok", result: "whatever" }],
+    [{ status: "ok", result: [] }],
+    [{ status: "error", result: [] }],
   ]) {
     assert.equal(
       buildEvidenceLedger({ toolCalls: calls, toolResults: malformed, reviewedHeadSha: HEAD }).state,
@@ -284,6 +303,105 @@ test("#1657 (round 10): truncation survives the envelope for repo_contents, list
   assert.equal(fullRead.receipts[0]!.complete, true);
 });
 
+test("#1657 (round 11): a SUCCESS lacking the tool's minimum output payload REFUSES the ledger — args alone never evidence acquisition", () => {
+  // The round-11 bug class: aligned results with structurally empty or
+  // wrong-typed payloads passed the old validator, letting bare call
+  // ARGUMENTS stand in for the acquisition. Each evidence-bearing tool
+  // names what a real executor observation must contain.
+  for (const call of [
+    { tool: "read_file", args: { path: "src/config.yaml" } },
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" } },
+    { tool: "web_search", args: { query: "lodash 4.17.15 4.17.21 security advisory CVE" } },
+    { tool: "gh_api", args: { endpoint: "/repos/o/r/compare/4.17.15...4.17.21" } },
+    { tool: "git_grep", args: { pattern: "sanitize", path: "src/paths.ts" } },
+    { tool: "repo_contents", args: { repo: "o/r", path: "src/app.ts" } },
+    { tool: "run_command", args: { command: "git_status_short" } },
+  ]) {
+    assert.equal(
+      buildEvidenceLedger({
+        toolCalls: [{ ...call, status: "ok" }],
+        toolResults: [{ status: "ok", result: {} }],
+        reviewedHeadSha: HEAD,
+      }).state,
+      "refused",
+      JSON.stringify(call),
+    );
+  }
+  // The named web_fetch lodash-compare failure mode: with no real nested
+  // observation the release-delta row can NEVER become receipt-backed —
+  // the URL arguments alone establish nothing, and the ledger refuses.
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE]);
+  const emptyTrace = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(emptyTrace.state, "refused");
+  assert.deepEqual(
+    evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", emptyTrace),
+    { rowClass: "objective", gate: "dependency-evidence", state: "trace-refused", receipts: [] },
+  );
+});
+
+test("#1657 (round 11): legitimate BINARY payloads are real observations but never content receipts — downgraded, never REFUSED", () => {
+  // repo_contents' production binary arm and gh_api's decoded binary
+  // contents are well-formed observations OF BYTES, not of source text:
+  // the ledger stays VALID, but the receipts carry discovery capability,
+  // so no content claim can settle on them.
+  const binaryLedger = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "repo_contents", args: { repo: "o/r", path: "assets/logo.png" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "/repos/o/r/contents/assets/logo.png" }, status: "ok" },
+    ],
+    toolResults: [
+      { tool: "repo_contents", status: "ok", result: { repo: "o/r", path: "assets/logo.png", type: "file", binary: true, truncated: false } },
+      { tool: "gh_api", status: "ok", result: { path: "assets/logo.png", sha: "9f2c1a3b4d5e6f70", size: 1024, binary: true, truncated: false } },
+    ],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(binaryLedger.state, "valid");
+  assert.deepEqual(
+    [binaryLedger.receipts[0]!.kind, binaryLedger.receipts[0]!.capability],
+    ["discovery", "discovery"],
+  );
+  assert.equal(binaryLedger.receipts[1]!.capability, "discovery");
+  // A "file" payload with NO content and NO binary marker is not a shape
+  // production emits: it masquerades as readable source, so the ledger
+  // REFUSES rather than credit a whole-path content receipt.
+  const masquerade = buildEvidenceLedger({
+    toolCalls: [{ tool: "repo_contents", args: { repo: "o/r", path: "src/app.ts" }, status: "ok" }],
+    toolResults: [{ tool: "repo_contents", status: "ok", result: { repo: "o/r", path: "src/app.ts", type: "file", truncated: false } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(masquerade.state, "refused");
+});
+
+test("#1657 (round 11): a default whole-file read whose 12k window DISCARDED bytes is an incomplete observation", () => {
+  // The executor now flags its internal default-read slice itself (pinned
+  // in tools-executors): a >12k-codepoint file read without offset/limit
+  // arrives with `truncated: true`. The receipt still records the WHOLE
+  // path (no range-aware receipt subsystem), but never complete, so a
+  // source-identity row naming the file settles receipt-unverified —
+  // NEVER receipt-backed.
+  const clipped = buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "src/big.ts" }, status: "ok" }],
+    toolResults: [{ tool: "read_file", status: "ok", result: { content: "x".repeat(12000), truncated: true } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(clipped.state, "valid");
+  assert.equal(clipped.receipts[0]!.complete, false);
+  assert.equal(
+    evaluateRowEvidence(tag("verify the surface in src/big.ts", "objective", "source-identity"), "verify the surface in src/big.ts", clipped).state,
+    "receipt-unverified",
+  );
+  // The same call whose payload kept everything is a complete receipt.
+  const kept = buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "src/big.ts" }, status: "ok" }],
+    toolResults: [{ tool: "read_file", status: "ok", result: { content: "x".repeat(500), truncated: false } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(kept.receipts[0]!.complete, true);
+});
+
 test("#1657 (round 8): the aligned RESULT is the acquisition authority — a valid ok result is usable, and a call claiming ok with a result saying error is a VALID unacquired receipt", () => {
   const usable = buildEvidenceLedger({
     toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
@@ -309,7 +427,7 @@ test("#1657: an over-cap trace is bounded by PREFIX truncation — the 1-based p
   const calls = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 10 }, (_, index) => ({
     tool: "read_file", args: { path: `src/file-${index}.ts` }, status: "ok",
   }));
-  const ledger = buildEvidenceLedger({ toolCalls: calls, toolResults: calls.map(() => ({ status: "ok" })) });
+  const ledger = buildEvidenceLedger({ toolCalls: calls, toolResults: calls.map(() => ({ status: "ok", result: { content: "x\n", truncated: false } })) });
   assert.equal(ledger.state, "valid");
   assert.equal(ledger.receipts.length, MAX_EXECUTED_CALL_INDEX);
   assert.equal(ledger.receipts[0]!.id, executedCallId(1));
@@ -327,7 +445,7 @@ const CONFIG_TAG = tag("verify the config surface in src/config.yaml", "objectiv
 test("#1657: requirement evaluation is shareable — the same receipt backs every row that legitimately names its identity", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "value: 1\n", truncated: false } }],
   });
   for (const row of [
     "verify the config surface in src/config.yaml",
@@ -346,7 +464,7 @@ test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused
   const ledger = buildEvidenceLedger({
     // The subject carries version 1.2.30 — NOT the 1.2.3 the row names.
     toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/contents/notes-1.2.30.md?ref=${HEAD}` }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { path: "notes-1.2.30.md", sha: "9c1a2b3c4d5e6f70", size: 8, content: "# notes\n", truncated: false } }],
     reviewedHeadSha: HEAD,
   });
   const wrong = evaluateRowEvidence(VERSION_TAG, "verify the published version 1.2.3 notes", ledger);
@@ -356,7 +474,7 @@ test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused
   // an unpinned forge read is not head-bound: relevant but unverified.
   const range = buildEvidenceLedger({
     toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/compare/1.2.3...4.5.6` }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { response: '{"commits":[]}', truncated: false } }],
     reviewedHeadSha: HEAD,
   });
   assert.equal(range.receipts[0]!.freshness, "unbound");
@@ -368,7 +486,7 @@ test("#1657: wrong-version, slug-prefix, and sha-embedded identities are refused
   // owner/repository does not carry owner/repo.
   const slug = buildEvidenceLedger({
     toolCalls: [{ tool: "read_file", args: { path: "owner/repository.json" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"repository":"owner/repository"}\n', truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(SLUG_TAG, "verify the owner/repo manifest wiring", slug).state, "receipt-absent");
 });
@@ -379,7 +497,7 @@ test("#1657: stale/wrong-head provenance is objectively invalid — a relevant-b
   const row = `verify the config surface at head ${HEAD} in src/config.yaml`;
   const staleLedger = buildEvidenceLedger({
     toolCalls: [{ tool: "gh_api", args: { endpoint: "/repos/o/r/contents/src/config.yaml?ref=1111111111111111111111111111111111111111" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "11aa22bb33cc44dd", size: 10, content: "value: 1\n", truncated: false } }],
     reviewedHeadSha: HEAD,
   });
   assert.deepEqual(evaluateRowEvidence(HEAD_TAG, row, staleLedger), {
@@ -397,7 +515,7 @@ const DEP_B = "chalk";
 test("#1657 (round 2): a dependency-A acquisition receipt backs dependency A's row — kind AND trusted identity both match", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.21 · lodash/lodash\n", truncated: false } }],
   });
   // #1657 (round 9): the trusted scope carries the COMPLETE captured
   // version identity — a versionless entry can never certify the delta.
@@ -409,7 +527,7 @@ test("#1657 (round 2): a dependency-A acquisition receipt backs dependency A's r
 test("#1657 (round 2): a dependency-B release-delta receipt does NOT back dependency A's row — the trusted scope refuses it", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/chalk/chalk/compare/v4.0.0...v5.0.0" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.0.0...5.0.0 · chalk/chalk\n", truncated: false } }],
   });
   const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
   const state = evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger);
@@ -420,7 +538,7 @@ test("#1657 (round 2): a dependency-B release-delta receipt does NOT back depend
 test("#1657 (round 2): a dependency-B security-advisory search does NOT back dependency A's advisory row — kind matches, identity does not", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query: "chalk security advisory CVE" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: '[{"title":"CVE-2025-1234 chalk"}]', truncated: false } }],
   });
   const advisoryTag = tag("check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "objective", "dependency-evidence", ["security_advisory"], [DEP_A]);
   const state = evaluateRowEvidence(advisoryTag, "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", ledger);
@@ -430,7 +548,7 @@ test("#1657 (round 2): a dependency-B security-advisory search does NOT back dep
 test("#1657 (round 2): the SAME dependency with the WRONG obligation kind does not back the row — both dimensions must match", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"lodash","dist-tags":{"latest":"4.17.21"}}', truncated: false } }],
   });
   const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
   // A provenance-registry fetch (kind: provenance) cannot back a
@@ -442,7 +560,7 @@ test("#1657 (round 2): the SAME dependency with the WRONG obligation kind does n
 test("#1657 (round 2): a failed or truncated matching acquisition stays receipt-unverified — identity relevance without verified acquisition", () => {
   const failed = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "error" }],
-    toolResults: [{ status: "error" }],
+    toolResults: [{ status: "error", result: { error: "web_fetch: HTTP 404 from github.com" } }],
   });
   const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
   assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", failed).state, "receipt-unverified");
@@ -457,7 +575,7 @@ test("#1657 (round 2): exact identity collisions stay refused — lodash never c
   // lodash-es is a DIFFERENT dependency: the slug boundary refuses it.
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash-es" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"lodash-es","dist-tags":{"latest":"4.17.21"}}', truncated: false } }],
   });
   const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
   assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger).state, "receipt-absent");
@@ -466,7 +584,7 @@ test("#1657 (round 2): exact identity collisions stay refused — lodash never c
   const scopeless = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], []);
   const anyLedger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v1...v2" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare v1...v2 · lodash/lodash\n", truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(scopeless, "inspect the exact old→new upstream release delta for the updated dependency", anyLedger).state, "receipt-absent");
   // The strict parser drops an unparseable scope (fail closed).
@@ -479,7 +597,7 @@ test("#1657 (round 2): exact identity collisions stay refused — lodash never c
 test("#1657 (round 2): one matching receipt still supports multiple legitimate conclusions — no allocation, scope-matched", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.21 · lodash/lodash\n", truncated: false } }],
   });
   const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
   const deltaTag2 = tag("inspect the exact old→new upstream release delta for the updated sub-dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
@@ -517,7 +635,10 @@ test("#1657: dependency-evidence rows are validated per named acquisition kind �
       { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
       { tool: "web_search", args: { query: "example-pkg 1.2.3 1.4.0 security advisory CVE" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { content: "Compare 1.2.3...1.4.0 · example/example-pkg\n", truncated: false } },
+      { status: "ok", result: { results: '[{"title":"example-pkg 1.2.3 security advisory CVE"}]', truncated: false } },
+    ],
   });
   assert.deepEqual(
     [evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).state, evaluateRowEvidence(deltaTag, DELTA_ROW, ledger).receipts],
@@ -533,7 +654,7 @@ test("#1657: dependency-evidence rows are validated per named acquisition kind �
   // A failed acquisition of the right kind is receipt-unverified.
   const failed = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "error" }],
-    toolResults: [{ status: "error" }],
+    toolResults: [{ status: "error", result: { error: "web_fetch: HTTP 502 from github.com" } }],
   });
   assert.equal(evaluateRowEvidence(deltaTag, DELTA_ROW, failed).state, "receipt-unverified");
 });
@@ -548,7 +669,10 @@ test("#1657: the ledger artifact round-trips exactly what the writer wrote; anyt
       { tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" },
       { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "error" },
     ],
-    toolResults: [{ status: "ok" }, { status: "error" }],
+    toolResults: [
+      { status: "ok", result: { content: "value: 1\n", truncated: false } },
+      { status: "error", result: { error: "web_fetch: HTTP 404 from pypi.org" } },
+    ],
     ciEvidence: { headSha: HEAD, finalState: "none", checks: [] },
     reviewedHeadSha: HEAD,
   });
@@ -592,7 +716,7 @@ const CHALK_UPDATE = { slug: "chalk", versions: ["4.1.2", "5.3.0"] };
 test("#1657 (round 3): A+B changed with evidence only for A stays unresolved — a partial scope never certifies the aggregate", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.21 · lodash/lodash\n", truncated: false } }],
   });
   const aggregate = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE, CHALK_UPDATE]);
   const state = evaluateRowEvidence(aggregate, DELTA_ROW, ledger);
@@ -606,7 +730,10 @@ test("#1657 (round 3): A+B changed with matching evidence for BOTH is receipt-ba
       { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
       { tool: "web_fetch", args: { url: "https://github.com/chalk/chalk/compare/v4.1.2...v5.3.0" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { content: "Compare 4.17.15...4.17.21 · lodash/lodash\n", truncated: false } },
+      { status: "ok", result: { content: "Compare 4.1.2...5.3.0 · chalk/chalk\n", truncated: false } },
+    ],
   });
   const aggregate = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE, CHALK_UPDATE]);
   const state = evaluateRowEvidence(aggregate, DELTA_ROW, ledger);
@@ -617,19 +744,19 @@ test("#1657 (round 3): the correct package with the WRONG old→new range does n
   const versioned = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE]);
   const wrongRange = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v9.9.9" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...9.9.9 · lodash/lodash\n", truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, wrongRange).state, "receipt-mismatch");
   // Carrying only ONE side of the changed identity is also a mismatch: the
   // release delta asserts the old→new pair.
   const halfRange = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.20" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.20 · lodash/lodash\n", truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, halfRange).state, "receipt-mismatch");
   const exactRange = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.21 · lodash/lodash\n", truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versioned, DELTA_ROW, exactRange).state, "receipt-backed");
 });
@@ -638,12 +765,12 @@ test("#1657 (round 3): a security-advisory acquisition binds the changed version
   const versionedAdvisory = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [{ slug: "lodash", versions: ["4.17.21"] }]);
   const unversioned = buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query: "lodash security advisory CVE" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: '[{"title":"lodash security advisory"}]', truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, unversioned).state, "receipt-mismatch");
   const bound = buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query: "lodash 4.17.21 security advisory CVE" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: '[{"title":"lodash 4.17.21 security advisory CVE"}]', truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, bound).state, "receipt-backed");
   // Provenance asserts WHO publishes the dependency, not which version —
@@ -651,7 +778,7 @@ test("#1657 (round 3): a security-advisory acquisition binds the changed version
   const versionedProvenance = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [{ slug: "example-pkg", versions: ["1.4.0"] }]);
   const provenance = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versionedProvenance, PROVENANCE_ROW, provenance).state, "receipt-backed");
 });
@@ -660,7 +787,7 @@ test("#1657 (round 3): a multi-obligation row needs EVERY kind covered — evide
   const both = tag("verify the update provenance and any referenced security advisory", "objective", "dependency-evidence", ["provenance", "security_advisory"], [{ slug: "example-pkg", versions: ["1.4.0"] }]);
   const advisoryOnly = buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: '[{"title":"example-pkg 1.4.0 security advisory CVE"}]', truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", advisoryOnly).state, "receipt-mismatch");
   const bothKinds = buildEvidenceLedger({
@@ -668,7 +795,10 @@ test("#1657 (round 3): a multi-obligation row needs EVERY kind covered — evide
       { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
       { tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } },
+      { status: "ok", result: { results: '[{"title":"example-pkg 1.4.0 security advisory CVE"}]', truncated: false } },
+    ],
   });
   assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", bothKinds).state, "receipt-backed");
 });
@@ -677,7 +807,7 @@ test("#1657 (round 8): security-advisory coverage binds the COMPLETE captured ve
   const versionedAdvisory = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [LODASH_UPDATE]);
   const search = (query: string) => buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: `[{"title":${JSON.stringify(query)}}]`, truncated: false } }],
   });
   // Naming only the OLD version proves nothing about the updated range.
   assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, search("lodash 4.17.15 security advisory CVE")).state, "receipt-mismatch");
@@ -693,7 +823,10 @@ test("#1657 (round 8): security-advisory coverage binds the COMPLETE captured ve
       { tool: "web_search", args: { query: "lodash 4.17.15 security advisory CVE" }, status: "ok" },
       { tool: "web_search", args: { query: "lodash 4.17.21 security advisory CVE" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { results: '[{"title":"lodash 4.17.15 security advisory CVE"}]', truncated: false } },
+      { status: "ok", result: { results: '[{"title":"lodash 4.17.21 security advisory CVE"}]', truncated: false } },
+    ],
   });
   assert.deepEqual(
     [evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).state, evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).receipts],
@@ -715,7 +848,7 @@ test("#1657 (round 9): a versionless entry backs provenance identity — and can
   const reResolution = [{ slug: "example-pkg", versions: [] }];
   const publisherLedger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } }],
   });
   assert.equal(
     evaluateRowEvidence(tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], reResolution), PROVENANCE_ROW, publisherLedger).state,
@@ -725,7 +858,7 @@ test("#1657 (round 9): a versionless entry backs provenance identity — and can
   // without a captured version identity: no exact delta exists to check.
   const compareLedger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 1.2.3...1.4.0 · example/example-pkg\n", truncated: false } }],
   });
   assert.equal(
     evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], reResolution), DELTA_ROW, compareLedger).state,
@@ -736,7 +869,7 @@ test("#1657 (round 9): a versionless entry backs provenance identity — and can
   // metadata, never in silently weakening this version-range row.
   const searchLedger = buildEvidenceLedger({
     toolCalls: [{ tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" }],
-    toolResults: [{ status: "ok" }],
+    toolResults: [{ status: "ok", result: { results: '[{"title":"example-pkg security advisory CVE"}]', truncated: false } }],
   });
   assert.equal(
     evaluateRowEvidence(tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], reResolution), ADVISORY_ROW, searchLedger).state,
@@ -762,7 +895,10 @@ test("#1657 (round 9): a versionless entry backs provenance identity — and can
       { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.3.0" }, status: "ok" },
       { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.3.0...v1.4.0" }, status: "ok" },
     ],
-    toolResults: [{ status: "ok" }, { status: "ok" }],
+    toolResults: [
+      { status: "ok", result: { content: "Compare 1.2.3...1.3.0 · example/example-pkg\n", truncated: false } },
+      { status: "ok", result: { content: "Compare 1.3.0...1.4.0 · example/example-pkg\n", truncated: false } },
+    ],
   });
   assert.deepEqual(
     [evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], pair), DELTA_ROW, splitDelta).state,

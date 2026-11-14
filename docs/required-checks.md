@@ -313,20 +313,32 @@ The rules this buys, and their limits:
   The aligned executor result is validated BEFORE any receipt is built and
   is the acquisition authority: a malformed envelope (missing entry,
   null/primitive/array, a missing `status` or one outside the executor's
-  closed `ok`/`error` vocabulary, or a present-but-malformed `truncated`
-  flag) refuses the ledger rather than letting `tool_calls.status` — a
-  harness display mirror — manufacture an `acquired` receipt. A valid result
+  closed `ok`/`error` vocabulary, a nested `result` payload that is absent
+  or not an object for ANY status — production nests one under both `ok`
+  and `error` — or a present-but-malformed `truncated` flag) refuses the
+  ledger rather than letting `tool_calls.status` — a harness display
+  mirror — manufacture an `acquired` receipt. A valid result
   saying `error` beside a call claiming `ok` is evidence state, not a
-  refusal: the receipt stays recorded and unacquired. Completeness is a
-  SEPARATE authority read where production reports it: `executeToolRequest`
-  nests every tool's fields under the envelope's `result` and records each
-  output clip (mask/byte caps, the web-fetch body slice, the
-  process-capture flags) as `truncated` on that PAYLOAD. The receipts layer
-  reads the nested flag — an envelope-level `truncated` is unknown and
-  ignored — and a malformed nested flag refuses the ledger like a malformed
+  refusal: the receipt stays recorded and unacquired. A SUCCESS whose
+  payload lacks the tool's minimum real output shape (the executor's own
+  observation field for that tool — `content`, `matches`, `results`,
+  `response`, …) is likewise refused: call arguments never stand in for
+  the acquisition they merely requested. Legitimate non-text observations
+  (a binary file read via `repo_contents` or decoded `gh_api` contents)
+  are real but never earn a content-capability receipt — the receipt
+  downgrades to discovery instead of masquerading as complete source
+  content. Completeness is a SEPARATE authority read where production
+  reports it: `executeToolRequest` nests every tool's fields under the
+  envelope's `result` and records each output clip (mask/byte caps, the
+  web-fetch body slice, the process-capture flags, and a default
+  whole-file `read_file` whose 12k-codepoint window actually discarded
+  bytes) as `truncated` on that PAYLOAD. The receipts layer reads the
+  nested flag — an envelope-level `truncated` is unknown and ignored —
+  and a malformed nested flag refuses the ledger like a malformed
   status. Correspondingly the executor boundary must report every clip it
   performs into the payload; receipt layers never guess completeness from
-  output size.
+  output size, and a clipped read of a whole path is never a complete
+  acquisition receipt.
 - **Receipts are shareable evidence, not consumable tokens.** One genuine
   acquisition may support any number of conclusions; there is no allocation
   and no per-row consumption. A receipt that carries none of a row's

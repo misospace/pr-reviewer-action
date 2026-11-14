@@ -847,12 +847,29 @@ import { buildEvidenceLedger, type CheckEvidenceTagWithText, type EvidenceLedger
 import { isForcingObligation } from "../src/enforcement/review-obligations.js";
 import { hasBlockingOpenFinding } from "../src/enforcement/verdict-policy.js";
 
-/** A minimal valid trace ledger: one successful read of src/paths.ts. */
+/** A minimal valid trace ledger: one successful read of src/paths.ts.
+ * The aligned result carries the production nested payload — a real
+ * per-tool output field, truncation flagged there, never on the
+ * envelope (#1657 rounds 10 + 11: empty or args-only payloads REFUSE
+ * the ledger). */
 function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
   return buildEvidenceLedger({
     toolCalls: entries.map((entry) => ({ tool: entry.tool, args: entry.args, status: entry.status })),
-    toolResults: entries.map((entry) => ({ status: entry.status, ...(entry.truncated !== undefined ? { truncated: entry.truncated } : {}) })),
+    toolResults: entries.map((entry) => ({ status: entry.status, result: alignedResultPayload(entry) })),
   });
+}
+
+/** The minimum production payload for each tool this suite exercises. */
+function alignedResultPayload(entry: { tool: string; status: string; truncated?: boolean }): Record<string, unknown> {
+  const payload: Record<string, unknown> = entry.status === "error"
+    ? { error: `${entry.tool}: simulated executor failure` }
+    : entry.tool === "web_search"
+      ? { results: '[{"title":"upstream security advisory"}]' }
+      : entry.tool === "web_fetch"
+        ? { content: "upstream comparison page\n" }
+        : { content: "const sanitized = resolve(p);\n" };
+  if (entry.truncated !== undefined) payload.truncated = entry.truncated;
+  return payload;
 }
 
 
@@ -1052,8 +1069,8 @@ test("#1657: stale or wrong-head provenance is objectively invalid for a row tha
     obligations,
     [{ check: row, status: "satisfied", rationale: "the contents read at call-1" }] as never,
     buildEvidenceLedger({
-      toolCalls: [{ tool: "gh_api", args: { endpoint: "/repos/o/r/contents/src/config.yaml?ref=1111111111111111111111111111111111111111" }, status: "ok" }],
-      toolResults: [{ status: "ok" }],
+        toolCalls: [{ tool: "gh_api", args: { endpoint: "/repos/o/r/contents/src/config.yaml?ref=1111111111111111111111111111111111111111" }, status: "ok" }],
+        toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "11aa22bb33cc44dd", size: 10, content: "value: 1\n", truncated: false } }],
       reviewedHeadSha: head,
     }),
   );
@@ -1066,8 +1083,8 @@ test("#1657: stale or wrong-head provenance is objectively invalid for a row tha
     obligations,
     [{ check: row, status: "satisfied", rationale: "the contents read at call-1" }] as never,
     buildEvidenceLedger({
-      toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/contents/src/config.yaml?ref=${head}` }, status: "ok" }],
-      toolResults: [{ status: "ok" }],
+        toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/contents/src/config.yaml?ref=${head}` }, status: "ok" }],
+        toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "8ba9876cb113f4aa", size: 10, content: "value: 1\n", truncated: false } }],
       reviewedHeadSha: head,
     }),
   );

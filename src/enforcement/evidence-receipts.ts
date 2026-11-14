@@ -53,7 +53,12 @@
  * Fail-closed rules carried over from #1627/#1634 where they still guard an
  * objective claim: a trace PRESENT but malformed refuses the whole ledger
  * (`refused` — objective satisfaction is impossible behind a trace this
- * runtime cannot verify, never silently downgraded to "no loop"); the trace
+ * runtime cannot verify, never silently downgraded to "no loop"). Malformed
+ * includes an aligned result whose nested executor payload is absent or
+ * non-object for ANY status (production `executeToolRequest` always nests
+ * one), and a SUCCESS whose payload cannot hold the observation the tool
+ * name claims (each evidence-bearing tool has a minimum real output shape;
+ * args alone never stand in for the acquisition they requested); the trace
  * list is bounded by prefix truncation so the positional `call-<n>` ids keep
  * their exact alignment. Without a ledger the receipt gate is INERT —
  * satisfaction folds on the pre-#1627 presence-and-shape rule — but trusted
@@ -470,13 +475,14 @@ export function evidenceTagFor(check: string, index: Map<string, CheckEvidenceTa
 
 /** The validated executor result envelope of one trace call (index-aligned
  * `tool_results`). `ok` comes from the envelope `status` (acquisition
- * authority); `truncated` is the completeness authority ORed across every
- * layer that reported clipping — production `executeToolRequest` reports
- * caps on the result PAYLOAD, never on the envelope. */
+ * authority); `truncated` is the completeness authority read from the
+ * executor result PAYLOAD — production `executeToolRequest` reports caps
+ * there, never on the envelope — and `payload` is that validated nested
+ * object, guaranteed present for every accepted record. */
 interface TraceResultRecord {
   ok: boolean;
   truncated: boolean;
-  result: Record<string, unknown> | null;
+  payload: Record<string, unknown>;
 }
 
 /** The executor's closed acquisition-status vocabulary: every result
@@ -493,18 +499,25 @@ const TRACE_RESULT_STATUSES: ReadonlySet<string> = new Set(["ok", "error"]);
  * error fallback; trusting it for a malformed result would let the call
  * trace alone stand in for an `acquired: true` receipt. Refusals: missing
  * entry, null/primitive/array, missing or non-string `status`, status
- * outside the closed vocabulary, or a present-but-malformed completeness
+ * outside the closed vocabulary, a present-but-malformed completeness
  * flag (only an actual boolean states completeness — object or string never
- * silently counts as false).
+ * silently counts as false), or a missing/malformed nested result payload.
  *
- * COMPLETENESS is a separate authority and lives on the result PAYLOAD
- * (`record.result.truncated`): production `executeToolRequest` caps tool
- * output when it builds the payload and reports the clip there, so a
- * truncated production result must never normalize to `complete: true`
- * because the envelope carries no flag. An `outer` envelope `truncated`
- * field is NOT the production shape and is ignored as unknown. Absence of a
- * payload flag means the executor emitted the result without clipping;
- * every wrapper-level cap in the executor is required to report itself.
+ * The nested `result` object is REQUIRED for every status: production
+ * `executeToolRequest` nests every tool's own fields under `result` (the
+ * envelope initializes `{tool, status: "error", result: {}}` and every
+ * executor path, including the catch arm, writes an object payload). A
+ * record whose payload is absent, null, a primitive, or an array is not a
+ * record the runtime can read the observation from — accepting it would let
+ * `{status: "ok"}` alone, with no evidence the executor produced anything,
+ * stand in for acquisition. COMPLETENESS is a separate authority and lives
+ * on the payload (`result.truncated`): production caps tool output when it
+ * builds the payload and reports the clip there, so a truncated production
+ * result must never normalize to `complete: true` because the envelope
+ * carries no flag. An `outer` envelope `truncated` field is NOT the
+ * production shape and is ignored as unknown. Absence of a payload flag
+ * means the executor emitted the result without clipping; every
+ * wrapper-level cap in the executor is required to report itself.
  */
 function traceResultAt(results: readonly unknown[], index: number): TraceResultRecord | null {
   const raw = results[index];
@@ -512,23 +525,71 @@ function traceResultAt(results: readonly unknown[], index: number): TraceResultR
   const record = raw as Record<string, unknown>;
   if (typeof record.status !== "string" || !TRACE_RESULT_STATUSES.has(record.status)) return null;
   const payload = record.result;
-  let truncated = false;
-  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-    const flag = (payload as Record<string, unknown>).truncated;
-    if (flag !== undefined && typeof flag !== "boolean") return null;
-    truncated = flag === true;
-  }
-  return { ok: record.status === "ok", truncated, result: record };
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const fields = payload as Record<string, unknown>;
+  if (fields.truncated !== undefined && typeof fields.truncated !== "boolean") return null;
+  return { ok: record.status === "ok", truncated: fields.truncated === true, payload: fields };
 }
 
-/** The executor result PAYLOAD inside a validated envelope
- * (`executeToolRequest` nests every tool's own fields under `result`;
- * production truncation flags live there, never on the envelope). */
-function tracePayload(result: TraceResultRecord): Record<string, unknown> {
-  const payload = result.result?.result;
-  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
-    : {};
+/** The minimum payload shape an evidence-bearing tool's SUCCESSFUL result
+ * must carry for it to be an observation at all. Applied only to `ok`
+ * records — an error payload is `{error}` by contract. "evidence": the
+ * payload proves the executor produced the output the tool name claims.
+ * "metadata": a legitimate non-content observation (a binary file read) —
+ * real, but proving nothing about source text, so it never earns a
+ * content-capability receipt. "invalid": a successful result whose payload
+ * cannot contain the claimed output (absent, empty-of-shape, or wrong-
+ * typed) — evidence state the runtime cannot read, so it REFUSES the whole
+ * ledger like any other unreadable record; arguments alone never stand in
+ * for the observation they asked for. Discovery/command tools get the
+ * narrower real-output check; unknown tools (including relayed MCP names,
+ * whose payloads the runtime cannot type) keep only the baseline object
+ * check and stay discovery-only regardless. */
+function evidencePayloadShape(
+  tool: string,
+  payload: Record<string, unknown>,
+): "evidence" | "metadata" | "invalid" {
+  switch (tool) {
+    case "read_file":
+    case "read_skill":
+    case "web_fetch":
+      return typeof payload.content === "string" ? "evidence" : "invalid";
+    case "git_blame":
+      return typeof payload.blame === "string" ? "evidence" : "invalid";
+    case "git_grep":
+      return Array.isArray(payload.matches) ? "evidence" : "invalid";
+    case "repo_contents":
+      if (payload.type === "file") {
+        // A binary read is a real observation but never source-text
+        // evidence: it must not masquerade as a complete content receipt.
+        if (payload.binary === true) return "metadata";
+        return typeof payload.content === "string" ? "evidence" : "invalid";
+      }
+      return payload.type === "directory" && Array.isArray(payload.entries) ? "evidence" : "invalid";
+    case "gh_api":
+      // Contents endpoints decode to `content` (text) or `binary: true`;
+      // every other endpoint answers with the `response` body (which may
+      // legitimately be empty). Endpoint arguments alone never prove the
+      // API returned content.
+      if (payload.binary === true) return "metadata";
+      return typeof payload.content === "string" || typeof payload.response === "string"
+        ? "evidence"
+        : "invalid";
+    case "web_search":
+      return typeof payload.results === "string" ? "evidence" : "invalid";
+    case "run_command":
+      return typeof payload.stdout === "string" && typeof payload.stderr === "string"
+        ? "evidence"
+        : "invalid";
+    case "find_files":
+      return Array.isArray(payload.files) ? "evidence" : "invalid";
+    case "list_tree":
+      return Array.isArray(payload.entries) ? "evidence" : "invalid";
+    case "git_log":
+      return typeof payload.log === "string" ? "evidence" : "invalid";
+    default:
+      return "evidence";
+  }
 }
 
 /** `owner/repo` from a forge API endpoint path: the two segments after
@@ -571,7 +632,7 @@ function receiptForTraceCall(
     case "git_grep": {
       const paths = new Set<string>();
       if (path !== "") paths.add(path);
-      const matches = tracePayload(result).matches;
+      const matches = result.payload.matches;
       if (Array.isArray(matches)) {
         for (const line of matches.slice(0, 200)) {
           if (typeof line !== "string") continue;
@@ -591,7 +652,10 @@ function receiptForTraceCall(
     }
     case "repo_contents": {
       if (path === "") return null;
-      const isFile = tracePayload(result).type === "file";
+      // Content capability requires the payload to carry readable file
+      // content: a directory listing or a binary read proves discovery of
+      // the path, not acquisition of its source text (#1657 round 11).
+      const isFile = result.payload.type === "file" && typeof result.payload.content === "string";
       return {
         id, kind: isFile ? "source-read" : "discovery", capability: isFile ? "content" : "discovery",
         acquired: result.ok, complete: result.ok && !result.truncated,
@@ -627,7 +691,14 @@ function receiptForTraceCall(
         && identityCarriesToken(identity, reviewedHeadSha.toLowerCase());
       return {
         id, kind: "source-read",
-        capability: FORGE_CONTENT_ENDPOINT_RE.test(endpoint) ? "content" : "discovery",
+        // An endpoint that ADDRESSES content is content-capable only when
+        // the executor actually answered with a content or response body:
+        // endpoint arguments alone never evidence the content they asked
+        // for, and a decoded-binary contents payload carries no text.
+        capability: FORGE_CONTENT_ENDPOINT_RE.test(endpoint)
+          && (typeof result.payload.content === "string" || typeof result.payload.response === "string")
+          ? "content"
+          : "discovery",
         acquired: result.ok, complete: result.ok && !result.truncated,
         freshness: headBound ? "head-bound" : "unbound",
         trust: "forge",
@@ -712,6 +783,14 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
     if (result === null) {
       // An aligned result the runtime cannot read is evidence of nothing —
       // refuse the whole ledger before constructing any receipt.
+      return { state: "refused", receipts: [] };
+    }
+    if (result.ok && evidencePayloadShape(record.tool, result.payload) === "invalid") {
+      // A SUCCESS whose payload cannot hold the observation the tool name
+      // claims (the executor's minimum output shape is absent or wrongly
+      // typed) is state the runtime cannot read — refuse the whole ledger
+      // rather than credit the call's arguments with the acquisition they
+      // merely requested.
       return { state: "refused", receipts: [] };
     }
     const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);

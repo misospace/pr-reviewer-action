@@ -606,6 +606,25 @@ test("executor payloads carry clip state from every stage: wrapper cap, fetch sl
   assert.match(wrapper.result.content, /\[truncated\]$/);
   const whole = await executeToolRequest("read_file", { path: "big.txt" }, ctx(root));
   assert.equal(whole.result.truncated, false);
+  // #1657 round 11: a DEFAULT whole-file read whose 12k-codepoint window
+  // actually discards bytes is a clipped observation and says so — the
+  // receipt layer carries only the path, no window identity, so an
+  // unflagged slice would credit complete whole-path acquisition the
+  // reviewer never saw. 12000 kept ASCII chars never trip the
+  // 12000-byte wrapper cap, so this flag comes purely from the internal
+  // slice — the executor cannot wait for a downstream layer to guess it.
+  fs.writeFileSync(path.join(root, "huge.txt"), "z".repeat(50000));
+  const sliceOnly = await executeToolRequest("read_file", { path: "huge.txt" }, ctx(root));
+  assert.equal(sliceOnly.status, "ok");
+  assert.equal(sliceOnly.result.truncated, true);
+  assert.equal((sliceOnly.result.content as string).length, 12000);
+  // Explicit offset/limit window semantics are unchanged this round: a
+  // requested window that itself exceeds the codepoint cap stays a
+  // deliberate bounded read, unflagged.
+  const ranged = await executeToolRequest("read_file", { path: "huge.txt", offset: 1, limit: 1 }, ctx(root));
+  assert.equal(ranged.status, "ok");
+  assert.equal((ranged.result.content as string).length, 12000);
+  assert.equal(ranged.result.truncated, false);
   // web_fetch: the fixed 10k-codepoint slice alone reports — an ASCII body
   // of 10000 kept chars never trips the default 12000-byte wrapper cap, so
   // a `truncated: false` here would hide fetched-and-discarded bytes behind

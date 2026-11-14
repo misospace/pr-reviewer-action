@@ -699,10 +699,14 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
     }
   }
   if (offset == null && limit == null) {
-    // The 12k-codepoint read window is the deliberate bounded-read contract
-    // (like `max_results`), NOT clipping — but transport loss of the git
-    // output itself is, and must reach the payload (#1657 round 10).
-    return { content: pyCodepointSlice(content, 12000), committed: bound, truncated: captureTruncated };
+    // A default whole-file read that the 12k-codepoint slice actually
+    // discards bytes from is a clipped observation, not a complete one:
+    // the receipt layer records only the path (no window identity), so an
+    // unflagged slice would credit whole-file acquisition the reviewer
+    // never saw (#1657 round 11). Transport loss on the git-committed read
+    // is the same kind of discarding and already flags (#1657 round 10).
+    const retained = pyCodepointSlice(content, 12000);
+    return { content: retained, committed: bound, truncated: captureTruncated || retained !== content };
   }
   const lines = splitKeepEnds(content);
   const start = Math.max((offset || 1) - 1, 0);
