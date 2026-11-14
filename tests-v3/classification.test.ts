@@ -2014,21 +2014,9 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     // family (.sh, .zsh) and extensionless scripts still recover it.
     ["shell loop in a .zsh file", "scripts/run.zsh", SH_SELF_LOCATION_LOOP],
     ["os.lstat", "src/app.py", ["+os.lstat(path)"]],
+    // The canonical relative-link `case` wrapper moved to the #1653 no-fire
+    // table below; its counterexamples stay pinned there.
     // Declared limits: false positives that exist today and stay.
-    [
-      "relative-link wrapper loop",
-      "scripts/run.sh",
-      [
-        '+_src="${BASH_SOURCE[0]}"',
-        '+while [ -L "$_src" ]; do',
-        '+  _link="$(readlink "$_src")"',
-        '+  case "$_link" in',
-        '+    /*) _src="$_link" ;;',
-        '+    *) _src="$(dirname "$_src")/$_link" ;;',
-        "+  esac",
-        "+done",
-      ],
-    ],
     ["comment in an extensionless file", "bin/tool", ["+# follow readlink until the real file", ...SH_SELF_LOCATION_LOOP]],
     ["single-line compound", "scripts/run.sh", ['+[ -L "$0" ] && readlink "$0"']],
     ["braced ${0}", "scripts/run.sh", ['+readlink "${0}"']],
@@ -2036,6 +2024,125 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     ["readlink -e", "scripts/run.sh", ['+readlink -e "$0"']],
     ["CRLF line", "scripts/run.sh", ['+readlink "$0"\r']],
     ["suffix with a variable", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")/$1"']],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
+  }
+});
+
+// ── #1653: the relative-link `case` shape of the shell self-location loop ──
+
+const SH_RELATIVE_LINK_LOOP = [
+  '+_src="${BASH_SOURCE[0]}"',
+  '+while [ -L "$_src" ]; do',
+  '+  _link="$(readlink "$_src")"',
+  '+  case "$_link" in',
+  '+    /*) _src="$_link" ;;',
+  '+    *) _src="$(dirname "$_src")/$_link" ;;',
+  "+  esac",
+  "+done",
+];
+const SH_RELATIVE_LINK_LOOP_UNQUOTED = [
+  '+_src=${BASH_SOURCE[0]}',
+  '+while [ -L "$_src" ]; do',
+  '+  _link=$(readlink "$_src")',
+  '+  case "$_link" in',
+  "+    /*) _src=$_link ;;",
+  '+    *) _src=$(dirname "$_src")/$_link ;;',
+  "+  esac",
+  "+done",
+];
+/** The canonical loop with the line at `index` replaced by `line`. */
+function withLoopLine(lines: string[], index: number, line: string): string[] {
+  return lines.map((l, i) => (i === index ? line : l));
+}
+
+test("#1653: relative-link self-location loop no longer fires symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The false positive from the issue.
+    ["canonical case variant", "scripts/run.sh", SH_RELATIVE_LINK_LOOP],
+    // The variants the basic loop already recognises apply to the case shape.
+    ["[[ -L ]] guard", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace('[ -L "$_src" ]', '[[ -L "$_src" ]]'))],
+    ["-h guard", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace("-L", "-h"))],
+    ["uppercase loop variables", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace(/_src/g, "SRC").replace(/_link/g, "LINK"))],
+    ["unquoted assignments", "scripts/run.sh", SH_RELATIVE_LINK_LOOP_UNQUOTED],
+    ['anchor "$0"', "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace("${BASH_SOURCE[0]}", "$0"))],
+    // Ordinary neighbours in the same file.
+    ["strict mode beside the loop", "scripts/run.sh", ["+set -euo pipefail", ...SH_RELATIVE_LINK_LOOP]],
+    // The extensionless bin/ wrapper.
+    ["extensionless wrapper", "bin/tool", SH_RELATIVE_LINK_LOOP],
+    // Diff shapes.
+    ["loop in context, unrelated line added", "scripts/run.sh", ["@@ -1,8 +1,9 @@", ...asContext(SH_RELATIVE_LINK_LOOP), "+set -e"]],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", label);
+    assert.equal(result.pathHandlingProvenance.fired, false, label);
+    assert.ok(!firesSymlinkSensitive(result), `${label}: unexpected symlink_sensitive`);
+  }
+});
+
+test("#1653: relative-link loop counterexamples keep firing symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // Arm reassigns a different variable than the anchor.
+    ["absolute arm reassigns another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _other="$_link" ;;')],
+    // Arm reads a different variable than the link.
+    ["absolute arm reads another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_other" ;;')],
+    ["relative arm joins another variable", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/$_other" ;;')],
+    // `case` opens on the wrong variable.
+    ["case opens on the anchor", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 3, '+  case "$_src" in')],
+    // Relative arm takes the dirname of the wrong variable.
+    ["relative arm dirnames the link", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_link")/$_link" ;;')],
+    // Non-canonical arm order.
+    [
+      "arms swapped",
+      "scripts/run.sh",
+      [
+        ...SH_RELATIVE_LINK_LOOP.slice(0, 4),
+        SH_RELATIVE_LINK_LOOP[5] ?? "",
+        SH_RELATIVE_LINK_LOOP[4] ?? "",
+        ...SH_RELATIVE_LINK_LOOP.slice(6),
+      ],
+    ],
+    // The hop cap stays a blocker: a counter line after `do` or after `esac`.
+    [
+      "hop cap after do",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 2), '+  [ "$hops" -gt 40 ] && break', ...SH_RELATIVE_LINK_LOOP.slice(2)],
+    ],
+    [
+      "hop counter before done",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 7), "+  hops=$((hops + 1))", ...SH_RELATIVE_LINK_LOOP.slice(7)],
+    ],
+    // `break` inside an arm body.
+    ["break in the absolute arm", "scripts/run.sh", withLoopLine(SH_RELATIVE_LINK_LOOP, 4, '+    /*) _src="$_link"; break ;;')],
+    // Missing `esac`.
+    [
+      "missing esac",
+      "scripts/run.sh",
+      [...SH_RELATIVE_LINK_LOOP.slice(0, 6), ...SH_RELATIVE_LINK_LOOP.slice(7)],
+    ],
+    // Head-level rules still apply to the case shape.
+    ["loop reads another variable", "scripts/run.sh", SH_RELATIVE_LINK_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
+    // Declared limits: false positives that exist today and stay.
+    [
+      "single-line compound case",
+      "scripts/run.sh",
+      [
+        SH_RELATIVE_LINK_LOOP[0] ?? "",
+        SH_RELATIVE_LINK_LOOP[1] ?? "",
+        SH_RELATIVE_LINK_LOOP[2] ?? "",
+        '+  case "$_link" in /*) _src="$_link" ;; *) _src="$(dirname "$_src")/$_link" ;; esac',
+        SH_RELATIVE_LINK_LOOP[7] ?? "",
+      ],
+    ],
+    [
+      "braced link in the relative arm",
+      "scripts/run.sh",
+      withLoopLine(SH_RELATIVE_LINK_LOOP, 5, '+    *) _src="$(dirname "$_src")/${_link}" ;;'),
+    ],
   ];
   for (const [label, file, lines] of cases) {
     const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });

@@ -139,8 +139,9 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
  *       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
  *     - self-location `readlink` (#1034): `os.readlink(__file__)`, shell
  *       `readlink [-f] "$0"` / `"${BASH_SOURCE[0]}"` as a whole statement or
- *       inside `dirname`/`cd`, and the Python and shell symlink-resolution
- *       loops. It holds for ordinary code only: rebinding the anchor, a
+ *       inside `dirname`/`cd`, the Python and shell symlink-resolution loops,
+ *       and the shell loop's relative-link `case` variant (#1653). It holds
+ *       for ordinary code only: rebinding the anchor, a
  *       template line that is really string content, a second file and
  *       obfuscated spellings can evade it, as `getattr(os, "read" + "link")`
  *       evades the class scan already;
@@ -429,11 +430,12 @@ function diffMarker(line: string): string {
  * `readlink "$0"`, the portable symlink-resolution loop) is self-location
  * bookkeeping like `realpath(__file__)`, not a symlink-sensitive surface.
  * Recognition is closed and line-whole: a handful of complete statements and
- * two loop templates of consecutive lines, matched by static patterns, so an
- * untrusted operand, an intervening reassignment or a second operation on
- * the line keeps firing. It reads each line as ordinary code: a rebound
- * anchor, a template line that is really string content, or a second file
- * that changes what the anchor means can evade it. */
+ * three loop templates of consecutive lines — the Python loop, the shell loop,
+ * and the shell loop's relative-link `case` variant (#1653) — matched by static
+ * patterns, so an untrusted operand, an intervening reassignment or a second
+ * operation on the line keeps firing. It reads each line as ordinary code: a
+ * rebound anchor, a template line that is really string content, or a second
+ * file that changes what the anchor means can evade it. */
 type SelfLocationFamilies = { python: boolean; shell: boolean };
 
 /** Language gate: `.py`/`.pyw` Python, `.sh`/`.bash` shell, an extensionless
@@ -492,6 +494,21 @@ const SH_LOOP_COPY = new RegExp(
   String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})\2[ \t]*$`,
 );
 const SH_LOOP_DONE = /^[ \t]*done[ \t]*$/;
+/** #1653 relative-link variant: the loop body's `case` on the `readlink`
+ * result. `case "$L" in`, an absolute arm `/*) T="$L" ;;`, a relative arm
+ * `*) T="$(dirname "$T")/$L" ;;`, then `esac`. Arm bodies are whole-line and
+ * identifier-consistent with the loop head, so a hop cap, a `break`, a
+ * rebound arm target or a different link variable keeps firing. */
+const SH_LOOP_CASE = new RegExp(
+  String.raw`^[ \t]*case[ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+in[ \t]*$`,
+);
+const SH_LOOP_CASE_ABS = new RegExp(
+  String.raw`^[ \t]*/\*\)[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})\2[ \t]*;;[ \t]*$`,
+);
+const SH_LOOP_CASE_REL = new RegExp(
+  String.raw`^[ \t]*\*\)[ \t]*(${SELF_LOCATION_IDENT})=("?)\$\(dirname[ \t]+"\$(${SELF_LOCATION_IDENT})"\)/\$(${SELF_LOCATION_IDENT})\2[ \t]*;;[ \t]*$`,
+);
+const SH_LOOP_CASE_END = /^[ \t]*esac[ \t]*$/;
 
 /** Python template at run position k: `T = __file__`, `while os.path.islink(T):`
  * at the same indentation, one body line `T = os.readlink(T)` indented under
@@ -517,18 +534,46 @@ function pythonSelfLocationLoop(codes: readonly string[], k: number): number | n
 }
 
 /** Shell template, five consecutive lines: `T="${BASH_SOURCE[0]}"` (or `"$0"`),
- * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, `T="$L"`, `done`. Returns
- * the readlink line's position, or null. */
+ * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, then either `T="$L"` and
+ * `done`, or the #1653 relative-link `case` tail and `done`. Returns the
+ * readlink line's position, or null. */
 function shellSelfLocationLoop(codes: readonly string[], k: number): number | null {
   const anchor = SH_LOOP_ANCHOR.exec(codes[k] ?? "");
   const guard = SH_LOOP_GUARD.exec(codes[k + 1] ?? "");
   const read = SH_LOOP_READ.exec(codes[k + 2] ?? "");
-  const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
-  if (!anchor || !guard || !read || !copy || !SH_LOOP_DONE.test(codes[k + 4] ?? "")) return null;
+  if (!anchor || !guard || !read) return null;
   const ident = anchor[1] ?? "";
   const link = read[1] ?? "";
   if (link === ident || (guard[1] ?? guard[2]) !== ident || read[3] !== ident) return null;
-  return copy[1] === ident && copy[3] === link ? k + 2 : null;
+  const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
+  if (copy) return copy[1] === ident && copy[3] === link && SH_LOOP_DONE.test(codes[k + 4] ?? "") ? k + 2 : null;
+  return shellRelativeLinkCaseTail(codes, k + 3, ident, link) ? k + 2 : null;
+}
+
+/** #1653 relative-link tail: four consecutive lines after the readlink line —
+ * `case "$L" in`, `/*) T="$L" ;;`, `*) T="$(dirname "$T")/$L" ;;`, `esac` —
+ * then `done`. The opener must read the link variable; the absolute arm must
+ * reassign the anchor from the link; the relative arm must reassign the anchor
+ * from the anchor's own `dirname` joined with the link. A hop cap, `break`,
+ * second statement or rebound variable anywhere in the tail keeps firing. */
+function shellRelativeLinkCaseTail(
+  codes: readonly string[],
+  k: number,
+  ident: string,
+  link: string,
+): boolean {
+  const opener = SH_LOOP_CASE.exec(codes[k] ?? "");
+  const abs = SH_LOOP_CASE_ABS.exec(codes[k + 1] ?? "");
+  const rel = SH_LOOP_CASE_REL.exec(codes[k + 2] ?? "");
+  if (!opener || !abs || !rel || !SH_LOOP_CASE_END.test(codes[k + 3] ?? "")) return false;
+  if ((opener[1] ?? "") !== link) return false;
+  if (abs[1] !== ident || (abs[3] ?? "") !== link) return false;
+  return (
+    rel[1] === ident &&
+    (rel[3] ?? "") === ident &&
+    (rel[4] ?? "") === link &&
+    SH_LOOP_DONE.test(codes[k + 4] ?? "")
+  );
 }
 
 /** Lines whose `readlink` is a recognised self-location read. A direct
