@@ -29,7 +29,7 @@ import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../co
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
-import { executedCallEvidenceIndex } from "../enforcement/executed-calls.js";
+import { checkEvidenceTagsFromArtifact, evidenceLedgerFromArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
@@ -403,7 +403,9 @@ const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "
  * #1537 style: anything this runtime did not write is `null` (the caller
  * then keeps its pre-#1594 behavior), never a guess — `version: 1`, a status
  * in the status vocabulary, and a `checks` array whose rows carry ONLY
- * `{check, status, rationale, reason}` with a non-empty check text, a status
+ * `{check, status, rationale, reason}` (plus the additive #1657
+ * `row_class`/`evidence` fields, validated against their closed
+ * vocabularies when present) with a non-empty check text, a status
  * in the row vocabulary, a `string | null` rationale, and a non-empty
  * reason.
  */
@@ -417,15 +419,44 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "check" && key !== "status" && key !== "rationale" && key !== "reason") return null;
+      if (key !== "check" && key !== "status" && key !== "rationale" && key !== "reason"
+        && key !== "row_class" && key !== "evidence") return null;
     }
     if (typeof row.check !== "string" || row.check === "") return null;
     if (typeof row.status !== "string" || !REQUIRED_CHECK_ROW_STATUSES.has(row.status)) return null;
     if (!(row.rationale === null || typeof row.rationale === "string")) return null;
     if (typeof row.reason !== "string" || row.reason === "") return null;
+    if (row.row_class !== undefined
+      && !(typeof row.row_class === "string" && REQUIRED_CHECK_ROW_CLASSES.has(row.row_class))) return null;
+    if (row.evidence !== undefined && !rowEvidenceProjectionReadable(row.evidence)) return null;
     rows.push({ check: row.check, status: row.status });
   }
   return { status: record.status, checks: rows };
+}
+
+/** #1657: the closed `row_class` vocabulary the coverage artifact carries. */
+const REQUIRED_CHECK_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt", "legacy"]);
+/** #1657: the closed per-row evidence-state vocabulary. */
+const ROW_EVIDENCE_STATES: ReadonlySet<string> = new Set([
+  "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
+]);
+/** #1657: the closed per-row evidence-gate vocabulary. */
+const ROW_EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-evidence", "source-identity"]);
+
+/** Strict shape check for the additive #1657 `evidence` projection on a
+ * coverage row (`{gate, state, receipt_ids?}`). */
+function rowEvidenceProjectionReadable(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "gate" && key !== "state" && key !== "receipt_ids") return false;
+  }
+  if (record.gate !== null && !(typeof record.gate === "string" && ROW_EVIDENCE_GATES.has(record.gate))) return false;
+  if (typeof record.state !== "string" || !ROW_EVIDENCE_STATES.has(record.state)) return false;
+  if (record.receipt_ids !== undefined
+    && !(Array.isArray(record.receipt_ids) && record.receipt_ids.length <= 20
+      && record.receipt_ids.every((id) => typeof id === "string" && id !== ""))) return false;
+  return true;
 }
 
 /**
@@ -566,27 +597,45 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
         const mustCheck = Array.isArray(classification.must_check)
           ? classification.must_check.filter((item): item is string => typeof item === "string")
           : [];
-        // #1627 (M2, #1388 parity): the engine folds the citation gate WITH the
-        // executed-call evidence index derived from the enforcement harness
-        // artifact's `tool_calls` trace — the recompute here must fold the
-        // SAME inputs, or a native-loop run's `uncited-satisfaction` rows read
-        // as satisfied on this side and silently drop out of the published
-        // handoff. Same artifact selection as `partialCoverageFromRunDir`
-        // above: the coverage record's `enforcement_harness` name, allowlisted
-        // to the exact filenames `review.ts` writes, and the same strict
-        // parser (`executedCallEvidenceIndex`) the engine folds from.
-        const harnessName = typeof coverageRecord?.enforcement_harness === "string"
-          && ENFORCEMENT_HARNESS_NAMES.has(coverageRecord.enforcement_harness)
-          ? coverageRecord.enforcement_harness
-          : undefined;
-        const harness = harnessName === undefined ? null : readJsonObject(join(runDir, harnessName));
-        const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
-        const checkCoverage = structuredCoverage(mustCheck, output as never, executedCalls);
-        fields.unresolvedRequiredChecks = boundedIdList(
-          checkCoverage.checks
-            .filter((row) => row.status === "unresolved" || row.status === "unmet")
-            .map((row) => row.check),
-        );
+        // #1657 (review): the producer's trusted evidence tags ride the same
+        // classification artifact — the recompute resolves row classes from
+        // this metadata, never from prose; untagged rows are `legacy`.
+        const mustCheckEvidence = checkEvidenceTagsFromArtifact(classification.must_check_evidence);
+        // #1657 (M2 parity): the recompute must fold the SAME evidence the
+        // engine's settled coverage was validated against, or a native-loop
+        // run's `receipt-absent` rows read as satisfied on this side and
+        // silently drop out of the published handoff.
+        // #1657 (review round 2): the recompute reads the ENGINE'S PERSISTED
+        // evidence ledger (`evidence-receipts.json` — the exact receipts the
+        // engine folded: trace, corpus diff, CI/head-bound), never a partial
+        // reconstruction from the harness trace alone, which would make the
+        // publish disclosure disagree with the engine's settled coverage.
+        // - present + parseable → that exact ledger;
+        // - present but malformed → fail closed: omit the uncertain
+        //   disclosure entirely (never a guessed reconstructed story);
+        // - absent (a genuine pre-#1657 legacy run dir) → the legacy path:
+        //   the fold runs WITHOUT a ledger, exactly the pre-#1657 recompute.
+        const receiptsPath = join(runDir, "evidence-receipts.json");
+        let ledger: EvidenceLedger | undefined;
+        let ledgerMalformed = false;
+        if (existsSync(receiptsPath)) {
+          const persisted = evidenceLedgerFromArtifact(readJsonObject(receiptsPath));
+          if (persisted === null) {
+            // Fail closed: omit the uncertain disclosure entirely — never a
+            // guessed reconstructed evidence story.
+            ledgerMalformed = true;
+          } else {
+            ledger = persisted;
+          }
+        }
+        if (!ledgerMalformed) {
+          const checkCoverage = structuredCoverage(mustCheck, output as never, ledger, mustCheckEvidence);
+          fields.unresolvedRequiredChecks = boundedIdList(
+            checkCoverage.checks
+              .filter((row) => row.status === "unresolved" || row.status === "unmet")
+              .map((row) => row.check),
+          );
+        }
       }
     }
   }

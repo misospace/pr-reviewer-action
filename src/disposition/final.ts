@@ -102,18 +102,21 @@ export const ADVISORY_DISPOSITION_CODES = [
    * trace's remaining incompleteness conservatively to MATERIAL
    * `mandatory_requirement_unresolved` — it never downgrades by wording. */
   "proof_shape_mismatch",
-  /** Call-ID proof bookkeeping established by trusted provenance (#1657
-   * feeds this). Until then the engine maps unbacked satisfactions
-   * conservatively to MATERIAL `mandatory_requirement_unresolved` — the
-   * #1634 safety contract pins that withheld approval. */
+  /** Call-ID proof bookkeeping. #1657 replaced call-ID allocation with
+   * objective evidence receipts (reason-coded receipt state on the row):
+   * an unbacked satisfaction on an explicitly-objective row stays a
+   * MATERIAL `mandatory_requirement_unresolved`, so the engine does not
+   * emit this code. Reserved seam vocabulary. */
   "citation_allocation_failed",
   /** Stale historical thread bookkeeping (#1654's reconciliation state is
    * consumed as provenance only). */
   "stale_thread_bookkeeping",
-  /** A missing/invalid disposition for a generic scrutiny prompt, fed ONLY
-   * from trusted row provenance (#1657) — no lexical classification exists
-   * in this runtime, so the engine maps such rows conservatively to
-   * MATERIAL `mandatory_requirement_unresolved` until then. */
+  /** A generic scrutiny prompt left unresolved or answered `unmet`, fed
+   * from trusted #1657 row metadata (`row_class` — the producer tags the
+   * row review-prompt at emission; no lexical classification exists in
+   * this runtime). Non-gating: the semantic negative is recorded for
+   * accounting, and a real defect blocks through a grounded
+   * blocker/major finding. */
   "generic_scrutiny_row_missing",
   /** A non-material serialization/bookkeeping failure. */
   "serialization_diagnostic",

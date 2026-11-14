@@ -37,8 +37,11 @@ import type { ReviewObligation } from "../enforcement/review-obligations.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
-  /** The completeness fold's rows: `{check, status, reason}`. */
-  completenessChecks: ReadonlyArray<{ check?: unknown; status?: unknown; reason?: unknown }>;
+  /** The completeness fold's rows: `{check, status, reason}` plus the
+   * additive #1657 trusted metadata — `row_class` (attention / objective /
+   * review-prompt / legacy) and `evidence` ({gate, state, receipt_ids}) —
+   * which decide materiality here. Untagged rows are `legacy`. */
+  completenessChecks: ReadonlyArray<{ check?: unknown; status?: unknown; reason?: unknown; row_class?: unknown; evidence?: unknown }>;
   /** The obligation fold's rows. */
   obligations: ReadonlyArray<ReviewObligation>;
   /** The final verified findings (for the unverified-blocking-claim floor). */
@@ -78,6 +81,15 @@ export interface DispositionEvidenceParts {
   ciEvidenceContractActive: boolean;
 }
 
+/** The trusted #1657 row class of one completeness row, read from the
+ * producer metadata the fold persisted (`row_class`). An unparseable or
+ * absent tag means `legacy` — pre-#1657 gating semantics, never a prose
+ * guess. */
+function readRowClass(row: { row_class?: unknown }): "attention" | "objective" | "review-prompt" | "legacy" {
+  const value = row.row_class;
+  return value === "attention" || value === "objective" || value === "review-prompt" ? value : "legacy";
+}
+
 export interface DispositionEvidenceBuild {
   evidence: DispositionEvidence[];
   /** True when a mandatory objective requirement is objectively proven
@@ -92,10 +104,34 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
 
   // The completeness fold's rows (the required-check contract). The
   // `required_checks=incomplete` BIT is never read here — each row speaks
-  // through its own reason code (#1656 audit delta).
+  // through its own reason code (#1656 audit delta) AND its own trusted
+  // #1657 row class. Materiality per class:
+  // - `objective` (producer-tagged mechanical gate): an `unmet` or
+  //   `unresolved` row is a MATERIAL unknown (the objective unresolved
+  //   receipt state stays material — receipts prove acquisition, never
+  //   semantic correctness), and only the MECHANICAL refutation count
+  //   below can prove a requirement false — a model-authored `unmet` is
+  //   never objective proof (#1656 audit round 3).
+  // - `legacy` (no trusted producer tag): pre-#1657 conservative
+  //   semantics — the row gates exactly as before.
+  // - `review-prompt` / `attention` (producer-tagged semantic review
+  //   questions / attention signals): non-gating diagnostics — recorded as
+  //   ADVISORY `generic_scrutiny_row_missing` from the trusted row
+  //   metadata; the semantic negative belongs in a grounded finding and
+  //   the final disposition (#1656/#1659), never in this seam.
   for (const row of parts.completenessChecks) {
     const check = typeof row.check === "string" ? row.check : "";
+    const rowClass = readRowClass(row);
+    const nonGating = rowClass === "review-prompt" || rowClass === "attention";
     if (row.status === "unmet") {
+      if (nonGating) {
+        // A semantic negative on a non-gating review prompt: recorded for
+        // accounting, never an objective proven-unmet requirement (#1657
+        // review) — an ordinary grounded defect blocks through a
+        // blocker/major finding.
+        evidence.push(dispositionEvidence("generic_scrutiny_row_missing", "deterministic", "advisory", check));
+        continue;
+      }
       // #1656 audit round 3: the model's structured `unmet` is NOT
       // objective proof — a usable rationale makes it structurally valid,
       // not objectively true. Without a mechanical current-head
@@ -106,15 +142,18 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
       continue;
     }
     if (row.status !== "unresolved" || check === "") continue;
-    // #1656 audit round 2: an unresolved required-check row whose
-    // satisfaction could not be backed (including the call-ID allocation
-    // refusals) stays a TRANSITIONAL CONSERVATIVE material unknown — the
-    // #1634 safety contract pins that unbacked satisfactions withhold the
-    // approval, and #1656 must not raise native APPROVE merely because the
-    // old proof machinery could not settle the row. The trusted reason
-    // codes stay visible in the completeness artifact; #1657 may feed
-    // proven bookkeeping-only advisory entries through the seam once it
-    // owns the settlement.
+    if (nonGating) {
+      // A producer-tagged review prompt or attention row left unresolved:
+      // a non-gating diagnostic from trusted row metadata (#1657) — never
+      // the material-unknown floor this TRANSITIONAL entry used to apply.
+      evidence.push(dispositionEvidence("generic_scrutiny_row_missing", "deterministic", "advisory", check));
+      continue;
+    }
+    // An unresolved objective row: its receipt state (receipt-absent /
+    // receipt-unverified / receipt-mismatch / trace-refused) is trusted
+    // provenance and the row stays a MATERIAL unknown — objective
+    // unresolved receipt state remains material (#1657). A legacy row
+    // keeps the TRANSITIONAL CONSERVATIVE mapping (pre-#1657 semantics).
     evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
   }
 

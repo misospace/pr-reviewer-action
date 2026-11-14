@@ -4,9 +4,9 @@
   "status": "active",
   "provenance": {
     "source_head": "8c2e5f0a7b3d6c9e1f4a0b7d2e5c8f1a9b3e6d0c",
-    "origin": "The deterministic must_check 'unit-tests' could not be verified in the run (no test-run evidence; the model dispositioned it unresolved), yet the model produced no findings. With verdict_policy=strict and required_check_validation_mode=fail, deterministic completeness must keep the block — unknown verification must never be relaxed to approve.",
+    "origin": "The deterministic must_check 'unit-tests' could not be verified in the run (no test-run evidence; the model dispositioned it unresolved), yet the model produced no findings. With verdict_policy=strict and required_check_validation_mode=fail, deterministic completeness must keep the block — unknown verification of an OBJECTIVE requirement must never be relaxed to approve. (#1657 audit delta: the original noun-only 'unit-tests' text classifies as a review prompt — generic must_check rows no longer gate merge-affecting completeness — so the case pins the block on the execution-verb test-run ask, which maps to the exact-head CI gate.)",
     "evidence_transform": "raw",
-    "model_response": "Recorded representative response (zero live inference): request_changes on verification grounds only, zero findings, unit-tests dispositioned unresolved."
+    "model_response": "Recorded representative response (zero live inference): request_changes on verification grounds only, zero findings, the test-run check dispositioned unresolved."
   },
   "engine": "enforcement-fixture",
   "pr": {
@@ -33,20 +33,20 @@
     "contract": "enforcement-pipeline/v1",
     "artifact": {
       "verdict": "request_changes",
-      "review_markdown": "The backoff change is correct on inspection, but the required 'unit-tests' check could not be verified in this run: no test-run evidence is available, so the mandatory check remains unresolved.\n",
+      "review_markdown": "The backoff change is correct on inspection, but the required 'run the unit tests before merge' check could not be verified in this run: no test-run evidence is available, so the mandatory check remains unresolved.\n",
       "findings": [],
       "required_checks": "incomplete",
       "required_check_dispositions": [
         {
-          "check": "unit-tests",
+          "check": "run the unit tests before merge",
           "status": "unresolved",
-          "rationale": "No CI test-run evidence is available in this run; the unit-tests check cannot be marked satisfied or not_applicable."
+          "rationale": "No CI test-run evidence is available in this run; the test-run check cannot be marked satisfied or not_applicable."
         }
       ],
       "source": "model"
     },
     "must_check": [
-      "unit-tests"
+      "run the unit tests before merge"
     ],
     "config": {
       "verdict_policy": "strict",

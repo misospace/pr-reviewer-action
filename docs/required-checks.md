@@ -132,7 +132,11 @@ trusted-base approval prerequisites. Forcing is **status-based** (#1505):
 an **`unmet`** row — the check was performed and the requirement confirmed
 NOT satisfied — is a confirmed negative and is a real blocking result
 exactly like a blocker/major finding: it forces `request_changes` through
-the enforcement overlays, and a native APPROVE never certifies it. An
+the enforcement overlays, and a native APPROVE never certifies it. #1657
+(review) narrows this by row class: an `unmet` on a tagged review-prompt
+row records the semantic negative for accounting but does NOT force — only
+an explicitly-objective mandatory requirement (and untagged `legacy` rows)
+keeps the forcing semantics. An
 **`unresolved`** row — the evidence was never gathered — is an availability
 failure, never a defect: it marks the review partial/incomplete, withholds
 the trusted native APPROVE at the publish boundary (the native event
@@ -272,6 +276,158 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   instead of recomputing the raw #750 coverage — which would re-list a
   CI-discharged row as unresolved and omit a contradicted one. A run dir
   without the artifact keeps the pre-#1594 recompute exactly.
+
+## Evidence classes and objective provenance (#1657)
+
+#1657 replaces the #1627/#1634 call-ID citation gate (a cited `call-<n>` plus
+argument-token overlap was treated as consumable proof, one executed call
+backed at most one discharge). That machinery is deleted. In its place every
+`must_check` row carries an **evidence class** carried as TRUSTED PRODUCER
+METADATA: the classifier tags each row it emits in
+`MUST_CHECK_EVIDENCE_TAGS` (`src/classification/classify.ts`) and the tag
+rides the persisted artifact as `must_check_evidence` into both folds. Row
+class is never inferred from the row's wording downstream:
+
+| class           | which rows                                                                 | merge-affecting? |
+|-----------------|----------------------------------------------------------------------------|------------------|
+| `objective`     | rows the classifier tags objective with an explicit gate kind at emission: test-run asks (exact-head CI), upstream provenance / release-delta / security-advisory acquisition asks, and rows the producer binds to exact path/version/head/slug identities | **yes** — an unresolved objective row is the merge-affecting incompleteness |
+| `review-prompt` | rows tagged review-prompt at emission: generic auth/path/security/scrutiny questions and absence asks ("no vulnerability", "no breaking change") | no — disclosed with reason codes, never independently incomplete, and an `unmet` answer never manufactures `REQUEST_CHANGES` |
+| `attention`     | rows tagged attention at emission: the P0/P1 linked-issue sentences ("treat as critical — verify all changes thoroughly", "treat as high priority — verify correctness carefully") | no — attention/routing signals, not propositions |
+| `legacy`        | rows without a trusted tag: hand-written/minimal artifacts and dynamic rows | **yes** — untagged rows retain conservative pre-#1657 gating semantics. A row whose trusted metadata fails strict validation is `legacy` too: validation voids the metadata, never deletes the mandatory row (#1657 round 8) |
+
+Identity extraction from a check's text happens only AFTER a row is tagged
+`objective` — solely to validate the tagged identity against receipts. It
+never decides whether the row is material.
+
+The rules this buys, and their limits:
+
+- **A receipt never certifies a semantic conclusion.** The deterministic
+  layer validates objective acquisition facts only — what was acquired,
+  source/path/span or CI/upstream identity, exact head/version/revision,
+  acquisition success/failure, complete/truncated, freshness/trust scope —
+  from records the run itself wrote (the `tool_calls`/`tool_results` trace,
+  the assembler-certified corpus diff payloads, the CI gate's head-bound
+  evidence). One implementation, `buildEvidenceLedger`, feeds both folds; a
+  trace present but unparseable REFUSES the whole ledger (fail closed, never
+  a silent no-op), and a trace without its aligned results is refused too.
+  The aligned executor result is validated BEFORE any receipt is built and
+  is the acquisition authority: a malformed envelope (missing entry,
+  null/primitive/array, a missing `status` or one outside the executor's
+  closed `ok`/`error` vocabulary, a nested `result` payload that is absent
+  or not an object for ANY status — production nests one under both `ok`
+  and `error` — or a present-but-malformed `truncated` flag) refuses the
+  ledger rather than letting `tool_calls.status` — a harness display
+  mirror — manufacture an `acquired` receipt. A valid result
+  saying `error` beside a call claiming `ok` is evidence state, not a
+  refusal: the receipt stays recorded and unacquired. A SUCCESS whose
+  payload lacks the tool's minimum real output shape (the executor's own
+  observation field for that tool — `content`, `matches`, `results`,
+  `response`, …) is likewise refused: call arguments never stand in for
+  the acquisition they merely requested. Legitimate non-text observations
+  (a binary file read via `repo_contents` or decoded `gh_api` contents)
+  are real but never earn a content-capability receipt — the receipt
+  downgrades to discovery instead of masquerading as complete source
+  content. Completeness is a SEPARATE authority read where production
+  reports it: `executeToolRequest` nests every tool's fields under the
+  envelope's `result` and records each output clip (mask/byte caps, the
+  web-fetch body slice, the process-capture flags, and a default
+  whole-file `read_file` whose 12k-codepoint window actually discarded
+  bytes) as `truncated` on that PAYLOAD. The receipts layer reads the
+  nested flag — an envelope-level `truncated` is unknown and ignored —
+  and a malformed nested flag refuses the ledger like a malformed
+  status. Correspondingly the executor boundary must report every clip it
+  performs into the payload; receipt layers never guess completeness from
+  output size, and a clipped read of a whole path is never a complete
+  acquisition receipt.
+- **Receipts are shareable evidence, not consumable tokens.** One genuine
+  acquisition may support any number of conclusions; there is no allocation
+  and no per-row consumption. A receipt that carries none of a row's
+  required identity never contributes to it.
+- **Objective `satisfied` claims are validated, never manufactured.** The
+  reviewer's disposition stands or falls with the ledger: a claimed
+  `satisfied` on an objective row is credited only when validated receipts
+  cover the requirement (jointly — one receipt may carry several identities),
+  and stays unresolved with a reason code otherwise: `receipt-absent`
+  (nothing relevant was acquired), `receipt-unverified` (relevant attempts
+  failed, were truncated, or are outside the requirement's freshness/trust
+  scope — an attempt is not evidence, and a stale/wrong-head read is
+  objectively invalid), `receipt-mismatch` (relevant receipts exist but none
+  carries the exact identity — kind-appropriate boundaries, never
+  substrings), or `trace-refused`. The deterministic layer never flips an
+  unresolved row to satisfied from receipts alone — that remains the
+  reviewer's judgment, and #1656/#1659 own the final disposition.
+- **Review prompts and attention rows carry no provenance choreography.**
+  Their dispositions fold on the presence-and-shape rule exactly as before
+  the citation gate existed; an unanswered or unresolved one is disclosed
+  (row `status`/`reason`/`row_class`/`evidence`) but never gates
+  completeness, never withholds by itself, and never forces. A tagged
+  review prompt's `unmet` answer records the semantic negative for
+  accounting but never independently manufactures `REQUEST_CHANGES` — a
+  reviewer-determined semantic defect belongs in an ordinary grounded
+  blocker/major finding, and the final approve/incomplete call is the
+  disposition layer's (#1656/#1659). The one structural disclosure: a run
+  that emits no structured dispositions at all still records
+  `structured: false` — the skipped contract is visible, but only an
+  unresolved OBJECTIVE row makes it merge-affecting.
+- **Narrow deterministic reconciliation stays where truth is mechanical.**
+  The #1594 exact-head CI discharge/contradiction above is unchanged — it
+  remains the only auto-satisfaction reconciler, and only when the CI
+  identity/scope genuinely proves the ask. Upstream-evidence rows
+  (provenance/release-delta/advisory) are acquisition asks: their satisfaction
+  is validated against acquisition receipts attributed by the shared #1379
+  URL/query-shape rules, bound to the producer-parsed dependency scope. That
+  scope (`dependency_scope` on the tagged rows) is the COMPLETE trustworthy
+  set of dependency updates the PR's diff actually changes — exact
+  `{slug, versions}` entries parsed ONLY from producer-recognized dependency
+  surfaces (npm lockfile package blocks, npm manifest dependency sections,
+  Helm chart manifests), carrying the exact changed old→new version identity
+  where the diff shape has one. A receipt backs the row only when, per
+  obligation kind, the validated receipts JOINTLY cover EVERY entry — slug
+  as an exact identity, and, for every kind that asserts the update itself
+  (release delta AND advisory), the COMPLETE captured changed-version
+  identity: an advisory check naming only one endpoint of a captured
+  `old → new` range never certifies the updated range (acquisition
+  provenance bound to the captured range — never semantic vulnerability
+  proof). A versionless entry (the parser emits one for re-resolution-only
+  changes) certifies `provenance` only — the slug proves WHO the dependency
+  is, never an exact delta or an updated version range — and a one-sided
+  entry certifies no release delta; a kind-matched acquisition of the right
+  slug then stays `receipt-mismatch` and the objective row stays
+  material-unresolved through the existing disposition path (never a
+  blocker, never versions inferred from prose, URLs, or receipt text).
+  Attribution is HUNK-LOCAL: a `@@` header resets the lockfile
+  package, manifest section, and chart identity, so a previous hunk's block
+  header, dependency section, or chart name never carries into this one
+  (this hunk's own context may re-establish it). Version identity is EXACT:
+  a lockfile version comes only from the package block's actual `"version"`
+  field validated as one version token — never from relation values, ranges,
+  resolved URLs, engines or integrity hashes; a chart version only from the
+  `version`/`appVersion` field anchored to chart identity in the same hunk.
+  Unchanged hunk-context neighbors never enter scope; dependency-shaped text
+  outside a recognized surface never does; on a lockfile surface ANY changed
+  line the current hunk cannot attribute to a package block fails the WHOLE
+  scope CLOSED rather than being silently omitted — package content comes in
+  every JSON value shape (boolean, number, null, object, array), so the only
+  changed lines that stay non-scope metadata while unattributed are
+  structural punctuation and the lockfile root object's own keys inside the
+  attributed root; and overflow, unattributable shapes, and unread
+  dependency surfaces (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows
+  stay unresolved rather than certifying a partial update set.
+- **No repair from prose.** Malformed or stale provenance is visible and
+  reason-coded; nothing rewrites a disposition.
+- **Surfaces for #1656/#1659**: every coverage and obligation row carries
+  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`); the
+  bounded ledger rides the run dir as `evidence-receipts.json` (strict
+  round-trip reader, `unavailable` explicit rather than inferred); the
+  required-evidence sentinel rows carry `row_class`. Nothing here decides
+  APPROVE/INCOMPLETE — the disposition layer consumes the reason-coded state.
+- **Compatibility**: without a ledger (fresh standard-call and fork paths)
+  the receipt gate is INERT — satisfaction folds on the pre-#1627
+  presence-and-shape rule — but trusted producer tags still intentionally
+  govern which rows are merge-affecting: tagged review-prompt/attention rows
+  are non-gating and only untagged `legacy` rows retain the old gating
+  behavior. The retired #1627/#1634 reason strings remain readable in
+  persisted artifacts but are no longer written.
 
 ## Regression coverage
 

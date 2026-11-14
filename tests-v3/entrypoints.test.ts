@@ -1436,48 +1436,191 @@ test("#1537: required-check ids are recomputed only when the fold itself was inc
   });
 });
 
-test("#1627: the publish-side required-check recompute folds the executed-call index — #1388 parity with the engine fold", () => {
+test("#1657: the publish-side required-check recompute folds the ENGINE'S PERSISTED evidence ledger — #1388 parity with the engine fold", () => {
   withRunDir((dir) => {
     writeEngineRecord(dir);
     writeCoverageArtifact(dir, {
-      tool_loop_ran: true,
-      enforcement_harness: "tool-harness.json",
       required_checks: "incomplete",
       required_check_fold_status: "incomplete",
       partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
     });
-    // The native loop's executed-call trace: call-1 ok, call-2 FAILED — the
-    // shape that separates a cited successful call from a cited failure.
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: ["Check the auth path in src/auth.ts"],
+      // #1657 (review): the producer tags the row explicitly objective —
+      // the recompute gates it on the ledger's receipts, exactly like the
+      // engine fold.
+      must_check_evidence: [{ text: "Check the auth path in src/auth.ts", row_class: "objective", gate: "source-identity" }],
+    }));
+    // Satisfied with NO supporting acquisition (the persisted ledger's only
+    // successful read was of src/other.ts, not the named src/auth.ts): the
+    // engine's fold keeps the row receipt-absent → unresolved; the
+    // publish-side recompute must agree.
     writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
       stop_reason: "obligations-settled",
-      tool_calls: [
-        { tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" },
-        { tool: "web_fetch", args: { url: "https://blocked.test/x" }, status: "error" },
-      ],
+      tool_calls: [{ tool: "read_file", args: { path: "src/other.ts" }, status: "ok" }],
+      tool_results: [{ status: "ok" }],
     }));
-    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
-    // Satisfied citing the FAILED call (call-2): the engine's fold reads
-    // uncited-satisfaction → unresolved; the publish-side recompute must
-    // agree (without the index it would silently mark the row satisfied and
-    // drop it from the handoff).
+    writeFileSync(join(dir, "evidence-receipts.json"), JSON.stringify({
+      version: 1,
+      state: "valid",
+      receipts: [{ id: "call-1", kind: "source-read", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "workspace", subject: { path: "src/other.ts" } }],
+    }));
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
       verdict: "request_changes",
       required_check_dispositions: [
-        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the fetch ran as call-2 and confirmed it" },
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "verified by reading the source" },
       ],
     }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path in src/auth.ts"]);
-    // Paired positive: citing the SUCCESSFUL call (call-1) discharges — the
-    // publish side agrees with the engine fold in the positive direction too.
+    // Paired positive: the engine's persisted ledger holds the matching
+    // head-bound read — receipt-backed, the row drops from the handoff.
+    writeFileSync(join(dir, "evidence-receipts.json"), JSON.stringify({
+      version: 1,
+      state: "valid",
+      receipts: [{ id: "call-1", kind: "source-read", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "workspace", subject: { path: "src/auth.ts" } }],
+    }));
+    const backed = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(backed.unresolvedRequiredChecks, []);
+  });
+});
+
+test("#1657 (round 2): a corpus-diff-backed objective row STAYS backed in the publish readback — the persisted ledger, never a trace-only approximation", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: ["Check the auth path in src/auth.ts"],
+      must_check_evidence: [{ text: "Check the auth path in src/auth.ts", row_class: "objective", gate: "source-identity" }],
+    }));
+    // The trace's only read is of an unrelated path; the corpus diff is
+    // what carried src/auth.ts into the review context (the engine's
+    // corpus-diff receipt). A trace-only reconstruction would lose it.
+    writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
+      stop_reason: "obligations-settled",
+      tool_calls: [{ tool: "read_file", args: { path: "src/other.ts" }, status: "ok" }],
+      tool_results: [{ status: "ok" }],
+    }));
+    writeFileSync(join(dir, "evidence-receipts.json"), JSON.stringify({
+      version: 1,
+      state: "valid",
+      receipts: [{ id: "corpus-diff:src/auth.ts", kind: "corpus-diff", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "corpus-certified", subject: { path: "src/auth.ts" } }],
+    }));
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
       verdict: "request_changes",
       required_check_dispositions: [
-        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the read of src/auth.ts at head confirmed it — call-1" },
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "the corpus carried the full diff" },
       ],
     }));
-    const cited = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
-    assert.deepEqual(cited.unresolvedRequiredChecks, []);
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, []);
+  });
+});
+
+test("#1657 (round 2): a malformed persisted receipt ledger fails CLOSED — the uncertain disclosure is omitted, never guessed", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: ["Check the auth path in src/auth.ts"],
+      must_check_evidence: [{ text: "Check the auth path in src/auth.ts", row_class: "objective", gate: "source-identity" }],
+    }));
+    writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
+      stop_reason: "obligations-settled",
+      tool_calls: [{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }],
+      tool_results: [{ status: "ok" }],
+    }));
+    // Present but unreadable: the publish boundary must not invent a
+    // different evidence story (a trace-only reconstruction would read the
+    // row receipt-backed and DROP it — the exact silent disagreement this
+    // seam exists to prevent).
+    writeFileSync(join(dir, "evidence-receipts.json"), JSON.stringify({ broken: true }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "verified" },
+      ],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.unresolvedRequiredChecks, undefined);
+  });
+});
+
+test("#1657 (round 2): a pre-#1657 legacy run dir keeps its legacy recompute path — no receipt artifact, no reconstruction", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    // A legacy run dir: NO evidence-receipts.json. The recompute folds
+    // WITHOUT a ledger — the pre-#1657 semantics: a satisfied claim
+    // discharges on the presence-and-shape rule and the row drops.
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path in src/auth.ts"] }));
+    writeFileSync(join(dir, "tool-harness.json"), JSON.stringify({
+      stop_reason: "obligations-settled",
+      tool_calls: [{ tool: "read_file", args: { path: "src/other.ts" }, status: "ok" }],
+      tool_results: [{ status: "ok" }],
+    }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "verified by reading the source" },
+      ],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, []);
+    // The trace artifact is not even needed on the legacy path.
+  });
+});
+
+test("#1657 (round 2): the persisted ledger survives a missing harness trace — the engine's evidence does not disappear on publish", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: ["Check the auth path in src/auth.ts"],
+      must_check_evidence: [{ text: "Check the auth path in src/auth.ts", row_class: "objective", gate: "source-identity" }],
+    }));
+    // NO tool-harness.json at all: the persisted ledger is the only receipt
+    // surface — and the recompute still folds from it (the engine's
+    // head-bound evidence does not disappear on publish).
+    writeFileSync(join(dir, "evidence-receipts.json"), JSON.stringify({
+      version: 1,
+      state: "valid",
+      receipts: [{ id: "call-1", kind: "source-read", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "workspace", subject: { path: "src/auth.ts" } }],
+    }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path in src/auth.ts", status: "satisfied", rationale: "verified" },
+      ],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, []);
   });
 });
 

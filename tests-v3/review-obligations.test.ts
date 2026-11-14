@@ -183,7 +183,7 @@ test("#1388: an unmet obligation is forcing — a model approve cannot survive, 
 });
 
 test("#1388: a must_check obligation is NOT discharged by an id echo, and the #750 completeness fold agrees", () => {
-  const check = "review path traversal vulnerabilities";
+  const check = "review the path resolution in src/paths.ts";
   const rows = candidateRowsToObligations([{ id: "obligation-1", source: "must_check", text: check }], []);
   const idEcho = [{ check: "obligation-1", status: "satisfied" as const }];
   // The obligation fold ignores the id echo entirely.
@@ -833,959 +833,342 @@ test("#1627: the fold artifact carries the parser drop receipt; the reader parse
 });
 
 // ---------------------------------------------------------------------------
-// #1627: the evidence citation gate — when the run executed tool calls, a
-// must_check `satisfied` discharges only by citing an executed successful
-// call id from the proof index; both folds agree on the rule.
+// #1657: the objective-evidence gate on the obligation side. A must_check
+// `satisfied` on an OBJECTIVE row is credited only by validated evidence
+// receipts from the run's own ledger; receipts are shareable (no
+// one-call-per-row rule), a call id is never proof, and generic review
+// prompts and attention rows are never receipt-gated at all. The same
+// ledger, evaluation, and reasons run in the #750 completeness fold, so the
+// two folds agree on every row. The superseded #1627/#1634 citation-gate
+// suites (allocator, citation outcomes, one-call-per-row) are deleted.
 // ---------------------------------------------------------------------------
 
-import { allocateCallCitations, executedCallEvidenceIndex, executedCallTarget, MAX_EXECUTED_CALL_INDEX, type CitationOutcome, type ExecutedCallEvidenceEntry, type ExecutedCallEvidenceIndex } from "../src/enforcement/executed-calls.js";
+import { buildEvidenceLedger, type CheckEvidenceTagWithText, type EvidenceLedger } from "../src/enforcement/evidence-receipts.js";
+import { isForcingObligation } from "../src/enforcement/review-obligations.js";
+import { hasBlockingOpenFinding } from "../src/enforcement/verdict-policy.js";
 
-/** The #1623-shaped surface: 5 must_check obligations, an executed-call
- * index where only some rows have identity-matched successful calls, and a
- * verdict whose PROSE claims "5/5 verified" (prose is never read as credit —
- * only the structured dispositions' check-specific citations are). The
- * executed-call entries carry the deterministic evidence identity (tool +
- * bounded target) the citation reconciliation matches against. */
-function citationFixture() {
-  const texts = [
-    "check the exact version bump recorded in package-lock.json",
-    "run full test suite after upgrade",
-    "establish upstream provenance for the dependency recorded in package-lock.json: publisher and canonical source repository",
-    "inspect the exact old→new upstream release delta for the updated dependency",
-    "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
-  ];
-  const obligations = candidateRowsToObligations([], texts);
-  // call-1 ok, call-2 FAILED, call-3 ok — the shape that separates a cited
-  // successful call from a cited failure and from a fabricated id.
-  const executedCalls: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
-      { id: "call-2", ok: false, tool: "gh_api", target: "/repos/lodash/lodash" },
-      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/other/pkg" },
-    ],
-  };
-  return { texts, obligations, executedCalls };
+/** A minimal valid trace ledger: one successful read of src/paths.ts.
+ * The aligned result carries the production nested payload — a real
+ * per-tool output field, truncation flagged there, never on the
+ * envelope (#1657 rounds 10 + 11: empty or args-only payloads REFUSE
+ * the ledger). */
+function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
+  return buildEvidenceLedger({
+    toolCalls: entries.map((entry) => ({ tool: entry.tool, args: entry.args, status: entry.status })),
+    toolResults: entries.map((entry) => ({ status: entry.status, result: alignedResultPayload(entry) })),
+  });
 }
 
-test("#1627: the #1623-shaped negative — uncited, failed-cited, and phantom-cited satisfactions stay unresolved in BOTH folds, and prose claims never credit", () => {
-  const { texts, obligations, executedCalls } = citationFixture();
-  const dispositions = [
-    // (a) satisfied + cited to the identity-matched successful call → discharges.
-    { check: texts[0]!, status: "satisfied", rationale: "the lockfile read at call-1 shows the exact version bump" },
-    // (b) satisfied with prose-only credit ("5/5 verified") and NO citation.
-    { check: texts[1]!, status: "satisfied", rationale: "I read the changes carefully — 5/5 checks verified with evidence." },
-    // (c) satisfied citing a FAILED call.
-    { check: texts[2]!, status: "satisfied", rationale: "the provenance fetch ran as call-2 and confirmed the publisher" },
-    // (d) satisfied citing a NONEXISTENT call id.
-    { check: texts[3]!, status: "satisfied", rationale: "the delta was inspected as call-99" },
-    // (e) no disposition at all.
-  ];
-  const folded = foldObligationDispositions(obligations, dispositions, executedCalls);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "no-disposition"],
-  ]);
-  assert.deepEqual(unresolvedReviewObligations(folded), ["obligation-2", "obligation-3", "obligation-4", "obligation-5"]);
-  // #750 parity: the completeness fold, given the SAME inputs and index,
-  // reports the same set — complete only for the cited row.
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, executedCalls);
-  assert.equal(coverage.status, "incomplete");
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "uncited-satisfaction"],
-    ["unresolved", "no-disposition"],
-  ]);
-  // The verdict's prose claim ("5/5 verified") is never read as credit: the
-  // fold consumed only the structured dispositions above, and the native
-  // approval is withheld (partial) with the unresolved rows riding.
-  const artifact = base({
-    verdict: "approve",
-    review_markdown: "Recommendation: Approve\n5/5 verified with evidence — all checks pass.",
-    findings: [],
-  });
-  const enforced = applyAllEnforcement(artifact, {
-    evidenceBlockerEnabled: false,
-    toolFailureEnabled: false,
-    toolMinSuccessful: 0,
-    evidence: null,
-    toolHarness: null,
-    threads: null,
-    humanReviews: null,
-    verdictPolicy: "strict",
-    reviewObligations: folded,
-  } satisfies EnforcementInputs);
-  assert.equal(enforced, 0, "unresolved rows are coverage, never a manufactured block");
-  assert.equal(artifact.verdict, "approve");
-  assert.equal(
-    markerReviewResult({
-      verdictPolicy: "strict",
-      verdict: "approve",
-      findings: [],
-      requiredChecks: "incomplete",
-      requiredEvidenceState: "unresolved",
-    }),
-    "partial",
-    "native approval withheld",
-  );
-});
+/** The minimum production payload for each tool this suite exercises. */
+function alignedResultPayload(entry: { tool: string; status: string; truncated?: boolean }): Record<string, unknown> {
+  const payload: Record<string, unknown> = entry.status === "error"
+    ? { error: `${entry.tool}: simulated executor failure` }
+    : entry.tool === "web_search"
+      ? { results: '[{"title":"upstream security advisory"}]' }
+      : entry.tool === "web_fetch"
+        ? { content: "upstream comparison page\n" }
+        : { content: "const sanitized = resolve(p);\n" };
+  if (entry.truncated !== undefined) payload.truncated = entry.truncated;
+  return payload;
+}
 
-test("#1627: the paired positive — check-specific cited satisfactions discharge in both folds and the strict policy approves natively", () => {
-  const { texts, obligations } = citationFixture();
-  // Every satisfied row cites a successful call whose bounded target
-  // carries the identity the check names: the lockfile read for the version
-  // bump, the forge read of the same named file for provenance. The suite
-  // (never citable — #1612 head-bound CI evidence reconciles it) and the
-  // delta (no bindable identity) and advisory (absence) rows are answered
-  // not_applicable — applicability answers, never citation-gated.
-  const executedCalls: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/contents/package-lock.json" },
-    ],
+
+/** A trusted producer tag for one check text (#1657 review: row class is
+ * producer metadata, never inferred from wording). */
+function etag(text: string, rowClass: "attention" | "objective" | "review-prompt", gate?: "ci-evidence" | "dependency-evidence" | "source-identity", obligations?: string[], dependencyScope?: Array<string | { slug: string; versions: string[] }>): CheckEvidenceTagWithText {
+  return {
+    text, rowClass, gate: gate ?? null,
+    obligations: (obligations ?? []) as CheckEvidenceTagWithText["obligations"],
+    dependencyScope: (dependencyScope ?? []).map((entry) => typeof entry === "string" ? { slug: entry, versions: [] } : entry),
   };
-  const dispositions = [
-    { check: texts[0]!, status: "satisfied", rationale: "the lockfile read at call-1 shows the exact version bump" },
-    { check: texts[1]!, status: "not_applicable", rationale: "no test-suite change in scope" },
-    { check: texts[2]!, status: "satisfied", rationale: "the forge read of the named lockfile at call-2 confirms the publisher" },
-    { check: texts[3]!, status: "not_applicable", rationale: "single-version lockfile bump, no upstream delta in scope" },
-    { check: texts[4]!, status: "not_applicable", rationale: "no advisory surface in scope" },
-  ];
-  const folded = foldObligationDispositions(obligations, dispositions, executedCalls);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), Array.from({ length: 5 }, () => ["satisfied", "ok"]));
-  assert.deepEqual(unresolvedReviewObligations(folded), []);
-  // #750 completeness agrees on the same inputs and index.
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, executedCalls);
-  assert.equal(coverage.status, "complete");
-  assert.ok(coverage.checks.every((row) => row.reason === "ok" && (row.status === "satisfied" || row.status === "not_applicable")));
-  // Native eligibility affirmative: the strict mapping keeps the model's
-  // approve and the marker reads clean (no abstention), with no second
-  // model call in the path — this is the existing in-conversation verdict
-  // surface; only the deterministic folds and the policy run here.
-  const artifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nAll required checks verified.", findings: [] });
-  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "approve", forced: false, unmetReviewObligations: [] });
-  assert.equal(outcome.verdict, "approve");
-  assert.equal(outcome.source, "model");
-  assert.equal(
-    markerReviewResult({
-      verdictPolicy: "strict",
-      verdict: "approve",
-      findings: [],
-      requiredChecks: "complete",
-      requiredEvidenceState: "complete",
-    }),
-    "clean",
-  );
+}
+
+test("#1657: an objective satisfied claim folds identically in BOTH folds against the same ledger — receipt-backed, prose-uncited, and refused shapes agree", () => {
+  const row = "review the path resolution in src/paths.ts";
+  const rowTag = etag(row, "objective", "source-identity");
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+  const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
+
+  const backed = [
+    { check: row, status: "satisfied", rationale: "read the resolution at call-1 and reviewed the boundary checks" },
+  ] as never;
+  const foldedBacked = foldObligationDispositions(obligations, backed, ledger);
+  assert.deepEqual(foldedBacked.map((row2) => [row2.status, row2.reason, row2.rowClass, row2.evidence?.state]), [
+    ["satisfied", "ok", "objective", "receipt-backed"],
+  ]);
+  const coverageBacked = evaluateRequiredCheckCoverage([row], backed, ledger, [rowTag]);
+  assert.deepEqual(coverageBacked.checks.map((row2) => [row2.status, row2.reason, row2.evidence?.state]),
+    [["satisfied", "ok", "receipt-backed"]]);
+
+  // Prose-only credit against a ledger with NO supporting receipt: the
+  // rationale's wording is irrelevant — the row is receipt-absent. (With a
+  // SUPPORTING ledger the same prose WOULD fold satisfied: receipts are
+  // shareable evidence, and the answer's honesty is judged elsewhere —
+  // the deterministic layer validates acquisition, never prose.)
+  const unrelatedLedger = ledgerWith([{ tool: "read_file", args: { path: "README.md" }, status: "ok" }]);
+  const prose = [{ check: row, status: "satisfied", rationale: "I read the changes carefully — 5/5 checks verified with evidence." }] as never;
+  const foldedProse = foldObligationDispositions(obligations, prose, unrelatedLedger);
+  assert.deepEqual(foldedProse.map((row2) => [row2.status, row2.reason, row2.evidence?.state]),
+    [["unresolved", "receipt-absent", "receipt-absent"]]);
+  const coverageProse = evaluateRequiredCheckCoverage([row], prose, unrelatedLedger, [rowTag]);
+  assert.deepEqual(coverageProse.checks.map((row2) => [row2.status, row2.reason]),
+    [["unresolved", "receipt-absent"]]);
+
+  const refused = buildEvidenceLedger({ toolCalls: [{ tool: 42 }], toolResults: [] });
+  assert.equal(refused.state, "refused");
+  const foldedRefused = foldObligationDispositions(obligations, prose, refused);
+  assert.deepEqual(foldedRefused.map((row2) => [row2.status, row2.reason]),
+    [["unresolved", "trace-refused"]]);
+  const coverageRefused = evaluateRequiredCheckCoverage([row], prose, refused, [rowTag]);
+  assert.deepEqual(coverageRefused.checks.map((row2) => [row2.status, row2.reason]),
+    [["unresolved", "trace-refused"]]);
 });
 
-test("#1627: only successful executed calls are citable — the citation matcher is word-bounded and content-free", () => {
-  const index: ExecutedCallEvidenceEntry[] = [
-    { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
-    { id: "call-10", ok: true, tool: "read_file", target: "package-lock.json" },
-    { id: "call-3", ok: false, tool: "read_file", target: "package-lock.json" },
-  ];
-  const outcomeOf = (rationale: string): CitationOutcome =>
-    allocateCallCitations([{ key: "check the exact version bump recorded in package-lock.json", rationale }], index)[0]!;
-  assert.equal(outcomeOf("checked via call-1"), "assigned");
-  assert.equal(outcomeOf("checked via `call-10` at head"), "assigned");
-  // call-1 must not match inside call-10, and prose half-echoes fail.
-  assert.equal(outcomeOf("checked via call-10 details"), "assigned");
-  assert.equal(outcomeOf("checked via call-1 after the fix"), "assigned");
-  assert.equal(outcomeOf("the failed call-3 attempt shows it"), "uncited", "a FAILED call is never citable");
-  assert.equal(outcomeOf("call-99 and call-0 are fabricated"), "uncited");
-  assert.equal(outcomeOf("xcall-1 call-1x"), "uncited", "word-bounded tokens only");
-  assert.equal(outcomeOf(""), "uncited");
-  // A successful but UNRELATED call is successful-and-cited yet not probative.
-  assert.equal(
-    allocateCallCitations(
-      [{ key: "check the exact version bump recorded in package-lock.json", rationale: "checked via call-1" }],
-      [{ id: "call-1", ok: true, tool: "gh_api", target: "/repos/other/pkg" }],
-    )[0],
-    "unrelated",
-  );
-});
-
-test("#1634 (review): one executed call backs at most ONE satisfied disposition — the shared allocator fails the second row closed, identically for both folds", () => {
-  const index: ExecutedCallEvidenceEntry[] = [
-    { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
-    { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
-  ];
-  // Both rows are identity-matched to the same call set and cite call-1:
-  // the allocation (canonical key order, lowest free matching id) gives
-  // call-1 to the canonical-first row and the other is `shared` — a single
-  // cited call cannot discharge two rows.
-  const outcomes = allocateCallCitations([
-    { key: "verify the publisher of lodash/lodash", rationale: "proven by call-1" },
-    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1 and call-2" },
-  ], index);
-  assert.deepEqual(outcomes, ["shared", "assigned"], "result is aligned to the input row order");
-  // Order-independent: the same row set in any iteration order allocates the
-  // same way (this is what keeps the two folds' agreement structural).
-  const shuffled = allocateCallCitations([
-    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1 and call-2" },
-    { key: "verify the publisher of lodash/lodash", rationale: "proven by call-1" },
-  ], index);
-  assert.deepEqual(shuffled, ["assigned", "shared"]);
-  // EVERY row consumes its own outcome: two same-key rows cannot share one
-  // call — the second is `shared`, never a second `assigned`.
-  assert.deepEqual(allocateCallCitations([
-    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1" },
-    { key: "verify provenance for lodash/lodash", rationale: "proven by call-1" },
-  ], index), ["assigned", "shared"]);
-  // Obligation fold: the second satisfaction lands as `citation-already-used`.
-  const texts = ["verify provenance for lodash/lodash", "verify the publisher of lodash/lodash"];
-  const dispositions = [
-    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1" },
-    { check: texts[1]!, status: "satisfied", rationale: "also call-1" },
-  ];
-  const gate: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: index };
-  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, gate);
-  // "verify provenance..." < "verify the publisher..." — the canonical key
-  // winner discharges (and takes call-1; call-2 stays free).
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["unresolved", "citation-already-used"],
-  ]);
-  // #750 fold parity on the same inputs and index.
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, gate);
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["unresolved", "citation-already-used"],
-  ]);
-  assert.equal(coverage.status, "incomplete");
-});
-
-test("#1634 (review): an invalidated (duplicate) row never consumes a citation — fold parity for the shared-call neighbor of a duplicate disposition", () => {
-  const gate: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "read_file", target: "package-lock.json" },
-      { id: "call-2", ok: true, tool: "read_file", target: "package-lock.json" },
-    ],
-  };
-  const texts = ["check the exact version bump recorded in package-lock.json", "check the lockfile diff of package-lock.json"];
-  const dispositions = [
-    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1" },
-    { check: texts[0]!, status: "satisfied", rationale: "verified via call-1 again" },
-    { check: texts[1]!, status: "satisfied", rationale: "verified via call-1" },
-  ];
-  // Obligation fold: A is invalidated BEFORE gating (conflicting) and never
-  // gates; B is the only allocation row and wins call-1.
-  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, gate);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["unresolved", "conflicting-dispositions"],
-    ["satisfied", "ok"],
-  ]);
-  // Completeness fold: A's second answer invalidates it AFTER its provisional
-  // credit — the row must then drop out of the allocation (not consume
-  // call-1), so B stays satisfied here too. Same statuses, both folds.
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, gate);
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
-    ["unresolved", "duplicate-dispositions"],
-    ["satisfied", "ok"],
-  ]);
-});
-
-test("#1634 (human review): an unrelated successful call can NEVER discharge an unrelated must_check row — the cited call must carry the identity the check names, in BOTH folds", () => {
-  // The exact shape the human review blocks on: `read README -> call-1`
-  // certifying a provenance/security/version check about something else.
-  // The check names lodash/lodash; the successful calls target a DIFFERENT
-  // repo (or a generic read with no identity) — the deterministic evidence
-  // identity cannot establish that the call proves this row.
-  const unrelated: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/other/pkg" },
-      { id: "call-2", ok: true, tool: "read_file", target: "README.md" },
-    ],
-  };
+test("#1657: one validated receipt supports several conclusions in the obligation fold too — no redundant second call, no allocation", () => {
   const texts = [
-    "establish upstream provenance for lodash/lodash: publisher and canonical source repository",
-    "inspect the exact upstream release delta for lodash/lodash from 1.2.3 to 4.5.6",
+    "review the path resolution in src/paths.ts",
+    "review the path tests in src/paths.ts",
   ];
-  const dispositions = [
-    { check: texts[0]!, status: "satisfied", rationale: "the successful forge call-1 confirms the publisher" },
-    { check: texts[1]!, status: "satisfied", rationale: "the read at call-2 shows the delta" },
-  ];
-  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, unrelated);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["unresolved", "unrelated-executed-call"],
-    ["unresolved", "unrelated-executed-call"],
-  ]);
-  // #750 fold parity: the same unrelated shape fails closed there too.
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, unrelated);
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
-    ["unresolved", "unrelated-executed-call"],
-    ["unresolved", "unrelated-executed-call"],
-  ]);
-  assert.equal(coverage.status, "incomplete");
-  // The paired positive: the SAME check text citing a call whose target
-  // carries the named identity discharges in both folds — the gate binds
-  // citations to check-specific evidence, it does not refuse all of them.
-  const matched: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
-    ],
-  };
-  const cited = [
-    { check: texts[0]!, status: "satisfied", rationale: "the forge read of lodash/lodash at call-1 confirms the publisher" },
-    { check: texts[1]!, status: "satisfied", rationale: "the compare fetch at call-2 shows the delta" },
-  ];
-  const foldedMatched = foldObligationDispositions(candidateRowsToObligations([], texts), cited, matched);
-  assert.deepEqual(foldedMatched.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["satisfied", "ok"],
-  ]);
-  const coverageMatched = evaluateRequiredCheckCoverage(texts, cited as never, matched);
-  assert.deepEqual(coverageMatched.checks.map((row) => [row.status, row.reason]), [
-    ["satisfied", "ok"],
-    ["satisfied", "ok"],
-  ]);
-  assert.equal(coverageMatched.status, "complete");
+  const obligations = candidateRowsToObligations([], texts, texts.map((text) => etag(text, "objective", "source-identity")));
+  const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
+  const folded = foldObligationDispositions(
+    obligations,
+    texts.map((text) => ({ check: text, status: "satisfied", rationale: "the call-1 read" })) as never,
+    ledger,
+  );
+  // The deleted allocator kept the second row unresolved; both rows now
+  // read from the SAME receipt, each keeping its own conclusion.
+  assert.equal(folded.every((row) => row.status === "satisfied" && row.reason === "ok"), true);
+  assert.deepEqual(folded.map((row) => row.evidence?.receipts), [["call-1"], ["call-1"]]);
 });
 
-test("#1634 (human review): the stale-head, wrong-package/version distinctions stay unresolved — the check's exact head/version/package tokens must ALL be in the cited call's target", () => {
-  const head = "a".repeat(40);
-  const otherHead = "b".repeat(40);
+test("#1657: not_applicable and unmet are never evidence-gated; guidance and derived rows keep their rules; the gate is inert without a ledger", () => {
   const texts = [
-    `confirm the released tag for lodash/lodash 4.5.6 was built from the reviewed head ${head}`,
-    "establish upstream provenance for expressjs/express: publisher and canonical source repository",
+    "review for path traversal vulnerabilities", // absence ask → review prompt
+    "check for directory traversal vulnerabilities", // absence ask → review prompt
   ];
-  // call-1 targets a DIFFERENT head; call-2 the right head but the wrong
-  // package; call-3 the right package but missing the head token.
-  const index: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: `/repos/lodash/lodash/commits/${otherHead}` },
-      { id: "call-2", ok: true, tool: "gh_api", target: `/repos/expressjs/express/commits/${head}` },
-      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v4.5.6" },
-    ],
-  };
-  const dispositions = [
-    { check: texts[0]!, status: "satisfied", rationale: `verified as call-1 and call-3 against head ${head}` },
-    { check: texts[1]!, status: "satisfied", rationale: "verified as call-3" },
-  ];
-  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, index);
-  // Row 1: call-1 carries the wrong head (and no version), call-3 the right
-  // package/version but no head — NO cited call carries every token.
-  // Row 2: call-3 targets the wrong package entirely. Neither row has one
-  // call bearing its full identity.
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["unresolved", "unrelated-executed-call"],
-    ["unresolved", "unrelated-executed-call"],
-  ]);
-  // The exact-match positive for the same texts: one call carrying EVERY
-  // token (package + version + head) discharges.
-  const exact: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: `/repos/lodash/lodash/compare/v4.5.6...${head}` },
-    ],
-  };
-  const foldedExact = foldObligationDispositions(
-    candidateRowsToObligations([], [texts[0]!]),
-    [{ check: texts[0]!, status: "satisfied", rationale: `the compare call-1 pins tag v4.5.6 to head ${head}` }],
-    exact,
+  const obligations = candidateRowsToObligations([], texts);
+  const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/paths.ts" }, status: "ok" }]);
+  const folded = foldObligationDispositions(
+    obligations,
+    [
+      { check: texts[0], status: "not_applicable", rationale: "no path handling in the changed surface" },
+      { check: texts[1], status: "unmet", rationale: "the traversal test is absent and the risk surface exists" },
+    ] as never,
+    ledger,
   );
-  assert.deepEqual(foldedExact.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-});
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["satisfied", "ok"], ["unmet", "ok"]]);
 
-test("#1634 (re-review): identity tokens match as EXACT identities, not substrings — the version prefix (1.2.3 vs 1.2.30), the version's build-metadata extension (1.2.3 vs 1.2.3+build.7), the version's pre-release extension (1.2.3 vs 1.2.3-beta), the repo-slug prefix (owner/repo vs owner/repository), and a head sha embedded in a longer hex run stay unrelated-executed-call while the exact-identity positives discharge, in BOTH folds", () => {
-  const head = "a".repeat(40);
-  // A DIFFERENT (longer) hex identity that merely contains the head as a
-  // prefix/substring — the #1634 re-review's SHA boundary collision class.
-  const embedded64 = `${"b".repeat(12)}${head}${"b".repeat(12)}`;
-  const versionCheck = "verify lodash/lodash 1.2.3 provenance";
-  const slugCheck = "review the release automation for owner/repo";
-  const shaCheck = `confirm the audited head ${head} was released`;
-  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
-
-  // The prefix-collision targets: each successful forge read carries the
-  // check's tokens only as SUBSTRINGS of a different identity — the version
-  // 1.2.3 inside 1.2.30, inside a build-metadata extension (1.2.3+build.7,
-  // the re-review's round-3 case: the generic segment extenders omit `+`, so
-  // before the kind-authoritative boundary fix the generic segment branch
-  // admitted the occurrence versionBoundaryHolds intentionally rejects), or
-  // inside a pre-release extension (1.2.3-beta); the slug owner/repo inside
-  // owner/repository; the head inside a longer hex run. None is the identity
-  // the check names, so every cited row fails closed as
-  // unrelated-executed-call in both folds.
-  const collisions: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.30" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repository" },
-      { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${embedded64}` },
-      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3+build.7" },
-      { id: "call-5", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3-beta" },
-    ],
-  };
-  const collisionCases: Array<[string, string]> = [
-    [versionCheck, "the tag fetch at call-1 confirms 1.2.3"],
-    [slugCheck, "the forge read at call-2 confirms it"],
-    [shaCheck, "the commit fetch at call-3 confirms the head"],
-    [versionCheck, "the release fetch at call-4 confirms 1.2.3"],
-    [versionCheck, "the pre-release fetch at call-5 confirms 1.2.3"],
-  ];
-  for (const [check, rationale] of collisionCases) {
-    const folded = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, rationale),
-      collisions,
-    );
-    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
-    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, collisions);
-    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
-  }
-
-  // The exact-identity positives for the SAME checks: one call per check
-  // carrying the exact named identity (bare/tagged v1.2.3 with no version
-  // extension, repo owner/repo, the full head) discharges in both folds —
-  // including exact counterparts of the build-metadata and pre-release
-  // collision calls, so the boundary fix is what separates the pairs.
-  const exact: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repo" },
-      { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${head}` },
-      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3" },
-      { id: "call-5", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
-    ],
-  };
-  for (const [check, rationale] of collisionCases) {
-    const folded = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, rationale),
-      exact,
-    );
-    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], check);
-    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, exact);
-    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], check);
-  }
-});
-
-test("#1634 (re-review, round 5): a following '.' that continues a numeric segment is a version EXTENSION — exact 1.2.3 never carries from a 1.2.3.4 target in BOTH folds, while the forge compare RANGE separator (1.2.3...4.5.6, dot followed by dot) stays admissible; extraction is the full dotted-numeric run, so a 1.2.3.4 (or v1.2.3.4) check text is discharged ONLY by exact four-segment evidence, never by 1.2.3 or the off-by-one 2.3.4, in BOTH folds — the round-4 residual pin inverted to fail closed", () => {
-  const versionCheck = "verify lodash/lodash 1.2.3 provenance";
-  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
-
-  // NEGATIVE (the round-4 blocker): the check names exact 1.2.3; the target
-  // carries it only as a TRUNCATION of the four-segment version 1.2.3.4 —
-  // the occurrence is flush against ".4", a dot continuing another numeric
-  // version segment, so it is not the identity the check names and every
-  // cited row fails closed as unrelated-executed-call in BOTH folds
-  // (releases/1.2.3.4 and tags/v1.2.3.4 shapes). Pre-fix (9211985e) the dot
-  // was not in VERSION_EXTEND_RE, so these discharged — the red proof.
-  const truncated: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/1.2.3.4" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/tags/v1.2.3.4" },
-    ],
-  };
-  const truncatedCases: Array<[string, string]> = [
-    [versionCheck, "the release fetch at call-1 confirms 1.2.3"],
-    [versionCheck, "the tag fetch at call-2 confirms 1.2.3"],
-  ];
-  for (const [check, rationale] of truncatedCases) {
-    const folded = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, rationale),
-      truncated,
-    );
-    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
-    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, truncated);
-    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
-  }
-
-  // POSITIVE (the range case): a following '.' whose NEXT char is another
-  // dot is the forge compare RANGE separator, not a segment continuation —
-  // 1.2.3 inside /compare/1.2.3...4.5.6 is boundary-delimited and still
-  // carries in BOTH folds, preserving the compare-URL exact positive.
-  const range: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
-    ],
-  };
-  const rangeRationale = "the compare fetch at call-1 pins the 1.2.3 range";
-  const foldedRange = foldObligationDispositions(
-    candidateRowsToObligations([], [versionCheck]),
-    dispositionsFor(versionCheck, rangeRationale),
-    range,
-  );
-  assert.deepEqual(foldedRange.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-  const coverageRange = evaluateRequiredCheckCoverage([versionCheck], dispositionsFor(versionCheck, rangeRationale) as never, range);
-  assert.deepEqual(coverageRange.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-
-  // INVERTED CONTRACT (round-5 re-review; the round-4 "documented residual"
-  // was itself the bug): the extraction half is FIXED, so a check text
-  // naming 1.2.3.4 extracts the ONE exact token 1.2.3.4 — never the
-  // truncating 1.2.3 — and exactly-1.2.3 evidence therefore does NOT
-  // discharge it. The row fails closed as unrelated-executed-call in BOTH
-  // folds. This is the direct inversion of the round-4 pin, which asserted
-  // satisfied/ok here and certified the wrong release.
-  const fourSegmentCheck = "verify lodash/lodash 1.2.3.4 provenance";
-  const taggedFourSegmentCheck = "verify lodash/lodash v1.2.3.4 provenance";
-  const exactShorter: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
-    ],
-  };
-  for (const [check, label] of [
-    [fourSegmentCheck, "a 1.2.3.4 check text is NOT discharged by exactly-1.2.3 evidence"],
-    [taggedFourSegmentCheck, "a v1.2.3.4 check text is NOT discharged by exactly-1.2.3 evidence"],
-  ] as const) {
-    const foldedFourShorter = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, "the release fetch at call-1 confirms 1.2.3.4"),
-      exactShorter,
-    );
-    assert.deepEqual(
-      foldedFourShorter.map((row) => [row.status, row.reason]),
-      [["unresolved", "unrelated-executed-call"]],
-      label,
-    );
-    const coverageFourShorter = evaluateRequiredCheckCoverage(
-      [check],
-      dispositionsFor(check, "the release fetch at call-1 confirms 1.2.3.4") as never,
-      exactShorter,
-    );
-    assert.deepEqual(
-      coverageFourShorter.checks.map((row) => [row.status, row.reason]),
-      [["unresolved", "unrelated-executed-call"]],
-      `${label} (required-checks fold)`,
-    );
-  }
-
-  // The now-exact match: a four-segment check IS discharged by evidence
-  // carrying the exact four-segment identity — the SAME targets that stay
-  // unrelated for the 1.2.3 check above (releases/1.2.3.4, tags/v1.2.3.4),
-  // in BOTH folds. A v1.2.3.4 check text extracts 1.2.3.4 (the tag `v` is
-  // a convention marker, excluded from the token) and matches the
-  // v1.2.3.4 tag target exactly.
-  const fourSegmentCases: Array<[string, string, string]> = [
-    [fourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4", "bare 1.2.3.4 target carries the four-segment check"],
-    [fourSegmentCheck, "the tag fetch at call-2 confirms 1.2.3.4", "tagged v1.2.3.4 target carries the four-segment check"],
-    [taggedFourSegmentCheck, "the tag fetch at call-2 confirms 1.2.3.4", "v1.2.3.4 check text extracts 1.2.3.4 and matches the v1.2.3.4 tag target"],
-  ];
-  for (const [check, rationale, label] of fourSegmentCases) {
-    const foldedExactFour = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, rationale),
-      truncated,
-    );
-    assert.deepEqual(
-      foldedExactFour.map((row) => [row.status, row.reason]),
-      [["satisfied", "ok"]],
-      label,
-    );
-    const coverageExactFour = evaluateRequiredCheckCoverage(
-      [check],
-      dispositionsFor(check, rationale) as never,
-      truncated,
-    );
-    assert.deepEqual(
-      coverageExactFour.checks.map((row) => [row.status, row.reason]),
-      [["satisfied", "ok"]],
-      `${label} (required-checks fold)`,
-    );
-  }
-
-  // The v-prefix off-by-one is dead: the extractor no longer mis-splits
-  // v1.2.3.4 into the mid-run 2.3.4, so a v2.3.4 tag target — which WOULD
-  // carry the off-by-one token — is unrelated for the tagged check in BOTH
-  // folds.
-  const offByOne: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v2.3.4" },
-    ],
-  };
-  const foldedOffByOne = foldObligationDispositions(
-    candidateRowsToObligations([], [taggedFourSegmentCheck]),
-    dispositionsFor(taggedFourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4"),
-    offByOne,
-  );
-  assert.deepEqual(
-    foldedOffByOne.map((row) => [row.status, row.reason]),
-    [["unresolved", "unrelated-executed-call"]],
-    "v1.2.3.4 never extracts the off-by-one 2.3.4 (a v2.3.4 target does not discharge it)",
-  );
-  const coverageOffByOne = evaluateRequiredCheckCoverage(
-    [taggedFourSegmentCheck],
-    dispositionsFor(taggedFourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4") as never,
-    offByOne,
-  );
-  assert.deepEqual(
-    coverageOffByOne.checks.map((row) => [row.status, row.reason]),
-    [["unresolved", "unrelated-executed-call"]],
-    "v-prefix off-by-one dead in the required-checks fold",
-  );
-});
-
-test("#1634 (re-review, round 6): the dotted-run extraction boundary is ATOMIC — a version-shaped run the extractor cannot represent exactly (trailing word char, word-glued start, suffix flush against a word char) yields NO shorter version token and refuses the WHOLE row in BOTH folds, so exact-1.2.3 evidence can never discharge it; the exact four-segment, tagged, prerelease, build, and compare-range positives survive the atomization", () => {
-  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
-
-  // NEGATIVE (the round-6 blocker): the round-5 trailing `\b` could not end
-  // after the last segment of `1.2.3.4` when the word char `x` followed, so
-  // the greedy dotted run BACKTRACKED to the boundary-clean prefix `1.2.3` —
-  // a shorter version token from inside a run the extractor cannot
-  // represent. Exact-1.2.3 evidence then certified the requirement (the
-  // wrong-release bind), and — worse — the row discharged even through its
-  // remaining `lodash/lodash` slug token once the version token was dropped.
-  // The atomic extractor yields NO token for the run and the unbound run
-  // refuses the WHOLE row: no shorter prefix, no slug-only discharge, in
-  // BOTH folds (pre-fix: satisfied/ok here).
-  const shorterEvidence: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
-    ],
-  };
-  const unrepresentableCases: Array<[string, string]> = [
-    ["verify lodash/lodash 1.2.3.4x provenance", "check naming 1.2.3.4x is not discharged by exact-1.2.3 evidence"],
-    ["verify lodash/lodash v1.2.3.4x provenance", "tagged v1.2.3.4x check is not discharged by exact-1.2.3 evidence"],
-    ["verify lodash/lodash 1.2.3.4.5x provenance", "five-segment 1.2.3.4.5x is not discharged by exact-1.2.3 evidence"],
-    ["verify lodash/lodash 1.2.3-beta_x provenance", "prerelease flush against a word char is not discharged by exact-1.2.3 evidence"],
-    ["verify dev1.2.3.4 of lodash/lodash", "word-glued dotted run leaves the identity unestablishable"],
-  ];
-  for (const [check, label] of unrepresentableCases) {
-    const folded = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, "the release fetch at call-1 confirms the release"),
-      shorterEvidence,
-    );
-    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], label);
-    const coverage = evaluateRequiredCheckCoverage(
-      [check],
-      dispositionsFor(check, "the release fetch at call-1 confirms the release") as never,
-      shorterEvidence,
-    );
-    assert.deepEqual(
-      coverage.checks.map((row) => [row.status, row.reason]),
-      [["unresolved", "unrelated-executed-call"]],
-      `${label} (required-checks fold)`,
-    );
-  }
-
-  // POSITIVES survive the atomization: the exact four-segment, tagged
-  // four-segment, prerelease, build-metadata, and compare-range identities
-  // still extract as one exact token each and still discharge ONLY from
-  // targets carrying that exact identity — in BOTH folds.
-  const exact: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3.4" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3-beta" },
-      { id: "call-3", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3+build.7" },
-      { id: "call-4", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/compare/1.2.3...4.5.6" },
-    ],
-  };
-  const positiveCases: Array<[string, string, string]> = [
-    ["verify lodash/lodash 1.2.3.4 provenance", "the release fetch at call-1 confirms 1.2.3.4", "exact four-segment positive survives"],
-    ["verify lodash/lodash v1.2.3.4 provenance", "the release fetch at call-1 confirms 1.2.3.4", "tagged four-segment positive survives"],
-    ["verify lodash/lodash 1.2.3-beta provenance", "the release fetch at call-2 confirms 1.2.3-beta", "prerelease positive survives"],
-    ["verify lodash/lodash 1.2.3+build.7 provenance", "the release fetch at call-3 confirms 1.2.3+build.7", "build-metadata positive survives"],
-    ["verify lodash/lodash 1.2.3...4.5.6 provenance", "the compare fetch at call-4 pins the 1.2.3...4.5.6 range", "compare-range positive survives"],
-  ];
-  for (const [check, rationale, label] of positiveCases) {
-    const folded = foldObligationDispositions(
-      candidateRowsToObligations([], [check]),
-      dispositionsFor(check, rationale),
-      exact,
-    );
-    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], label);
-    const coverage = evaluateRequiredCheckCoverage(
-      [check],
-      dispositionsFor(check, rationale) as never,
-      exact,
-    );
-    assert.deepEqual(
-      coverage.checks.map((row) => [row.status, row.reason]),
-      [["satisfied", "ok"]],
-      `${label} (required-checks fold)`,
-    );
-  }
-
-  // The compare-range positive is not a license: a WRONG four-segment
-  // version never rides along. The 1.2.3...4.5.6 evidence cannot discharge
-  // a check naming 1.2.3.4 — its target does not carry the exact
-  // four-segment identity — in BOTH folds.
-  const fourSegmentCheck = "verify lodash/lodash 1.2.3.4 provenance";
-  const foldedRangeWrongVersion = foldObligationDispositions(
-    candidateRowsToObligations([], [fourSegmentCheck]),
-    dispositionsFor(fourSegmentCheck, "the compare fetch at call-4 pins the range"),
-    exact,
-  );
-  assert.deepEqual(
-    foldedRangeWrongVersion.map((row) => [row.status, row.reason]),
-    [["unresolved", "unrelated-executed-call"]],
-    "compare-range evidence does not certify the four-segment check",
-  );
-  const coverageRangeWrongVersion = evaluateRequiredCheckCoverage(
-    [fourSegmentCheck],
-    dispositionsFor(fourSegmentCheck, "the compare fetch at call-4 pins the range") as never,
-    exact,
-  );
-  assert.deepEqual(
-    coverageRangeWrongVersion.checks.map((row) => [row.status, row.reason]),
-    [["unresolved", "unrelated-executed-call"]],
-    "compare-range evidence does not certify the four-segment check (required-checks fold)",
-  );
-});
-
-test("#1634 (human review): negative-advisory, unrelated/test-only CI, and non-repository tools never discharge — and the suite/CI ask reconciles only through the #1612 head-bound CI matcher", () => {
-  // Advisory absence: the check asks for an advisory SEARCH; even a
-  // successful forge call naming the exact package+version proves only that
-  // a search RAN, never its result — the row stays unresolved.
-  const advisory = "check upstream security advisories for lodash/lodash 4.5.6";
-  const suite = "run full test suite after upgrade";
-  const index: ExecutedCallEvidenceIndex = {
-    gate: true,
-    refused: false,
-    entries: [
-      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/advisories?ecosystem=npm&version=4.5.6" },
-      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/actions/runs?head_sha=" + "c".repeat(40) },
-      { id: "call-3", ok: true, tool: "web_search", target: "lodash 4.5.6 advisories" },
-      { id: "call-4", ok: true, tool: "run_command", target: "git_status_short" },
-    ],
-  };
-  const dispositions = [
-    { check: advisory, status: "satisfied", rationale: "the advisory search ran as call-1 and call-3 and came back clean" },
-    { check: suite, status: "satisfied", rationale: "the CI run call-2 for the head is green" },
-  ];
-  const folded = foldObligationDispositions(candidateRowsToObligations([], [advisory, suite]), dispositions, index);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["unresolved", "unrelated-executed-call"],
-    ["unresolved", "unrelated-executed-call"],
-  ]);
-  // #1612 integration: the suite/CI ask discharges ONLY through the
-  // head-bound CI evidence reconciliation (a green in-scope test-execution
-  // check on the exact reviewed head), never through a cited call.
-  const reviewedHead = "c".repeat(40);
-  const reconciled = reconcileObligationsWithCiEvidence(folded, {
-    headSha: reviewedHead,
-    finalState: "success",
-    checks: [{ name: "test suite", state: "success", conclusion: "success" }],
-  }, reviewedHead);
-  // The advisory row is not a test-execution ask — CI evidence leaves it
-  // unresolved; the suite row discharges with the CI provenance record.
-  assert.deepEqual(reconciled.map((row) => row.status), ["unresolved", "satisfied"]);
-  assert.deepEqual(reconciled[1]!.resolvedBy, { kind: "ci-evidence", check: "test suite", headSha: reviewedHead });
-  // Head-mismatched CI evidence does NOT discharge: the matcher is
-  // head-bound.
-  const notDischarged = reconcileObligationsWithCiEvidence(folded, {
-    headSha: "d".repeat(40),
-    finalState: "success",
-    checks: [{ name: "test suite", state: "success", conclusion: "success" }],
-  }, reviewedHead);
-  assert.deepEqual(notDischarged.map((row) => row.status), ["unresolved", "unresolved"]);
-});
-
-test("#1634 (human review): the executed-call target is the bounded identity the trace already owns", () => {
-  assert.equal(executedCallTarget({ endpoint: "/repos/o/r/releases/tags/v1.2.3" }), "/repos/o/r/releases/tags/v1.2.3");
-  assert.equal(executedCallTarget({ path: "src/auth.ts", limit: 5 }), "src/auth.ts");
-  assert.equal(executedCallTarget({ path: "a.ts", ref: "abc" }), "a.ts abc");
-  assert.equal(executedCallTarget({ repo: "o/r", ref: "head" }), "head o/r");
-  assert.equal(executedCallTarget({ pattern: "traversal", path: "src" }), "src traversal");
-  assert.equal(executedCallTarget({ url: "https://x.test/a" }), "https://x.test/a");
-  assert.equal(executedCallTarget({ query: "q" }), "q");
-  assert.equal(executedCallTarget({ command: "git_diff_stat" }), "git_diff_stat");
-  // No identity args / non-object args: targetless, never a refusal.
-  assert.equal(executedCallTarget({ limit: 5 }), "");
-  assert.equal(executedCallTarget({}), "");
-  assert.equal(executedCallTarget("forged"), "");
-  assert.equal(executedCallTarget(null), "");
-  assert.equal(executedCallTarget(undefined), "");
-  // Bounded: a target never exceeds the proof index's rendered bound.
-  assert.equal(executedCallTarget({ path: "a".repeat(400) }).length, 300);
-});
-
-test("#1627 (m1): the index parser TRUNCATES an over-cap trace to the first MAX_EXECUTED_CALL_INDEX entries — the bounded prefix keeps its 1-based positional alignment and the gate stays live", () => {
-  const trace = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 25 }, (_, position) => ({
-    tool: "read_file",
-    args: {},
-    status: position % 2 === 0 ? "ok" : "error",
-  }));
-  const { gate, refused, entries } = executedCallEvidenceIndex(trace);
-  assert.equal(gate, true);
-  assert.equal(refused, false);
-  // Not the old whole-index refusal (fail-open gate): the prefix survives.
-  assert.equal(entries.length, MAX_EXECUTED_CALL_INDEX);
-  assert.equal(entries[0]!.id, "call-1");
-  assert.equal(entries[0]!.ok, true);
-  assert.equal(entries[MAX_EXECUTED_CALL_INDEX - 1]!.id, `call-${MAX_EXECUTED_CALL_INDEX}`);
-  assert.equal(entries[MAX_EXECUTED_CALL_INDEX - 1]!.ok, false, "positional statuses are preserved exactly");
-  // A malformed entry inside the bounded prefix still refuses the WHOLE
-  // index — but a REFUSAL is not an absence (#1634 review): the gate stays
-  // ACTIVE with zero citable entries, never the inert `[]` that was
-  // indistinguishable from the no-loop case.
-  const malformed = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 25 }, () => ({ tool: "read_file", args: {}, status: "ok" }));
-  malformed[3] = "forged" as never;
-  assert.deepEqual(executedCallEvidenceIndex(malformed), { gate: true, refused: true, entries: [] });
-  // Absent / non-array / empty traces are the no-native-loop surface: inert.
-  for (const absent of [undefined, null, "forged", {}, []]) {
-    assert.deepEqual(executedCallEvidenceIndex(absent), { gate: false, refused: false, entries: [] }, JSON.stringify(absent));
-  }
-});
-
-test("#1634 (review): a malformed executed-call trace FAILS THE GATE CLOSED — a cited satisfaction cannot discharge behind an unverifiable trace, in BOTH folds", () => {
-  const index = executedCallEvidenceIndex([{ tool: "read_file", args: {}, status: "ok" }, "forged" as never]);
-  assert.deepEqual(index, { gate: true, refused: true, entries: [] });
-  const texts = ["check one", "check two"];
-  const dispositions = [
-    { check: "check one", status: "satisfied", rationale: "verified via call-1" },
-    { check: "check two", status: "satisfied", rationale: "verified via call-2" },
-  ];
-  const folded = foldObligationDispositions(candidateRowsToObligations([], texts), dispositions, index);
-  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
-    ["unresolved", "malformed-executed-trace"],
-    ["unresolved", "malformed-executed-trace"],
-  ]);
-  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, index);
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
-    ["unresolved", "malformed-executed-trace"],
-    ["unresolved", "malformed-executed-trace"],
-  ]);
-  assert.equal(coverage.status, "incomplete");
-  // Negative/applicability answers are not positive evidence claims — a
-  // refused trace never gates them (same rule as a valid index).
-  const unmet = foldObligationDispositions(
-    candidateRowsToObligations([], ["check one"]),
-    [{ check: "check one", status: "unmet", rationale: "performed, requirement absent" }],
-    index,
-  );
-  assert.deepEqual(unmet.map((row) => [row.status, row.reason]), [["unmet", "ok"]]);
-});
-
-test("#1627: not_applicable and unmet are never citation-gated; guidance and derived rows keep their rules; the gate is inert without an index", () => {
-  const executedCalls: ExecutedCallEvidenceIndex = { gate: true, refused: false, entries: [{ id: "call-1", ok: true, tool: "read_file", target: "src/a.ts" }] };
-  const rows = candidateRowsToObligations([
-    { id: "obligation-1", source: "must_check", text: "check one" },
-    { id: "obligation-2", source: "trusted_base_guidance", text: "Before approval, verify the matrix." },
+  // trusted_base_guidance keeps its own rule (non-empty rationale), and a
+  // derived row still needs its anchor named — no receipt demand appears.
+  const mixed = candidateRowsToObligations([
+    { id: "obligation-1", source: "trusted_base_guidance", text: "Verify the release notes document the migration" },
   ], []);
-  // not_applicable and unmet are applicability/negative answers, not
-  // positive evidence claims — they fold exactly as before WITH an index.
-  const na = foldObligationDispositions(
-    candidateRowsToObligations([], ["check one"]),
-    [{ check: "check one", status: "not_applicable", rationale: "no config in diff" }],
-    executedCalls,
-  );
-  assert.deepEqual(na.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-  const unmet = foldObligationDispositions(
-    candidateRowsToObligations([], ["check one"]),
-    [{ check: "check one", status: "unmet", rationale: "the check was performed and the requirement is absent" }],
-    executedCalls,
-  );
-  assert.deepEqual(unmet.map((row) => [row.status, row.reason]), [["unmet", "ok"]]);
-  // trusted_base_guidance keeps its own rule (non-empty rationale, no
-  // citation demand).
   const guidance = foldObligationDispositions(
-    [rows[1]!],
-    [{ check: "obligation-2", status: "satisfied", rationale: "matrix read at head" }],
-    executedCalls,
+    mixed,
+    [{ check: "obligation-1", status: "satisfied", rationale: "the release notes cover it" }] as never,
+    ledger,
   );
   assert.deepEqual(guidance.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-  // derived rows keep the anchor rule (a location, not a call id).
-  const derived: ReviewObligation[] = [{ id: "derived-1", source: "derived", text: "check one", status: "unresolved", cause: null, anchors: ["src/ingress/reconcile.ts:mintFoundJob"] }];
-  const derivedFold = foldObligationDispositions(
-    derived,
-    [{ check: "derived-1", status: "satisfied", rationale: "src/ingress/reconcile.ts:mintFoundJob places the identity before hashing" }],
-    executedCalls,
-  );
-  assert.deepEqual(derivedFold.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-  // The #750 fold agrees on the ungated statuses too.
-  const coverage = evaluateRequiredCheckCoverage(
-    ["check one"],
-    [{ check: "check one", status: "not_applicable", rationale: "no config in diff" }] as never,
-    executedCalls,
-  );
-  assert.equal(coverage.checks[0]!.reason, "ok");
+  assert.equal(guidance[0]!.rowClass, undefined);
 
-  // Fresh-call path regression: WITHOUT an active gate (undefined, or an
-  // index with no trace behind it), a bare satisfied still discharges —
-  // byte-identical to pre-#1627.
-  for (const absent of [undefined, { gate: false, refused: false, entries: [] } as ExecutedCallEvidenceIndex]) {
-    const bare = foldObligationDispositions(
-      candidateRowsToObligations([], ["check one"]),
-      [{ check: "check one", status: "satisfied" }],
-      absent,
-    );
-    assert.deepEqual(bare.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], JSON.stringify(absent));
-    const bareCoverage = evaluateRequiredCheckCoverage(
-      ["check one"],
-      [{ check: "check one", status: "satisfied", rationale: null }] as never,
-      absent,
-    );
-    assert.equal(bareCoverage.status, "complete");
-    assert.equal(bareCoverage.checks[0]!.reason, "ok");
-  }
+  // No ledger: every fold keeps pre-#1627 semantics byte-for-byte.
+  const inert = foldObligationDispositions(
+    candidateRowsToObligations([], ["review the path resolution in src/paths.ts"]),
+    [{ check: "review the path resolution in src/paths.ts", status: "satisfied", rationale: "prose only" }] as never,
+  );
+  assert.deepEqual(inert.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  assert.equal(inert[0]!.evidence, undefined);
 });
 
-test("#1627: the gate does not disturb the P1 rejection variants — missing entry, malformed status, duplicates, wrong-text echo", () => {
-  const { texts, obligations, executedCalls } = citationFixture();
-  const first = texts[0]!;
-  // Missing entry: everything undisposed.
-  assert.deepEqual(
-    foldObligationDispositions(obligations, [], executedCalls).map((row) => [row.status, row.reason]),
-    Array.from({ length: 5 }, () => ["unresolved", "no-disposition"]),
+test("#1657: generic review prompts and attention rows never create merge-affecting incompleteness — no withhold, no ungathered section, no force", () => {
+  // An attention row is dropped at the candidate boundary: it never becomes
+  // an obligation at all.
+  const dropped = candidateRowsToObligations([], [
+    "treat as high priority — verify correctness carefully",
+    "treat as critical — verify all changes thoroughly",
+    "review auth flow for regression",
+  ], [
+    etag("treat as high priority — verify correctness carefully", "attention"),
+    etag("treat as critical — verify all changes thoroughly", "attention"),
+  ]);
+  assert.deepEqual(dropped.map((row) => row.text), ["review auth flow for regression"]);
+
+  // A generic prompt answered unresolved stays disclosed but is neither
+  // forcing nor rendered as unresolved REQUIRED evidence, and the
+  // required-evidence fold result carries no enforcement section for it.
+  const obligations = candidateRowsToObligations(
+    [],
+    ["review auth flow for regression"],
+    [etag("review auth flow for regression", "review-prompt")],
   );
-  // Malformed status.
-  assert.deepEqual(
-    foldObligationDispositions(candidateRowsToObligations([], [first]), [{ check: first, status: "invalid" }], executedCalls).map((row) => [row.status, row.reason]),
-    [["unresolved", "malformed-disposition"]],
+  const ledger = ledgerWith([{ tool: "read_file", args: { path: "src/auth.ts" }, status: "ok" }]);
+  const folded = foldObligationDispositions(
+    obligations,
+    [{ check: "review auth flow for regression", status: "unresolved", rationale: "could not fully verify the flow" }] as never,
+    ledger,
   );
-  // Duplicate answers under one alias.
-  assert.deepEqual(
-    foldObligationDispositions(
-      candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: first }], []),
-      [
-        { check: first, status: "satisfied", rationale: "call-1" },
-        { check: first, status: "satisfied", rationale: "call-1 again" },
-      ],
-      executedCalls,
-    ).map((row) => [row.status, row.reason]),
-    [["unresolved", "conflicting-dispositions"]],
+  assert.deepEqual(folded.map((row) => [row.status, row.rowClass, row.evidence?.state]),
+    [["unresolved", "review-prompt", "not-required"]]);
+  assert.equal(isForcingObligation(folded[0]!), false);
+  assert.deepEqual(blockingReviewObligations(folded), []);
+
+  const artifact = { verdict: "approve", review_markdown: "body", findings: [] } as unknown as ReviewArtifact;
+  const foldResult = applyReviewObligationEnforcement(artifact, folded);
+  assert.deepEqual(foldResult, { applied: false, reason: "" });
+  // The unresolved prompt is disclosed nowhere as required evidence.
+  assert.equal(artifact.review_markdown, "body");
+
+  // #1657 (review, issue 3): an UNMET semantic review prompt records the
+  // negative for accounting but never independently forces a blocking
+  // verdict — a reviewer-determined semantic defect belongs in an ordinary
+  // grounded blocker/major finding, which still blocks normally. Only an
+  // explicitly OBJECTIVE mandatory requirement (falsity mechanically
+  // establishable) may act as a proven unmet requirement.
+  const unmet = foldObligationDispositions(
+    obligations,
+    [{ check: "review auth flow for regression", status: "unmet", rationale: "the token check is missing and exploitable" }] as never,
+    ledger,
   );
-  // Wrong-text echo matches no row.
-  assert.deepEqual(
-    foldObligationDispositions(candidateRowsToObligations([], [first]), [{ check: "a different check entirely", status: "satisfied", rationale: "call-1" }], executedCalls).map((row) => [row.status, row.reason]),
-    [["unresolved", "no-disposition"]],
+  assert.equal(unmet[0]!.status, "unmet");
+  assert.equal(isForcingObligation(unmet[0]!), false);
+  assert.deepEqual(blockingReviewObligations(unmet), []);
+  const unmetArtifact = { verdict: "approve", review_markdown: "body", findings: [] } as unknown as ReviewArtifact;
+  const unmetResult = applyReviewObligationEnforcement(unmetArtifact, unmet);
+  assert.deepEqual(unmetResult, { applied: false, reason: "" });
+  assert.equal(unmetArtifact.verdict, "approve");
+  assert.ok(!unmetArtifact.review_markdown.includes("Unmet Required Review Evidence"));
+
+  // An UNMET row on an explicitly-OBJECTIVE mandatory requirement still
+  // forces.
+  const objectiveUnmet = foldObligationDispositions(
+    candidateRowsToObligations([], ["review the path resolution in src/paths.ts"],
+      [etag("review the path resolution in src/paths.ts", "objective", "source-identity")]),
+    [{ check: "review the path resolution in src/paths.ts", status: "unmet", rationale: "the boundary check is absent" }] as never,
+    ledger,
   );
-  // The #750 fold reports the same shapes on the same inputs.
-  const coverage = evaluateRequiredCheckCoverage(
-    [first],
-    [
-      { check: first, status: "invalid", rationale: null },
-      { check: first, status: "satisfied", rationale: "call-1" },
-      { check: first, status: "satisfied", rationale: "call-1 again" },
-    ] as never,
-    executedCalls,
+  assert.equal(isForcingObligation(objectiveUnmet[0]!), true);
+  assert.deepEqual(blockingReviewObligations(objectiveUnmet).map((row) => row.status), ["unmet"]);
+
+  // A grounded ordinary major finding still blocks normally (unchanged).
+  assert.equal(hasBlockingOpenFinding([
+    { severity: "major", category: "correctness", path: "src/auth.ts", message: "broken", own_finding: true },
+  ] as never), true);
+});
+
+test("#1657: stale or wrong-head provenance is objectively invalid for a row that names the reviewed head — the receipt's own freshness refuses it", () => {
+  const head = "3f9c8a1b2d4e5f6071728394a5b6c7d8e9f0a1b2";
+  const row = `verify the config surface at head ${head} in src/config.yaml`;
+  const rowTag = etag(row, "objective", "source-identity");
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+
+  // The forge read carries the path but pins a DIFFERENT (stale) head:
+  // relevant, unverified — an attempt at another revision is not evidence
+  // of this one.
+  const stale = foldObligationDispositions(
+    obligations,
+    [{ check: row, status: "satisfied", rationale: "the contents read at call-1" }] as never,
+    buildEvidenceLedger({
+        toolCalls: [{ tool: "gh_api", args: { endpoint: "/repos/o/r/contents/src/config.yaml?ref=1111111111111111111111111111111111111111" }, status: "ok" }],
+        toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "11aa22bb33cc44dd", size: 10, content: "value: 1\n", truncated: false } }],
+      reviewedHeadSha: head,
+    }),
   );
-  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "duplicate-dispositions"]]);
+  assert.deepEqual(stale.map((r) => [r.status, r.reason, r.evidence?.state]),
+    [["unresolved", "receipt-unverified", "receipt-unverified"]]);
+
+  // The same read pinned to the EXACT reviewed head is head-bound and
+  // covers both identity tokens → receipt-backed.
+  const fresh = foldObligationDispositions(
+    obligations,
+    [{ check: row, status: "satisfied", rationale: "the contents read at call-1" }] as never,
+    buildEvidenceLedger({
+        toolCalls: [{ tool: "gh_api", args: { endpoint: `/repos/o/r/contents/src/config.yaml?ref=${head}` }, status: "ok" }],
+        toolResults: [{ status: "ok", result: { path: "src/config.yaml", sha: "8ba9876cb113f4aa", size: 10, content: "value: 1\n", truncated: false } }],
+      reviewedHeadSha: head,
+    }),
+  );
+  assert.deepEqual(fresh.map((r) => [r.status, r.reason, r.evidence?.receipts]),
+    [["satisfied", "ok", ["call-1"]]]);
+});
+
+// ── #1657 (review round 8): trusted producer metadata is COPIED WHOLE by
+// both obligation paths, and a malformed metadata field voids the metadata
+// — never the mandatory row itself.
+
+test("#1657 (round 8): the candidates-less fallback carries the tag's dependency scope — both folds settle the scoped row identically", () => {
+  const row = "inspect the exact old→new upstream release delta for the updated dependency";
+  const rowTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const dispositions = [{ check: row, status: "satisfied", rationale: "the exact release delta" }] as never;
+  // No usable candidates artifact (fork/skipped-harness path): the fallback
+  // must copy the producer's COMPLETE metadata — dependency scope included.
+  // Before round 8 it copied class/gate/obligations only, so the obligation
+  // fold settled this row receipt-absent while the coverage fold settled it
+  // receipt-backed: the same classification folding two ways.
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+  assert.deepEqual(obligations[0]!.dependencyScope, [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const folded = foldObligationDispositions(obligations, dispositions, ledger);
+  const coverage = evaluateRequiredCheckCoverage([row], dispositions, ledger, [rowTag]);
+  assert.deepEqual(folded.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+  assert.deepEqual(coverage.checks.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+});
+
+test("#1657 (round 8): a malformed dependency_scope on a candidates row voids the trusted METADATA, never deletes the mandatory row", () => {
+  const obligations = candidateRowsToObligations([
+    {
+      id: "obligation-1",
+      source: "must_check",
+      text: "inspect the exact old→new upstream release delta for the updated dependency",
+      row_class: "objective",
+      gate: "dependency-evidence",
+      obligations: ["release_delta"],
+      dependency_scope: ["../evil"],
+    },
+  ], [], []);
+  // The row survives — untrusted metadata means the pre-#1657 legacy gating
+  // default (exactly like an unparseable row_class), not a silently missing
+  // mandatory obligation.
+  assert.equal(obligations.length, 1);
+  assert.equal(obligations[0]!.rowClass, undefined);
+  assert.equal(obligations[0]!.dependencyScope, undefined);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const legacyFold = foldObligationDispositions(
+    obligations,
+    [{ check: obligations[0]!.text, status: "satisfied", rationale: "the release delta was inspected" }] as never,
+    ledger,
+  );
+  // Legacy semantics: discharged by the rationale, no receipt demand.
+  assert.deepEqual(legacyFold.map((r) => [r.status, r.reason]), [["satisfied", "ok"]]);
+});
+
+// ── #1657 (review round 9): a versionless scope entry (reachable — the
+// parser emits it for re-resolution-only changes) certifies provenance
+// identity ONLY. Through the obligation fold a release-delta row behind it
+// stays material-unresolved even beside a kind-matched right-slug
+// acquisition — never credited, never a manufactured blocker.
+
+test("#1657 (round 9): a versionless scoped release-delta row stays unresolved in the fold — identity alone never certifies a delta", () => {
+  const row = "inspect exact old→new upstream release delta updated dependency";
+  const rowTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: [] }]);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+  const dispositions = [{ check: row, status: "satisfied", rationale: "the exact release delta" }] as never;
+  const folded = foldObligationDispositions(obligations, dispositions, ledger);
+  assert.deepEqual(folded.map((r) => [r.status, r.reason, r.evidence?.state]), [["unresolved", "receipt-mismatch", "receipt-mismatch"]]);
+  const coverage = evaluateRequiredCheckCoverage([row], dispositions, ledger, [rowTag]);
+  assert.deepEqual(coverage.checks.map((r) => [r.status, r.reason, r.evidence?.state]), [["unresolved", "receipt-mismatch", "receipt-mismatch"]]);
+
+  // Same ledger, producer captured the complete pair → the identical row
+  // settles; the refusal is about the MISSING captured identity, not the
+  // acquisition.
+  const pairTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const settledFold = foldObligationDispositions(candidateRowsToObligations([], [row], [pairTag]), dispositions, ledger);
+  assert.deepEqual(settledFold.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
 });
