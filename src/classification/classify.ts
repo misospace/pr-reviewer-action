@@ -140,7 +140,8 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
  *     - self-location `readlink` (#1034): `os.readlink(__file__)`, shell
  *       `readlink [-f] "$0"` / `"${BASH_SOURCE[0]}"` as a whole statement or
  *       inside `dirname`/`cd`, and the Python and shell symlink-resolution
- *       loops. It holds for ordinary code only: rebinding the anchor, a
+ *       loops, including the one-line `DIR` join resolver variant (#1671).
+ *       It holds for ordinary code only: rebinding the anchor, a
  *       template line that is really string content, a second file and
  *       obfuscated spellings can evade it, as `getattr(os, "read" + "link")`
  *       evades the class scan already;
@@ -429,8 +430,10 @@ function diffMarker(line: string): string {
  * `readlink "$0"`, the portable symlink-resolution loop) is self-location
  * bookkeeping like `realpath(__file__)`, not a symlink-sensitive surface.
  * Recognition is closed and line-whole: a handful of complete statements and
- * two loop templates of consecutive lines, matched by static patterns, so an
- * untrusted operand, an intervening reassignment or a second operation on
+ * three loop templates of consecutive lines — the Python loop, the shell
+ * loop, and the shell loop's one-line `DIR` join variant (#1671) — matched by
+ * static patterns, so an untrusted operand, an intervening reassignment or a
+ * second operation on
  * the line keeps firing. It reads each line as ordinary code: a rebound
  * anchor, a template line that is really string content, or a second file
  * that changes what the anchor means can evade it. */
@@ -492,6 +495,20 @@ const SH_LOOP_COPY = new RegExp(
   String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})\2[ \t]*$`,
 );
 const SH_LOOP_DONE = /^[ \t]*done[ \t]*$/;
+/** #1671 one-line `DIR` join resolver template lines. The loop folds the
+ * `readlink` result back into the anchor and joins a relative hop from a
+ * `dirname` variable with a one-line conditional: `D="$(dirname "$T")"`,
+ * then the fold (the loop read pattern with both identifiers the anchor)
+ * and the join `[[ $T != /* ]] && T="$DIR/$T"` in either order, then
+ * `done`. Join expansions stay bare `$DIR/$T`: a rebound `DIR`, an
+ * extended `&&` chain, an unquoted command operand or a mismatched
+ * identifier keeps firing. */
+const SH_LOOP_ONEHOP_DIR = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$\(dirname[ \t]+"\$(${SELF_LOCATION_IDENT})"\)\2[ \t]*$`,
+);
+const SH_LOOP_ONEHOP_JOIN = new RegExp(
+  String.raw`^[ \t]*\[\[[ \t]*("?)\$(${SELF_LOCATION_IDENT})\1[ \t]+!=[ \t]+/\*[ \t]*\]\][ \t]*&&[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})/\$(${SELF_LOCATION_IDENT})\4[ \t]*$`,
+);
 
 /** Python template at run position k: `T = __file__`, `while os.path.islink(T):`
  * at the same indentation, one body line `T = os.readlink(T)` indented under
@@ -517,18 +534,49 @@ function pythonSelfLocationLoop(codes: readonly string[], k: number): number | n
 }
 
 /** Shell template, five consecutive lines: `T="${BASH_SOURCE[0]}"` (or `"$0"`),
- * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, `T="$L"`, `done`. Returns
- * the readlink line's position, or null. */
+ * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, `T="$L"`, `done`; or the
+ * #1671 one-line `DIR` join variant, six lines. Returns the readlink line's
+ * position, or null. */
 function shellSelfLocationLoop(codes: readonly string[], k: number): number | null {
   const anchor = SH_LOOP_ANCHOR.exec(codes[k] ?? "");
   const guard = SH_LOOP_GUARD.exec(codes[k + 1] ?? "");
+  if (!anchor || !guard) return null;
+  const ident = anchor[1] ?? "";
+  if ((guard[1] ?? guard[2]) !== ident) return null;
   const read = SH_LOOP_READ.exec(codes[k + 2] ?? "");
   const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
-  if (!anchor || !guard || !read || !copy || !SH_LOOP_DONE.test(codes[k + 4] ?? "")) return null;
-  const ident = anchor[1] ?? "";
-  const link = read[1] ?? "";
-  if (link === ident || (guard[1] ?? guard[2]) !== ident || read[3] !== ident) return null;
-  return copy[1] === ident && copy[3] === link ? k + 2 : null;
+  const link = read?.[1] ?? "";
+  if (read && copy && link !== ident && read[3] === ident && copy[1] === ident && copy[3] === link && SH_LOOP_DONE.test(codes[k + 4] ?? "")) {
+    return k + 2;
+  }
+  return shellRelativeDirJoinLoop(codes, k, ident);
+}
+
+/** #1671 one-line `DIR` join tail, reached only when the anchor line and a
+ * guard reading the same variable match the loop head: `D="$(dirname "$T")"`,
+ * then the fold `T="$(readlink "$T")"` and the join `[[ $T != /* ]] &&
+ * T="$DIR/$T"` in either order, then `done`. The `dirname` operand, the fold
+ * and the join all read the anchor; the join reassigns the anchor from the
+ * `dirname` variable joined with the anchor. A rebound or intervening `DIR`
+ * assignment, an extended `&&` chain, an unquoted command operand, a hop cap
+ * or `break` anywhere in the body, or a foreign variable keeps firing.
+ * Returns the fold line's position, or null. */
+function shellRelativeDirJoinLoop(codes: readonly string[], k: number, ident: string): number | null {
+  const dir = SH_LOOP_ONEHOP_DIR.exec(codes[k + 2] ?? "");
+  if (!dir || dir[1] === ident || dir[3] !== ident) return null;
+  const dirIdent = dir[1] ?? "";
+  const done = (i: number): boolean => SH_LOOP_DONE.test(codes[i] ?? "");
+  const fold = (i: number): boolean => {
+    const read = SH_LOOP_READ.exec(codes[i] ?? "");
+    return read !== null && read[1] === ident && read[3] === ident;
+  };
+  const join = (i: number): boolean => {
+    const j = SH_LOOP_ONEHOP_JOIN.exec(codes[i] ?? "");
+    return j !== null && j[2] === ident && j[3] === ident && j[5] === dirIdent && j[6] === ident;
+  };
+  if (join(k + 3) && fold(k + 4) && done(k + 5)) return k + 4;
+  if (fold(k + 3) && join(k + 4) && done(k + 5)) return k + 3;
+  return null;
 }
 
 /** Lines whose `readlink` is a recognised self-location read. A direct
