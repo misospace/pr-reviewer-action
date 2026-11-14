@@ -4191,11 +4191,15 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     });
 
     const coverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
-    // #1658: the unverifiable requirement is exposed on the trace artifact
-    // (unresolved/material) — no incomplete_reason, no partial review_result.
+    // #1658 (integrated with the merged #1656): the unverifiable requirement
+    // is exposed on the trace artifact (unresolved/material) and the SINGLE
+    // final disposition withholds approval FROM THAT CLASS — a material
+    // unknown (INCOMPLETE), whose machine surface is the `partial`
+    // review_result. The trace itself still owns no flag or veto: no
+    // incomplete_reason, no required-check flip.
     assert.notEqual(result.outputs.requiredChecks, "incomplete");
     assert.notEqual(result.outputs.incompleteReason, "requirement_trace");
-    assert.equal(result.outputs.reviewResult, "clean");
+    assert.equal(result.outputs.reviewResult, "partial");
     assert.notEqual(coverage.incomplete_reason, "requirement_trace");
     // #1543: the published dimension reads `incomplete` from the trace flip
     // alone — the #750 fold itself never validated (README-only diff, empty
