@@ -265,7 +265,25 @@ function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
   return (finding as { grounding_status?: unknown }).grounding_status === "unverified";
 }
 
-function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean {
+/**
+ * #1016/#1656: a blocker-level finding the deterministic boundary demoted
+ * to minor because its source claim could not be checked — unknown
+ * evidence, not a refutation. `capped_from` and `grounding_status` are set
+ * together only by `applyBlockerVerification`; the other capping paths set
+ * `capped_from` alone and never record a grounding status, so this cannot
+ * collide with another capping path's `capped_from: "blocker"`.
+ *
+ * #1656: this predicate no longer FORCES `request_changes` anywhere — an
+ * unverified blocker/major claim is a MATERIAL UNKNOWN (the claim remains
+ * current-head relevant but could not be grounded or refuted), published as
+ * an abstention (`incomplete`) by the authoritative disposition, never as a
+ * fabricated code blocker. The engine builds the disposition's
+ * `unverified_blocking_claim` evidence from this exact predicate, so the
+ * #1016 fail-closed guarantee (an approve can never silently certify a
+ * claim the verifier never confirmed) holds through the disposition's
+ * withheld certification instead of a forced verdict.
+ */
+export function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean {
   const status = (finding as { grounding_status?: unknown }).grounding_status;
   if (status !== "unverified") return false;
   const original = finding.capped_from;
@@ -280,13 +298,7 @@ function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean {
  * the other capping paths (non-blocking category #775, CI evidence #976) set
  * `capped_from` alone and never record a grounding status — so this cannot
  * collide with another capping path's `capped_from: "blocker"`.
- *
- * Such a finding is unknown evidence, not a refutation, and must keep
- * counting as blocking everywhere a verdict is derived from the open findings.
  */
-function isUnverifiedBlockerDemotion(finding: ArtifactFinding): boolean {
-  return finding.capped_from === "blocker" && isUnverifiedGrounding(finding);
-}
 
 /**
  * #1016: relax a model-authored request_changes whose every still-open finding
@@ -307,8 +319,9 @@ export function relaxUnverifiedBlockerVerdict(
   if (!Array.isArray(findings) || findings.length === 0) return false;
   // Unknown evidence must never certify a clean review: refuse the relaxer
   // outright when any open finding has grounding_status="unverified". The
-  // strict verdict mapping applies the same fail-closed rule via the
-  // `forced` flag at its call site.
+  // authoritative disposition answers unknown evidence with the
+  // `unverified_blocking_claim` material unknown (#1656), so an approve
+  // reached here can never silently certify it either.
   if (findings.some(isUnverifiedGrounding)) return false;
   const allRelaxable = findings.every((finding) =>
     isAlwaysNonBlockingCategory(finding.category)
@@ -328,26 +341,6 @@ export interface VerdictPolicyResult {
    * open-findings rule, "enforcement" when a fail-closed layer forced a
    * verdict the model did not produce, "model" otherwise. */
   source: "model" | "findings" | "enforcement";
-}
-
-/**
- * #1016: the findings_severity_gated escalation note. One part when only
- * live blocker findings triggered the escalation — byte-identical to the
- * pre-#1016 note — plus an explicit #1016 unknown-evidence part when
- * blocker-level demotions whose source claim could not be verified
- * co-contribute, so the markdown never implies a live blocker that does
- * not exist. Mirrors `strictRequestChangesDetail` below: `;`-joined parts,
- * one attribution note rather than two.
- */
-function gatedEscalationDetail(input: { blockers: number; unverified: number; total: number }): string {
-  const parts: string[] = [];
-  if (input.blockers > 0) {
-    parts.push(`${input.blockers} blocker finding(s) out of ${input.total}`);
-  }
-  if (input.unverified > 0) {
-    parts.push(`${input.unverified} blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)`);
-  }
-  return parts.join("; ");
 }
 
 /**
@@ -377,23 +370,18 @@ export function applyVerdictPolicy(
       artifact.verdict = "approve";
       source = "findings";
     }
-    // #1016: the boundary's demotion of an originally-blocker finding hides
+    // #1656: the boundary's demotion of an originally-blocker finding hides
     // it from the severity gate — after the demotion there are zero `blocker`
-    // findings, so a model `approve` would survive as a published approve even
-    // though the exact-head source was never read. Unknown evidence is not
-    // refutation: a demotion with `grounding_status === "unverified"` counts
-    // as blocking here, matching the strict mapping for blocker-level
-    // demotions. This gate is blocker-level by design (the strict mapping
-    // also fires on a demoted `major`), so a demoted major is left alone
-    // rather than escalated by a policy that never escalated one.
+    // findings, so a model `approve` would survive even though the exact-head
+    // source was never read. The #1016 fail-closed answer is now the
+    // authoritative disposition's: an unverified blocker/major demotion is
+    // `unverified_blocking_claim` MATERIAL evidence, so the review publishes
+    // as an abstention (kind `incomplete`, native COMMENT, no certified
+    // approval) instead of a fabricated code blocker. Only LIVE blocker
+    // findings escalate here.
     const blockers = findings.filter((finding) => finding.severity === "blocker" && !isAlwaysNonBlockingCategory(finding.category));
-    const unverifiedBlockers = findings.filter((finding) => isUnverifiedBlockerDemotion(finding) && !isAlwaysNonBlockingCategory(finding.category));
-    if ((blockers.length > 0 || unverifiedBlockers.length > 0) && artifact.verdict !== "request_changes") {
-      const detail = gatedEscalationDetail({
-        blockers: blockers.length,
-        unverified: unverifiedBlockers.length,
-        total: findings.length,
-      });
+    if (blockers.length > 0 && artifact.verdict !== "request_changes") {
+      const detail = `${blockers.length} blocker finding(s) out of ${findings.length}`;
       artifact.review_markdown += (
         "\n\n_Verdict escalated from structured findings "
         + `(verdict_policy=findings_severity_gated): ${detail}; model verdict was '${artifact.verdict}'._`
@@ -481,23 +469,18 @@ function appendStrictNote(artifact: ReviewArtifact, detail: string, modelVerdict
  * Build the strict-mapping attribution note for an override to
  * `request_changes`. Names every contributing safety signal so the reader
  * can see exactly why the verdict is what it is: a blocker count when
- * open blockers exist, an "unknown evidence" note when an unverified
- * demotion co-exists, and an enforcement-forced note when a fail-closed
+ * open blockers exist, and an enforcement-forced note when a fail-closed
  * layer fired. Multiple signals compose with `;` so the override line
- * stays one attribution note rather than three.
+ * stays one attribution note rather than two.
  */
 function strictRequestChangesDetail(input: {
   counts: { blocking: number; total: number };
-  unverifiedGrounding: boolean;
   forced: boolean;
   obligations?: readonly string[];
 }): string {
   const parts: string[] = [];
   if (input.counts.blocking > 0) {
     parts.push(`${input.counts.blocking} blocker/major finding(s) out of ${input.counts.total} open`);
-  }
-  if (input.unverifiedGrounding) {
-    parts.push("blocker-verification boundary could not confirm a demoted source claim (unknown evidence, not refuted; #1016)");
   }
   if (input.forced) {
     parts.push("a fail-closed enforcement layer forced request_changes");
@@ -506,10 +489,10 @@ function strictRequestChangesDetail(input: {
     parts.push(`required review evidence unresolved: ${input.obligations.join(", ")} (#1381)`);
   }
   if (parts.length === 0) {
-    // No findings, no unverified, no forced — the reviewer would be a
-    // request_changes with nothing to attribute to. This branch is
-    // unreachable in practice: the caller already established that at
-    // least one signal fires when this helper runs.
+    // No findings, no forced — the reviewer would be a request_changes with
+    // nothing to attribute to. This branch is unreachable in practice: the
+    // caller already established that at least one signal fires when this
+    // helper runs.
     return "request_changes";
   }
   return parts.join("; ");
@@ -526,27 +509,25 @@ function strictRequestChangesDetail(input: {
  *
  * Mapping: request_changes only when at least one open finding is blocker
  * or major; otherwise approve. `forced` is the caller's fail-closed signal
- * — a forcing layer (evidence blocker, tool-harness failure, min-successful,
- * `required_check_validation_mode=fail`) fired for these inputs. The
- * mapping also computes a #1016 unknown-evidence signal from the artifact's
- * own `grounding_status`: any demoted finding with `grounding_status ===
- * "unverified"` (the verifier could not check the claim — it did not disprove
- * the claim) forces `request_changes` with a `#1016` attribution note, so
- * an approve cannot silently certify a clean review the verifier never
- * confirmed. Refuted/unsupported demotions alone do not force — they flow
- * through the normal strict mapping.
+ * — a PROVEN-result forcing layer (an evidence-provider blocker or the
+ * `required_check_validation_mode=fail` flip) fired for these inputs.
+ *
+ * #1656: the former #1016 unknown-evidence forcing is REMOVED from the
+ * mapping. An unverified blocker/major demotion (the verifier could not
+ * check the claim — it did not disprove it) is a MATERIAL UNKNOWN, not a
+ * defect: the authoritative disposition publishes it as an abstention
+ * (`unverified_blocking_claim` evidence, kind `incomplete`, native COMMENT
+ * with no certified approval), preserving #1016's guarantee that an approve
+ * can never silently certify a claim the verifier never confirmed — without
+ * manufacturing a code blocker the reviewer did not prove. The engine
+ * builds that evidence from `isUnverifiedBlockingGrounding` over the same
+ * final findings set this mapping reads.
  *
  * When an override flips the model verdict, the attribution note names
- * EVERY contributing safety signal — blocker counts, unverified-grounding
- * (#1016), and forced enforcement — so the review markdown discloses the
- * full authority model. A blocker count alone produces the unchanged
- * "N blocker/major finding(s) out of M open" prose; an unverified
- * co-existence adds the #1016 attribution; a forced layer adds the
- * enforcement-forced disclosure. Provenance (`verdict_source`) reflects
- * the dominant authority per branch ("findings" for blocker count,
- * "enforcement" for forced/unverified-only), so a mixed-blocker-plus-
- * unverified verdict still disclaims the model layer while disclosing
- * both contributions inline.
+ * EVERY contributing safety signal — blocker counts and forced
+ * enforcement — so the review markdown discloses the full authority model.
+ * Provenance (`verdict_source`) reflects the dominant authority per branch
+ * ("findings" for blocker count, "enforcement" for forced).
  * When the mapping overrides the model verdict the review says so in one
  * line, as findings_severity_gated does.
  */
@@ -559,18 +540,17 @@ export function applyStrictVerdictPolicy(
      * negatives that force `request_changes`. UNRESOLVED rows are
      * deliberately absent: they are a coverage state (the evidence was
      * never gathered), they never manufacture a blocking request here, and
-     * they withhold the trusted approval at the publish boundary instead. */
+     * they withhold the trusted approval through the disposition's
+     * material-unknown evidence instead. */
     unmetReviewObligations?: readonly string[];
   },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
-  const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
   const unmetObligations = options.unmetReviewObligations ?? [];
   const detail = (): string => strictRequestChangesDetail({
     counts,
-    unverifiedGrounding,
     forced: options.forced,
     obligations: unmetObligations,
   });
@@ -589,29 +569,11 @@ export function applyStrictVerdictPolicy(
         modelVerdict,
       );
     }
-  } else if (options.forced || unverifiedGrounding) {
+  } else if (options.forced) {
     // A fail-closed enforcement layer decided this verdict. When the model
     // did not produce it, attributing the verdict to "model" would lie
     // about provenance — the deciding authority is the enforcement layer
     // ("enforcement"); the layer's own section discloses the forcing.
-    // #1265: the unknown-evidence veto is deliberately scoped to findings
-    // whose ORIGINAL severity was blocker or major (`isUnverifiedBlockingGrounding`
-    // checks `capped_from`, or severity when no cap was applied). An unverified
-    // minor/info finding stays visible in the published review and carries its
-    // unknown grounding status, but it must not independently turn an otherwise
-    // non-blocking review into request_changes.
-    //
-    // #1016: when the only blocker-level demotions are "unverified"
-    // (unknown evidence, not refutation), the boundary did not disprove the
-    // claim — it could not check it — so an approve would silently
-    // certify a clean review the verifier never confirmed. Treat as a
-    // fail-closed forcing condition with a #1016 attribution note.
-    //
-    // Reached only when `counts.blocking === 0` (the first branch
-    // captures the blocker-count path), so the helper emits a
-    // single-signal attribution line — the unverified #1016 note
-    // when present, the fail-closed enforcement note when present,
-    // or both joined with `;` when both fire.
     verdict = "request_changes";
     overridden = modelVerdict !== "request_changes";
     source = overridden ? "enforcement" : "model";

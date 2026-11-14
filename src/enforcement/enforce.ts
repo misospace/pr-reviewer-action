@@ -98,6 +98,33 @@ function successfulRequestCount(harness: ToolHarnessArtifact | null): number {
   return harnessExecutionCounts(harness).succeeded ?? 0;
 }
 
+/**
+ * #1656: the bounded reason the review's INVESTIGATION CAPABILITY failed,
+ * or null when it did not — a tool-harness planning/execution failure, or
+ * a run whose every executed call failed. A genuine capability failure is
+ * reason-coded MATERIAL evidence for the authoritative disposition
+ * (`investigation_unavailable`, an abstention), never a fabricated code
+ * blocker. The configured min-successful COUNT floor is deliberately NOT
+ * part of this predicate: a count must never define adequacy (#1656 audit
+ * delta) — see `toolMinSuccessfulFloorUnmet`.
+ */
+export function toolCapabilityFailure(harness: ToolHarnessArtifact | null): string | null {
+  return toolHarnessFailureReason(harness);
+}
+
+/**
+ * #1656 audit delta: true when the configured min-successful tool-request
+ * COUNT floor was unmet. Advisory evidence only
+ * (`investigation_floor_unmet`) — a call count can never define
+ * investigation adequacy by itself.
+ */
+export function toolMinSuccessfulFloorUnmet(
+  harness: ToolHarnessArtifact | null,
+  minRequired: number,
+): boolean {
+  return minRequired > 0 && successfulRequestCount(harness) < minRequired;
+}
+
 function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string | null {
   if (!harness) return null;
   if (harness.planning_error !== undefined && harness.planning_error !== null) {
@@ -139,7 +166,14 @@ function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string |
   return null;
 }
 
-/** Override the verdict when tool-harness planning or execution failed. */
+/**
+ * Disclose a tool-harness planning/execution failure in the review body
+ * (#1656: an observable diagnostic, no longer a verdict overlay). The
+ * failure is reason-coded evidence for the authoritative disposition —
+ * the investigation did not finish (`investigation_unavailable`), so the
+ * disposition withholds certification as an abstention; it never
+ * manufactures a code blocker the model did not find.
+ */
 export function applyToolHarnessFailureEnforcement(
   artifact: ReviewArtifact,
   harness: ToolHarnessArtifact | null,
@@ -148,19 +182,23 @@ export function applyToolHarnessFailureEnforcement(
   if (!reason) {
     return { applied: false, reason: "" };
   }
-  return forceRequestChanges(
-    artifact,
-    "\n\n## Tool Harness Failure\n"
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n## Tool Harness Failure\n"
     + `The tool harness failed during planning or execution (${reason}). `
-    + "This workflow is configured fail-closed for tool harness failures; "
-    + "rerun after reducing tool planning context or fixing connectivity.",
-    `Tool harness failure detected (${reason}). `
-    + "The tool harness failed during planning or execution; "
-    + "this workflow is configured fail-closed for tool harness failures.",
-  );
+    + "The review's investigation is incomplete, so no approval is certified; "
+    + "rerun after reducing tool planning context or fixing connectivity.";
+  return { applied: true, reason: "" };
 }
 
-/** Override the verdict when fewer than minRequired tool requests succeeded. */
+/**
+ * Disclose an unmet min-successful tool-request floor (#1656 audit round
+ * 3: a DIAGNOSTIC ONLY). The configured successful-request COUNT was not
+ * met — a count must never define investigation adequacy, so this section
+ * must not claim review incompleteness or certification withholding: the
+ * authoritative disposition carries the shortfall as ADVISORY
+ * `investigation_floor_unmet` evidence, and a certified APPROVE may stand
+ * beside it.
+ */
 export function applyToolMinSuccessfulEnforcement(
   artifact: ReviewArtifact,
   minRequired: number,
@@ -172,15 +210,14 @@ export function applyToolMinSuccessfulEnforcement(
   if (successful >= minRequired) {
     return { applied: false, reason: "" };
   }
-  return forceRequestChanges(
-    artifact,
-    "\n\n## Tool Harness Insufficient Evidence\n"
-    + `This workflow requires at least ${minRequired} successful tool requests, `
-    + `but only ${successful} succeeded. Rerun after adjusting tool planning settings.`,
-    "Tool harness gathered insufficient evidence. "
-    + `This workflow requires at least ${minRequired} successful tool requests, `
-    + `but only ${successful} succeeded.`,
-  );
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n## Tool Harness Insufficient Evidence\n"
+    + `Diagnostic: this workflow's configured floor of at least ${minRequired} `
+    + `successful tool requests was not met (${successful} succeeded). This is `
+    + "a recorded count, not a measure of review adequacy; it does not change "
+    + "the review's conclusion. Rerun after adjusting tool planning settings if "
+    + "a deeper investigation is wanted.";
+  return { applied: true, reason: "" };
 }
 
 /**
@@ -264,24 +301,27 @@ export interface EnforcementInputs {
 
 /**
  * True when a fail-closed verdict-forcing rule fired for these inputs —
- * evidence blockers, tool-harness failure, or the min-successful fallback
- * (the same conditions `applyAllEnforcement` forces `request_changes` on;
- * thread/human settlement never force). The #811 strict verdict mapping
+ * an evidence-provider blocker (an evidenced blocker) or an `unmet`
+ * (confirmed-negative) review-owned obligation. Both are proven results,
+ * like a grounded blocker/major finding (#1656: they stay forcing).
+ *
+ * #1656: a TOOL-HARNESS failure and an unmet min-successful floor are NO
+ * LONGER forcing conditions — a capability failure is a materially
+ * relevant investigation that could not happen, and the authoritative
+ * disposition answers it with an abstention (`investigation_unavailable`
+ * evidence, kind `incomplete`), never a fabricated code blocker. The
+ * failure is disclosed in the review body by the overlays and rides the
+ * disposition's evidence seam.
+ *
+ * Thread/human settlement never force. The #811 strict verdict mapping
  * consults this so it can never relax a request_changes these layers
  * forced, including when the model itself also asked for changes.
  */
 export function failClosedEnforcementFired(inputs: Pick<
   EnforcementInputs,
-  "evidenceBlockerEnabled" | "evidence" | "toolFailureEnabled" | "toolHarness" | "toolMinSuccessful" | "reviewObligations"
+  "evidenceBlockerEnabled" | "evidence" | "reviewObligations"
 >): boolean {
   if (inputs.evidenceBlockerEnabled && inputs.evidence?.has_blocker) return true;
-  if (inputs.toolFailureEnabled) {
-    if (toolHarnessFailureReason(inputs.toolHarness ?? null)) return true;
-    if (inputs.toolMinSuccessful > 0
-      && successfulRequestCount(inputs.toolHarness ?? null) < inputs.toolMinSuccessful) {
-      return true;
-    }
-  }
   // #1381/#1505: an `unmet` (confirmed-negative) review-owned obligation —
   // from EITHER forcing source (`must_check`, `trusted_base_guidance`) — is
   // a required check the reviewer performed and confirmed NOT satisfied,
@@ -338,15 +378,16 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
   }
 
   if (inputs.toolFailureEnabled) {
+    // #1656: these disclose the capability failure and record the action;
+    // they no longer force a verdict — the disposition answers them with
+    // `investigation_unavailable` evidence (an abstention, never a block).
     const outcome = applyToolHarnessFailureEnforcement(artifact, inputs.toolHarness);
     if (outcome.applied) {
       applied += 1;
-      forcingReasons.push(outcome.reason);
     } else if (inputs.toolMinSuccessful > 0) {
       const minOutcome = applyToolMinSuccessfulEnforcement(artifact, inputs.toolMinSuccessful, inputs.toolHarness);
       if (minOutcome.applied) {
         applied += 1;
-        forcingReasons.push(minOutcome.reason);
       }
     }
   }

@@ -399,7 +399,7 @@ function supersededSentence(statement: string, original: string): string {
  * unchanged rather than throwing — a reconciliation failure must never cost
  * the reader the review itself.
  */
-export function normalizePublishedRecommendation(markdown: string, disposition: ReviewDisposition): string {
+export function normalizePublishedRecommendation(markdown: string, disposition: Pick<ReviewDisposition, "kind" | "statement">): string {
   if (typeof markdown !== "string" || markdown === "") return markdown;
   try {
     const authority = dispositionDirection(disposition.kind);

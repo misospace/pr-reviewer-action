@@ -161,6 +161,12 @@ export interface ReviewBundleInput {
     reviewResult: string;
     incompleteReason: string;
     degraded: boolean;
+    /** #1656: the authoritative final disposition's kind and machine
+     * reason, additive so the bundle states WHAT the run concluded in the
+     * one vocabulary every consumer shares. Absent on a caller without
+     * the disposition (legacy). */
+    dispositionKind?: string;
+    dispositionReason?: string;
   };
   /** Publication outcome for this run, only when publication was attempted
    * (mirrors the `publish-status` output). */
@@ -286,6 +292,12 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
       review_result: redactBounded(input.disposition.reviewResult, REVIEW_BUNDLE_MAX_TOKEN_CHARS),
       incomplete_reason: redactBounded(input.disposition.incompleteReason, REVIEW_BUNDLE_MAX_TOKEN_CHARS),
       degraded: input.disposition.degraded === true,
+      ...(input.disposition.dispositionKind !== undefined
+        ? { disposition_kind: redactBounded(input.disposition.dispositionKind, REVIEW_BUNDLE_MAX_TOKEN_CHARS) }
+        : {}),
+      ...(input.disposition.dispositionReason !== undefined
+        ? { disposition_reason: redactBounded(input.disposition.dispositionReason, REVIEW_BUNDLE_MAX_TOKEN_CHARS) }
+        : {}),
     };
   }
   if (input.publication !== undefined) {

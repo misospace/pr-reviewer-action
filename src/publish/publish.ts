@@ -23,6 +23,7 @@ import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
 import { buildReviewHandoff, renderReviewHandoffBlock } from "./handoff.js";
 import { computeReviewDisposition, normalizePublishedRecommendation } from "./disposition.js";
+import { MATERIAL_CODE_CLAUSES, reviewResultFromDisposition, unreadableFinalDisposition, type FinalDisposition, type MaterialDispositionCode } from "../disposition/final.js";
 import { buildReviewObligations, renderReviewObligationsBlock, REVIEW_OBLIGATIONS_MAX_BYTES, type ReviewObligationsInput } from "./obligations.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
@@ -153,6 +154,20 @@ export interface PublishInput {
    * (a non-blocking COMMENT), never a manufactured blocking request.
    * Absent when the contract was inactive. */
   requiredEvidenceState?: string;
+  /** #1656: the run's authoritative final disposition (the engine's ONE
+   * post-validation object). When present, the published recommendation,
+   * the native review event and the withheld-approval notices are derived
+   * from it and from nothing else. Absent (a legacy run directory or a
+   * direct publish invocation) keeps the pre-#1656 scalar derivation
+   * byte-for-byte. */
+  finalDisposition?: FinalDisposition;
+  /** #1656 audit round 2: a run DIRECTORY was involved but its serialized
+   * disposition record was missing, malformed or incoherent — publication
+   * fails closed to an unavailable abstention instead of re-deriving an
+   * approval from the legacy scalars. Only a caller with NO run-directory
+   * provenance (a direct publish invocation) may use the legacy
+   * derivation. */
+  finalDispositionRefused?: boolean;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -1712,6 +1727,17 @@ function renderStrictStateBlock(options: {
 }
 
 /**
+ * #1656: the human-readable reason text for a disposition's withholding —
+ * the material unknowns' own clauses, so the notice, the recommendation
+ * line and the machine surfaces all name the same reasons.
+ */
+function dispositionReasonText(disposition: { materialUnknowns: ReadonlyArray<{ code: string }> }): string {
+  const first = disposition.materialUnknowns[0];
+  if (first === undefined) return "material review questions remain unresolved";
+  return MATERIAL_CODE_CLAUSES[first.code as MaterialDispositionCode] ?? "material review questions remain unresolved";
+}
+
+/**
  * Evaluate the native approval guardrails (#1161): the final verdict
  * decides whether an approval is possible at all, and the cross-repository
  * scope policy (`approve_forks`) decides whether it is allowed. The
@@ -2004,22 +2030,53 @@ export async function publishReview(
   // (findings/partial carry an approve).
   const strict = input.verdictPolicy === "strict";
   const incompleteReason = resolveIncompleteReason(input);
-  const reviewResult = markerReviewResult(input);
-  // #1596: the authoritative disposition of this review, computed ONCE from
-  // the deterministic signals — the final verdict, the marker's
-  // `review_result`, the coverage state and the approval certification. It
-  // is the ONE statement of what the action decided: the published
-  // recommendation line, the native review event and the prose reconciliation
-  // all read from it, so they cannot contradict each other.
-  //
-  // `completeCoverage` and the approval guardrails moved up here because the
-  // disposition needs them; both are pure functions of the run's own inputs
-  // (`completeCoverage` of the coverage fields plus `reviewResult` /
-  // `incompleteReason`, the guardrails of the verdict and the fork/derived/
-  // evidence states), so moving them changes no decision — only the order in
-  // which the same values become available.
-  const completeCoverage = !input.partialCoverage && !input.coverageUnknown
-    && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+  // #1656: the authoritative disposition. A run that computed one (every
+  // run of this action version writes `final-disposition.json` and passes
+  // the object) consumes it directly — the recommendation, the native event
+  // and the withheld-approval notices below all read from it and from
+  // nothing else. A caller without one (a legacy run directory, or a direct
+  // publish invocation) keeps the #1596 scalar derivation, byte-compatible
+  // with the pre-#1656 publish behavior.
+  // #1656 audit round 2: resolution order — (1) the explicit authoritative
+  // object; (2) a REFUSED record (run dir present, artifact missing/
+  // malformed/incoherent) → the canonical unavailable abstention, never a
+  // legacy approval; (3) the legacy scalar derivation, only for callers
+  // with no run-directory provenance.
+  const disposition = input.finalDisposition ?? (input.finalDispositionRefused === true
+    ? unreadableFinalDisposition()
+    : (() => {
+    const legacyReviewResult = markerReviewResult(input);
+    const legacyCompleteCoverage = !input.partialCoverage && !input.coverageUnknown
+      && legacyReviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+    const legacyGuardrails = evaluateApprovalGuardrails({
+      verdict: input.verdict,
+      approveForks: input.approveForks,
+      isForkPr: input.isForkPr,
+      ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
+      ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
+    });
+    return computeReviewDisposition({
+      verdict: input.verdict,
+      validVerdict: isValidPublishVerdict(input.verdict),
+      reviewResult: legacyReviewResult,
+      coverageIncomplete: reviewCoverageIncomplete(legacyReviewResult),
+      approvalCertified: input.mode === "review_verdict" && legacyGuardrails.canApprove && legacyCompleteCoverage && input.degradedGateBypass !== true,
+      verdictBearing: isNativeVerdictMode(input.mode),
+      incompleteReason,
+      blockingFindingOpen: hasBlockingOpenFinding(input.findings),
+    });
+  })());
+  // #1656: the marker's review_result is a PROJECTION of the disposition on
+  // the authoritative path, so the marker can never disagree with it; the
+  // legacy path keeps the pre-#1656 rollup.
+  const reviewResult = input.finalDisposition !== undefined
+    ? reviewResultFromDisposition(input.finalDisposition, {
+      strict,
+      openFindings: Array.isArray(input.findings) ? input.findings.length : 0,
+    })
+    : markerReviewResult(input);
+  // The objective scope guardrails stay computed for the fork-scope
+  // withholding notice below; they no longer choose the event.
   const guardrails = evaluateApprovalGuardrails({
     verdict: input.verdict,
     approveForks: input.approveForks,
@@ -2027,30 +2084,11 @@ export async function publishReview(
     ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
     ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
   });
-  // #1447: a native APPROVE is a trusted-approval certificate, not merely a
-  // rendering of the model's approve verdict. It therefore requires
-  // complete, known review-owned coverage in addition to the existing
-  // scope/derived guardrails. The verdict output itself remains `approve`:
-  // an incomplete approve candidate is an abstention and publishes as a
-  // non-blocking COMMENT, never a manufactured REQUEST_CHANGES.
-  // #1161: `review_blockers` publishes blocking findings only — it never
-  // approves, under any verdict, input, or pull-request scope.
-  const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage && input.degradedGateBypass !== true;
   const validVerdict = isValidPublishVerdict(input.verdict);
-  const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
-  const disposition = computeReviewDisposition({
-    verdict: input.verdict,
-    validVerdict,
-    reviewResult,
-    coverageIncomplete,
-    approvalCertified: canApprove,
-    // #1596: the recommendation must agree with the native event on a
-    // verdict-bearing surface, and the coverage reason must survive into the
-    // published wording (a non-strict policy renders no coverage notice).
-    verdictBearing: isNativeVerdictMode(input.mode),
-    incompleteReason,
-    blockingFindingOpen: hasBlockingOpenFinding(input.findings),
-  });
+  // #1656: coverage is incomplete exactly when the disposition abstained —
+  // a material unknown withheld certification, or the review was
+  // unavailable. An advisory-only diagnostic never reads as a gap.
+  const coverageIncomplete = disposition.kind === "incomplete" || disposition.kind === "unavailable";
   // Sanitize model output first — the same pipeline for every mode. Any
   // outside-diff findings are appended as their own section: unlike inline
   // comments (which can only anchor in-diff findings), every publish mode
@@ -2623,7 +2661,7 @@ export async function publishReview(
       // here too, never as an APPROVE beside the blocking recommendation.
       const platformNotice = nativeSurface.supported
         ? ""
-        : validVerdict && (disposition.kind === "request_changes" || canApprove)
+        : validVerdict && (disposition.kind === "request_changes" || disposition.kind === "approve")
           ? `\n> **Automated recommendation: ${disposition.kind === "request_changes" ? "REQUEST CHANGES" : "APPROVE"}** — advisory only: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`
           : `\n> **Native review verdicts are unavailable on this platform**: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`;
       // #1554: the withholding notices below used to be appended to the
@@ -2652,6 +2690,21 @@ export async function publishReview(
         // output is an advisory comment.)
         withheldNotice = "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
         messages.push(`Publishing advisory review for #${input.prNumber} (no valid verdict produced)`);
+      } else if (input.finalDisposition === undefined && input.finalDispositionRefused === true) {
+        // #1656 audit round 2: the disposition record was unreadable — the
+        // publication states the refusal instead of any conclusion.
+        if (!blockingPublication) {
+          withheldNotice = "\n> **Review unavailable**: the run's disposition record could not be read, so no conclusion (approval or block) is certified.\n";
+        }
+        messages.push(`Review unavailable for #${input.prNumber} (disposition record unreadable; no conclusion certified)`);
+      } else if (input.finalDisposition !== undefined && input.finalDisposition.kind === "unavailable" && input.finalDisposition.reason === "degraded_no_evidence") {
+        // #1656: a degraded no-evidence fallback verdict certifies nothing —
+        // the authoritative disposition reads UNAVAILABLE, so the publication
+        // states that no conclusion (approval or block) could be certified.
+        if (!blockingPublication) {
+          withheldNotice = "\n> **Review unavailable**: this run's verdict came from a degraded no-evidence fallback, so no review conclusion (approval or block) is certified.\n";
+        }
+        messages.push(`Review unavailable for #${input.prNumber} (degraded no-evidence fallback; no conclusion certified)`);
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.scopeBlocked) {
         // #1161: the cross-repository scope policy is the only thing that
         // withholds an approval here (the deprecated allow_approve input
@@ -2672,7 +2725,19 @@ export async function publishReview(
         messages.push(
           `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
         );
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.derivedBlocked === true) {
+      } else if (input.finalDisposition !== undefined && input.finalDisposition.kind === "incomplete" && input.finalDisposition.reason === "material_unknown" && input.mode === "review_verdict" && input.verdict === "approve") {
+        // #1656: the abstention notice names the material unknowns the
+        // disposition withheld certification for — one authority, the same
+        // reasons the recommendation line carries. An `approval_withheld`
+        // abstention (fork scope policy, advisory surface) renders the
+        // scope notice above or no notice at all — the review itself
+        // completed, so it never reads as a coverage gap.
+        const gap = dispositionReasonText(input.finalDisposition);
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld — review incomplete**: ${gap} No blocking code defect was proven; this run needs review and no native approval is certified.\n`;
+        }
+        messages.push(`Withholding native approval for #${input.prNumber} (review incomplete: ${gap})`);
+      } else if (input.finalDisposition === undefined && input.mode === "review_verdict" && input.verdict === "approve" && guardrails.derivedBlocked === true) {
         // #1449: the derived-obligation state withholds the native approval
         // at the publish boundary too — a native `review_verdict` approval
         // must not be a way around the obligation contract. The withholding
@@ -2694,7 +2759,7 @@ export async function publishReview(
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
         );
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.requiredEvidenceBlocked === true) {
+      } else if (input.finalDisposition === undefined && input.mode === "review_verdict" && input.verdict === "approve" && guardrails.requiredEvidenceBlocked === true) {
         // #1505: unresolved required review evidence withholds the native
         // approval at the publish boundary too — an approve verdict over
         // evidence the review could not gather is an abstention, not a
@@ -2717,7 +2782,7 @@ export async function publishReview(
         messages.push(
           `Withholding native approval for #${input.prNumber} (required-evidence state: ${state})`,
         );
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
+      } else if (input.finalDisposition === undefined && input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
         // #1447: degraded review state is an abstention, never a trusted
         // native approval, even if the surviving coverage fields look clean.
         if (!blockingPublication) {
@@ -2726,7 +2791,7 @@ export async function publishReview(
         messages.push(
           `Withholding native approval for #${input.prNumber} (degraded review state)`,
         );
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete) {
+      } else if (input.finalDisposition === undefined && input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete) {
         // #1447: incomplete or unprovable review coverage is an abstention.
         // Keep the authoritative verdict output as `approve`, but withhold the
         // native APPROVE event. The event below becomes COMMENT on platforms
@@ -2921,7 +2986,13 @@ export async function publishReview(
         : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined && stickyBody !== undefined
           ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
           : undefined;
-    const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
+    // #1656: the retirement gate keeps its own coverage-completeness signal —
+    // publication hygiene (when this run may retire the previous run's
+    // inline comments and threads), not disposition semantics: advisory-only
+    // bookkeeping diagnostics never made a replacement incomplete.
+    const replacementCoverageComplete = !input.partialCoverage && !input.coverageUnknown
+      && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+    const replacementComplete = replacementCoverageComplete && !fallbackSubmission && replacementCheckpoint !== undefined;
     // #1114/#1144: verification below (head, trusted owner, supersession
     // ordering, still-current revalidation) is what proves staleness — not
     // coverage completeness. A published checkpoint therefore authorizes

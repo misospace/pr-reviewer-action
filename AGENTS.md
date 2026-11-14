@@ -110,6 +110,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/code-map.md`](docs/architecture/code-map.md) — per-module map, pipeline architecture, review-corpus sections, behavioral contracts
 - [`docs/architecture/v3-typescript-runtime.md`](docs/architecture/v3-typescript-runtime.md) — composite/Node runtime decision and platform boundary
 - [`docs/architecture/deep-review-execution-shape.md`](docs/architecture/deep-review-execution-shape.md) — specialist execution-shape ADR
+- [`docs/architecture/final-disposition.md`](docs/architecture/final-disposition.md) — #1656 authoritative final review disposition: one post-validation object (certification inside it) consumed by recommendation, handoff, marker/attestation and native event; reason-coded materiality seam
 - [`docs/architecture/distributed-requirement-proof.md`](docs/architecture/distributed-requirement-proof.md) — #962 distributed-enforcement proof contract: trusted seam topology, collective validation, anti-abuse
 - [`docs/architecture/owner-anchored-enforcement-citation.md`](docs/architecture/owner-anchored-enforcement-citation.md) — #1343 owner-anchored enforcement-citation gate: declared-owner acceptance keeps the predicate and drops the lexical subject
 - [`docs/architecture/durable-review-queue.md`](docs/architecture/durable-review-queue.md) — #731 durable review-queue semantics: lifecycle state machine, supersession, leases, recovery (live operator library composed by the controller daemon (#1348))

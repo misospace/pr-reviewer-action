@@ -255,6 +255,9 @@ export async function platformActionMain(
     (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
     review.outputs.findings,
     "",
+    // #1656 audit round 2: the authoritative disposition gates the
+    // workflow, never the raw verdict.
+    review.finalDisposition?.kind,
   );
   return publishFailed ? Math.max(gate, 1) : gate;
 }
