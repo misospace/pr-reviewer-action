@@ -338,59 +338,66 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
-/** #1449: the run's derived-obligation state, read from the run dir's own
- * `review-coverage.json` artifact (never cwd, never ambient env).
- *
- * This is the ONE seam the standalone `publish` CLI reads the state through,
- * so the composite action and the standalone CLI publish the SAME record from
- * the SAME run — neither path re-derives the state.
+/**
+ * The ONE seam the standalone `publish` CLI reads the review-owned gate
+ * states through (#1449 derived obligations, #1505 required evidence): the
+ * state is read from the run dir's own `review-coverage.json` artifact
+ * (never cwd, never ambient env), so the composite action and the standalone
+ * CLI publish the SAME record from the SAME run — neither path re-derives
+ * the state.
  *
  * The state IS a gate, not only disclosure: it decides whether a native
  * approval may publish. So an UNCERTAIN state must fail CLOSED, never open:
- * the engine writes `derived-obligation-state.json` ONLY when the operator
- * enabled the feature, so that file is the run's own "the feature was on"
- * sentinel. When the sentinel is present but the coverage record's state is
- * missing, unreadable, or unrecognized, the state is `unavailable` — the
- * derived coverage is unknown, so the approval is withheld. When the sentinel
- * is absent the feature was off and the state stays absent (the published
- * bytes are exactly the pre-#1449 ones).
+ * the engine writes the feature's `<sentinel-file>` ONLY when the feature
+ * was on, so that file is the run's own "the feature was on" sentinel. When
+ * the sentinel is present but the coverage record's state is missing,
+ * unreadable, or not one of `settledStates`, the state is `unavailable` —
+ * the feature's coverage is unknown, so the approval is withheld. When the
+ * sentinel is absent the feature was off and the state stays absent (the
+ * published bytes are exactly the pre-feature ones).
  *
  * A run dir that carries neither file is a run without the feature: the
  * state is simply not published, and the publish step's own guardrail sees
- * no derived state. */
-function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+ * no state.
+ */
+function gateStateFromRunDir(
+  env: NodeJS.ProcessEnv,
+  field: string,
+  sentinelFile: string,
+  settledStates: ReadonlySet<string>,
+): string | undefined {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
   if (runDir === undefined) return undefined;
   const record = readJsonObject(join(runDir, "review-coverage.json"));
-  const state = record === null ? undefined : record.derived_obligation_state;
-  if (state === "complete" || state === "unresolved" || state === "unavailable") {
+  const state = record === null ? undefined : record[field];
+  if (typeof state === "string" && settledStates.has(state)) {
     return state;
   }
-  // #1449: fail closed when the run says the feature was on but the state
-  // cannot be read — an unknown derived coverage must never certify an
-  // approval. The sentinel exists only in a feature-on run.
-  const featureEnabled = existsSync(join(runDir, "derived-obligation-state.json"));
+  // Fail closed when the run says the feature was on but the state cannot
+  // be read — unknown feature coverage must never certify an approval. The
+  // sentinel exists only in a feature-on run.
+  const featureEnabled = existsSync(join(runDir, sentinelFile));
   return featureEnabled ? "unavailable" : undefined;
 }
 
-/** #1505: the run's required-evidence state, read from the run dir's own
- * `review-coverage.json` artifact (never cwd, never ambient env) — the same
- * seam and the same fail-closed discipline as the derived state above: the
- * engine writes `required-evidence-state.json` ONLY when the review-owned
- * required-evidence contract was active, so a present sentinel with an
- * unreadable state reads `unavailable` (approval withheld), and an absent
- * sentinel means the contract was off (state stays absent, published bytes
- * unchanged). */
+/** #1449: the run's derived-obligation state (see `gateStateFromRunDir`). */
+function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  return gateStateFromRunDir(
+    env,
+    "derived_obligation_state",
+    "derived-obligation-state.json",
+    new Set(["complete", "unresolved", "unavailable"]),
+  );
+}
+
+/** #1505: the run's required-evidence state (see `gateStateFromRunDir`). */
 function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
-  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
-  if (runDir === undefined) return undefined;
-  const record = readJsonObject(join(runDir, "review-coverage.json"));
-  const state = record === null ? undefined : record.required_evidence_state;
-  if (state === "complete" || state === "unresolved") {
-    return state;
-  }
-  const featureEnabled = existsSync(join(runDir, "required-evidence-state.json"));
-  return featureEnabled ? "unavailable" : undefined;
+  return gateStateFromRunDir(
+    env,
+    "required_evidence_state",
+    "required-evidence-state.json",
+    new Set(["complete", "unresolved"]),
+  );
 }
 
 /** The row-status vocabulary `applyRequiredCheckValidation` records. */
