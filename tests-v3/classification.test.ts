@@ -2043,6 +2043,120 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
   }
 });
 
+// ── #1671: the one-line `[[ ... ]] &&` DIR-join resolver shape ─────────────
+
+const SH_ONEHOP_DIR_JOIN_LOOP = [
+  '+SOURCE="${BASH_SOURCE[0]}"',
+  '+while [ -L "$SOURCE" ]; do',
+  '+  DIR="$(dirname "$SOURCE")"',
+  '+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"',
+  '+  SOURCE="$(readlink "$SOURCE")"',
+  "+done",
+];
+/** The #1671 loop with its line `index` replaced by `line`. */
+function withOneHopLine(lines: string[], index: number, line: string): string[] {
+  return lines.map((l, i) => (i === index ? line : l));
+}
+
+test("#1671: one-line DIR join resolver no longer fires symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The issue's example: join before the fold.
+    ["canonical one-line resolver", "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP],
+    // The Stack Overflow order: fold before the join.
+    [
+      "fold before join",
+      "scripts/run.sh",
+      [
+        SH_ONEHOP_DIR_JOIN_LOOP[0] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[1] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[2] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[4] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[3] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[5] ?? "",
+      ],
+    ],
+    // The issue's title idiom: unquoted join.
+    ["unquoted join", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, "+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE")],
+    ["quoted conditional operand", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"')],
+    // Variants the loop head already recognises apply to this body shape.
+    ["[[ -L ]] guard", "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP.map((l) => l.replace('[ -L "$SOURCE" ]', '[[ -L "$SOURCE" ]]'))],
+    ["-h guard", "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP.map((l) => l.replace("-L", "-h"))],
+    ['anchor "$0"', "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP.map((l) => l.replace("${BASH_SOURCE[0]}", "$0"))],
+    ["uppercase loop variables", "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP.map((l) => l.replace(/\bSOURCE\b/g, "SRC").replace(/\bDIR\b/g, "BASE"))],
+    [
+      "unquoted assignments",
+      "scripts/run.sh",
+      [
+        "+SOURCE=${BASH_SOURCE[0]}",
+        '+while [ -L "$SOURCE" ]; do',
+        '+  DIR=$(dirname "$SOURCE")',
+        "+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE",
+        "+  SOURCE=$(readlink \"$SOURCE\")",
+        "+done",
+      ],
+    ],
+    // Ordinary neighbours in the same file.
+    ["strict mode beside loop", "scripts/run.sh", ["+set -euo pipefail", ...SH_ONEHOP_DIR_JOIN_LOOP]],
+    // The extensionless bin/ wrapper.
+    ["extensionless wrapper", "bin/tool", SH_ONEHOP_DIR_JOIN_LOOP],
+    // Diff shapes.
+    [
+      "loop in context, unrelated line added",
+      "scripts/run.sh",
+      ["@@ -1,6 +1,7 @@", ...asContext(SH_ONEHOP_DIR_JOIN_LOOP), "+set -e"],
+    ],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", label);
+    assert.equal(result.pathHandlingProvenance.fired, false, label);
+    assert.ok(!firesSymlinkSensitive(result), `${label}: unexpected symlink_sensitive`);
+  }
+});
+
+test("#1671: one-line DIR join resolver counterexamples keep firing symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The conditional and its join are one whole-line statement.
+    ["&& chain extended with a second command", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" && chmod +x "$SOURCE"')],
+    ["second statement after the join", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"; :')],
+    ["`||` instead of `&&`", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] || SOURCE="$DIR/$SOURCE"')],
+    ["hop cap folded into the conditional", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* && $HOPS -lt 40 ]] && SOURCE="$DIR/$SOURCE"')],
+    ["single-bracket test", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [ $SOURCE != /* ] && SOURCE="$DIR/$SOURCE"')],
+    ["braced join expansions", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="${DIR}/${SOURCE}"')],
+    // The `dirname` variable is assigned once per hop, from the anchor.
+    ["DIR rebound between hops", "scripts/run.sh", [...SH_ONEHOP_DIR_JOIN_LOOP.slice(0, 4), '+  DIR="$PWD"', ...SH_ONEHOP_DIR_JOIN_LOOP.slice(4)]],
+    ["DIR taken from another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$(dirname "$OTHER")"')],
+    ["DIR assignment rebinds the anchor", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  SOURCE="$(dirname "$SOURCE")"')],
+    // Join identifiers must agree with the head, the fold and the dirname line.
+    ["join reassigns another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && TARGET="$DIR/$SOURCE"')],
+    ["conditional tests another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $OTHER != /* ]] && SOURCE="$DIR/$SOURCE"')],
+    ["join appends another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$OTHER"')],
+    ["join reads a foreign dirname variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="$BASE/$SOURCE"')],
+    // Head-level rules still apply to the fold.
+    ["fold writes another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 4, '+  LINK="$(readlink "$SOURCE")"')],
+    ["guard reads another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 1, '+while [ -L "$OTHER" ]; do')],
+    // Unquoted expansions inside command substitutions split and glob.
+    ["unquoted dirname operand", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$(dirname $SOURCE)"')],
+    ["unquoted fold operand", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 4, '+  SOURCE="$(readlink $SOURCE)"')],
+    // Hop caps and `break` stay blockers (#1653 scope).
+    ["break in the body", "scripts/run.sh", [...SH_ONEHOP_DIR_JOIN_LOOP.slice(0, 4), "+  [ -e /dev/null ] && break", ...SH_ONEHOP_DIR_JOIN_LOOP.slice(4)]],
+    ["hop counter before done", "scripts/run.sh", [...SH_ONEHOP_DIR_JOIN_LOOP.slice(0, 5), "+  HOPS=$((HOPS + 1))", ...SH_ONEHOP_DIR_JOIN_LOOP.slice(5)]],
+    // The body must end at `done`.
+    ["missing done", "scripts/run.sh", SH_ONEHOP_DIR_JOIN_LOOP.slice(0, 5)],
+    // Declared limits: false positives that exist today and stay.
+    ["fold with a -f flag", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 4, '+  SOURCE="$(readlink -f "$SOURCE")"')],
+    [
+      "cd -P DIR assignment",
+      "scripts/run.sh",
+      withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"'),
+    ],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
+  }
+});
+
 // ── #1331: quoted symlink diagnostics vs executable symlink forms ──────────
 
 test("#1331: quoted symlink diagnostics stop firing while executable command forms keep firing", () => {
