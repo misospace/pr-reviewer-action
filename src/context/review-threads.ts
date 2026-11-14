@@ -158,6 +158,24 @@ export function prepareThreads(raw: readonly unknown[], marker: string = DEFAULT
   return threads;
 }
 
+/** #1645: the thread ids the raw listing positively carries, by the SAME
+ * identity rule `normalizeThread` applies — including rows whose comments
+ * cannot be parsed into a thread. The settlement reconciliation uses the
+ * difference between this and the parsed threads to tell "the listing no
+ * longer reports the thread" (`absent`) from "the listing still reports the
+ * thread but its live state could not be parsed" (`unknown`): a listing can
+ * never prove a thread absent while it still contains it. */
+export function listedThreadIds(raw: readonly unknown[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const rec = entry as Record<string, unknown>;
+    const id = headerField(rec.thread_id !== null && rec.thread_id !== undefined ? rec.thread_id : rec.id);
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 function compareThreads(a: ReviewThread, b: ReviewThread): number {
   const rootA = a.comments[0]!;
   const rootB = b.comments[0]!;

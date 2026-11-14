@@ -4,6 +4,7 @@ import {
   FINDING_TRAILER,
   PER_COMMENT_MAX_BYTES,
   enforcementView,
+  listedThreadIds,
   normalizeThread,
   prepareThreads,
   renderReviewThreads,
@@ -121,4 +122,25 @@ test("#812: thread comments older than the PR's last edit are labeled superseded
   const [plain] = renderReviewThreads(threads, undefined, 50000);
   assert.ok(!plain.includes("earlier discussion"));
   assert.ok(!plain.includes("authoritative"));
+});
+
+test("#1645: listedThreadIds carries the id of every positively listed row, parsed or not", () => {
+  const raw = [
+    thread("PRRT_parsed", [comment(1, "bot", "2026-09-25T22:32:00Z", OWN_FINDING)]),
+    // Present in the listing, but its comments cannot become a thread.
+    { thread_id: "PRRT_unparsable", path: "a.ts", resolved: false, comments: [] },
+    { id: "PRRT_id_key", path: "b.ts", resolved: true, comments: [{ id: 1, body: "" }] },
+    // Not a thread row at all: never contributes an id.
+    { no_id_here: true },
+    null,
+    ["not", "an", "object"],
+  ];
+  assert.deepEqual([...listedThreadIds(raw)].sort(), ["PRRT_id_key", "PRRT_parsed", "PRRT_unparsable"]);
+  // The unparsable rows prepareThreads drops are exactly the difference the
+  // reconciliation reads as `unknown` (listed, but live state unprovable).
+  const parsedIds = new Set(prepareThreads(raw).map((t) => t.threadId));
+  assert.deepEqual(
+    [...listedThreadIds(raw)].filter((id) => !parsedIds.has(id)).sort(),
+    ["PRRT_id_key", "PRRT_unparsable"],
+  );
 });

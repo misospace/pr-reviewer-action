@@ -801,6 +801,283 @@ test("#812: an undeterminable re-emission severity defaults to minor and never b
 });
 
 // ---------------------------------------------------------------------------
+// #1645: stale carried thread state must not force REQUEST_CHANGES on the
+// current head. A listed thread may re-enter the finding set only when the
+// authoritative live listing proves it live and unresolved; resolved/absent
+// threads drop, unknown (unreadable listing) fails open with disclosure, and
+// bounded reconciliation provenance persists on the artifact.
+// ---------------------------------------------------------------------------
+
+const staleThreads = [
+  { thread_id: "PRRT_stale1", path: "src/a.ts", line: 3, severity: "major", message: "old defect one", own_finding: true, replies: 0 },
+  { thread_id: "PRRT_stale2", path: "src/b.ts", line: 7, severity: "major", message: "old defect two", own_finding: true, replies: 0 },
+];
+
+test("#1645: stale carried blockers absent from the live listing cannot block an approve", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [
+      { severity: "minor", category: "tests", file: "src/a.ts", line: 9, message: "nit" },
+      { severity: "info", category: "docs", file: "src/b.ts", line: 1, message: "note" },
+    ],
+    thread_dispositions: [],
+  });
+  const settlement = applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "a".repeat(40),
+  });
+  assert.equal(a.findings.length, 2, "historical majors must not re-enter the open finding set");
+  assert.equal(settlement.applied, false, "dropping dead threads is not an enforcement action");
+  const strict = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve", "strict mapping must not force REQUEST_CHANGES from historical rows");
+  assert.equal(strict.reviewResult, "findings");
+  assert.deepEqual(a.thread_reconciliation, {
+    state: "complete",
+    head_sha: "a".repeat(40),
+    live_unresolved: 0,
+    resolved: 0,
+    absent: 2,
+    unknown: 0,
+  });
+  assert.doesNotMatch(String(a.review_markdown), /Unresolved Review Threads/);
+});
+
+test("#1645: live carried blocker still blocks; sibling absent thread drops", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "b".repeat(40),
+  });
+  const reemitted = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(reemitted.length, 1, "a thread proven live-unresolved re-emits");
+  assert.equal(reemitted[0]!.severity, "major");
+  assert.equal(reemitted[0]!.thread_reconciliation, "live_unresolved");
+  assert.ok(!a.findings.some((f) => f.thread_id === "PRRT_stale2"), "the absent sibling never re-emits");
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes", "the live carried blocker still blocks");
+});
+
+test("#1645: historical blocker whose live thread resolved upstream does not block", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "c".repeat(40),
+  });
+  assert.equal(a.findings.length, 0);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.thread_reconciliation?.resolved, 1);
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "resolved");
+});
+
+test("#1645: unreadable live listing fails open — no blocker invented, incompleteness disclosed", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [{ severity: "blocker", category: "bug", file: "src/a.ts", line: 1, message: "fresh current-head defect" }],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: false,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "d".repeat(40),
+  });
+  assert.equal(a.findings.length, 1, "only the current-head finding remains");
+  assert.equal(a.findings[0]!.thread_id, undefined);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes", "a fresh current-head blocker still blocks");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+  assert.equal(a.thread_reconciliation?.unknown, 2);
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the incompleteness is disclosed");
+  assert.match(String(a.review_markdown), /PRRT_stale1/, "carried threads stay visible as bookkeeping");
+});
+
+test("#1645: a capped (incomplete) listing proves NO state — every carried thread reconciles unknown and none blocks", () => {
+  // Only a proven-complete listing may yield a proven state (maintainer
+  // review 5885372900). A partial enumeration cannot show that a thread is
+  // live-unresolved, resolved, or gone, so even the thread it positively
+  // reports reconciles `unknown`: historical state never blocks on a
+  // listing that does not enumerate the whole set.
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "f".repeat(40),
+    complete: false,
+  });
+  const carried = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(carried.length, 0, "a thread the partial listing reports is not a proven live thread");
+  assert.ok(!a.findings.some((f) => f.thread_id === "PRRT_stale2"), "a thread the partial listing omits is not proven absent");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+  assert.equal(a.thread_reconciliation?.unknown, 2, "both carried threads reconcile as unknown");
+  assert.equal(a.thread_reconciliation?.live_unresolved, 0, "an incomplete listing proves no live thread");
+  assert.equal(a.thread_reconciliation?.absent, 0);
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "approve", "unverifiable historical state never forces REQUEST_CHANGES");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.deepEqual(settled.map((record) => record.reconciliation), ["unknown", "unknown"]);
+});
+
+test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict");
+  assert.equal(a.findings.length, 1, "legacy callers re-emit as before");
+  assert.equal(a.thread_reconciliation, undefined, "no provenance is fabricated for a read that never ran");
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+});
+
+test("#1645: incomplete reconciliation is disclosed even when nothing changed", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open" }, { thread_id: "PRRT_stale2", disposition: "open" }],
+  });
+  const settlement = applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: false,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    headSha: "e".repeat(40),
+  });
+  assert.equal(settlement.applied, false, "no settlement change is not a forcing action");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the disclosure renders regardless");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+});
+
+test("#1645: a thread the live listing dropped is persisted withdrawn, never with a null disposition", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "a".repeat(40),
+  });
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    settled.map((record) => [record.thread_id, record.reconciliation, record.disposition]),
+    [
+      ["PRRT_stale1", "resolved", "withdrawn"],
+      ["PRRT_stale2", "absent", "withdrawn"],
+    ],
+    "a dropped thread carries the terminal disposition and its reconciliation reason",
+  );
+  assert.ok(
+    settled.every((record) => record.disposition !== null),
+    "no dropped record reads back as 'no disposition given'",
+  );
+});
+
+test("#1645: a dropped thread's stale record never supplies a disposition to a later settlement", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", reconciliation: "absent", disposition: "withdrawn", evidence: null }],
+  });
+  applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "b".repeat(40),
+  });
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.disposition, "open", "the stale withdrawn record supplied no disposition");
+  assert.equal(settled[0]!.reconciliation, "live_unresolved");
+  assert.equal(settled[0]!.enforced, "no disposition given");
+  const reemitted = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(reemitted.length, 1, "the reappearing live thread is re-emitted");
+  assert.match(String(reemitted[0]!.message), /\(review thread PRRT_stale1: open\)$/, "it re-emits as an open thread, not a withdrawn one");
+});
+
+test("#1645: a thread the listing still carries but cannot parse reconciles unknown, never absent", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(),
+    unparsedIds: new Set(["PRRT_stale1"]),
+    headSha: "1".repeat(40),
+  });
+  assert.equal(a.findings.length, 0, "an unparsable listed thread never re-emits (its live state is unproven)");
+  assert.equal(a.thread_reconciliation?.absent, 1, "the genuinely absent sibling still proves absent");
+  assert.equal(a.thread_reconciliation?.unknown, 1, "the carried-but-unparsable thread reconciles as unknown");
+  assert.equal(a.thread_reconciliation?.live_unresolved, 0);
+  // The transport read succeeded, but the carried thread set did not fully
+  // reconcile: the persisted state must say incomplete, agreeing with the
+  // disclosure (state and disclosure share one authority — counts.unknown).
+  assert.equal(a.thread_reconciliation?.state, "incomplete", "an unresolved unknown makes the carried-set reconciliation incomplete even on a transport-complete listing");
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "unknown", "the record carries the accurate unknown state");
+  assert.equal(settled[0]!.disposition, "open", "its own disposition is not silently treated as settled truth");
+  assert.equal(settled[1]!.reconciliation, "absent", "the proven-absent sibling keeps its proven state");
+  assert.match(String(a.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+});
+
+test("#1645: a partial listing reconciles every carried thread unknown — only a complete listing proves a state", () => {
+  // A globally partial listing (a capped window, a failed sub-read) proves NO
+  // state at all (maintainer review 5885372900): a thread the partial listing
+  // positively reports as live is not a proven live thread, and a thread it
+  // reports as resolved is not a proven resolution — the enumeration does
+  // not cover the whole set, so every carried thread is unverifiable.
+  const live = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(live, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(["PRRT_stale1"]),
+    resolvedIds: new Set(),
+    headSha: "3".repeat(40),
+    complete: false,
+  });
+  assert.equal(live.findings.length, 0, "a positively-reported thread is not proven live on a partial listing");
+  assert.equal(live.thread_reconciliation?.state, "incomplete", "a partial listing never reconciles the carried set complete");
+  assert.equal(live.thread_reconciliation?.unknown, 1);
+  assert.match(String(live.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
+
+  const resolved = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(resolved, staleThreads.slice(0, 1), "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1"]),
+    headSha: "4".repeat(40),
+    complete: false,
+  });
+  assert.equal(resolved.findings.length, 0);
+  assert.equal(resolved.thread_reconciliation?.state, "incomplete", "a positively-reported resolution is not a proven resolution");
+  assert.equal(resolved.thread_reconciliation?.unknown, 1);
+  assert.equal(resolved.thread_reconciliation?.resolved, 0);
+  assert.match(String(resolved.review_markdown), /reconciliation incomplete/, "the partial listing is disclosed");
+});
+
+test("#1645: a listing that proves every carried thread's state owes no disclosure", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, staleThreads, "strict", {
+    available: true,
+    unresolvedIds: new Set(),
+    resolvedIds: new Set(["PRRT_stale1", "PRRT_stale2"]),
+    headSha: "2".repeat(40),
+  });
+  assert.equal(a.thread_reconciliation?.state, "complete");
+  assert.equal(a.thread_reconciliation?.unknown, 0);
+  assert.doesNotMatch(String(a.review_markdown), /reconciliation incomplete/, "no unverifiable state remains, so nothing is disclosed");
+  assert.equal(a.verdict, "approve");
+});
+
+// ---------------------------------------------------------------------------
 // #812: the publish path records the folded external-CI conclusion in the
 // managed marker so the next diff-unchanged skip can compare it.
 // ---------------------------------------------------------------------------

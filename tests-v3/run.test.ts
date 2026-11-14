@@ -498,6 +498,247 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
   assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
 });
 
+// #1645: the context-stage thread listing and the settlement-time
+// authoritative re-read are separately controllable — a carried thread must
+// be proven live-unresolved against the SECOND read before it can block.
+async function runStaleThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean } = {},
+): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>> }> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const majorThread = {
+      thread_id: "PRRT_stale1",
+      path: "README.md",
+      line: 1,
+      original_line: 1,
+      resolved: false,
+      outdated: false,
+      comments: [{
+        id: 1,
+        user: { login: "bot" },
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
+      }],
+    };
+    const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    let reads = 0;
+    adapter.listReviewThreads = () => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve({ ok: true, data: [majorThread] });
+      return Promise.resolve({
+        ok: true,
+        data: options.secondListing ?? [majorThread],
+        ...(options.secondListingComplete === false ? { complete: false } : {}),
+      });
+    };
+    const result = await runReview({
+      env: { VERDICT_POLICY: "strict" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": "strict",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: adapter,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return {
+      artifact: JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>,
+      result,
+    };
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+/** Pipe a finished run's machine handoff into the publish step and return
+ * the recorded native reviews — the surface where the #1645 acceptance
+ * clause "handoff/native event/marker agree" is observable. */
+async function publishRunHandoff(
+  result: Awaited<ReturnType<typeof runReview>>,
+): Promise<MinimalPublishApi> {
+  const api = new MinimalPublishApi("a".repeat(40));
+  const published = await publishReview({
+    mode: "review_verdict",
+    reviewMarkdown: result.outputs.reviewMarkdown,
+    verdict: result.outputs.verdict,
+    verdictPolicy: result.verdictPolicy,
+    analysisEngine: result.outputs.analysisEngine,
+    baseSha: "b".repeat(40),
+    headSha: "a".repeat(40),
+    prNumber: "7",
+    commentMarker: "<!-- ai-pr-review -->",
+    requiredChecks: result.outputs.requiredChecks,
+    ...(result.requiredEvidenceState !== undefined ? { requiredEvidenceState: result.requiredEvidenceState } : {}),
+    reviewRoute: result.outputs.reviewRoute,
+    escalationReason: result.outputs.escalationReason,
+    cacheHitRatio: result.outputs.cacheHitRatio,
+    inlineFindings: false,
+    inlineFindingsMax: 5,
+    findings: JSON.parse(result.outputs.findings),
+    cleanupPreviousNativeReviews: "false",
+    allowApprove: true,
+    approveForks: false,
+    isForkPr: false,
+    upstreamLinkMode: "inert",
+    conditionalPresence: {
+      linkedIssue: false, evidenceProvider: false, standards: false,
+      toolHarnessFindings: false, toolHarnessResults: false,
+    },
+    forgejoPositions: false,
+  }, api, { diffText: "" });
+  assert.equal(published.status, "published");
+  return api;
+}
+
+test("#1645: a carried thread absent from the settlement-time listing cannot force REQUEST_CHANGES", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [] });
+  assert.equal(artifact.verdict, "approve", "the stale major thread must not block the current head");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete");
+  assert.equal(reconciliation.absent, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string }>;
+  assert.ok(!findings.some((f) => f.thread_id === "PRRT_stale1"));
+  // Acceptance clause "handoff/native event/marker agree": the action-output
+  // handoff, the metadata marker, and the native review event the publish
+  // step derives from that handoff must all carry the same reconciled
+  // non-blocking disposition.
+  assert.equal(result.outputs.verdict, artifact.verdict, "the handoff verdict is the reconciled verdict");
+  const marker = parseMetadata(result.marker) as Record<string, unknown> | null;
+  assert.equal(marker?.review_result, result.outputs.reviewResult, "the marker echoes the handoff review result");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.match(api.submitted[0]!.body, new RegExp(`"review_result":"${result.outputs.reviewResult}"`),
+    "the published body marker agrees with the handoff");
+});
+
+test("#1645: a carried thread proven live-unresolved at settlement still blocks", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { });
+  assert.equal(artifact.verdict, "request_changes", "the live carried major still blocks under strict policy");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.live_unresolved, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string; thread_reconciliation?: string }>;
+  const carried = findings.find((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(carried?.thread_reconciliation, "live_unresolved");
+  // Acceptance clause "handoff/native event/marker agree" on the blocking
+  // side too: a live unresolved thread blocks identically on every surface.
+  assert.equal(result.outputs.verdict, "request_changes", "the handoff verdict is the reconciled verdict");
+  const marker = parseMetadata(result.marker) as Record<string, unknown> | null;
+  assert.equal(marker?.review_result, "issues", "the marker reports the block");
+  const api = await publishRunHandoff(result);
+  assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
+});
+
+test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
+  // The #1619 shape again, but the settlement read declares the listing
+  // incomplete (a GitHub 100-thread window or a Forgejo partial read): the
+  // carried major is UNSEEN, not proven absent — it must neither block nor
+  // be reported as gone, and the reconciliation must not claim completeness.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [], secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "an unverifiable carried thread fails open, never a fabricated block");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "a capped listing never claims complete reconciliation");
+  assert.equal(reconciliation.unknown, 1, "the unseen thread reconciles as unknown, not absent");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the incompleteness is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
+test("#1645: a capped settlement-time listing proves no state — a thread it reports is not a proven live blocker", async () => {
+  // A capped window (GitHub's 100-thread GraphQL window) or a partial Forgejo
+  // enumeration cannot prove that a thread it DOES report is live-unresolved:
+  // the enumeration does not cover the whole set, so historical state must
+  // never block on it (maintainer review 5885372900). Only a proven-complete
+  // listing may yield a proven state.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "a thread a capped listing reports is not a proven live blocker");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete");
+  assert.equal(reconciliation.unknown, 1, "the reported thread reconciles as unknown too");
+  assert.equal(reconciliation.live_unresolved, 0, "an incomplete listing proves no live thread");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the capped listing is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
+test("#1645: a carried thread the listing still reports but cannot parse is unknown, never absent", async () => {
+  // The settlement read DOES contain the carried thread's row, but the row
+  // has no parseable comments — its live resolved/unresolved state cannot be
+  // established. The listing therefore proves nothing about absence: the
+  // thread reconciles `unknown` (disclosed, non-blocking), never `absent`,
+  // and an approve stands without claiming the thread is gone.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [{ thread_id: "PRRT_stale1", path: "README.md", resolved: false, comments: [] }] });
+  assert.equal(artifact.verdict, "approve", "unprovable carried state never blocks");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "the carried thread set did not fully reconcile — state agrees with the disclosure, not with the transport read");
+  assert.equal(reconciliation.unknown, 1, "the listed-but-unparsable thread reconciles as unknown");
+  assert.equal(reconciliation.absent, 0, "a listing cannot prove a thread absent while it still contains it");
+  const settled = artifact.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "unknown", "the carried record carries the accurate state");
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  const api = await publishRunHandoff(result);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
   const artifact = await runVerificationThreadVerdict({
     verdict: "approve",
