@@ -1,10 +1,16 @@
 # Distributed requirement proof (#962)
 
 Status: **pinned proof contract (v2)** — implemented by `src/enforcement/requirement-trace.ts`,
-`src/config/requirement-owners.ts`, `src/requirements/trace-repair.ts` and the
-`requirement_trace` prompt fragment. Amended by #1343: the distributed predicate
-clause is predicate-only (see
-[owner-anchored-enforcement-citation.md](owner-anchored-enforcement-citation.md)).
+`src/config/requirement-owners.ts` and the `requirement_trace` prompt fragment.
+#1343 (owner-anchored citations) and #1658 both superseded parts of this
+document: #1658 removed the per-seam regression-test demand and the lexical
+predicate check along with the rest of the universal proof-shape system, and
+deleted `src/requirements/trace-repair.ts` (the repair pass existed only to
+redraw citations until that validator accepted them). Seam coverage is now
+PROVENANCE validation — an uncovered declared seam leaves the row `unresolved`
+(material exposure) instead of vetoing approval by itself; the final
+disposition is #1656's. The seam topology, matching and fail-closed rules
+below are unchanged.
 
 ## Problem
 

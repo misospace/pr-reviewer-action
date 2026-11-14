@@ -88,20 +88,30 @@ Advisory codes (observable, never vetoing, never independent authorities):
 `investigation_floor_unmet` today (the configured min-successful CALL-COUNT
 floor — a count never defines adequacy).
 
-The mapping while #1657/#1658/#1659 are in flight
-(`buildDispositionEvidence`) — deliberately CONSERVATIVE, so #1656 does not
+The mapping after #1657/#1658 (`buildDispositionEvidence`) — still
+deliberately CONSERVATIVE where settlement has not arrived, so #1656 does not
 raise native APPROVE merely because the old proof machinery could not
 settle a state:
 
 - a model-authored `unmet` row (must_check, trusted-base) is a MATERIAL
   unknown — a usable rationale makes the disposition structurally valid,
   not objectively true; only a MECHANICAL current-head refutation (the
-  #1145 confirmed-unmet escalation) may prove a requirement and drive
+  #1658 requirement-trace validators' `confirmed_unmet` rows, re-derived
+  from the checkout at head) may prove a requirement and drive
   `request_changes`;
-- unresolved required-check rows (call-ID allocation refusals included —
-  the #1634 safety contract), the requirement trace's remaining
-  incompleteness and the #810 loop-stopped-early record are MATERIAL
-  unknowns;
+- unresolved required-check rows (receipt states — #1657 classifies them by
+  trusted `row_class`; the #1634 safety contract) and the #810
+  loop-stopped-early record are MATERIAL unknowns;
+- the requirement trace settles by PROVENANCE (#1658): the artifact's
+  reason-coded summary classes feed the seam — `unresolved_material` rows
+  are a MATERIAL unknown (INCOMPLETE), `unresolved_advisory` rows are
+  diagnostics that can never veto approval, and an IN-SCOPE
+  `unmet_claimed` row is likewise a MATERIAL unknown: a claim alone can
+  never certify an approve, yet is never converted into a refutation or a
+  synthesized blocker — a grounded blocker/major finding outranks it into
+  REQUEST_CHANGES through the existing finding path, while an
+  OUT-OF-SCOPE claim (the row's `out-of-scope-reported-unmet` marker)
+  stays disclosure-only and can never independently prevent APPROVE;
 - a tool CAPABILITY failure (planning/execution error, every call failed)
   and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
   lane-independent — never a route/tier name) are MATERIAL;

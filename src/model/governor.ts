@@ -27,7 +27,7 @@ import {
  * Scheduling contract (deterministic and testable):
  * - bounded concurrency: at most `maxConcurrent` requests are in flight;
  * - priority classes, highest first: 1 authoritative review / verdict
- *   continuation / requirement-trace repair; 2 merge-gating required
+ *   continuation; 2 merge-gating required
  *   pre-passes; 3 smart/fallback recovery when it owns the authoritative
  *   result; 4 advisory specialists / confidence / optional enrichment;
  * - FIFO within a priority class (monotonic arrival sequence);

@@ -105,10 +105,10 @@ inputs empty. `primary-tool-max-requests` / `smart-tool-max-requests` can
 override their own route, while `tool-max-requests` overrides the derived
 tier budget when no route-specific value is set. The hard ceiling remains 50.
 
-When primary requirement-trace is active, its one post-verdict repair round
+Historically (pre-#1658), when primary requirement-trace was active, a post-verdict repair round
 also has a bounded four-request closure allowance. The published effective
 tool budget includes that allowance, so a default 40-call primary review with
-trace enabled can execute at most 44 read-only tool calls.
+trace enabled could execute at most 44 read-only tool calls. #1658 removed the repair round and its dedicated allowance: the trace is non-certifying, so unresolved requirement rows are disclosed for the disposition layer instead of being repaired into acceptance.
 
 When no explicit override wins, the default is further scaled by PR size
 (#810): one request per 4 changed files, one per 400 changed lines, and 2
@@ -329,110 +329,18 @@ unresolved cause maps to `budget-exhausted`. The reserve is time-based and
 independent of the #1379/#1396 required-evidence window (reserved in
 rounds/requests): a reserve stop can end a run with that window still open.
 
-## Evidence-repair continuation (#1145)
+## Evidence-repair continuation (#1145) — removed by #1658
 
-When requirement-trace validation is on and the primary native loop accepts a
-verdict while in-scope requirements are still unproven — no claim, an invalid
-citation, an unmapped distributed seam — the harness asks the same conversation
-for a bounded repair round before writing outputs. #1447 gives that repair
-round up to four targeted requests even when ordinary exploration consumed its
-entire ceiling. This is still the same authoritative reviewer and conversation,
-not a second reviewer or confidence call, and it remains inside the same
-whole-run wall-clock deadline. A probe (requirements side:
-`createTraceGapProbe`) re-validates the accepted verdict with the exact
-deterministic validator the publication path uses; on a genuine gap it returns
-a fenced instruction listing the unresolved requirements with their
-deterministic validator reasons. The loop appends it to the same conversation,
-runs the repair rounds under the remaining budgets (no new tools, permissions,
-or call capacity beyond the original totals — the instruction explicitly
-forbids them), and then (#1503) runs a trace-only repair turn instead of
-re-requesting the verdict. Every failure path keeps the original verdict:
-a throwing probe, a budget/deadline stop, or a failed repair round records
-`skipped_probe_error`, `skipped_no_budget`, or `skipped_refresh_failed` on the
-harness's `trace_repair_continuation` instead of continuing. #1552: a repair
-round that issued no tool call no longer suppresses the trace-only turn — the
-evidence the earlier rounds gathered is already in the conversation, so the
-turn still runs (outcome `continued_trace_only`, `stop_reason: no-tool-calls`,
-`tool_calls: 0` keep the record honest about what the round did).
-
-A row the validator has already refuted against the checkout
-(`structural-proof-unconfirmed`, #985) is never a repair target — reading more
-cannot un-prove it; the confirmed-unmet escalation in
-`docs/verdicts-and-publishing.md` owns that outcome. Model-claimed `unmet`
-rows (#1095) are likewise left to the reviewer's own findings.
-
-The #854 `enforcement-location-copies-without-comparing` row IS a repair
-target. That predicate searched only the locations the reviewer cited, so it
-proves that *those* locations contain no comparison — it cannot prove the
-requirement is unenforced elsewhere in the implementation. The row is
-therefore a repairable coverage gap, and this bounded continuation is the
-mechanism that can go find the real enforcement location — when it runs at
-all: the native tool loop, the primary tier, the default prompt, a
-requirement-trace with a non-empty scope, and budget left over. Without it
-(tools off, the smart tier, or an exhausted budget) the row stays
-`unverifiable`, the run keeps reporting partial coverage, and it never reads
-as clean.
-
-The repair rounds share the original run's whole-exchange wall-clock deadline,
-but they have a deliberately separate closure allowance: the ordinary loop's
-remaining requests plus at most four additional targeted requests, spread over
-at most four rounds (#1503 — spreading the same allowance over a few rounds
-lets the reviewer read one location and follow one reference; it does not
-increase the call capacity, and the ordinary primary ceiling is untouched).
-That means a `tool-call-budget-exhausted` or `max-rounds` exploration stop no
-longer mechanically prevents requirement-trace from checking the evidence it
-just discovered it still needs. A wall-clock stop can still leave no safe
-repair capacity and records `skipped_no_budget`. After a repair round,
-deterministic changed-file/specialist coverage is recomputed over the combined
-original + repair call log, so new reads can close a real gap but can never
-erase one they did not inspect.
-
-After the repair rounds, #1503 replaces the old full-verdict refresh with a
-trace-only repair turn on the SAME conversation. Re-requesting the entire
-verdict made trace completion depend on re-serializing a large unrelated
-payload: on the #1488 failure a ~129k-token refresh dropped 8 of 10
-requirement rows even though the repair reads had found the evidence. The
-trace-only instruction instead re-lists exactly the ids that were unresolved
-when the repair began and asks only for `requirement_coverage` entries — the
-same shape and the same parser (`normalizeTraceRepairPayload`) as the no-tools
-#959 repair pass. The returned claims merge into the accepted verdict artifact
-through `mergeTraceRepairClaims` (#1552): ids that carried no claim are
-filled, and — inside the validator-derived target set only — an existing row
-the validator left `unverifiable` is replaced in place even when its stored
-disposition says `met` (a downgrade), because inside that set a stored
-`met`/`not_applicable` row is exactly the invalid coverage the repair targets.
-A stored `unmet` row is the reviewer's own affirmative finding (#1095) and is
-never replaced, ids outside the target set are never touched, and findings,
-severities, the recommendation/verdict, escalation state, required check
-dispositions, and every other artifact field are unchanged. `claims_merged`
-counts appended + replaced rows. The merged
-artifact then flows through the unchanged publication-time validator; ids the
-trace-only turn did not fill stay incomplete and fall to the #1492
-fail-closed publication boundary and the #959 pass as before. A malformed,
-empty, or failed trace-only response never damages the standing verdict. The
-turn never re-appends the review corpus, and #1552 gates it on a structural
-Anthropic wire-safety check (`appendingUserWouldBeAdjacent`): the instruction
-is appended only when it cannot render as an adjacent user turn — in the
-ordinary shape it merges into the trailing tool-result user message, and a
-conversation whose tail is a standalone user message suppresses the turn
-(`skipped_wire_unsafe`, `trace_skipped_reason: wire_unsafe`) and leaves
-recovery to the #959 pass. The repair round is also honest about what it
-achieved: a round that issued no tool call is `continued_trace_only` when the
-trace-only turn ran against the conversation's existing evidence (and never
-reads as a completed evidence repair — `tool_calls: 0` and the stop reason
-say what happened), an errored round is `skipped_refresh_failed`, and a round
-that executed at least one read is `continued` — with `claims_merged`,
-`trace_claims_merged`, and `repair_requests_remaining` recording how many
-requirement ids the trace-only turn actually filled and what allowance
-remained.
-
-The continuation is primary-tier only (the smart tier keeps its pre-#1145
-shape) and never overrides the loop's own stop reason. What happened is
-reported, sanitized, on `tool-harness.json` (`trace_repair_continuation`), on
-`review-coverage.json` (`trace_repair_continuation`), and inside the
-`requirement_trace_repair` summary (`continuation`) — the loop's in-conversation
-attempt and the no-tools #959 repair pass are distinct and both visible.
-
+The #1145/#1447/#1503 evidence-repair continuation — the trace-gap probe, the
+bounded post-verdict repair round with its dedicated request allowance, and the
+trace-only repair turn — was removed by #1658. Its purpose was to redraw trace
+citations until the universal lexical proof-shape validator accepted them; with
+that validator deleted (the trace is non-certifying by default), the machinery
+had no honest work left. An in-scope requirement the reviewer could not settle
+is disclosed on the trace artifact (`unresolved`, reason-coded, with the
+row's materiality and the artifact summary) for the final-disposition layer
+(#1656) instead of being repaired into acceptance — no trace-only model pass is
+required to turn an otherwise adequate review into complete.
 ## Fork behavior
 
 By default, the tool harness is **skipped** on cross-repository (fork) pull
