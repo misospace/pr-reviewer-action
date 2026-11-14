@@ -171,6 +171,50 @@ test("#1657: a trace present but malformed (or without its aligned results) REFU
   assert.equal(buildEvidenceLedger({ toolCalls: [], toolResults: [] }).state, "unavailable");
 });
 
+test("#1657 (round 8): a malformed aligned result REFUSES the ledger — tool_calls.status alone can never manufacture acquisition", () => {
+  const calls = [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }];
+  for (const malformed of [
+    [null],
+    ["ok"],
+    [42],
+    [[]],
+    [{}],
+    [{ status: 42 }],
+    [{ status: "" }],
+    [{ status: "success" }],
+    [{ status: "ok", truncated: "false" }],
+    [{ status: "ok", truncated: {} }],
+    [{ status: "ok", truncated: null }],
+  ]) {
+    assert.equal(
+      buildEvidenceLedger({ toolCalls: calls, toolResults: malformed, reviewedHeadSha: HEAD }).state,
+      "refused",
+      JSON.stringify(malformed),
+    );
+  }
+});
+
+test("#1657 (round 8): the aligned RESULT is the acquisition authority — a valid ok result is usable, and a call claiming ok with a result saying error is a VALID unacquired receipt", () => {
+  const usable = buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "value: 1" } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(usable.state, "valid");
+  assert.equal(usable.receipts[0]!.acquired, true);
+  // The call trace claims success; the executor's own envelope says error.
+  // The result wins: the ledger stays VALID and records the receipt
+  // UNACQUIRED — the disagreement is evidence state, never a fabrication.
+  const contradicted = buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
+    toolResults: [{ status: "error", result: { error: "no such file" } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(contradicted.state, "valid");
+  assert.equal(contradicted.receipts[0]!.acquired, false);
+  assert.equal(contradicted.receipts[0]!.complete, false);
+});
+
 test("#1657: an over-cap trace is bounded by PREFIX truncation — the 1-based positional ids keep their exact alignment", () => {
   const calls = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 10 }, (_, index) => ({
     tool: "read_file", args: { path: `src/file-${index}.ts` }, status: "ok",
@@ -532,6 +576,34 @@ test("#1657 (round 3): a multi-obligation row needs EVERY kind covered — evide
     toolResults: [{ status: "ok" }, { status: "ok" }],
   });
   assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", bothKinds).state, "receipt-backed");
+});
+
+test("#1657 (round 8): security-advisory coverage binds the COMPLETE captured version range — one endpoint never certifies the updated range", () => {
+  const versionedAdvisory = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [LODASH_UPDATE]);
+  const search = (query: string) => buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  // Naming only the OLD version proves nothing about the updated range.
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, search("lodash 4.17.15 security advisory CVE")).state, "receipt-mismatch");
+  // Only the NEW version (the old side unchecked), or a wrong endpoint, is
+  // the same gap.
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, search("lodash 4.17.21 security advisory CVE")).state, "receipt-mismatch");
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, search("lodash 9.9.9 security advisory CVE")).state, "receipt-mismatch");
+  // One acquisition naming the complete captured range covers it…
+  assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, search("lodash 4.17.15 4.17.21 security advisory CVE")).state, "receipt-backed");
+  // …and several trustworthy endpoints may JOINTLY represent the range.
+  const split = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_search", args: { query: "lodash 4.17.15 security advisory CVE" }, status: "ok" },
+      { tool: "web_search", args: { query: "lodash 4.17.21 security advisory CVE" }, status: "ok" },
+    ],
+    toolResults: [{ status: "ok" }, { status: "ok" }],
+  });
+  assert.deepEqual(
+    [evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).state, evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).receipts],
+    ["receipt-backed", ["call-1", "call-2"]],
+  );
 });
 
 test("#1657 (round 3): the strict tag parser takes the {slug, versions} entry shape and refuses everything else", () => {

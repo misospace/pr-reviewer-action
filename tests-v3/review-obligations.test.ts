@@ -1074,3 +1074,57 @@ test("#1657: stale or wrong-head provenance is objectively invalid for a row tha
   assert.deepEqual(fresh.map((r) => [r.status, r.reason, r.evidence?.receipts]),
     [["satisfied", "ok", ["call-1"]]]);
 });
+
+// ── #1657 (review round 8): trusted producer metadata is COPIED WHOLE by
+// both obligation paths, and a malformed metadata field voids the metadata
+// — never the mandatory row itself.
+
+test("#1657 (round 8): the candidates-less fallback carries the tag's dependency scope — both folds settle the scoped row identically", () => {
+  const row = "inspect the exact old→new upstream release delta for the updated dependency";
+  const rowTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const dispositions = [{ check: row, status: "satisfied", rationale: "the exact release delta" }] as never;
+  // No usable candidates artifact (fork/skipped-harness path): the fallback
+  // must copy the producer's COMPLETE metadata — dependency scope included.
+  // Before round 8 it copied class/gate/obligations only, so the obligation
+  // fold settled this row receipt-absent while the coverage fold settled it
+  // receipt-backed: the same classification folding two ways.
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+  assert.deepEqual(obligations[0]!.dependencyScope, [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const folded = foldObligationDispositions(obligations, dispositions, ledger);
+  const coverage = evaluateRequiredCheckCoverage([row], dispositions, ledger, [rowTag]);
+  assert.deepEqual(folded.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+  assert.deepEqual(coverage.checks.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+});
+
+test("#1657 (round 8): a malformed dependency_scope on a candidates row voids the trusted METADATA, never deletes the mandatory row", () => {
+  const obligations = candidateRowsToObligations([
+    {
+      id: "obligation-1",
+      source: "must_check",
+      text: "inspect the exact old→new upstream release delta for the updated dependency",
+      row_class: "objective",
+      gate: "dependency-evidence",
+      obligations: ["release_delta"],
+      dependency_scope: ["../evil"],
+    },
+  ], [], []);
+  // The row survives — untrusted metadata means the pre-#1657 legacy gating
+  // default (exactly like an unparseable row_class), not a silently missing
+  // mandatory obligation.
+  assert.equal(obligations.length, 1);
+  assert.equal(obligations[0]!.rowClass, undefined);
+  assert.equal(obligations[0]!.dependencyScope, undefined);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const legacyFold = foldObligationDispositions(
+    obligations,
+    [{ check: obligations[0]!.text, status: "satisfied", rationale: "the release delta was inspected" }] as never,
+    ledger,
+  );
+  // Legacy semantics: discharged by the rationale, no receipt demand.
+  assert.deepEqual(legacyFold.map((r) => [r.status, r.reason]), [["satisfied", "ok"]]);
+});

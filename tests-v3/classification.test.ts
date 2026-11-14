@@ -3737,6 +3737,100 @@ test("#1657 (round 3): hostile or unrepresentable changed dependency identities 
   assert.deepEqual(parseDependencyScope(hostile), { available: false });
 });
 
+// ── #1657 (review round 8): attribution is HUNK-LOCAL and version
+// extraction is EXACT. A `@@` hunk header resets the lockfile package
+// state, the manifest dependency-section state, and the chart identity;
+// changed dependency-shaped lines the current hunk cannot attribute fail
+// the scope CLOSED instead of being silently omitted, and a version
+// identity comes only from the field that actually IS the version.
+
+test("#1657 (round 8): a dependency section opened in hunk 1 never makes hunk 2's pair-shaped line a dependency; unattributable changed pairs fail closed", () => {
+  const diff =
+    "diff --git a/package.json b/package.json\n" +
+    "@@ -1,5 +1,5 @@\n" +
+    '  "dependencies": {\n' +
+    '-    "chalk": "^4.1.2",\n' +
+    '+    "chalk": "^5.3.0",\n' +
+    "  },\n" +
+    "@@ -20,3 +20,4 @@\n" +
+    '+  "test": "vitest run",\n';
+  // Hunk 1's section is real scope; hunk 2's pair-shaped line appears with
+  // NO section established in its own hunk — the whole scope fails closed
+  // rather than silently omitting possible dependency identity.
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 8): a package block header in hunk 1 never attributes hunk 2's changed lines — a hunk opening mid-package fails closed", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -10,4 +10,4 @@\n" +
+    '     "node_modules/lodash": {\n' +
+    '-      "version": "4.17.15",\n' +
+    '+      "version": "4.17.21",\n' +
+    "     },\n" +
+    "@@ -80,3 +80,3 @@\n" +
+    '-      "resolved": "https://registry.npmjs.org/lost/-/lost-1.0.0.tgz",\n' +
+    '+      "resolved": "https://registry.npmjs.org/lost/-/lost-1.0.1.tgz",\n';
+  // Hunk 2 opens inside a package without its header: attribution state was
+  // reset at `@@`, and the changed dependency-bearing line cannot be
+  // attributed to a package — fail closed, never credit hunk 1's block.
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 8): a version identity comes ONLY from the package block's actual \"version\" field — relation values never become versions", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -10,5 +10,5 @@\n" +
+    '     "node_modules/example-pkg": {\n' +
+    '-      "resolved": "https://registry.npmjs.org/example-pkg/-/example-pkg-2.3.3.tgz",\n' +
+    '+      "resolved": "https://registry.npmjs.org/example-pkg/-/example-pkg-2.3.4.tgz",\n' +
+    '+      "peer": "9.9.9",\n' +
+    "       \"license\": \"MIT\"\n" +
+    "     },\n";
+  // The changed block proves example-pkg's entry changed (a re-resolution),
+  // but NO version identity: 2.3.3/2.3.4 live in a resolved URL and 9.9.9
+  // in a relation value — neither is the \"version\" field.
+  assert.deepEqual(parseDependencyScope(diff), { available: true, entries: [{ slug: "example-pkg", versions: [] }] });
+  // The actual old/new \"version\" field lines still produce the exact pair.
+  const bumped =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -10,4 +10,4 @@\n" +
+    '     "node_modules/example-pkg": {\n' +
+    '-      "version": "2.3.3",\n' +
+    '+      "version": "2.3.4",\n' +
+    "     },\n";
+  assert.deepEqual(parseDependencyScope(bumped), { available: true, entries: [{ slug: "example-pkg", versions: ["2.3.3", "2.3.4"] }] });
+});
+
+test("#1657 (round 8): a lockfile \"version\" field that is not an exact version token fails closed", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    '     "node_modules/example-pkg": {\n' +
+    '-      "version": "^2.0.0 || ^3.0.0",\n' +
+    '+      "version": "latest",\n' +
+    "     },\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 8): chart identity anchors hunk-locally — unchanged name context credits THIS hunk's changed version; no identity fails closed", () => {
+  const anchored =
+    "diff --git a/charts/myapp/Chart.yaml b/charts/myapp/Chart.yaml\n" +
+    "@@ -1,4 +1,4 @@\n" +
+    " name: myapp\n" +
+    " version: 0.2.1\n" +
+    "-appVersion: 1.4.2\n" +
+    "+appVersion: 1.4.3\n";
+  assert.deepEqual(parseDependencyScope(anchored), { available: true, entries: [{ slug: "myapp", versions: ["1.4.2", "1.4.3"] }] });
+  // A changed chart version with no chart identity in its own hunk: the
+  // identity is unattributable — fail closed.
+  const unanchored =
+    "diff --git a/charts/myapp/Chart.yaml b/charts/myapp/Chart.yaml\n" +
+    "@@ -40,2 +40,2 @@\n" +
+    "-appVersion: 1.4.2\n" +
+    "+appVersion: 1.4.3\n";
+  assert.deepEqual(parseDependencyScope(unanchored), { available: false });
+});
+
 test("#1657 (round 3): an unavailable scope leaves the dependency rows scope-less; an available one rides the row verbatim", () => {
   const rows = ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed"];
   const unavailable: DependencyScopeResult = { available: false };

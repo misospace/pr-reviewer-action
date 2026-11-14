@@ -468,21 +468,39 @@ export function evidenceTagFor(check: string, index: Map<string, CheckEvidenceTa
 // Ledger construction — receipts only from the run's own records.
 // ---------------------------------------------------------------------------
 
-/** The executor result of one trace call (index-aligned `tool_results`). */
+/** The validated executor result envelope of one trace call (index-aligned
+ * `tool_results`). */
 interface TraceResultRecord {
   ok: boolean;
   truncated: boolean;
   result: Record<string, unknown> | null;
 }
 
-function traceResultAt(results: readonly unknown[], index: number, callStatus: string): TraceResultRecord {
+/** The executor's closed acquisition-status vocabulary: every result
+ * envelope carries its own `status` and these are the only two outcomes the
+ * executor produces (`executeToolRequest`). */
+const TRACE_RESULT_STATUSES: ReadonlySet<string> = new Set(["ok", "error"]);
+
+/**
+ * Validate the aligned executor result for one trace call BEFORE any receipt
+ * is constructed. The result envelope is the acquisition authority: a record
+ * this runtime cannot read must REFUSE the whole ledger (`null`), never
+ * manufacture acquisition state from the call trace. `tool_calls.status` is
+ * only a display mirror the harness derives from this envelope with a silent
+ * error fallback; trusting it for a malformed result would let the call
+ * trace alone stand in as an `acquired: true` receipt. Refusals: a missing
+ * entry, null/primitive/array, a missing or non-string `status`, a status
+ * outside the closed vocabulary, or a present-but-malformed `truncated` flag
+ * (only an actual boolean states completeness — an object or string never
+ * silently counts as false).
+ */
+function traceResultAt(results: readonly unknown[], index: number): TraceResultRecord | null {
   const raw = results[index];
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: callStatus === "ok", truncated: false, result: null };
-  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
-  const status = typeof record.status === "string" ? record.status : callStatus;
-  return { ok: status === "ok", truncated: record.truncated === true, result: record };
+  if (typeof record.status !== "string" || !TRACE_RESULT_STATUSES.has(record.status)) return null;
+  if (record.truncated !== undefined && typeof record.truncated !== "boolean") return null;
+  return { ok: record.status === "ok", truncated: record.truncated === true, result: record };
 }
 
 /** `owner/repo` from a forge API endpoint path: the two segments after
@@ -665,7 +683,12 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
     const args = record.args !== null && typeof record.args === "object" && !Array.isArray(record.args)
       ? record.args as Record<string, unknown>
       : {};
-    const result = traceResultAt(toolResults, position, record.status);
+    const result = traceResultAt(toolResults, position);
+    if (result === null) {
+      // An aligned result the runtime cannot read is evidence of nothing —
+      // refuse the whole ledger before constructing any receipt.
+      return { state: "refused", receipts: [] };
+    }
     const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);
     if (receipt !== null) receipts.push(receipt);
   }
@@ -778,8 +801,11 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  * - `release_delta` asserts the old→new pair — the candidates must JOINTLY
  *   carry EVERY captured changed version, so one side alone (e.g. the old
  *   end of a wrong-range compare link) never covers;
- * - `security_advisory` binds the changed version the check examined — any
- *   captured changed identity the candidates carry counts. */
+ * - `security_advisory` binds the version RANGE the changed update actually
+ *   covers — the candidates must JOINTLY carry EVERY captured changed
+ *   version too: an advisory check naming only the old version proves
+ *   nothing about the updated one. This binds ACQUISITION provenance to the
+ *   captured range only; it is never semantic vulnerability proof. */
 function dependencyCellCovered(
   receipts: readonly EvidenceReceipt[],
   kind: DependencyEvidenceObligation,
@@ -789,10 +815,13 @@ function dependencyCellCovered(
     && identityCarriesToken(receiptIdentityString(receipt), entry.slug));
   if (candidates.length === 0) return false;
   if (kind === "provenance" || entry.versions.length === 0) return true;
-  if (kind === "release_delta") {
-    return entry.versions.every((version) => candidates.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), version)));
-  }
-  return candidates.some((receipt) => entry.versions.some((version) => identityCarriesToken(receiptIdentityString(receipt), version)));
+  // `release_delta` and `security_advisory` both bind the COMPLETE captured
+  // changed-version identity: the candidate set covers a versioned entry
+  // only when every captured version appears in it (one receipt may carry
+  // several; several receipts may jointly cover). Advisory provenance names
+  // the range the changed update actually covers — never one arbitrary
+  // endpoint.
+  return entry.versions.every((version) => candidates.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), version)));
 }
 
 /** Settle a dependency-evidence row: for EVERY obligation kind the row

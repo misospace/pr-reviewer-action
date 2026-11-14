@@ -4098,6 +4098,10 @@ const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
  * recorded version is checkable against receipts and a partial numeric run
  * never stands in for one. */
 const DEPENDENCY_SCOPE_VERSION_TOKEN_RE = /\b\d+(?:\.\d+){2,}(?:[-+][0-9A-Za-z.-]+)?\b/g;
+/** The same shape anchored for EXACT whole-value validation — a lockfile
+ * `"version"` field value must be exactly one version token, never a range
+ * or a value merely containing one. */
+const DEPENDENCY_SCOPE_EXACT_VERSION_RE = /^\d+(?:\.\d+){2,}(?:[-+][0-9A-Za-z.-]+)?$/;
 /** #1657 (review round 3): trusted scope comes ONLY from producer-
  * recognized dependency surfaces — an npm lockfile, an npm manifest, or a
  * Helm chart manifest. Dependency-shaped text in any other changed file
@@ -4125,7 +4129,7 @@ const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
 const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][A-Za-z0-9._+-]*)\s*$/;
 
 /**
- * #1657 (review round 3): the TRUSTED dependency update identity scope —
+ * #1657 (review rounds 3+8): the TRUSTED dependency update identity scope —
  * the COMPLETE set of dependency updates this diff actually changes,
  * parsed only from producer-recognized dependency surfaces (npm lockfile
  * package blocks, npm manifest dependency sections, Helm chart
@@ -4138,31 +4142,50 @@ const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][
  * unchanged hunk-context neighbors never enter scope. Identity is NEVER
  * derived from checklist or reviewer prose.
  *
+ * #1657 (review round 8): attribution is HUNK-LOCAL. Every `@@` hunk header
+ * resets the lockfile brace/package state, the manifest dependency-section
+ * state, and the chart identity: context lines INSIDE the hunk may
+ * re-establish attribution, but a previous hunk's block header, section,
+ * or chart identity never carries into this one. A changed
+ * dependency-shaped line this hunk cannot confidently attribute fails the
+ * scope CLOSED — never a silent omission from an otherwise-available scope.
+ * Version identity is EXACT: a lockfile version comes only from the
+ * package block's actual `"version"` field (validated as one exact version
+ * token — never from relation values, ranges, resolved URLs, engines or
+ * integrity hashes); a manifest version comes from the dependency pair's
+ * own value; a chart version from the `version`/`appVersion` field value.
+ *
  * `{ available: false }` is the fail-closed outcome: the producer could
  * not establish the COMPLETE trustworthy identity set — a recognized
  * dependency surface carried changed lines this parser cannot attribute
- * exactly (unrecognized shape, hostile identity, malformed version), an
- * entry/version cap overflowed, or the scan budget ended mid-diff. The
- * objective dependency rows then stay unresolved — never kind-only
- * credit, never a partial-scope certificate. An available-but-empty scope
- * means no dependency change could be attributed at all; the rows fail
- * closed the same way at the receipt seam.
+ * exactly (unrecognized shape, hostile identity, malformed version, state
+ * unresolvable inside the hunk), an entry/version cap overflowed, or the
+ * scan budget ended mid-diff. The objective dependency rows then stay
+ * unresolved — never kind-only credit, never a partial-scope certificate.
+ * An available-but-empty scope means no dependency change could be
+ * attributed at all; the rows fail closed the same way at the receipt seam.
  */
 export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
   const entries = new Map<string, Set<string>>();
   let scopeComplete = true;
   let lines = 0;
   let currentFile = "";
-  // Per-file attribution state (reset at each diff file header): the npm
-  // JSON brace depth, the `node_modules/<name>` package block a line
-  // belongs to, the npm dependency-section nesting depth, and the Chart.yaml
-  // identity a changed line belongs to. Context lines KEEP the attribution
-  // state (they anchor changed lines to their package) but NEVER create
-  // scope entries themselves.
+  // Per-file attribution state (reset at each diff file header AND at every
+  // `@@` hunk header): the npm JSON brace depth, the `node_modules/<name>`
+  // package block a line belongs to, the npm dependency-section nesting
+  // depth, and the Chart.yaml identity a changed line belongs to. Context
+  // lines KEEP the attribution state (they anchor changed lines to their
+  // package within this hunk) but NEVER create scope entries themselves.
   let braceDepth = 0;
   let currentBlockSlug: string | null = null;
   let npmSectionDepth = 0;
   let chartSlug: string | null = null;
+  const resetAttribution = (): void => {
+    braceDepth = 0;
+    currentBlockSlug = null;
+    npmSectionDepth = 0;
+    chartSlug = null;
+  };
   const normalizeSlug = (rawName: string): string =>
     rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
   const usableSlug = (name: string): boolean =>
@@ -4176,10 +4199,13 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       versions.add(version);
     }
   };
-  const recordVersions = (slug: string, content: string): void => {
+  // Version tokens are extracted ONLY from an exact field VALUE this parser
+  // chose deliberately (a manifest dependency pair value, a chart version
+  // field value) — never from arbitrary line content.
+  const recordVersions = (slug: string, value: string): void => {
     if (!entries.has(slug)) return;
     let taken = 0;
-    for (const match of content.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
+    for (const match of value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
       if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS || entries.get(slug)!.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
         scopeComplete = false;
         return;
@@ -4187,24 +4213,35 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       recordVersion(slug, match[0].toLowerCase());
     }
   };
-  const recordChangedEntry = (rawName: string, content: string): void => {
+  // A lockfile package block's `"version"` field: the exact version token,
+  // or a fail-closed malformed version. Any other changed line inside the
+  // block proves the package's entry changed without a version identity.
+  const lockfileVersionFieldValue = (content: string): string | null => {
+    const field = NPM_BLOCK_VERSION_LINE_RE.exec(content);
+    if (field === null) return null;
+    const value = (field[1] ?? "").trim().toLowerCase();
+    if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(value)) { scopeComplete = false; return null; }
+    return value;
+  };
+  const recordChangedEntry = (rawName: string, versionSource: string | null): void => {
     const name = normalizeSlug(rawName);
     if (!usableSlug(name)) { scopeComplete = false; return; }
     if (!entries.has(name)) {
       if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
       entries.set(name, new Set<string>());
     }
-    recordVersions(name, content);
+    if (versionSource !== null) recordVersions(name, versionSource);
   };
+  // A changed line in a recognized npm JSON surface that carries dependency
+  // identity this parser cannot attribute to an open block/section in THIS
+  // hunk fails the scope closed instead of being silently omitted.
+  const npmDependencyShapedPair = (content: string): boolean => NPM_SECTION_PAIR_RE.test(content);
   for (const line of fullDiffText.split("\n")) {
     if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
     const fileHeader = /^diff --git a\/(\S+)/.exec(line);
     if (fileHeader !== null) {
       currentFile = fileHeader[1] ?? "";
-      braceDepth = 0;
-      currentBlockSlug = null;
-      npmSectionDepth = 0;
-      chartSlug = null;
+      resetAttribution();
       // A changed dependency surface this parser does not read breaks the
       // completeness of the identity set — fail closed, never an npm-only
       // approximation of a mixed-ecosystem update.
@@ -4216,7 +4253,15 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     const inManifest = NPM_MANIFEST_SHAPE_RE.test(currentFile);
     const inChartYaml = CHART_MANIFEST_SHAPE_RE.test(currentFile);
     if (!inLockfile && !inManifest && !inChartYaml) continue;
-    if (line.startsWith("index ") || line.startsWith("@@")) continue;
+    if (line.startsWith("index ")) continue;
+    if (line.startsWith("@@")) {
+      // #1657 (review round 8): hunk-local attribution. A previous hunk's
+      // block header, dependency section, or chart identity proves nothing
+      // about the lines in THIS hunk — reset, and let this hunk's own
+      // context re-establish what it shows.
+      resetAttribution();
+      continue;
+    }
     const sign = line.startsWith("-") && !line.startsWith("---") ? "-"
       : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
     const content = line.slice(sign === "" ? 0 : 1).trim();
@@ -4243,6 +4288,14 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
         // (context or changed); only the pairs themselves must change.
         if (NPM_SECTION_OPEN_RE.test(content)) npmSectionDepth = 1;
         else if (NPM_SECTION_CLOSE_RE.test(content)) npmSectionDepth = 0;
+      } else {
+        // The chart's own unchanged identity line anchors this hunk's
+        // version lines to the chart — without entering the scope itself.
+        const contextName = CHART_NAME_LINE_RE.exec(content);
+        if (contextName !== null) {
+          const name = normalizeSlug(contextName[1] ?? "");
+          chartSlug = usableSlug(name) ? name : null;
+        }
       }
       continue;
     }
@@ -4251,27 +4304,30 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       // scope (an added or removed block) and anchors the lines after it.
       const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
       if (block !== null) {
-        recordChangedEntry(block[1] ?? "", content);
+        recordChangedEntry(block[1] ?? "", null);
         const name = normalizeSlug(block[1] ?? "");
         currentBlockSlug = usableSlug(name) ? name : null;
         for (const ch of content) { if (ch === "{") braceDepth += 1; }
         continue;
       }
       if (braceDepth > 0 && currentBlockSlug !== null) {
-        // A changed line inside the package's own block: version lines
-        // carry the exact old→new identity; any other changed line still
-        // proves the package's entry changed (a re-resolution) without a
-        // version identity. Pure structural braces carry neither.
-        if (!NPM_STRUCTURAL_LINE_RE.test(content)) recordChangedEntry(currentBlockSlug, content);
-      } else if (braceDepth > 0) {
-        // A changed line inside a block this parser cannot attribute to a
-        // package (hostile/unrecognized block key): the changed-dependency
-        // set is not provably complete — fail closed.
+        // A changed line inside the package's own attributed block proves
+        // the package's entry changed (a version edit or a re-resolution).
+        // Its version identity comes ONLY from the actual `"version"`
+        // field value — never from relation values, resolved URLs, engines
+        // or integrity hashes that merely contain version-shaped text.
+        if (!NPM_STRUCTURAL_LINE_RE.test(content)) {
+          recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content));
+        }
+      } else if (braceDepth > 0 || npmDependencyShapedPair(content)) {
+        // A changed dependency-shaped line this parser cannot attribute to
+        // a package block in THIS hunk (hostile/unrecognized block key, or a
+        // hunk that opens inside a package without its header): the
+        // changed-dependency set is not provably complete — fail closed.
         if (!NPM_STRUCTURAL_LINE_RE.test(content)) scopeComplete = false;
       }
-      // Outside any package block, a changed line mirrors a manifest
-      // declaration; the acquisition identity is the resolved package
-      // block, so it contributes no entry of its own.
+      // A changed line outside any package block that carries no dependency
+      // identity (structural braces, lockfile metadata) contributes nothing.
       for (const ch of content) {
         if (ch === "{") braceDepth += 1;
         else if (ch === "}") braceDepth -= 1;
@@ -4280,27 +4336,38 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       continue;
     }
     if (inManifest) {
-      const sectionOpen = NPM_SECTION_OPEN_RE.exec(content);
-      if (sectionOpen !== null) { npmSectionDepth = 1; continue; }
+      if (NPM_SECTION_OPEN_RE.test(content)) { npmSectionDepth = 1; continue; }
       if (npmSectionDepth > 0) {
         if (NPM_SECTION_CLOSE_RE.test(content)) { npmSectionDepth = 0; continue; }
         const pair = NPM_SECTION_PAIR_RE.exec(content);
-        if (pair !== null) recordChangedEntry(pair[1] ?? "", content);
+        if (pair !== null) recordChangedEntry(pair[1] ?? "", pair[2] ?? "");
         else scopeComplete = false;
+      } else if (npmDependencyShapedPair(content)) {
+        // A changed dependency pair outside any dependency section THIS hunk
+        // established (a section opened in an earlier hunk never carries
+        // over): unattributable identity — fail closed, never an omission.
+        scopeComplete = false;
       }
       continue;
     }
     // Helm chart manifest: the chart's own identity on a changed line.
     const chartName = CHART_NAME_LINE_RE.exec(content);
     if (chartName !== null) {
+      recordChangedEntry(chartName[1] ?? "", null);
       const name = normalizeSlug(chartName[1] ?? "");
-      if (usableSlug(name)) {
-        chartSlug = name;
-        recordChangedEntry(chartName[1] ?? "", content);
-      }
+      chartSlug = usableSlug(name) ? name : null;
       continue;
     }
-    if (chartSlug !== null && CHART_IDENTITY_VERSION_LINE_RE.test(content)) recordVersions(chartSlug, content);
+    const chartVersion = CHART_IDENTITY_VERSION_LINE_RE.exec(content);
+    if (chartVersion !== null) {
+      if (chartSlug === null) {
+        // A changed chart version with no chart identity established in THIS
+        // hunk: the version identity is unattributable — fail closed.
+        scopeComplete = false;
+        continue;
+      }
+      recordChangedEntry(chartSlug, chartVersion[1] ?? "");
+    }
   }
   if (!scopeComplete) return { available: false };
   return {

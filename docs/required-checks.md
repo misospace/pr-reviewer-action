@@ -293,7 +293,7 @@ class is never inferred from the row's wording downstream:
 | `objective`     | rows the classifier tags objective with an explicit gate kind at emission: test-run asks (exact-head CI), upstream provenance / release-delta / security-advisory acquisition asks, and rows the producer binds to exact path/version/head/slug identities | **yes** — an unresolved objective row is the merge-affecting incompleteness |
 | `review-prompt` | rows tagged review-prompt at emission: generic auth/path/security/scrutiny questions and absence asks ("no vulnerability", "no breaking change") | no — disclosed with reason codes, never independently incomplete, and an `unmet` answer never manufactures `REQUEST_CHANGES` |
 | `attention`     | rows tagged attention at emission: the P0/P1 linked-issue sentences ("treat as critical — verify all changes thoroughly", "treat as high priority — verify correctness carefully") | no — attention/routing signals, not propositions |
-| `legacy`        | rows without a trusted tag: hand-written/minimal artifacts and dynamic rows | **yes** — untagged rows retain conservative pre-#1657 gating semantics |
+| `legacy`        | rows without a trusted tag: hand-written/minimal artifacts and dynamic rows | **yes** — untagged rows retain conservative pre-#1657 gating semantics. A row whose trusted metadata fails strict validation is `legacy` too: validation voids the metadata, never deletes the mandatory row (#1657 round 8) |
 
 Identity extraction from a check's text happens only AFTER a row is tagged
 `objective` — solely to validate the tagged identity against receipts. It
@@ -310,6 +310,14 @@ The rules this buys, and their limits:
   evidence). One implementation, `buildEvidenceLedger`, feeds both folds; a
   trace present but unparseable REFUSES the whole ledger (fail closed, never
   a silent no-op), and a trace without its aligned results is refused too.
+  The aligned executor result is validated BEFORE any receipt is built and
+  is the acquisition authority: a malformed envelope (missing entry,
+  null/primitive/array, a missing `status` or one outside the executor's
+  closed `ok`/`error` vocabulary, a malformed `truncated` flag) refuses the
+  ledger rather than letting `tool_calls.status` — a harness display mirror
+  — manufacture an `acquired` receipt. A valid result saying `error` beside
+  a call claiming `ok` is evidence state, not a refusal: the receipt stays
+  recorded and unacquired.
 - **Receipts are shareable evidence, not consumable tokens.** One genuine
   acquisition may support any number of conclusions; there is no allocation
   and no per-row consumption. A receipt that carries none of a row's
@@ -354,10 +362,23 @@ The rules this buys, and their limits:
   Helm chart manifests), carrying the exact changed old→new version identity
   where the diff shape has one. A receipt backs the row only when, per
   obligation kind, the validated receipts JOINTLY cover EVERY entry — slug
-  as an exact identity, and the changed version identity for the kinds that
-  assert the update itself (release delta, advisory). Unchanged hunk-context
-  neighbors never enter scope; dependency-shaped text outside a recognized
-  surface never does; overflow, unattributable shapes, and unread
+  as an exact identity, and, for every kind that asserts the update itself
+  (release delta AND advisory), the COMPLETE captured changed-version
+  identity: an advisory check naming only one endpoint of a captured
+  `old → new` range never certifies the updated range (acquisition
+  provenance bound to the captured range — never semantic vulnerability
+  proof). Attribution is HUNK-LOCAL: a `@@` header resets the lockfile
+  package, manifest section, and chart identity, so a previous hunk's block
+  header, dependency section, or chart name never carries into this one
+  (this hunk's own context may re-establish it). Version identity is EXACT:
+  a lockfile version comes only from the package block's actual `"version"`
+  field validated as one version token — never from relation values, ranges,
+  resolved URLs, engines or integrity hashes; a chart version only from the
+  `version`/`appVersion` field anchored to chart identity in the same hunk.
+  Unchanged hunk-context neighbors never enter scope; dependency-shaped text
+  outside a recognized surface never does; a changed dependency-shaped line
+  the current hunk cannot attribute fails the scope CLOSED rather than being
+  silently omitted; and overflow, unattributable shapes, and unread
   dependency surfaces (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows
   stay unresolved rather than certifying a partial update set.
 - **No repair from prose.** Malformed or stale provenance is visible and

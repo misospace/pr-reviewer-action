@@ -476,17 +476,23 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
     // #1657 (review round 3): the trusted dependency update identity is the
     // strict `{slug, versions}` entry set — an unparseable scope DROPS the
     // row's metadata (the row falls back to `legacy`, gating), never
-    // half-trusted.
+    // half-trusted. #1657 (review round 8): an unparseable metadata field
+    // must not silently DELETE a mandatory row — the fail-closed outcome is
+    // the row surviving `legacy`-gated, exactly like an unparseable
+    // `row_class` above, not a dropped obligation.
     let dependencyScope: DependencyScopeEntry[] | undefined;
+    let scopeUsable = true;
     if (record.dependency_scope !== undefined) {
       const parsedScope = dependencyScopeEntriesFromArtifact(record.dependency_scope);
-      if (parsedScope === null) return null;
-      dependencyScope = parsedScope;
+      if (parsedScope === null) scopeUsable = false;
+      else dependencyScope = parsedScope;
     }
-    if (rowClass === "objective" && gate !== null) {
-      metadata = { rowClass, gate, obligations, ...(dependencyScope !== undefined ? { dependencyScope } : {}) };
-    } else if (rowClass !== "objective" && gate === null && obligations.length === 0) {
-      metadata = { rowClass, gate: null, obligations: [], dependencyScope: [] };
+    if (scopeUsable) {
+      if (rowClass === "objective" && gate !== null) {
+        metadata = { rowClass, gate, obligations, ...(dependencyScope !== undefined ? { dependencyScope } : {}) };
+      } else if (rowClass !== "objective" && gate === null && obligations.length === 0) {
+        metadata = { rowClass, gate: null, obligations: [], dependencyScope: [] };
+      }
     }
   }
   if (metadata?.rowClass === "attention") return null;
@@ -537,7 +543,14 @@ export function candidateRowsToObligations(
         status: "unresolved",
         cause: null,
         reason: "no-disposition",
-        ...(tag !== null ? { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations } : {}),
+        // #1657 (review round 8): the fallback must carry the tag's COMPLETE
+      // trusted metadata — the dependency identity scope included. Copying
+      // only the class fields made the fallback settle dependency rows
+      // without the scope the artifact path attaches, so the two paths
+      // folded differently on the same classification.
+      ...(tag !== null
+        ? { rowClass: tag.rowClass, gate: tag.gate, obligations: tag.obligations, dependencyScope: tag.dependencyScope }
+        : {}),
       });
     }
   }
