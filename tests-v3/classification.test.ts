@@ -2125,6 +2125,18 @@ test("#1671: one-line DIR join resolver counterexamples keep firing symlink_sens
     ["braced join expansions", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="${DIR}/${SOURCE}"')],
     // The `dirname` variable is assigned once per hop, from the anchor.
     ["DIR rebound between hops", "scripts/run.sh", [...SH_ONEHOP_DIR_JOIN_LOOP.slice(0, 4), '+  DIR="$PWD"', ...SH_ONEHOP_DIR_JOIN_LOOP.slice(4)]],
+    [
+      "DIR assigned after the fold",
+      "scripts/run.sh",
+      [
+        SH_ONEHOP_DIR_JOIN_LOOP[0] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[1] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[4] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[2] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[3] ?? "",
+        SH_ONEHOP_DIR_JOIN_LOOP[5] ?? "",
+      ],
+    ],
     ["DIR taken from another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$(dirname "$OTHER")"')],
     ["DIR assignment rebinds the anchor", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  SOURCE="$(dirname "$SOURCE")"')],
     // Join identifiers must agree with the head, the fold and the dirname line.
@@ -2135,6 +2147,11 @@ test("#1671: one-line DIR join resolver counterexamples keep firing symlink_sens
     // Head-level rules still apply to the fold.
     ["fold writes another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 4, '+  LINK="$(readlink "$SOURCE")"')],
     ["guard reads another variable", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 1, '+while [ -L "$OTHER" ]; do')],
+    ["hop cap folded into the guard", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 1, '+while [ -L "$SOURCE" ] && [ "$HOPS" -lt 40 ]; do')],
+    // The quote-pair fences take the delimiter itself.
+    ["unbalanced DIR assignment quotes", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$(dirname "$SOURCE")')],
+    ["unbalanced join quotes", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE')],
+    ["asymmetric conditional quotes", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 3, '+  [[ "$SOURCE != /* ]] && SOURCE=$DIR/$SOURCE')],
     // Unquoted expansions inside command substitutions split and glob.
     ["unquoted dirname operand", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 2, '+  DIR="$(dirname $SOURCE)"')],
     ["unquoted fold operand", "scripts/run.sh", withOneHopLine(SH_ONEHOP_DIR_JOIN_LOOP, 4, '+  SOURCE="$(readlink $SOURCE)"')],
