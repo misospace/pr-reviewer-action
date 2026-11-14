@@ -367,7 +367,14 @@ The rules this buys, and their limits:
   identity: an advisory check naming only one endpoint of a captured
   `old → new` range never certifies the updated range (acquisition
   provenance bound to the captured range — never semantic vulnerability
-  proof). Attribution is HUNK-LOCAL: a `@@` header resets the lockfile
+  proof). A versionless entry (the parser emits one for re-resolution-only
+  changes) certifies `provenance` only — the slug proves WHO the dependency
+  is, never an exact delta or an updated version range — and a one-sided
+  entry certifies no release delta; a kind-matched acquisition of the right
+  slug then stays `receipt-mismatch` and the objective row stays
+  material-unresolved through the existing disposition path (never a
+  blocker, never versions inferred from prose, URLs, or receipt text).
+  Attribution is HUNK-LOCAL: a `@@` header resets the lockfile
   package, manifest section, and chart identity, so a previous hunk's block
   header, dependency section, or chart name never carries into this one
   (this hunk's own context may re-establish it). Version identity is EXACT:
@@ -376,9 +383,13 @@ The rules this buys, and their limits:
   resolved URLs, engines or integrity hashes; a chart version only from the
   `version`/`appVersion` field anchored to chart identity in the same hunk.
   Unchanged hunk-context neighbors never enter scope; dependency-shaped text
-  outside a recognized surface never does; a changed dependency-shaped line
-  the current hunk cannot attribute fails the scope CLOSED rather than being
-  silently omitted; and overflow, unattributable shapes, and unread
+  outside a recognized surface never does; on a lockfile surface ANY changed
+  line the current hunk cannot attribute to a package block fails the WHOLE
+  scope CLOSED rather than being silently omitted — package content comes in
+  every JSON value shape (boolean, number, null, object, array), so the only
+  changed lines that stay non-scope metadata while unattributed are
+  structural punctuation and the lockfile root object's own keys inside the
+  attributed root; and overflow, unattributable shapes, and unread
   dependency surfaces (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows
   stay unresolved rather than certifying a partial update set.
 - **No repair from prose.** Malformed or stale provenance is visible and

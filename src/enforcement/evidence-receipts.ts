@@ -805,7 +805,15 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  *   covers — the candidates must JOINTLY carry EVERY captured changed
  *   version too: an advisory check naming only the old version proves
  *   nothing about the updated one. This binds ACQUISITION provenance to the
- *   captured range only; it is never semantic vulnerability proof. */
+ *   captured range only; it is never semantic vulnerability proof.
+ * A VERSIONLESS entry (no captured changed-version identity — the parser
+ * emits one for re-resolution-only changes) backs `provenance` alone: the
+ * slug proves WHO the dependency is, never an exact old→new delta nor an
+ * updated version range, so the version-asserting kinds stay uncovered
+ * rather than crediting a kind-matched acquisition of the right slug. A
+ * ONE-SIDED entry likewise certifies no `release_delta` (a delta needs
+ * both endpoints); an advisory range may legitimately be one-endpoint
+ * (an added package's updated version IS the captured range). */
 function dependencyCellCovered(
   receipts: readonly EvidenceReceipt[],
   kind: DependencyEvidenceObligation,
@@ -814,7 +822,18 @@ function dependencyCellCovered(
   const candidates = receipts.filter((receipt) => (receipt.subject.obligations ?? []).includes(kind)
     && identityCarriesToken(receiptIdentityString(receipt), entry.slug));
   if (candidates.length === 0) return false;
-  if (kind === "provenance" || entry.versions.length === 0) return true;
+  if (kind === "provenance") return true;
+  // #1657 (round 9): a version-asserting kind needs captured version
+  // identity to assert at all. A versionless entry (re-resolution-only
+  // change) can certify NEITHER kind; a one-sided entry certifies no
+  // exact old→new `release_delta` (a delta needs both endpoints — one
+  // side alone, e.g. an added block, is not a delta), while an advisory
+  // range can legitimately be one-endpoint (an added package's updated
+  // version IS the captured range). Slug identity alone never stands in
+  // for any of this: the row stays material-unresolved through the
+  // existing disposition path — never a manufactured blocker, never
+  // versions inferred from prose, URLs, or receipt text.
+  if (kind === "release_delta" ? entry.versions.length < 2 : entry.versions.length === 0) return false;
   // `release_delta` and `security_advisory` both bind the COMPLETE captured
   // changed-version identity: the candidate set covers a versioned entry
   // only when every captured version appears in it (one receipt may carry

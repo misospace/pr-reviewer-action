@@ -1128,3 +1128,30 @@ test("#1657 (round 8): a malformed dependency_scope on a candidates row voids th
   // Legacy semantics: discharged by the rationale, no receipt demand.
   assert.deepEqual(legacyFold.map((r) => [r.status, r.reason]), [["satisfied", "ok"]]);
 });
+
+// ── #1657 (review round 9): a versionless scope entry (reachable — the
+// parser emits it for re-resolution-only changes) certifies provenance
+// identity ONLY. Through the obligation fold a release-delta row behind it
+// stays material-unresolved even beside a kind-matched right-slug
+// acquisition — never credited, never a manufactured blocker.
+
+test("#1657 (round 9): a versionless scoped release-delta row stays unresolved in the fold — identity alone never certifies a delta", () => {
+  const row = "inspect exact old→new upstream release delta updated dependency";
+  const rowTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: [] }]);
+  const ledger = ledgerWith([
+    { tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" },
+  ]);
+  const obligations = candidateRowsToObligations([], [row], [rowTag]);
+  const dispositions = [{ check: row, status: "satisfied", rationale: "the exact release delta" }] as never;
+  const folded = foldObligationDispositions(obligations, dispositions, ledger);
+  assert.deepEqual(folded.map((r) => [r.status, r.reason, r.evidence?.state]), [["unresolved", "receipt-mismatch", "receipt-mismatch"]]);
+  const coverage = evaluateRequiredCheckCoverage([row], dispositions, ledger, [rowTag]);
+  assert.deepEqual(coverage.checks.map((r) => [r.status, r.reason, r.evidence?.state]), [["unresolved", "receipt-mismatch", "receipt-mismatch"]]);
+
+  // Same ledger, producer captured the complete pair → the identical row
+  // settles; the refusal is about the MISSING captured identity, not the
+  // acquisition.
+  const pairTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
+  const settledFold = foldObligationDispositions(candidateRowsToObligations([], [row], [pairTag]), dispositions, ledger);
+  assert.deepEqual(settledFold.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+});

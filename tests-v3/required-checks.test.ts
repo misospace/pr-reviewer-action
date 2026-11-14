@@ -659,10 +659,13 @@ test("#1657: dependency-evidence rows are receipt-gated acquisition asks — pro
     { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
     { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
   ]);
+  // #1657 (round 9): the version-asserting kinds carry the COMPLETE captured
+  // changed-version identity in the trusted scope — the compare URL below
+  // names that exact pair.
   const depTags = checks.map((text) => {
     if (text.includes("provenance")) return etag(text, "objective", "dependency-evidence", ["provenance"], ["example-pkg"]);
-    if (text.includes("release delta")) return etag(text, "objective", "dependency-evidence", ["release_delta"], ["example-pkg"]);
-    return etag(text, "objective", "dependency-evidence", ["security_advisory"], ["example-pkg"]);
+    if (text.includes("release delta")) return etag(text, "objective", "dependency-evidence", ["release_delta"], [{ slug: "example-pkg", versions: ["1.2.3", "1.4.0"] }]);
+    return etag(text, "objective", "dependency-evidence", ["security_advisory"], [{ slug: "example-pkg", versions: ["1.2.3", "1.4.0"] }]);
   });
   const coverage = evaluateRequiredCheckCoverage(
     checks,
@@ -696,8 +699,11 @@ test("#1657: the dependency advisory row keeps its not-performed escape and stay
   const satisfied = evaluateRequiredCheckCoverage(
     [check],
     [d(check, "satisfied", "the advisory database search at call-1")],
-    ledgerWith([{ tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" }]),
-    [etag(check, "objective", "dependency-evidence", ["security_advisory"], ["example-pkg"])],
+    // #1657 (round 9): an advisory range may be one-endpoint (an added
+    // package's updated version IS the captured range) — but it must be a
+    // captured range the acquisition actually names, never slug alone.
+    ledgerWith([{ tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" }]),
+    [etag(check, "objective", "dependency-evidence", ["security_advisory"], [{ slug: "example-pkg", versions: ["1.4.0"] }])],
   );
   assert.deepEqual(satisfied.checks.map((row) => [row.status, row.evidence?.state]), [["satisfied", "receipt-backed"]]);
   const notPerformed = evaluateRequiredCheckCoverage(

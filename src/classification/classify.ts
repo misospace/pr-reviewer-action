@@ -4125,6 +4125,12 @@ const NPM_SECTION_PAIR_RE = /^\s*"([^"]+)"\s*:\s*"([^"]*)"\s*,?\s*$/;
 const NPM_BLOCK_VERSION_LINE_RE = /^\s*"version"\s*:\s*"([^"]*)"/;
 const NPM_SECTION_CLOSE_RE = /^\s*\}\s*,?\s*$/;
 const NPM_STRUCTURAL_LINE_RE = /^[{}[\],]+$/;
+/** The npm lockfile root object's OWN keys — changed inside the attributed
+ * root (brace depth exactly 1), these are provably not package-entry
+ * content and stay non-scope metadata. Package-entry content comes in every
+ * JSON value shape (string, boolean, number, null, object, array), so
+ * string-valued pairs alone never bound what could belong to a package. */
+const NPM_ROOT_METADATA_KEYS: ReadonlySet<string> = new Set(["name", "version", "lockfileVersion", "requires", "packages"]);
 const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
 const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][A-Za-z0-9._+-]*)\s*$/;
 
@@ -4154,6 +4160,16 @@ const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][
  * token — never from relation values, ranges, resolved URLs, engines or
  * integrity hashes); a manifest version comes from the dependency pair's
  * own value; a chart version from the `version`/`appVersion` field value.
+ *
+ * #1657 (review round 9): a changed field line in an npm lockfile with NO
+ * package identity established in this hunk fails the WHOLE scope closed —
+ * package-entry content comes in EVERY JSON value shape (boolean, number,
+ * null, object, array), not only string pairs, so one unattributable
+ * mid-package line can never yield a partial scope beside another hunk's
+ * attributable update. The only changed lines that stay non-scope metadata
+ * while unattributed are structural punctuation and the lockfile ROOT
+ * object's own keys (lockfileVersion, name, version, requires, packages)
+ * changed inside the attributed root at brace depth exactly 1.
  *
  * `{ available: false }` is the fail-closed outcome: the producer could
  * not establish the COMPLETE trustworthy identity set — a recognized
@@ -4232,10 +4248,25 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     }
     if (versionSource !== null) recordVersions(name, versionSource);
   };
-  // A changed line in a recognized npm JSON surface that carries dependency
-  // identity this parser cannot attribute to an open block/section in THIS
-  // hunk fails the scope closed instead of being silently omitted.
+  // A changed pair-shaped manifest line outside any dependency section THIS
+  // hunk established carries dependency identity this parser cannot
+  // attribute, and fails the scope closed instead of being omitted.
   const npmDependencyShapedPair = (content: string): boolean => NPM_SECTION_PAIR_RE.test(content);
+  // #1657 (review round 9): a changed line in an npm lockfile this hunk
+  // cannot attribute to a package block. Package-block content is any field
+  // line (every JSON value shape) or array element; the only content
+  // confidently NOT package identity is structural punctuation and the
+  // root object's own metadata keys changed inside the attributed root at
+  // depth exactly 1 (at any deeper point the enclosing object is unknown —
+  // an unattributed package block is equally possible). Conservative: a
+  // shape this rule cannot place fails the WHOLE scope closed, never a
+  // silent omission from an otherwise-available scope.
+  const lockfileContentUnattributable = (content: string, depthBeforeLine: number): boolean => {
+    if (NPM_STRUCTURAL_LINE_RE.test(content)) return false;
+    const field = /^\s*"([^"]+)"\s*:/.exec(content);
+    if (field === null) return content.includes('"');
+    return !(depthBeforeLine === 1 && NPM_ROOT_METADATA_KEYS.has(field[1] ?? ""));
+  };
   for (const line of fullDiffText.split("\n")) {
     if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
     const fileHeader = /^diff --git a\/(\S+)/.exec(line);
@@ -4319,15 +4350,18 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
         if (!NPM_STRUCTURAL_LINE_RE.test(content)) {
           recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content));
         }
-      } else if (braceDepth > 0 || npmDependencyShapedPair(content)) {
-        // A changed dependency-shaped line this parser cannot attribute to
-        // a package block in THIS hunk (hostile/unrecognized block key, or a
-        // hunk that opens inside a package without its header): the
-        // changed-dependency set is not provably complete — fail closed.
-        if (!NPM_STRUCTURAL_LINE_RE.test(content)) scopeComplete = false;
+      } else if (lockfileContentUnattributable(content, braceDepth)) {
+        // #1657 (review round 9): a changed field line this hunk cannot
+        // attribute to a package block (hunk opens mid-package without its
+        // header, or a hostile/unrecognized block key) COULD be package
+        // entry content in any value shape. The changed-dependency set is
+        // not provably complete — fail the WHOLE scope closed, never a
+        // partial scope beside another hunk's attributable update.
+        scopeComplete = false;
       }
-      // A changed line outside any package block that carries no dependency
-      // identity (structural braces, lockfile metadata) contributes nothing.
+      // The only changed lines outside package attribution that stay
+      // non-scope metadata: structural punctuation and root object's own
+      // keys inside the attributed root (see lockfileContentUnattributable).
       for (const ch of content) {
         if (ch === "{") braceDepth += 1;
         else if (ch === "}") braceDepth -= 1;

@@ -3831,6 +3831,101 @@ test("#1657 (round 8): chart identity anchors hunk-locally — unchanged name co
   assert.deepEqual(parseDependencyScope(unanchored), { available: false });
 });
 
+// ── #1657 (review round 9): a changed lockfile line this hunk cannot
+// attribute to a package block fails the WHOLE scope closed. Package-entry
+// content comes in EVERY JSON value shape — boolean, number, null, object,
+// array — so string-valued pairs alone never bounded what could belong to
+// a package, and one unattributed mid-package line can never yield a
+// partial scope beside another hunk's attributable update. The only
+// changed lines that stay non-scope metadata while unattributed are
+// structural punctuation and the lockfile root object's OWN keys changed
+// inside the attributed root at brace depth exactly 1.
+
+test("#1657 (round 9): a hunk opening mid-package with a boolean package field fails closed — no identity, no silent omission", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -80,3 +80,3 @@\n" +
+    '-      "dev": true,\n' +
+    '+      "dev": false,\n';
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 9): numeric, null, object, and array-shaped unattributed package fields fail closed too", () => {
+  for (const pair of [
+    '-      "someCount": 1,\n+      "someCount": 2,\n',
+    '-      "optional": null,\n+      "optional": false,\n',
+    '-      "funding": {\n+      "funding": {\n',
+    '-        "url": "https://x.example",\n+        "url": "https://y.example",\n',
+    '-      "cpu": [\n+      "cpu": [\n',
+  ]) {
+    const diff = "diff --git a/package-lock.json b/package-lock.json\n@@ -80,4 +80,4 @@\n" + pair;
+    assert.deepEqual(parseDependencyScope(diff), { available: false }, pair);
+  }
+});
+
+test("#1657 (round 9): one attributable package hunk plus one unattributable mid-package hunk fails the WHOLE scope — never a partial update set", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -10,4 +10,4 @@\n" +
+    '     "node_modules/lodash": {\n' +
+    '-      "version": "4.17.15",\n' +
+    '+      "version": "4.17.21",\n' +
+    "     },\n" +
+    "@@ -80,3 +80,3 @@\n" +
+    '-      "dev": true,\n' +
+    '+      "dev": false,\n';
+  // The trustworthy scope would be `{ lodash → 4.17.15→4.17.21 }`, but the
+  // second hunk's changed package-shaped content has no identity in scope:
+  // the COMPLETE changed-update set is not provable — fail closed whole.
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 9): changed root lockfile metadata stays non-scope — no bogus entries, scope stays available", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    " {\n" +
+    '   "name": "my-repo",\n' +
+    '-  "lockfileVersion": 3,\n' +
+    '+  "lockfileVersion": 4,\n' +
+    '-  "version": "1.0.0",\n' +
+    '+  "version": "1.0.1",\n' +
+    '   "requires": true,\n' +
+    '   "packages": {\n' +
+    '     "node_modules/left-pad": {\n' +
+    '       "version": "1.3.0",\n' +
+    "     }\n" +
+    "   }\n" +
+    " }\n";
+  // None of these changed lines is package-entry content: they are the
+  // lockfile's own root keys inside the attributed root (brace depth 1).
+  assert.deepEqual(parseDependencyScope(diff), { available: true, entries: [] });
+});
+
+test("#1657 (round 9): a root metadata NAME deep inside a package block is not excused — unattributed means unattributed", () => {
+  const diff =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -80,3 +80,3 @@\n" +
+    '-      "version": "1.0.0",\n' +
+    '+      "version": "2.0.0",\n';
+  // At hunk-start depth this line could be a package block's version —
+  // without a block header in THIS hunk the identity is unattributable.
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1657 (round 9): an unattributed array element fails closed; unquoted text with no JSON identity stays ignored", () => {
+  const element =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -80,3 +80,3 @@\n" +
+    '-      "libc": "glibc",\n' +
+    '+      ["glibc", "musl"],\n';
+  assert.deepEqual(parseDependencyScope(element), { available: false });
+  const quoted =
+    "diff --git a/package-lock.json b/package-lock.json\n" +
+    "@@ -80,2 +80,3 @@\n" +
+    "+a stray word without JSON shape carries no dependency identity\n";
+  assert.deepEqual(parseDependencyScope(quoted), { available: true, entries: [] });
+});
+
 test("#1657 (round 3): an unavailable scope leaves the dependency rows scope-less; an available one rides the row verbatim", () => {
   const rows = ["check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed"];
   const unavailable: DependencyScopeResult = { available: false };

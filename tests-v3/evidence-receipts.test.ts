@@ -309,7 +309,9 @@ test("#1657 (round 2): a dependency-A acquisition receipt backs dependency A's r
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
     toolResults: [{ status: "ok" }],
   });
-  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  // #1657 (round 9): the trusted scope carries the COMPLETE captured
+  // version identity — a versionless entry can never certify the delta.
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
   const state = evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger);
   assert.deepEqual([state.state, state.gate, state.receipts], ["receipt-backed", "dependency-evidence", ["call-1"]]);
 });
@@ -389,8 +391,8 @@ test("#1657 (round 2): one matching receipt still supports multiple legitimate c
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
     toolResults: [{ status: "ok" }],
   });
-  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
-  const deltaTag2 = tag("inspect the exact old→new upstream release delta for the updated sub-dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
+  const deltaTag2 = tag("inspect the exact old→new upstream release delta for the updated sub-dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
   assert.deepEqual(
     [evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", ledger).receipts,
      evaluateRowEvidence(deltaTag2, "inspect the exact old→new upstream release delta for the updated sub-dependency", ledger).receipts],
@@ -413,14 +415,17 @@ const DELTA_ROW = "inspect the exact old→new upstream release delta for the up
 const ADVISORY_ROW = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
 const DEP_SLUG = "example-pkg";
 const provenanceTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [DEP_SLUG]);
-const deltaTag = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [DEP_SLUG]);
-const advisoryTag = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [DEP_SLUG]);
+// #1657 (round 9): the version-asserting kinds demand the COMPLETE captured
+// version identity — the producer entry carries the old→new pair, and an
+// acquisition crediting it must name it.
+const deltaTag = tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_SLUG, versions: ["1.2.3", "1.4.0"] }]);
+const advisoryTag = tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], [{ slug: DEP_SLUG, versions: ["1.2.3", "1.4.0"] }]);
 
 test("#1657: dependency-evidence rows are validated per named acquisition kind — one verified web acquisition per kind, unrelated targets never credit", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [
       { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
-      { tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" },
+      { tool: "web_search", args: { query: "example-pkg 1.2.3 1.4.0 security advisory CVE" }, status: "ok" },
     ],
     toolResults: [{ status: "ok" }, { status: "ok" }],
   });
@@ -602,6 +607,76 @@ test("#1657 (round 8): security-advisory coverage binds the COMPLETE captured ve
   });
   assert.deepEqual(
     [evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).state, evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, split).receipts],
+    ["receipt-backed", ["call-1", "call-2"]],
+  );
+});
+
+// ── #1657 (review round 9): a VERSIONLESS scope entry carries no changed-
+// version identity. It certifies `provenance` (WHO the dependency is) but
+// can NEVER certify `release_delta` (an exact old→new delta) or
+// `security_advisory` (the updated version range) — a correctly-slugged
+// kind-matched acquisition of that kind stays receipt-mismatch, leaving the
+// objective row material-unresolved through the existing disposition path.
+// The parser emits versionless entries for re-resolution-only changes
+// (classification fixture: lockfile package block changed with only
+// resolved/relation lines), so this is the reachable shape.
+
+test("#1657 (round 9): a versionless entry backs provenance identity — and can never certify release_delta or security_advisory", () => {
+  const reResolution = [{ slug: "example-pkg", versions: [] }];
+  const publisherLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(
+    evaluateRowEvidence(tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], reResolution), PROVENANCE_ROW, publisherLedger).state,
+    "receipt-backed",
+  );
+  // The right slug, the right acquisition kind — still not certifiable
+  // without a captured version identity: no exact delta exists to check.
+  const compareLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(
+    evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], reResolution), DELTA_ROW, compareLedger).state,
+    "receipt-mismatch",
+  );
+  // A package-wide advisory search is NOT this row's version-range ask;
+  // a package-wide advisory objective belongs in its own producer
+  // metadata, never in silently weakening this version-range row.
+  const searchLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "example-pkg security advisory CVE" }, status: "ok" }],
+    toolResults: [{ status: "ok" }],
+  });
+  assert.equal(
+    evaluateRowEvidence(tag(ADVISORY_ROW, "objective", "dependency-evidence", ["security_advisory"], reResolution), ADVISORY_ROW, searchLedger).state,
+    "receipt-mismatch",
+  );
+  // A one-sided captured identity certifies no exact delta either: the
+  // receipts must jointly carry EVERY captured version, and with only one
+  // side captured the complete old→new range was never established.
+  const oneSided = [{ slug: "example-pkg", versions: ["1.4.0"] }];
+  assert.equal(
+    evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], oneSided), DELTA_ROW, compareLedger).state,
+    "receipt-mismatch",
+  );
+  // With a complete captured pair, the SAME acquisitions certify — and two
+  // receipts may carry the two endpoints jointly.
+  const pair = [{ slug: "example-pkg", versions: ["1.2.3", "1.4.0"] }];
+  assert.equal(
+    evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], pair), DELTA_ROW, compareLedger).state,
+    "receipt-backed",
+  );
+  const splitDelta = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.3.0" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.3.0...v1.4.0" }, status: "ok" },
+    ],
+    toolResults: [{ status: "ok" }, { status: "ok" }],
+  });
+  assert.deepEqual(
+    [evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], pair), DELTA_ROW, splitDelta).state,
+     evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], pair), DELTA_ROW, splitDelta).receipts],
     ["receipt-backed", ["call-1", "call-2"]],
   );
 });
