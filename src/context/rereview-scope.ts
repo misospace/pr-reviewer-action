@@ -71,7 +71,7 @@ function emptyDelta(priorHeadSha: string, headSha: string): ReReviewScopeDelta {
   };
 }
 
-interface GitOutcome {
+export interface GitOutcome {
   ok: boolean;
   /** True when the capture hit its byte cap: the output is a prefix, and a
    * consumer must treat the list as incomplete. */
@@ -82,7 +82,11 @@ interface GitOutcome {
 /** Read-only git probe in the reviewed checkout, bounded and fail-soft. The
  * restricted environment matches `generatedAttributePaths` (src/run/stages.ts):
  * no tenant-controlled git config, no hooks on a read path. */
-async function runGit(workspace: string, args: readonly string[]): Promise<GitOutcome> {
+export async function runGit(
+  workspace: string,
+  args: readonly string[],
+  maxOutputBytes: number,
+): Promise<GitOutcome> {
   try {
     const handle = runProcess({
       file: "git",
@@ -90,7 +94,7 @@ async function runGit(workspace: string, args: readonly string[]): Promise<GitOu
       cwd: workspace,
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
       timeoutMs: GIT_TIMEOUT_MS,
-      maxOutputBytes: MAX_GIT_OUTPUT_BYTES,
+      maxOutputBytes,
       terminateGraceMs: TERMINATE_GRACE_MS,
     });
     const result = await handle.result;
@@ -99,7 +103,7 @@ async function runGit(workspace: string, args: readonly string[]): Promise<GitOu
     }
     return {
       ok: true,
-      truncated: result.stdout.length >= MAX_GIT_OUTPUT_BYTES,
+      truncated: result.stdout.length >= maxOutputBytes,
       stdout: result.stdout.toString("utf8"),
     };
   } catch {
@@ -111,7 +115,7 @@ async function runGit(workspace: string, args: readonly string[]): Promise<GitOu
  * newline or other control byte is dropped whole (render less, never
  * hostile) rather than being flattened into a line that could forge section
  * structure inside the fence. */
-function hasControlChar(text: string): boolean {
+export function hasControlChar(text: string): boolean {
   for (const character of text) {
     if (character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f) return true;
   }
@@ -133,10 +137,10 @@ export async function computeReReviewDelta(
   // The prior head must be a real commit in this checkout: a shallow Action
   // checkout may no longer contain a force-pushed-away revision, and an
   // unprovable delta is reported as such, never guessed.
-  const present = await runGit(workspace, ["cat-file", "-e", `${prior}^{commit}`]);
+  const present = await runGit(workspace, ["cat-file", "-e", `${prior}^{commit}`], MAX_GIT_OUTPUT_BYTES);
   if (!present.ok) return emptyDelta(prior, head);
 
-  const filesOutcome = await runGit(workspace, ["diff", "--name-only", "-z", prior, head]);
+  const filesOutcome = await runGit(workspace, ["diff", "--name-only", "-z", prior, head], MAX_GIT_OUTPUT_BYTES);
   if (!filesOutcome.ok) return emptyDelta(prior, head);
   let rawNames = filesOutcome.stdout.split("\0");
   // A capture capped mid-stream leaves the final chunk a partial name: drop
@@ -155,7 +159,7 @@ export async function computeReReviewDelta(
     "-n",
     `${MAX_DELTA_COMMITS + 1}`,
     `${prior}..${head}`,
-  ]);
+  ], MAX_GIT_OUTPUT_BYTES);
   if (!commitsOutcome.ok) return emptyDelta(prior, head);
   const commits: DeltaCommit[] = [];
   let commitsTruncated = false;

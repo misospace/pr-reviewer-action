@@ -2042,25 +2042,29 @@ export async function publishReview(
   // malformed/incoherent) → the canonical unavailable abstention, never a
   // legacy approval; (3) the legacy scalar derivation, only for callers
   // with no run-directory provenance.
+  // The objective scope guardrails are a pure function of the publish input;
+  // they are computed once here and read by BOTH disposition paths — the
+  // legacy scalar derivation's certification check below and the withheld-
+  // approval notices further down. They no longer choose the event.
+  const guardrails = evaluateApprovalGuardrails({
+    verdict: input.verdict,
+    approveForks: input.approveForks,
+    isForkPr: input.isForkPr,
+    ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
+    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
+  });
   const disposition = input.finalDisposition ?? (input.finalDispositionRefused === true
     ? unreadableFinalDisposition()
     : (() => {
     const legacyReviewResult = markerReviewResult(input);
     const legacyCompleteCoverage = !input.partialCoverage && !input.coverageUnknown
       && legacyReviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
-    const legacyGuardrails = evaluateApprovalGuardrails({
-      verdict: input.verdict,
-      approveForks: input.approveForks,
-      isForkPr: input.isForkPr,
-      ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
-      ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
-    });
     return computeReviewDisposition({
       verdict: input.verdict,
       validVerdict: isValidPublishVerdict(input.verdict),
       reviewResult: legacyReviewResult,
       coverageIncomplete: reviewCoverageIncomplete(legacyReviewResult),
-      approvalCertified: input.mode === "review_verdict" && legacyGuardrails.canApprove && legacyCompleteCoverage && input.degradedGateBypass !== true,
+      approvalCertified: input.mode === "review_verdict" && guardrails.canApprove && legacyCompleteCoverage && input.degradedGateBypass !== true,
       verdictBearing: isNativeVerdictMode(input.mode),
       incompleteReason,
       blockingFindingOpen: hasBlockingOpenFinding(input.findings),
@@ -2075,15 +2079,6 @@ export async function publishReview(
       openFindings: Array.isArray(input.findings) ? input.findings.length : 0,
     })
     : markerReviewResult(input);
-  // The objective scope guardrails stay computed for the fork-scope
-  // withholding notice below; they no longer choose the event.
-  const guardrails = evaluateApprovalGuardrails({
-    verdict: input.verdict,
-    approveForks: input.approveForks,
-    isForkPr: input.isForkPr,
-    ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
-    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
-  });
   const validVerdict = isValidPublishVerdict(input.verdict);
   // #1656: coverage is incomplete exactly when the disposition abstained —
   // a material unknown withheld certification, or the review was
