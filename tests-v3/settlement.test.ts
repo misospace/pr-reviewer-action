@@ -10,27 +10,36 @@ import {
   type DependencyEvidenceObligation,
 } from "../src/tools/loop.js";
 import {
+  finalSettlementsToArtifact,
+  parseFinalSettlements,
   parseLoopSettlements,
+  parseLoopSettlementsReport,
+  reconcileSettlements,
   settlementsToArtifact,
+  type FinalSettlementRow,
   type LoopEvidenceSettlement,
   type SettlementObligationSource,
 } from "../src/enforcement/settlement.js";
+import { persistedLoopSettlements } from "../src/engine/review.js";
 import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
-import { computeFinalDisposition } from "../src/disposition/final.js";
+import { computeFinalDisposition, reviewResultFromDisposition } from "../src/disposition/final.js";
 import { buildToolLoopTelemetry } from "../src/tools/harness.js";
 
 // ---------------------------------------------------------------------------
-// #1659 — ONE canonical evidence-settlement record shared by the native
-// loop's investigation stopping and final publication completeness.
+// #1659 — ONE canonical per-question record shared by the native loop's
+// investigation stopping and the final publication disposition.
 //
-// The record is OBJECTIVE PROVENANCE only (#1657's receipts-are-provenance
-// boundary): it discloses what the loop did with each tracked question —
-// discharged, cap-released (a budget release, never a semantic settlement),
-// or still open — plus whether evidence was actually acquired. It never
-// certifies a semantic resolution and never overrides the final disposition
-// by admission bookkeeping alone. A cap/budget release is disclosed: a
-// cap-released material question becomes a named material unknown; a
-// cap-released advisory question never vetoes.
+// The record has two deliberately distinct dimensions:
+// - EVIDENCE state (`acquired` / `cap-released` / `open`) is the loop's
+//   acquisition bookkeeping. The `obligations-settled` stop is evidence-ready,
+//   never proof of a clean settlement.
+// - SEMANTIC state (`resolved` / `finding` / `unknown` / `not-tracked`) is
+//   reconciled AFTER the verdict from the same folds the final disposition
+//   consumes, so the record and the disposition cannot disagree.
+//
+// Receipts are OBJECTIVE PROVENANCE only (#1657): a successful call never
+// certifies a semantic resolution, one receipt may support several questions,
+// and no allocation rule exists.
 // ---------------------------------------------------------------------------
 
 const openAiCall = (id: string, name: string, args: string) => ({
@@ -69,7 +78,7 @@ const settlement = (
     kind: "prose",
     materiality: "material",
     source: "must_check",
-    settledVia: "discharged",
+    evidenceState: "acquired",
     successfulAttempt: true,
     admittedBy: ["call-1"],
     successfulBy: ["call-1"],
@@ -79,36 +88,49 @@ const settlement = (
   };
 };
 
+const final = (
+  overrides: Partial<Omit<FinalSettlementRow, "source">> & { source?: SettlementObligationSource | undefined } = {},
+): FinalSettlementRow => {
+  const { source, ...rest } = overrides;
+  const merged: FinalSettlementRow = { ...settlement(), semantic: "unknown", ...rest, ...(source !== undefined ? { source } : {}) };
+  if (source === undefined && Object.prototype.hasOwnProperty.call(overrides, "source")) {
+    const { source: _drop, ...withoutSource } = merged;
+    return withoutSource;
+  }
+  return merged;
+};
+
 // ---------------------------------------------------------------------------
 // the record module: serializer + fail-closed reader.
 // ---------------------------------------------------------------------------
 
-test("#1659: settlement record round-trips through the artifact shape", () => {
+test("#1659: the evidence record round-trips through the artifact shape", () => {
   const rows: LoopEvidenceSettlement[] = [
     settlement(),
     settlement({ id: "provenance", kind: "dependency", source: undefined, admittedBy: ["call-2", "call-5"], successfulBy: ["call-5"] }),
-    settlement({ id: "trace:req-1", kind: "trace", source: undefined, settledVia: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" }),
+    settlement({ id: "trace:req-1", kind: "trace", source: undefined, evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" }),
   ];
   const parsed = parseLoopSettlements(settlementsToArtifact(rows));
   assert.deepEqual(parsed, rows);
 });
 
-test("#1659: the reader is fail-closed — malformed rows are dropped, never repaired", () => {
+test("#1659: the evidence reader is fail-closed — malformed rows are dropped, never repaired", () => {
   assert.deepEqual(parseLoopSettlements(null), []);
   assert.deepEqual(parseLoopSettlements(undefined), []);
   assert.deepEqual(parseLoopSettlements("nope"), []);
   assert.deepEqual(parseLoopSettlements({ id: "obligation-1" }), []);
   // Each malformed row drops WHOLE; its neighbors keep. A receipt id that
-  // does not match the shared `call-<n>` scheme drops the row too — a
-  // record naming ids the artifact's own trace cannot contain is never
-  // trusted.
+  // does not match the shared `call-<n>` scheme drops the row (the id↔trace
+  // existence check is a write-time guarantee: the loop records ids from the
+  // same counter that numbers the persisted trace). The retired semantic
+  // vocabulary (`discharged`) is not evidence state and is rejected too.
   assert.deepEqual(
     parseLoopSettlements([
       null,
       {},
       settlement({ id: "" }),
       { ...settlementsToArtifact([settlement()])[0]!, kind: "invented-kind" },
-      { ...settlementsToArtifact([settlement()])[0]!, settled_via: "settled-clean" },
+      { ...settlementsToArtifact([settlement()])[0]!, evidence_state: "discharged" },
       { ...settlementsToArtifact([settlement()])[0]!, successful_attempt: "yes" },
       { ...settlementsToArtifact([settlement()])[0]!, admitted_by: ["call-1", 7] },
       { ...settlementsToArtifact([settlement()])[0]!, admitted_by: ["nonsense"] },
@@ -118,12 +140,53 @@ test("#1659: the reader is fail-closed — malformed rows are dropped, never rep
     ]),
     [settlement()],
   );
+  // The drop count is reported, so a corrupted record is never silent.
+  const report = parseLoopSettlementsReport([
+    { ...settlementsToArtifact([settlement()])[0]!, kind: "invented-kind" },
+    settlementsToArtifact([settlement()])[0],
+  ]);
+  assert.deepEqual(report, { rows: [settlement()], dropped: 1 });
+  assert.deepEqual(parseLoopSettlementsReport(undefined), { rows: [], dropped: 0 });
+});
+
+test("#1659: the final record carries the semantic state through its own strict reader", () => {
+  const rows: FinalSettlementRow[] = [
+    final({ semantic: "unknown" }),
+    final({ id: "provenance", kind: "dependency", source: undefined, semantic: "not-tracked" }),
+    final({ id: "obligation-2", semantic: "resolved" }),
+  ];
+  const artifact = finalSettlementsToArtifact(rows);
+  assert.deepEqual(parseFinalSettlements(artifact), rows);
+  // A missing/invented semantic state drops the row (the loop reader alone
+  // cannot stand in for the post-verdict record).
+  assert.deepEqual(
+    parseFinalSettlements([
+      { ...artifact[0]!, semantic: "settled-clean" },
+      { ...artifact[1]!, semantic: undefined },
+      artifact[2],
+    ]),
+    [rows[2]],
+  );
+});
+
+test("#1659: one receipt may support several questions — the record never allocates", () => {
+  // #1657 removed the one-call-per-row allocator: receipts are shareable
+  // evidence, not consumable tokens. Two rows admitted by the same executed
+  // call both keep that receipt through the strict reader.
+  const rows: LoopEvidenceSettlement[] = [
+    settlement({ id: "obligation-1", admittedBy: ["call-1"], successfulBy: ["call-1"] }),
+    settlement({ id: "obligation-2", admittedBy: ["call-1"], successfulBy: ["call-1"] }),
+  ];
+  assert.deepEqual(
+    parseLoopSettlements(settlementsToArtifact(rows)).map((row) => [row.id, row.admittedBy]),
+    [["obligation-1", ["call-1"]], ["obligation-2", ["call-1"]]],
+  );
 });
 
 test("#1659: the persisted record rides the telemetry budget block and reads back", () => {
   // The raw `tool_loop_meta` is consumed at write time; the artifact's
   // telemetry budget block is the persisted surface the engine reads.
-  const rows = [settlement(), settlement({ id: "security_advisory", kind: "dependency", source: undefined, settledVia: "cap-released", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })];
+  const rows = [settlement(), settlement({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })];
   const telemetry = buildToolLoopTelemetry({
     tool_loop_meta: { required_evidence_settlements: settlementsToArtifact(rows) },
   } as unknown as Parameters<typeof buildToolLoopTelemetry>[0]) as { budget: Record<string, unknown> } | null;
@@ -139,16 +202,55 @@ test("#1659: the persisted record rides the telemetry budget block and reads bac
 });
 
 // ---------------------------------------------------------------------------
-// the loop side: the record is written on every exit path.
+// the reconciliation: evidence state joined with the fold's semantic outcome.
 // ---------------------------------------------------------------------------
 
-test("#1659: a settled stop records discharged rows with their admitting call receipts", async () => {
+test("#1659: reconciliation derives the semantic state from the fold, never from admission", () => {
+  const rows = [
+    settlement({ id: "obligation-1" }),
+    settlement({ id: "obligation-2" }),
+    settlement({ id: "obligation-3" }),
+    settlement({ id: "provenance", kind: "dependency", source: undefined }),
+    settlement({ id: "release_delta", kind: "dependency", source: undefined, evidenceState: "open", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    settlement({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+  ];
+  const reconciled = reconcileSettlements(rows, [
+    { id: "obligation-1", status: "satisfied" },
+    { id: "obligation-2", status: "unmet" },
+    { id: "obligation-3", status: "unresolved" },
+  ]);
+  assert.deepEqual(reconciled.map((row) => [row.id, row.semantic]), [
+    // A successful admitted call is NOT a semantic resolution.
+    ["obligation-1", "resolved"],
+    ["obligation-2", "finding"],
+    ["obligation-3", "unknown"],
+    // An objective shape row the loop merely acquired evidence for is the
+    // required-check fold's business, not this record's semantics.
+    ["provenance", "not-tracked"],
+    // A row the loop never settled can never read as clean.
+    ["release_delta", "unknown"],
+    // A cap/budget release is never a semantic settlement.
+    ["security_advisory", "unknown"],
+  ]);
+  // The fold still wins when it does have an outcome.
+  assert.equal(
+    reconcileSettlements([settlement({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released" })], [{ id: "security_advisory", status: "satisfied" }])[0]!.semantic,
+    "resolved",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// the loop side: the evidence record is written on every exit path.
+// ---------------------------------------------------------------------------
+
+test("#1659: a settled stop records acquired rows with their admitting call receipts", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // Both dependency rows are discharged by admitted, successful calls
-  // (the provenance fetch credits provenance, the releases fetch
-  // release_delta) — the settled stop fires and the record carries each
-  // row's receipt.
+  // Both dependency rows are admitted by successful calls (the provenance
+  // fetch credits provenance, the releases fetch release_delta) — the
+  // evidence-ready stop fires and the record carries each row's receipt.
+  // `acquired` is acquisition bookkeeping: the semantic outcome is joined
+  // after the verdict.
   const { postFn, executeFn } = recordingLoop([
     openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
     openAiCall("c2", "web_fetch", '{"url":"https://upstream.test/releases"}'),
@@ -163,20 +265,20 @@ test("#1659: a settled stop records discharged rows with their admitting call re
   });
   assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
   assert.deepEqual(outcome.requiredEvidenceSettlements, [
-    { id: "provenance", kind: "dependency", materiality: "material", settledVia: "discharged", successfulAttempt: true, admittedBy: ["call-1"], successfulBy: ["call-1"], acquisition: "available" },
-    { id: "release_delta", kind: "dependency", materiality: "material", settledVia: "discharged", successfulAttempt: true, admittedBy: ["call-2"], successfulBy: ["call-2"], acquisition: "available" },
+    { id: "provenance", kind: "dependency", materiality: "material", evidenceState: "acquired", successfulAttempt: true, admittedBy: ["call-1"], successfulBy: ["call-1"], acquisition: "available" },
+    { id: "release_delta", kind: "dependency", materiality: "material", evidenceState: "acquired", successfulAttempt: true, admittedBy: ["call-2"], successfulBy: ["call-2"], acquisition: "available" },
   ]);
 });
 
-test("#1659: a cap-released row is recorded as `cap-released`, never discharged", async () => {
+test("#1659: a cap-released row is recorded as `cap-released`, never acquired", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
   // The #1379 no-lockout shape: one pre-window read, then three gated
   // evidence fetches of unattributed hosts on budget 4/reserve 3. Nothing
   // is admitted to any row, the attempts cap fires, and the window
   // releases — the record says `cap-released` (the budget release it is,
-  // never a semantic settlement) with acquisition `unavailable` (the
-  // successful fetches admitted to no row).
+  // never a settlement) with acquisition `unavailable` (the successful
+  // fetches admitted to no row).
   const { postFn, executeFn } = recordingLoop([
     openAiCall("c1", "read_file", '{"path":"a.ts"}'),
     openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
@@ -194,7 +296,7 @@ test("#1659: a cap-released row is recorded as `cap-released`, never discharged"
   assert.deepEqual(outcome.requiredEvidenceCredits, []);
   assert.equal(outcome.requiredEvidenceWindowAttempts, 3);
   for (const row of outcome.requiredEvidenceSettlements) {
-    assert.equal(row.settledVia, "cap-released");
+    assert.equal(row.evidenceState, "cap-released");
     assert.equal(row.kind, "dependency");
     assert.equal(row.materiality, "material");
     assert.equal(row.successfulAttempt, false);
@@ -204,28 +306,12 @@ test("#1659: a cap-released row is recorded as `cap-released`, never discharged"
   }
 });
 
-test("#1659: one receipt may support several questions — the record never allocates", () => {
-  // #1657 removed the one-call-per-row allocator: receipts are shareable
-  // evidence, not consumable tokens. Two rows admitted by the same executed
-  // call both keep that receipt through the strict reader.
-  const rows: LoopEvidenceSettlement[] = [
-    settlement({ id: "obligation-1", admittedBy: ["call-1"], successfulBy: ["call-1"] }),
-    settlement({ id: "obligation-2", admittedBy: ["call-1"], successfulBy: ["call-1"] }),
-  ];
-  assert.deepEqual(
-    parseLoopSettlements(settlementsToArtifact(rows)).map((row) => [row.id, row.admittedBy]),
-    [["obligation-1", ["call-1"]], ["obligation-2", ["call-1"]]],
-  );
-});
-
-test("#1659: a row discharged by a FAILED admitted attempt records acquisition `failed` (the #1627 M1 shape)", async () => {
+test("#1659: a row admitted by a FAILED attempt records acquisition `failed` (the #1627 M1 shape)", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // A dependency row's admission discharges it executor-status-agnostically
-  // (an attempt is the discharge), so the record must expose the shape the
-  // M1 stranding guard suppresses the settled stop for: a discharged row
-  // whose every admitted attempt failed — never readable as "evidence
-  // available".
+  // A dependency row's admission covers it regardless of executor status, so
+  // the record must expose the M1 stranding shape: acquired evidence whose
+  // every admitted attempt failed — never readable as "evidence available".
   const { postFn, executeFn } = recordingLoop([
     openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
     openAiText("done"),
@@ -240,7 +326,7 @@ test("#1659: a row discharged by a FAILED admitted attempt records acquisition `
   });
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance"]);
   const row = outcome.requiredEvidenceSettlements[0]!;
-  assert.equal(row.settledVia, "discharged");
+  assert.equal(row.evidenceState, "acquired");
   assert.equal(row.successfulAttempt, false);
   assert.deepEqual(row.admittedBy, ["call-1"]);
   assert.deepEqual(row.successfulBy, []);
@@ -266,7 +352,7 @@ test("#1659: a budget/rounds stop records rows the loop never settled as `open` 
   assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
   assert.equal(outcome.requiredEvidenceSettlements.length, 3);
   for (const row of outcome.requiredEvidenceSettlements) {
-    assert.equal(row.settledVia, "open");
+    assert.equal(row.evidenceState, "open");
     assert.equal(row.successfulAttempt, false);
     assert.deepEqual(row.admittedBy, []);
     assert.deepEqual(row.successfulBy, []);
@@ -274,12 +360,33 @@ test("#1659: a budget/rounds stop records rows the loop never settled as `open` 
   }
 });
 
+test("#1659: a row seeded by the #1145 continuation records `truncated` acquisition, never `unavailable`", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The prior loop already acquired this row; this loop holds no admitting
+  // call id for it. `acquired` + `truncated` says exactly that — the old
+  // `acquired` + `unavailable` pairing contradicted itself.
+  const responses = [openAiCall("c1", "read_file", '{"path":"a.ts"}'), openAiText("done")];
+  const { postFn, executeFn } = recordingLoop(responses);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 4, 120),
+    reserveForRequiredEvidence: 1,
+    requiredEvidence: depRows(1),
+    requiredEvidenceCredits: ["provenance"],
+    timeFn: recordingTime(),
+  });
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((row) => [row.id, row.evidenceState, row.acquisition, row.admittedBy]), [
+    ["provenance", "acquired", "truncated", []],
+  ]);
+});
+
 test("#1659: a prose row's record derives materiality from its obligation source", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // The must_check row discharges on its admitted read; the guidance row is
-  // never targeted and stays open. Provenance only: the discharge does not
-  // claim the question is semantically settled.
+  // The must_check row is acquired on its admitted read; the guidance row is
+  // never targeted and stays open.
   const { postFn, executeFn } = recordingLoop([
     openAiCall("c1", "read_file", '{"path":"docs/talos-matrix.md"}'),
     openAiText("done"),
@@ -296,16 +403,16 @@ test("#1659: a prose row's record derives materiality from its obligation source
     timeFn: recordingTime(),
   });
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
-  assert.deepEqual(outcome.requiredEvidenceSettlements.map((row) => [row.id, row.kind, row.materiality, row.settledVia, row.acquisition]), [
-    ["obligation-1", "prose", "material", "discharged", "available"],
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((row) => [row.id, row.kind, row.materiality, row.evidenceState, row.acquisition]), [
+    ["obligation-1", "prose", "material", "acquired", "available"],
     ["obligation-2", "prose", "advisory", "open", "unavailable"],
   ]);
 });
 
 // ---------------------------------------------------------------------------
-// the disposition consumes the record (#1659 acceptance: a cap-released
-// material auth/security question becomes INCOMPLETE/material-unknown, never
-// "settled clean"; a cap-released non-material advisory does not veto).
+// the disposition consumes the reconciled record. A cap-released material
+// question is a material unknown; a cap-released advisory never vetoes; an
+// acquired-but-unresolved question is covered once by the existing fold.
 // ---------------------------------------------------------------------------
 
 function dispositionParts(overrides: Partial<Parameters<typeof buildDispositionEvidence>[0]> = {}) {
@@ -328,8 +435,8 @@ function dispositionParts(overrides: Partial<Parameters<typeof buildDispositionE
 
 test("#1659: a cap-released MATERIAL question is a material unknown even when everything else is clean", () => {
   const build = buildDispositionEvidence(dispositionParts({
-    loopSettlements: [
-      settlement({ id: "security_advisory", kind: "dependency", source: undefined, settledVia: "cap-released", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    finalSettlements: [
+      final({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released", semantic: "unknown", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
     ],
   }));
   assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "material"]]);
@@ -355,8 +462,8 @@ test("#1659: a cap-released MATERIAL question is a material unknown even when ev
 
 test("#1659: a cap-released ADVISORY question never vetoes the approval", () => {
   const build = buildDispositionEvidence(dispositionParts({
-    loopSettlements: [
-      settlement({ id: "obligation-9", source: "trusted_base_guidance", materiality: "advisory", settledVia: "cap-released", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    finalSettlements: [
+      final({ id: "obligation-9", source: "trusted_base_guidance", materiality: "advisory", evidenceState: "cap-released", semantic: "unknown", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
     ],
   }));
   assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "advisory"]]);
@@ -377,34 +484,199 @@ test("#1659: a cap-released ADVISORY question never vetoes the approval", () => 
   assert.equal(disposition.kind, "approve");
 });
 
-test("#1659: a cap-released row the fold resolved satisfied feeds nothing, and trace-kind rows stay with #1658's trace settlement", () => {
+test("#1659: a resolved/cap-released row the fold credited feeds nothing, and trace rows stay with #1658", () => {
+  const satisfied = { id: "obligation-1", source: "must_check" as const, text: "check the bump", status: "satisfied" as const, cause: null, reason: "ok" as const };
   assert.deepEqual(
     buildDispositionEvidence(dispositionParts({
-      obligations: [
-        { id: "obligation-1", source: "must_check", text: "check the bump", status: "satisfied", cause: null, reason: "ok" },
-      ],
-      loopSettlements: [settlement({ settledVia: "cap-released" })],
+      obligations: [satisfied],
+      finalSettlements: [final({ evidenceState: "cap-released", semantic: "resolved" })],
     })).evidence,
     [],
   );
   // The trace's disposition settlement is the #1658 provenance summary's
-  // job; the loop record never adds a second entry for it.
+  // job; the record never adds a second entry for it.
   assert.deepEqual(
     buildDispositionEvidence(dispositionParts({
-      loopSettlements: [settlement({ id: "trace:req-1", kind: "trace", source: undefined, settledVia: "cap-released" })],
+      finalSettlements: [final({ id: "trace:req-1", kind: "trace", source: undefined, evidenceState: "cap-released", semantic: "unknown" })],
     })).evidence,
     [],
   );
-  // A discharged/open row contributes nothing either: discharged is the
-  // loop's terminal state (provenance only), and open is already covered by
-  // the fold evidence above — one question, one evidence entry.
+  // An acquired row whose fold is still unresolved is disclosed ONCE by the
+  // completeness fold; the reconciled record must not duplicate it.
+  const unresolved = { ...satisfied, status: "unresolved" as const };
+  const build = buildDispositionEvidence(dispositionParts({
+    obligations: [unresolved],
+    completenessChecks: [{ check: "check the bump", status: "unresolved", reason: "receipt-absent", row_class: "objective" }],
+    finalSettlements: [final({ semantic: "unknown" })],
+  }));
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.subject]), [["mandatory_requirement_unresolved", "check the bump"]]);
+});
+
+test("#1659: a dependency shape row the fold resolved is never re-disclosed, and no receipt id is required", () => {
+  // Regression (review round): the disposition used to skip cap-released rows
+  // by matching `settlement.id` against `obligations[].id`. Dependency shape
+  // row ids are obligation NAMES (`provenance`), never `obligation-<n>`, so
+  // that skip was dead and a proven-satisfied review could carry a spurious
+  // material unknown. The semantic state now comes from the fold itself.
+  const shapeRow = final({
+    id: "provenance",
+    kind: "dependency",
+    source: undefined,
+    evidenceState: "cap-released",
+    successfulAttempt: false,
+    admittedBy: [],
+    acquisition: "unavailable",
+  });
+  const reconciled = reconcileSettlements([shapeRow], [{ id: "provenance", status: "satisfied" }]);
+  assert.equal(reconciled[0]!.semantic, "resolved");
   assert.deepEqual(
-    buildDispositionEvidence(dispositionParts({
-      loopSettlements: [
-        settlement(),
-        settlement({ id: "obligation-2", settledVia: "open", successfulAttempt: false, admittedBy: [], acquisition: "unavailable" }),
+    buildDispositionEvidence(dispositionParts({ finalSettlements: reconciled })).evidence,
+    [],
+  );
+  // Counterpart: the SAME row with an unrelated satisfied must_check row keeps
+  // its material unknown — a cap-released dependency question was never
+  // answered, whatever else the review proved.
+  const stillUnknown = reconcileSettlements(
+    [shapeRow],
+    [{ id: "obligation-1", status: "satisfied" }],
+  );
+  assert.equal(stillUnknown[0]!.semantic, "unknown");
+  assert.deepEqual(
+    buildDispositionEvidence(dispositionParts({ finalSettlements: stillUnknown })).evidence
+      .map((entry) => [entry.code, entry.materiality]),
+    [["investigation_unavailable", "material"]],
+  );
+});
+
+test("#1659: a corrupted persisted record is a material unknown, never 'no gaps'", () => {
+  const build = buildDispositionEvidence(dispositionParts({ settlementRecordDroppedRows: 2 }));
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "material"]]);
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: build.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  });
+  assert.equal(disposition.kind, "incomplete");
+  // A clean record (0 / absent) discloses nothing.
+  assert.deepEqual(buildDispositionEvidence(dispositionParts({ settlementRecordDroppedRows: 0 })).evidence, []);
+});
+
+test("#1659: the harness telemetry → engine reader → reconciliation join keeps rows and counts drops", () => {
+  // The join the unit tests used to miss: the harness artifact's telemetry
+  // budget block is the surface `persistedLoopSettlements` reads.
+  const rows = [
+    settlement({ id: "obligation-1", evidenceState: "cap-released", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" }),
+  ];
+  const telemetry = buildToolLoopTelemetry({
+    tool_loop_meta: {
+      required_evidence_settlements: [
+        ...settlementsToArtifact(rows),
+        { ...settlementsToArtifact([settlement()])[0]!, kind: "invented-kind" },
       ],
-    })).evidence,
-    [],
-  );
+    },
+  } as unknown as Parameters<typeof buildToolLoopTelemetry>[0]);
+  const read = persistedLoopSettlements({ tool_loop_telemetry: telemetry });
+  assert.deepEqual(read.settlements, rows);
+  assert.equal(read.dropped, 1);
+  // Absent telemetry/budget is the legacy shape: nothing, and no false drop.
+  assert.deepEqual(persistedLoopSettlements(null), { settlements: [], dropped: 0 });
+  assert.deepEqual(persistedLoopSettlements({}), { settlements: [], dropped: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// end-to-end: loop record -> post-verdict record -> disposition/native event.
+//
+// The acceptance shape: a successful admitted call acquires the evidence, but
+// the verdict leaves the question unanswered. The loop record must say
+// `acquired` (evidence ready, never a clean settlement), the reconciled
+// record must say `unknown`, and the final disposition + shared review result
+// (the handoff/marker/native-event projection) must withhold. The control
+// pair resolves the same question and approves.
+// ---------------------------------------------------------------------------
+
+test("#1659 end-to-end: successful admission + a missing semantic disposition withholds; the resolved control approves", async () => {
+  const question = "verify the dependency bump against package-lock.json";
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"package-lock.json"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 6, 120),
+    reserveForRequiredEvidence: 1,
+    // #1657: must_check rows with tokens enter the loop as prose rows.
+    requiredEvidence: [{ id: "obligation-1", tokens: ["package-lock", "bump"], source: "must_check" }],
+    timeFn: recordingTime(),
+  });
+  // The loop is evidence-ready; it never claims a semantic settlement.
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((row) => [row.id, row.evidenceState, row.successfulAttempt]), [
+    ["obligation-1", "acquired", true],
+  ]);
+
+  const obligation = { id: "obligation-1", source: "must_check" as const, text: question, status: "unresolved" as const, cause: null, reason: "receipt-absent" as const };
+  const completeness = [{ check: question, status: "unresolved", reason: "receipt-absent", row_class: "objective" }];
+
+  // Repro: acquired evidence, no semantic answer.
+  const missing = reconcileSettlements(outcome.requiredEvidenceSettlements, [{ id: "obligation-1", status: "unresolved" }]);
+  assert.deepEqual(missing.map((row) => [row.evidenceState, row.semantic]), [["acquired", "unknown"]]);
+  const missingBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [obligation],
+    completenessChecks: completeness,
+    finalSettlements: missing,
+  }));
+  const missingDisposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: missingBuild.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: missingBuild.evidence,
+  });
+  assert.equal(missingDisposition.kind, "incomplete");
+  // The handoff, the marker's review_result and the native event all project
+  // THIS disposition: they agree with the loop/final record by construction.
+  assert.equal(reviewResultFromDisposition(missingDisposition, { strict: true, openFindings: 0 }), "partial");
+
+  // Control: the same acquired evidence, adequately resolved by the verdict.
+  const resolved = reconcileSettlements(outcome.requiredEvidenceSettlements, [{ id: "obligation-1", status: "satisfied" }]);
+  assert.deepEqual(resolved.map((row) => [row.evidenceState, row.semantic]), [["acquired", "resolved"]]);
+  const resolvedBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [{ ...obligation, status: "satisfied" }],
+    completenessChecks: [{ check: question, status: "satisfied", reason: "ok", row_class: "objective" }],
+    finalSettlements: resolved,
+  }));
+  const resolvedDisposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: resolvedBuild.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: resolvedBuild.evidence,
+  });
+  assert.equal(resolvedDisposition.kind, "approve");
+  assert.equal(reviewResultFromDisposition(resolvedDisposition, { strict: true, openFindings: 0 }), "clean");
 });

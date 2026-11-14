@@ -850,24 +850,27 @@ export interface LoopOutcome {
   requiredEvidenceReleased: boolean;
   /** #1627: whether the deterministic `obligations-settled` early stop
    * fired — the obligation surface was active at some point this run and
-   * every tracked row settled (discharged or cap-released) with budget
-   * still unspent. False for a run with no obligation surface, a run whose
-   * rows never all settled, and every other stop reason. */
+   * every tracked row settled its EVIDENCE window (acquired or cap-released)
+   * with budget still unspent. This is an evidence-ready stop, never a claim
+   * that the questions were answered cleanly; the semantic outcome is
+   * reconciled after the verdict. False for a run with no obligation
+   * surface, a run whose rows never all settled, and every other stop
+   * reason. */
   requiredEvidenceSettledStop: boolean;
   /**
-   * #1659: the canonical per-row evidence-settlement record — the ONE
-   * settlement vocabulary shared with final publication completeness. One
-   * row per tracked question: identity, kind/materiality, the loop-side
-   * terminal state (`discharged` is the only state finalization recognizes
-   * as a loop settlement; `cap-released` is a budget release, never a
-   * semantic settlement; `open` means the loop stopped before the row
-   * settled), whether any admitted executed call succeeded, the admitting
-   * call ids (objective provenance, the shared `call-<n>` scheme), and the
-   * evidence acquisition state. Written on EVERY exit path, next to the
-   * run-wide counters above. Receipts never certify a semantic resolution
-   * (#1657's receipts-are-provenance boundary): they stop the loop's own
-   * settlement state from being lost between loop → verdict → fallback →
-   * finalization. The harness persists it as
+   * #1659: the canonical per-row evidence-settlement record — ONE
+   * vocabulary shared with final publication completeness. One row per
+   * tracked question: identity, kind/materiality, the loop-side EVIDENCE
+   * state (`acquired` = the window covered the row, `cap-released` = a
+   * budget release, `open` = the loop stopped before settlement — none of
+   * these is a semantic conclusion), whether any admitted executed call
+   * succeeded, the admitting call ids (objective provenance, the shared
+   * `call-<n>` scheme), and the evidence acquisition state. Written on
+   * EVERY exit path, next to the run-wide counters above; the post-verdict
+   * SEMANTIC state is joined onto it by `reconcileSettlements`. Receipts
+   * never certify a semantic resolution (#1657's receipts-are-provenance
+   * boundary): they stop the loop's own state from being lost between
+   * loop → verdict → fallback → finalization. The harness persists it as
    * `required_evidence_settlements` in the telemetry budget block. */
   requiredEvidenceSettlements: LoopEvidenceSettlement[];
 }
@@ -2007,25 +2010,28 @@ export async function driveToolLoop(
   outcome.requiredEvidenceAttempts = evidenceAttempts;
   outcome.requiredEvidenceWindowAttempts = windowEvidenceAttempts;
   outcome.requiredEvidenceReleased = reserve <= 0 || !hasActiveRow();
-  // #1659: the canonical per-row settlement record — written on every exit
-  // path next to the run-wide counters, so finalization consumes the loop's
-  // own terminal state instead of re-deriving it. `discharged` is the only
-  // state finalization recognizes as a loop settlement; a shape row's
-  // cap-release is recorded as `cap-released` (a budget release, NEVER a
-  // semantic settlement — #1659's acceptance makes a cap-released material
-  // question a material unknown downstream); a row the loop stopped before
-  // settling is `open`. The acquisition state distinguishes evidence the run
-  // actually got (`available`) from attempts that all failed (`failed`) and
-  // evidence the run never got to attempt (`unavailable` — refused or
-  // unattempted), so a provider failure before meaningful evidence is never
-  // misread as a completed review. Provenance only: `successfulAttempt`
-  // says a call succeeded, never that the question is semantically settled.
+  // #1659: the canonical per-row evidence record — written on every exit
+  // path next to the run-wide counters. `acquired` means the loop's
+  // admission window covered the row (EVIDENCE ready, not a semantic
+  // conclusion); a shape row's cap-release is recorded as `cap-released` (a
+  // budget release, NEVER a settlement — #1659's acceptance makes a
+  // cap-released material question a material unknown downstream); a row the
+  // loop stopped before settling is `open`. The acquisition state
+  // distinguishes evidence the run actually got (`available`) from attempts
+  // that all failed (`failed`) and evidence the run never got to attempt
+  // (`unavailable` — refused or unattempted), so a provider failure before
+  // meaningful evidence is never misread as a completed review. The SEMANTIC
+  // state is reconciled onto this record after the verdict
+  // (`reconcileSettlements`).
   outcome.requiredEvidenceSettlements = pendingRows.map((row) => {
     const admittedBy = rowAdmittingCalls.get(row.id) ?? [];
     const successfulBy = rowSuccessfulCalls.get(row.id) ?? [];
     const successfulAttempt = rowSuccessfulAttempt.has(row.id);
-    const settledVia = discharged.has(row.id)
-      ? "discharged"
+    // EVIDENCE state only — `acquired` means the loop's admission
+    // bookkeeping covered the row; the SEMANTIC outcome is reconciled after
+    // the verdict (`reconcileSettlements`) and never asserted here.
+    const evidenceState = discharged.has(row.id)
+      ? "acquired"
       : row.obligation !== undefined && windowEvidenceAttempts >= attemptsCap
       ? "cap-released"
       : "open";
@@ -2033,6 +2039,11 @@ export async function driveToolLoop(
       ? "available"
       : admittedBy.length > 0
       ? "failed"
+      // A #1145 continuation seeds a row the prior loop already acquired: the
+      // evidence exists but this loop holds no admitting call id for it, so
+      // the record says `truncated` — never `unavailable`.
+      : seededDischarged.has(row.id)
+      ? "truncated"
       : "unavailable";
     return {
       id: row.id,
@@ -2045,7 +2056,7 @@ export async function driveToolLoop(
         ? "advisory"
         : "material",
       ...(row.source !== undefined ? { source: row.source } : {}),
-      settledVia,
+      evidenceState,
       successfulAttempt,
       admittedBy,
       successfulBy,

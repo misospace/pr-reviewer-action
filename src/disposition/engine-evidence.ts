@@ -38,7 +38,7 @@
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
-import type { LoopEvidenceSettlement } from "../enforcement/settlement.js";
+import type { FinalSettlementRow } from "../enforcement/settlement.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
@@ -100,17 +100,24 @@ export interface DispositionEvidenceParts {
    * conclusion withholds (#1656 audit delta: never a blanket rule). */
   ciEvidenceContractActive: boolean;
   /**
-   * #1659: the canonical per-row evidence-settlement record the native loop
-   * persisted in the harness artifact's telemetry budget block
-   * (`tool_loop_telemetry.budget.required_evidence_settlements`), parsed
-   * fail-closed. Empty for legacy artifacts and every non-native path — the
-   * pre-#1659 behavior. Objective provenance only: the record never
-   * certifies a semantic resolution by itself (the #1657 boundary). It stops
-   * the loop's settlement state from being lost between loop → verdict →
-   * fallback → finalization, so a cap/budget release is disclosed as an
-   * unknown instead of reading as completed.
+   * #1659: the canonical post-verdict settlement rows — the native loop's
+   * evidence state (`acquired`/`cap-released`/`open`) JOINED with the fold's
+   * semantic outcome (`resolved`/`finding`/`unknown`/`not-tracked`) by
+   * `reconcileSettlements` over the SAME `obligations` above. Persisted in
+   * `review-coverage.json`; absent for legacy artifacts and every non-native
+   * path (the pre-#1659 behavior). Objective provenance only: a successful
+   * call never certifies a semantic resolution (#1657), and a cap/budget
+   * release is never a clean settlement. The record adds the ONE
+   * disclosure the folds cannot represent — a cap-released material question
+   * as MATERIAL `investigation_unavailable` (advisory for non-material) — and
+   * never duplicates a question the folds already decided.
    */
-  loopSettlements?: ReadonlyArray<LoopEvidenceSettlement>;
+  finalSettlements?: ReadonlyArray<FinalSettlementRow>;
+  /** #1659: how many persisted settlement rows the strict reader refused
+   * (present-but-malformed record). Any drop is a MATERIAL
+   * `investigation_unavailable` disclosure, never silence. Absent/0 is the
+   * clean and the legacy shape alike. */
+  settlementRecordDroppedRows?: number;
 }
 
 /** The trusted #1657 row class of one completeness row, read from the
@@ -285,29 +292,47 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     evidence.push(dispositionEvidence("exact_head_evidence_unavailable", "deterministic", "material", "required ci pending"));
   }
 
-  // #1659: the loop's own settlement record. A cap/budget release is NOT a
-  // semantic settlement: a cap-released MATERIAL question becomes a named
-  // material unknown (`investigation_unavailable`) — never "settled clean" —
-  // and a cap-released ADVISORY question becomes an advisory entry that
-  // never vetoes the approval. Terminal (`discharged`) and `open` rows
-  // contribute nothing here: a discharged row is the loop's settled terminal
-  // state (provenance only — it never certifies the semantics, #1657), and
-  // an `open` row is already covered by the fold/completeness evidence
-  // above — one question yields one evidence entry. Trace-kind rows are
-  // skipped: the requirement trace settles by PROVENANCE (#1658) through the
-  // summary classes above, so the record must not double-count it.
-  const resolvedSatisfied = new Set(
-    parts.obligations.filter((o) => o.status === "satisfied").map((o) => o.id),
-  );
-  for (const settlement of parts.loopSettlements ?? []) {
-    if (settlement.settledVia !== "cap-released" || settlement.kind === "trace") continue;
-    if (resolvedSatisfied.has(settlement.id)) continue;
+  // #1659: the canonical post-verdict settlement rows. A cap/budget release
+  // is NOT a semantic settlement — the loop's `obligations-settled` stop only
+  // means the evidence window is ready — and the folds cannot see it, so a
+  // cap-released MATERIAL question becomes a named material unknown
+  // (`investigation_unavailable`) here, never "settled clean". A cap-released
+  // ADVISORY question becomes an advisory entry that never vetoes the
+  // approval. Every other semantic state is already carried by the folds
+  // below (`unknown` rows have their one completeness/obligation entry;
+  // `resolved`/`finding` carry no unknown; `not-tracked` objective shape rows
+  // are the required-check fold's business), so the record never duplicates a
+  // question. Trace-kind rows are skipped: the requirement trace settles by
+  // PROVENANCE (#1658) through the summary classes above. This join is what
+  // keeps the canonical record and the disposition from disagreeing — the
+  // semantic state is derived from these same fold outcomes.
+  for (const settlement of parts.finalSettlements ?? []) {
+    if (settlement.kind === "trace") continue;
+    if (settlement.semantic !== "unknown") continue;
+    if (settlement.evidenceState !== "cap-released") continue;
     evidence.push(
       dispositionEvidence(
         "investigation_unavailable",
         "deterministic",
         settlement.materiality,
         `cap-released unprovable: ${settlement.id}`,
+      ),
+    );
+  }
+
+  // #1659 review round: a persisted record the strict reader had to DROP rows
+  // from is not "no gaps" — the pre-#1659 failure was exactly a cap release
+  // reading as a clean settlement, and a stripped/corrupted record would
+  // reintroduce it. The count (never the raw content) is disclosed as a
+  // MATERIAL unknown, so the run withholds rather than certifying a review
+  // whose settlement evidence is unreadable.
+  if ((parts.settlementRecordDroppedRows ?? 0) > 0) {
+    evidence.push(
+      dispositionEvidence(
+        "investigation_unavailable",
+        "deterministic",
+        "material",
+        `malformed settlement rows dropped: ${parts.settlementRecordDroppedRows}`,
       ),
     );
   }

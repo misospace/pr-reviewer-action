@@ -3633,14 +3633,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // the loop stopped exploring because every tracked row had settled with
     // budget still unspent.
     required_evidence_settled_stop: outcome.requiredEvidenceSettledStop,
-    // #1659: the canonical per-row evidence-settlement record — the loop's
-    // own terminal state per tracked question, the ONE settlement vocabulary
-    // final publication completeness consumes (a cap-released material
-    // question becomes a material unknown downstream, never "settled clean";
-    // `open` distinguishes an unfinished review from a completed one).
-    // Provenance only: a `discharged` row never certifies a semantic
-    // resolution by itself (#1657). Written once per native-loop run, on
-    // every exit path, next to the run-wide counters above.
+    // #1659: the canonical per-row EVIDENCE record — the loop's own
+    // acquisition state per tracked question, persisted next to the run-wide
+    // counters above. `acquired` means the evidence window covered the row,
+    // not that the question was answered; the post-verdict SEMANTIC state is
+    // joined onto it by the engine's `reconcileSettlements`, which feeds the
+    // final disposition (a cap-released material question becomes a material
+    // unknown there, never "settled clean"). Provenance only: a successful
+    // call never certifies a semantic resolution by itself (#1657).
     required_evidence_settlements: settlementsToArtifact(outcome.requiredEvidenceSettlements),
     // #1595 (review): the scoped plan's first claim — the obligation window
     // was enforced from the loop's first request, not only the reserved tail.

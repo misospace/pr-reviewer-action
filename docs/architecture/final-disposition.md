@@ -115,17 +115,21 @@ settle a state:
 - a tool CAPABILITY failure (planning/execution error, every call failed)
   and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
   lane-independent — never a route/tier name) are MATERIAL;
-- #1659's canonical settlement record (the harness artifact's
-  `tool_loop_telemetry.budget.required_evidence_settlements`, written by
-  the native loop on every exit path) feeds the seam as PROVENANCE only:
-  the loop's per-row terminal state is disclosed, so a CAP-RELEASED
-  material question becomes a MATERIAL `investigation_unavailable`
-  unknown (never "settled clean"), a cap-released advisory question never
-  vetoes, and an unfinished review stays distinguishable from a
-  completed-but-incomplete one. The record never certifies a semantic
-  resolution by admission alone (#1657's receipts boundary) and never
-  overrides this disposition; trace-kind rows stay with #1658's
-  provenance settlement;
+- #1659's canonical per-question settlement record feeds the seam. Its two
+  dimensions are deliberately separate: the loop writes EVIDENCE state
+  (`acquired` / `cap-released` / `open` — the `obligations-settled` stop is
+  only evidence-ready, never proof of a clean settlement), and after the
+  verdict the engine reconciles each tracked question with the fold's
+  SEMANTIC outcome (`resolved` / `finding` / `unknown` / `not-tracked`) over
+  the SAME obligation rows this disposition consumes, so the record and the
+  disposition cannot disagree. A CAP-RELEASED material question becomes a
+  MATERIAL `investigation_unavailable` unknown (never "settled clean"), a
+  cap-released advisory question never vetoes, and every question the folds
+  already decided keeps its single entry — the record never duplicates it.
+  Admission alone never overrides this disposition, and trace-kind rows stay
+  with #1658's provenance settlement. A persisted record the strict reader
+  had to DROP rows from is itself a MATERIAL `investigation_unavailable`
+  unknown — a corrupted record can never read as "no gaps";
 - the exact-head CI floor reads the CI gate's already-paid conclusion — a
   KNOWN failure is always material, a PENDING one withholds only when the
   #1594 head-bound evidence contract proves CI materially required.
