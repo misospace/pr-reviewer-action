@@ -114,7 +114,7 @@ test("#1657: a failed or truncated acquisition is recorded, never credited", () 
       { tool: "read_file", args: { path: "src/config.yaml" }, status: "error" },
       { tool: "read_file", args: { path: "src/other.yaml" }, status: "ok" },
     ],
-    toolResults: [{ status: "error" }, { status: "ok", truncated: true }],
+    toolResults: [{ status: "error" }, { status: "ok", result: { content: "value: 1", truncated: true } }],
   });
   assert.equal(ledger.state, "valid");
   assert.equal(ledger.receipts[0]!.acquired, false);
@@ -182,9 +182,9 @@ test("#1657 (round 8): a malformed aligned result REFUSES the ledger — tool_ca
     [{ status: 42 }],
     [{ status: "" }],
     [{ status: "success" }],
-    [{ status: "ok", truncated: "false" }],
-    [{ status: "ok", truncated: {} }],
-    [{ status: "ok", truncated: null }],
+    [{ status: "ok", result: { truncated: "false" } }],
+    [{ status: "ok", result: { truncated: {} } }],
+    [{ status: "ok", result: { truncated: null } }],
   ]) {
     assert.equal(
       buildEvidenceLedger({ toolCalls: calls, toolResults: malformed, reviewedHeadSha: HEAD }).state,
@@ -192,6 +192,96 @@ test("#1657 (round 8): a malformed aligned result REFUSES the ledger — tool_ca
       JSON.stringify(malformed),
     );
   }
+  // Round-10 layering: the OUTER envelope carries no completeness flag in
+  // the production shape — an outer `truncated` is unknown and ignored.
+  // Completeness authority lives on the result payload, where production
+  // `executeToolRequest` actually reports its caps; reading the envelope
+  // layer alone once silently normalized production clipping to complete.
+  const outerIgnored = buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "src/config.yaml" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "value: 1" }, truncated: true }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(outerIgnored.state, "valid");
+  assert.equal(outerIgnored.receipts[0]!.complete, true);
+});
+
+test("#1657 (round 10): production envelope shape — nested payload truncated is the completeness authority", () => {
+  // The production executor record for a byte-capped git_grep: clipping is
+  // reported INSIDE the result payload. The receipt is acquired but never
+  // complete — never the round-9 behavior of normalizing it to complete
+  // because the envelope carries no flag.
+  const production = buildEvidenceLedger({
+    toolCalls: [{ tool: "git_grep", args: { pattern: "sanitize", path: "src/x.ts" }, status: "ok" }],
+    toolResults: [{ tool: "git_grep", status: "ok", result: { matches: ["src/x.ts:1:x"], truncated: true } }],
+  });
+  assert.equal(production.state, "valid");
+  assert.equal(production.receipts[0]!.acquired, true);
+  assert.equal(production.receipts[0]!.complete, false);
+  // Nested explicit false ⇒ complete receipt.
+  const clean = buildEvidenceLedger({
+    toolCalls: [{ tool: "git_grep", args: { pattern: "sanitize", path: "src/x.ts" }, status: "ok" }],
+    toolResults: [{ tool: "git_grep", status: "ok", result: { matches: ["src/x.ts:1:x"], truncated: false } }],
+  });
+  assert.equal(clean.receipts[0]!.acquired, true);
+  assert.equal(clean.receipts[0]!.complete, true);
+  // A malformed NESTED flag refuses the whole ledger, like a malformed
+  // executor status.
+  const malformed = buildEvidenceLedger({
+    toolCalls: [{ tool: "git_grep", args: { pattern: "sanitize", path: "src/x.ts" }, status: "ok" }],
+    toolResults: [{ tool: "git_grep", status: "ok", result: { matches: ["src/x.ts:1:x"], truncated: "false" } }],
+  });
+  assert.equal(malformed.state, "refused");
+  // A truncated production record can NEVER make a source-identity row
+  // receipt-backed — it settles receipt-unverified and stays material.
+  const identityRow = "verify the config surface in src/config.yaml";
+  const identityLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "git_grep", args: { pattern: "config", path: "src/config.yaml" }, status: "ok" }],
+    toolResults: [{ tool: "git_grep", status: "ok", result: { matches: ["src/config.yaml:1:x"], truncated: true } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.deepEqual(
+    [
+      evaluateRowEvidence(tag(identityRow, "objective", "source-identity"), identityRow, identityLedger).state,
+      evaluateRowEvidence(tag(identityRow, "objective", "source-identity"), identityRow, identityLedger).receipts,
+    ],
+    ["receipt-unverified", []],
+  );
+});
+
+test("#1657 (round 10): truncation survives the envelope for repo_contents, list_tree, and find_files", () => {
+  const clipped = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "repo_contents", args: { repo: "o/r", path: "src/app.ts" }, status: "ok" },
+      { tool: "list_tree", args: { path: "src" }, status: "ok" },
+      { tool: "find_files", args: { pattern: "*.ts" }, status: "ok" },
+    ],
+    toolResults: [
+      // Production repo_contents file read: `type` AND `truncated` are
+      // payload fields — the earlier envelope-layer read misclassified
+      // every production file read as discovery.
+      { tool: "repo_contents", status: "ok", result: { type: "file", path: "src/app.ts", content: "const x = 1;\n[truncated]", truncated: true } },
+      { tool: "list_tree", status: "ok", result: { entries: [{ name: "app.ts" }], total: 1, truncated: true } },
+      { tool: "find_files", status: "ok", result: { files: ["src/app.ts"], total: 42, truncated: true } },
+    ],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(clipped.state, "valid");
+  const [repo, tree, found] = clipped.receipts;
+  assert.equal(repo!.kind, "source-read");
+  assert.equal(repo!.capability, "content");
+  assert.equal(repo!.acquired, true);
+  assert.equal(repo!.complete, false);
+  assert.equal(tree!.complete, false);
+  assert.equal(found!.complete, false);
+  // Untruncated production file read stays a complete content receipt.
+  const fullRead = buildEvidenceLedger({
+    toolCalls: [{ tool: "repo_contents", args: { repo: "o/r", path: "src/app.ts" }, status: "ok" }],
+    toolResults: [{ tool: "repo_contents", status: "ok", result: { type: "file", path: "src/app.ts", content: "const x = 1;\n", truncated: false } }],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(fullRead.receipts[0]!.kind, "source-read");
+  assert.equal(fullRead.receipts[0]!.complete, true);
 });
 
 test("#1657 (round 8): the aligned RESULT is the acquisition authority — a valid ok result is usable, and a call claiming ok with a result saying error is a VALID unacquired receipt", () => {
@@ -358,7 +448,7 @@ test("#1657 (round 2): a failed or truncated matching acquisition stays receipt-
   assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", failed).state, "receipt-unverified");
   const truncated = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
-    toolResults: [{ status: "ok", truncated: true }],
+    toolResults: [{ status: "ok", result: { content: "compare v4.17.15...v4.17.21", truncated: true } }],
   });
   assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", truncated).state, "receipt-unverified");
 });

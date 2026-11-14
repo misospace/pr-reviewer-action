@@ -313,11 +313,20 @@ The rules this buys, and their limits:
   The aligned executor result is validated BEFORE any receipt is built and
   is the acquisition authority: a malformed envelope (missing entry,
   null/primitive/array, a missing `status` or one outside the executor's
-  closed `ok`/`error` vocabulary, a malformed `truncated` flag) refuses the
-  ledger rather than letting `tool_calls.status` — a harness display mirror
-  — manufacture an `acquired` receipt. A valid result saying `error` beside
-  a call claiming `ok` is evidence state, not a refusal: the receipt stays
-  recorded and unacquired.
+  closed `ok`/`error` vocabulary, or a present-but-malformed `truncated`
+  flag) refuses the ledger rather than letting `tool_calls.status` — a
+  harness display mirror — manufacture an `acquired` receipt. A valid result
+  saying `error` beside a call claiming `ok` is evidence state, not a
+  refusal: the receipt stays recorded and unacquired. Completeness is a
+  SEPARATE authority read where production reports it: `executeToolRequest`
+  nests every tool's fields under the envelope's `result` and records each
+  output clip (mask/byte caps, the web-fetch body slice, the
+  process-capture flags) as `truncated` on that PAYLOAD. The receipts layer
+  reads the nested flag — an envelope-level `truncated` is unknown and
+  ignored — and a malformed nested flag refuses the ledger like a malformed
+  status. Correspondingly the executor boundary must report every clip it
+  performs into the payload; receipt layers never guess completeness from
+  output size.
 - **Receipts are shareable evidence, not consumable tokens.** One genuine
   acquisition may support any number of conclusions; there is no allocation
   and no per-row consumption. A receipt that carries none of a row's

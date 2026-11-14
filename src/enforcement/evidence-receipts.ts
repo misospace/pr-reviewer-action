@@ -469,7 +469,10 @@ export function evidenceTagFor(check: string, index: Map<string, CheckEvidenceTa
 // ---------------------------------------------------------------------------
 
 /** The validated executor result envelope of one trace call (index-aligned
- * `tool_results`). */
+ * `tool_results`). `ok` comes from the envelope `status` (acquisition
+ * authority); `truncated` is the completeness authority ORed across every
+ * layer that reported clipping — production `executeToolRequest` reports
+ * caps on the result PAYLOAD, never on the envelope. */
 interface TraceResultRecord {
   ok: boolean;
   truncated: boolean;
@@ -482,25 +485,50 @@ interface TraceResultRecord {
 const TRACE_RESULT_STATUSES: ReadonlySet<string> = new Set(["ok", "error"]);
 
 /**
- * Validate the aligned executor result for one trace call BEFORE any receipt
- * is constructed. The result envelope is the acquisition authority: a record
- * this runtime cannot read must REFUSE the whole ledger (`null`), never
+ * Validate the aligned executor result of one trace call BEFORE any receipt
+ * is constructed. The result envelope is the ACQUISITION authority: a record
+ * the runtime cannot read must REFUSE the whole ledger (`null`), never
  * manufacture acquisition state from the call trace. `tool_calls.status` is
- * only a display mirror the harness derives from this envelope with a silent
+ * only the display mirror the harness derives from the envelope with a silent
  * error fallback; trusting it for a malformed result would let the call
- * trace alone stand in as an `acquired: true` receipt. Refusals: a missing
- * entry, null/primitive/array, a missing or non-string `status`, a status
- * outside the closed vocabulary, or a present-but-malformed `truncated` flag
- * (only an actual boolean states completeness — an object or string never
+ * trace alone stand in for an `acquired: true` receipt. Refusals: missing
+ * entry, null/primitive/array, missing or non-string `status`, status
+ * outside the closed vocabulary, or a present-but-malformed completeness
+ * flag (only an actual boolean states completeness — object or string never
  * silently counts as false).
+ *
+ * COMPLETENESS is a separate authority and lives on the result PAYLOAD
+ * (`record.result.truncated`): production `executeToolRequest` caps tool
+ * output when it builds the payload and reports the clip there, so a
+ * truncated production result must never normalize to `complete: true`
+ * because the envelope carries no flag. An `outer` envelope `truncated`
+ * field is NOT the production shape and is ignored as unknown. Absence of a
+ * payload flag means the executor emitted the result without clipping;
+ * every wrapper-level cap in the executor is required to report itself.
  */
 function traceResultAt(results: readonly unknown[], index: number): TraceResultRecord | null {
   const raw = results[index];
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   if (typeof record.status !== "string" || !TRACE_RESULT_STATUSES.has(record.status)) return null;
-  if (record.truncated !== undefined && typeof record.truncated !== "boolean") return null;
-  return { ok: record.status === "ok", truncated: record.truncated === true, result: record };
+  const payload = record.result;
+  let truncated = false;
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    const flag = (payload as Record<string, unknown>).truncated;
+    if (flag !== undefined && typeof flag !== "boolean") return null;
+    truncated = flag === true;
+  }
+  return { ok: record.status === "ok", truncated, result: record };
+}
+
+/** The executor result PAYLOAD inside a validated envelope
+ * (`executeToolRequest` nests every tool's own fields under `result`;
+ * production truncation flags live there, never on the envelope). */
+function tracePayload(result: TraceResultRecord): Record<string, unknown> {
+  const payload = result.result?.result;
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
 }
 
 /** `owner/repo` from a forge API endpoint path: the two segments after
@@ -543,10 +571,7 @@ function receiptForTraceCall(
     case "git_grep": {
       const paths = new Set<string>();
       if (path !== "") paths.add(path);
-      const inner = result.result?.result;
-      const matches = inner !== null && typeof inner === "object" && !Array.isArray(inner)
-        ? (inner as Record<string, unknown>).matches
-        : undefined;
+      const matches = tracePayload(result).matches;
       if (Array.isArray(matches)) {
         for (const line of matches.slice(0, 200)) {
           if (typeof line !== "string") continue;
@@ -566,7 +591,7 @@ function receiptForTraceCall(
     }
     case "repo_contents": {
       if (path === "") return null;
-      const isFile = result.result?.type === "file";
+      const isFile = tracePayload(result).type === "file";
       return {
         id, kind: isFile ? "source-read" : "discovery", capability: isFile ? "content" : "discovery",
         acquired: result.ok, complete: result.ok && !result.truncated,

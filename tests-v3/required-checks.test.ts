@@ -424,11 +424,13 @@ function etag(text: string, rowClass: "attention" | "objective" | "review-prompt
   };
 }
 
-/** A minimal valid trace: one successful read of src/paths.ts. */
+/** A minimal valid trace: one successful read of src/paths.ts. The
+ * production envelope nests tool fields under `result` — truncation is a
+ * payload flag, never an envelope field (#1657 round 10). */
 function ledgerWith(entries: Array<{ tool: string; args: Record<string, unknown>; status: string; truncated?: boolean }>): EvidenceLedger {
   return buildEvidenceLedger({
     toolCalls: entries.map((entry) => ({ tool: entry.tool, args: entry.args, status: entry.status })),
-    toolResults: entries.map((entry) => ({ status: entry.status, ...(entry.truncated !== undefined ? { truncated: entry.truncated } : {}) })),
+    toolResults: entries.map((entry) => ({ status: entry.status, result: entry.truncated !== undefined ? { truncated: entry.truncated } : {} })),
   });
 }
 

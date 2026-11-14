@@ -589,8 +589,66 @@ test("tool wrapper applies byte truncation and redaction", async () => fixture(a
   const p = path.join(root, "sample.txt"); fs.writeFileSync(p, "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 AKIA1234567890ABCDEF");
   const result = await executeToolRequest("read_file", { path: "sample.txt" }, ctx(root, { maxResponseBytes: 12000 }));
   assert.equal(result.status, "ok"); assert.match(result.result.content, /redacted:credential/); assert.doesNotMatch(result.result.content, /ghp_|AKIA/);
+  assert.equal(result.result.truncated, false);
   const clipped = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, { maxResponseBytes: 5, allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 200, body: "abcdefgh" }), resolver: async () => ["93.184.216.34"] } }));
   assert.match(clipped.result.content, /\[truncated\]/);
+  // The wrapper byte cap reports its own clip INTO the payload (#1657 round
+  // 10): completeness is decided at the executor boundary, never guessed by
+  // receipt or conversation layers from output size.
+  assert.equal(clipped.result.truncated, true);
+}));
+
+test("executor payloads carry clip state from every stage: wrapper cap, fetch slice, transport capture (#1657 round 10)", async () => fixture(async (root) => {
+  fs.writeFileSync(path.join(root, "big.txt"), "y".repeat(500));
+  const wrapper = await executeToolRequest("read_file", { path: "big.txt" }, ctx(root, { maxResponseBytes: 64 }));
+  assert.equal(wrapper.status, "ok");
+  assert.equal(wrapper.result.truncated, true);
+  assert.match(wrapper.result.content, /\[truncated\]$/);
+  const whole = await executeToolRequest("read_file", { path: "big.txt" }, ctx(root));
+  assert.equal(whole.result.truncated, false);
+  // web_fetch: the fixed 10k-codepoint slice alone reports — an ASCII body
+  // of 10000 kept chars never trips the default 12000-byte wrapper cap, so
+  // a `truncated: false` here would hide fetched-and-discarded bytes behind
+  // a "complete" acquisition receipt.
+  const sliced = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => ({ status: 200, body: "x".repeat(10500) }), resolver: async () => ["93.184.216.34"] },
+  }));
+  assert.equal(sliced.status, "ok");
+  assert.equal(sliced.result.truncated, true);
+  // Neither stage clips ⇒ the acquisition stays complete (pin 9).
+  const clean = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => ({ status: 200, body: "short body" }), resolver: async () => ["93.184.216.34"] },
+  }));
+  assert.equal(clean.result.truncated, false);
+  // Process-runner capture loss reaches the payload even when the wrapper
+  // cap never fired on the (short) captured remainder.
+  const captureDeps = {
+    env: {},
+    runProcess: async () => ({
+      status: "exited", exitCode: 0, signal: null, stdout: Buffer.from(" M big.txt"), stderr: Buffer.from(""),
+      stdoutTruncated: true, stderrTruncated: false, durationMs: 1, termination: null,
+    }),
+  } as any;
+  const capture = await executeToolRequest("run_command", { command: "git_status_short" }, ctx(root, { deps: captureDeps }));
+  assert.equal(capture.status, "ok");
+  assert.equal(capture.result.truncated, true);
+  const cleanCapture = await executeToolRequest("run_command", { command: "git_status_short" }, ctx(root));
+  assert.equal(cleanCapture.result.truncated, false);
+  // gh_api non-Contents JSON response cap.
+  const api = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
+    ctx(root, { maxResponseBytes: 32, allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data: { note: "z".repeat(400) } }) } }));
+  assert.equal(api.status, "ok");
+  assert.equal(api.result.truncated, true);
+  const cleanApi = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
+    ctx(root, { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data: { number: 1 } }) } }));
+  assert.equal(cleanApi.result.truncated, false);
+  // web_search serialization cap.
+  const search = await executeToolRequest("web_search", { query: "example-pkg 1.2.3 security advisory CVE" },
+    ctx(root, { maxResponseBytes: 64, searchUrl: "https://search.test/search", deps: { ...deps(), fetch: async () => ({ status: 200, body: JSON.stringify({ results: [{ title: "t", url: "https://a.test/x", content: "s".repeat(400) }] }) }) } }));
+  assert.equal(search.status, "ok");
+  assert.equal(search.result.truncated, true);
 }));
 
 test("MCP verb gate, safe URL parsing, connect advertisement and call-time denial", async () => {
@@ -868,7 +926,7 @@ test("web_fetch treats non-2xx final responses as errors, never evidence", async
   assert.equal(serverError.content, undefined);
   // A 200 body is still evidence.
   const ok = await webFetch("https://github.com/ok", context(200, "release notes"));
-  assert.deepEqual(ok, { content: "release notes" });
+  assert.deepEqual(ok, { content: "release notes", truncated: false });
   // 3xx that is not a redirect (e.g. 304 Not Modified) fails like urllib.
   const notModified = await webFetch("https://github.com/etag", context(304, ""));
   assert.equal(notModified.error, "HTTP Error 304: Not Modified");
@@ -889,7 +947,7 @@ test("web_fetch preserves success across an allowed redirect and fail-closes on 
       },
     },
   });
-  assert.deepEqual(await webFetch("https://github.com/start", allowed), { content: "final body" });
+  assert.deepEqual(await webFetch("https://github.com/start", allowed), { content: "final body", truncated: false });
   const disallowed = ctx("/tmp", {
     allowedHosts: ["github.com"],
     deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }), resolver: async () => ["93.184.216.34"] },
@@ -973,7 +1031,7 @@ test("web_fetch still succeeds end-to-end when every hop resolves public", async
       },
     },
   }));
-  assert.deepEqual(res, { content: "final body" });
+  assert.deepEqual(res, { content: "final body", truncated: false });
   assert.equal(called, 2);
 });
 
@@ -1008,7 +1066,7 @@ test("git grep uses extended regex and retries an invalid pattern as a fixed str
   fs.writeFileSync(path.join(root, "a.sh"), "apply() {\n"); fs.writeFileSync(path.join(root, "a.py"), "x = foo(1)\n");
   const ok = scriptedProcess([0], "a.sh\0" + "1\0" + "apply() {\n");
   const res = await gitGrep("A|B", { workspaceRoot: root, deps: ok.deps });
-  assert.deepEqual(res, { matches: ["a.sh:1:apply() {"] });
+  assert.deepEqual(res, { matches: ["a.sh:1:apply() {"], truncated: false });
   assert.deepEqual(ok.argvs, [["git", "grep", "-n", "-z", "-E", "--", "A|B", "."]]);
   const retry = scriptedProcess([128, 0], "a.py\0" + "1\0" + "x = foo(1)\n");
   const scoped = await gitGrep("foo(", { workspaceRoot: root, deps: retry.deps }, "sub");
@@ -1016,7 +1074,7 @@ test("git grep uses extended regex and retries an invalid pattern as a fixed str
   assert.deepEqual(retry.argvs[0]!.slice(0, 7), ["git", "grep", "-n", "-z", "-E", "--", "foo("]);
   assert.deepEqual(retry.argvs[1], retry.argvs[0]!.map((a) => (a === "-E" ? "-F" : a)));
   assert.equal(retry.argvs[1]![7], "--");
-  assert.deepEqual(scoped, { matches: ["a.py:1:x = foo(1)"], note: "pattern is not a valid extended regex; searched as a fixed string" });
+  assert.deepEqual(scoped, { matches: ["a.py:1:x = foo(1)"], truncated: false, note: "pattern is not a valid extended regex; searched as a fixed string" });
   const dispatched = await executeToolRequest("git_grep", { pattern: "foo(" }, { workspaceRoot: root, deps: scriptedProcess([128, 0], "a.py\0" + "1\0" + "x = foo(1)\n").deps });
   assert.equal(dispatched.result.note, "pattern is not a valid extended regex; searched as a fixed string");
   const failed = await gitGrep("foo(", { workspaceRoot: root, deps: scriptedProcess([128, 128]).deps });
