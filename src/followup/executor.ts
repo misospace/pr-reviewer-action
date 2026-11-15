@@ -77,6 +77,13 @@ export function createFollowUpAnswerExecutor(
       // effort or structured-output key is ever sent on its wire.
       anthropicEffortSupported: false,
       anthropicStructuredOutputSupported: false,
+      // #1655 review: the answer executor is one-shot by contract (a cheap
+      // answer is skipped, not retried), so it must not carry a wire surface
+      // it cannot degrade away — a gateway that accepts only a string `system`
+      // would answer 400 and no answer would be posted. The conversation lane
+      // keeps the plain-string system prompt it always sent; its one-line
+      // system prompt is far below any prompt cache's minimum prefix anyway.
+      anthropicCacheCheckpoint: false,
     });
     options.onPayload?.(payload);
     const call = options.transport ?? runChatRequestOnce;

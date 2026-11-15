@@ -103,7 +103,13 @@ export type ChatRequestOutcome =
        * one-shot strip retry — the request that produced it did NOT carry the
        * named parameter, so "what was enforced" reporting must reflect the
        * stripped state, not the configuration. */
-      strippedStructuredOutput?: StructuredOutputSurface | undefined }
+      strippedStructuredOutput?: StructuredOutputSurface | undefined;
+      /** #1655 (review round 3): set only when THIS successful response came
+       * from the system cache checkpoint strip retry — the request that
+       * produced it sent the system prompt as the PLAIN STRING, so persisted
+       * request state must not stand as if the checkpointed block array had
+       * been the wire bytes. Same reporting posture as the tag above. */
+      strippedSystemCacheCheckpoint?: true | undefined }
   | { status: "failure"; failure: TransportFailure };
 
 /**
@@ -143,6 +149,17 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
  * carries it, the same request is retried once with the parameter removed —
  * the review degrades to prompted-JSON instead of dying. `stripRemaining`
  * makes it strictly once-per-request, exactly like the clamp.
+ *
+ * #1655 (review) adds a third repair of this shape on the SAME strip budget:
+ * the corpus-only Anthropic request carries a prompt-cache checkpoint on its
+ * system prompt (`system: [{ type: "text", text, cache_control }]`), which a
+ * self-hosted Anthropic-compatible gateway that only accepts a STRING
+ * `system` answers with a request-shape rejection (HTTP 400, or the 415/422
+ * a validation-style gateway returns) — the review would die on request bytes
+ * the pre-#1655 request never had. When that body names the checkpoint
+ * AND this payload carries it, the same request is retried once with the
+ * system prompt back as the plain string. It shares the #1047 budget:
+ * at most ONE strip retry per request, whichever surface it was.
  *
  * #1080 adds the terminal-provider decision FIRST, before both of those: a
  * body the shared classifier recognizes as permanently unusable (quota
@@ -197,8 +214,10 @@ async function runChatRequestLoop(
       // unchanged so the tier seam sees the same instance and can fail over
       // immediately. Checked BEFORE the clamp/strip retries, deliberately: a
       // permanently-failed lane must not spend an extra wire attempt proving
-      // it, and both of those decisions only fire on a 400 whose body states a
-      // token cap or names a structured-output parameter, neither of which is
+      // it, and all three of those decisions only fire on a request-shape
+      // rejection whose body states a token cap, names a structured-output
+      // parameter, or names the system cache checkpoint (400, or the 415/422
+      // a validation-style gateway returns), none of which is
       // terminal evidence. The retry budgets and backoff constants below are
       // unchanged for every non-terminal failure.
       const terminal = classifyTerminalProviderFailure(outcome.failure);
@@ -231,6 +250,29 @@ async function runChatRequestLoop(
         // reported its own wire calls, so this branch reports nothing more.
         if (retryOutcome.status === "ok") {
           return { ...retryOutcome, strippedStructuredOutput: strip.surface };
+        }
+        return retryOutcome;
+      }
+      // #1655 (review): the system cache checkpoint strip shares the SAME
+      // single strip budget as the structured-output strip above — at most ONE
+      // strip retry per request, whichever surface it was — so the recursion
+      // hands over `stripRemaining` false just like the structured strip.
+      const checkpoint = stripRemaining
+        ? systemCacheCheckpointStripRetry(input, outcome.failure)
+        : null;
+      if (checkpoint !== null && followUpAllowed()) {
+        report(true);
+        process.stderr.write(`removed ${checkpoint.surface} for one retry (HTTP ${outcome.failure.status} body named it)\n`);
+        // The nested loop reported its own wire calls, so this branch reports
+        // nothing more. The outcome carries NO structured-output tag: this
+        // strip dropped the checkpoint, not the structured-output parameter,
+        // and that tag means exactly one thing. It DOES carry its own tag,
+        // mirroring the strip above, so callers can report the EFFECTIVE
+        // request bytes — the plain-string system — instead of letting a
+        // pre-call persisted artifact stand as the wire's word.
+        const retryOutcome = await runChatRequestLoop({ ...checkpoint.input, requestTimeoutSec: attemptTimeoutSec() }, clampRemaining, false, attemptBase + attempt);
+        if (retryOutcome.status === "ok") {
+          return { ...retryOutcome, strippedSystemCacheCheckpoint: true };
         }
         return retryOutcome;
       }
@@ -419,6 +461,148 @@ function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportF
     };
   }
   return null;
+}
+
+// ── Anthropic system cache checkpoint removal on a shape-rejecting status
+// (#1655 review) ──
+// #1655 gave the corpus-only Anthropic request a prompt-cache checkpoint on
+// the system prompt (`system: [{ type: "text", text, cache_control }]`). A
+// self-hosted Anthropic-compatible gateway that only accepts a STRING
+// `system` — or rejects `cache_control` outright — answers with a request-
+// shape rejection, and the review dies on request bytes the pre-#1655 request
+// never carried. The repair is the posture the #824 clamp and the #1047 strip
+// already take: DEGRADE the request once instead of failing the review.
+//
+// The status set is the family shape-rejecting gateways actually answer with
+// (review round 3): HTTP 400 Bad Request, 415 Unsupported Media Type, and
+// 422 Unprocessable Content — a validation-style gateway may reject the
+// block-array `system` with any of them. Only these three; 401/403/404 are
+// authorization/routing failures the body gate must not paper over.
+//
+// The gate is evidence-gated on BOTH sides, exactly like the #1047 strip: the
+// error body must NAME the checkpoint surface AND the request must actually
+// CARRY it. The body-side gate is deliberately narrow — `cache_control`
+// anywhere in the message, or `system` together with one of
+// `string`/`array`/`type`/`expected` — so an unrelated failure ("internal
+// system error") never spends the strip on a request that needs no repair.
+//
+// The request-side gate is what keeps the NATIVE TOOL LOOP untouched: its
+// body carries tool definitions and a moving message breakpoint, so it never
+// matches and its behavior is unchanged. Only the corpus-only one-shot body
+// — the one request shape #1655 changed — can ever match.
+//
+// Like the #1047 strip, this shares the SAME single strip budget: at most
+// ONE strip retry per request, structured-output or checkpoint, never both.
+
+/** The request-shape-rejection statuses a checkpoint-rejecting gateway may
+ * answer with: 400 Bad Request, 415 Unsupported Media Type, and 422
+ * Unprocessable Content (validation-style gateways). Narrow on purpose —
+ * authorization (401/403) and routing (404) failures are never a shape
+ * rejection and must fail as-is. None of these is in RETRYABLE_HTTP_STATUSES,
+ * so the strip and the backoff loop never both fire on one status. */
+const SHAPE_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 415, 422]);
+
+interface SystemCacheCheckpointStripRetry {
+  input: ChatRequestInput;
+  surface: "system cache checkpoint";
+}
+
+/**
+ * Does a shape-rejection error body NAME the Anthropic system checkpoint
+ * surface? `cache_control` is that surface's own wire field, so its presence
+ * is decisive; a body that only says `system` needs a second word that narrows
+ * it to the field's TYPE (`string`/`array`/`type`/`expected`), because a bare
+ * "system" also shows up in unrelated failures ("internal system error").
+ */
+function namesSystemCacheCheckpoint(message: string): boolean {
+  if (message.includes("cache_control")) return true;
+  if (!message.includes("system")) return false;
+  return message.includes("string") || message.includes("array") || message.includes("type") || message.includes("expected");
+}
+
+/**
+ * The corpus-only Anthropic body that carries the #1655 system checkpoint:
+ * `system` is EXACTLY ONE cache-checkpointed text block, there are no tool
+ * definitions, the single user message's content is a plain string, and no
+ * OTHER `cache_control` marker exists anywhere in the body. The last two
+ * conditions are what keep the NATIVE TOOL LOOP out — its body carries tools
+ * and a moving message breakpoint — so only the one-shot request #1655
+ * changed can ever match. Returns the block's text (the plain string the
+ * stripped request sends), or null when this body is not that shape.
+ */
+function corpusOnlySystemCheckpoint(body: Record<string, unknown>): { text: string } | null {
+  const system = body.system;
+  if (!Array.isArray(system) || system.length !== 1) return null;
+  const block = system[0];
+  if (typeof block !== "object" || block === null || Array.isArray(block)) return null;
+  const record = block as Record<string, unknown>;
+  if (record.type !== "text" || typeof record.text !== "string") return null;
+  const cacheControl = record.cache_control;
+  if (typeof cacheControl !== "object" || cacheControl === null || Array.isArray(cacheControl)) return null;
+  if ((cacheControl as Record<string, unknown>).type !== "ephemeral") return null;
+  if (body.tools !== undefined) return null;
+  const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length !== 1) return null;
+  const message = messages[0];
+  if (typeof message !== "object" || message === null || Array.isArray(message)) return null;
+  if (typeof (message as Record<string, unknown>).content !== "string") return null;
+  if (carriesCacheControlOutsideSystem(body)) return null;
+  return { text: record.text };
+}
+
+/**
+ * Does any object OUTSIDE the `system` field carry a `cache_control` key? The
+ * marker is a WIRE FIELD, not a substring: a prompt that merely mentions
+ * `cache_control` is not a checkpoint, and the `system` block's own marker is
+ * the one this strip is about to remove.
+ */
+function carriesCacheControlOutsideSystem(body: Record<string, unknown>): boolean {
+  const seen = new WeakSet<object>();
+  const visit = (value: unknown): boolean => {
+    if (typeof value !== "object" || value === null) return false;
+    if (seen.has(value)) return false;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (visit(item)) return true;
+      }
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    if ("cache_control" in record) return true;
+    for (const child of Object.values(record)) {
+      if (visit(child)) return true;
+    }
+    return false;
+  };
+  for (const [key, child] of Object.entries(body)) {
+    if (key === "system") continue;
+    if (visit(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * A one-shot same-request retry with the #1655 system cache checkpoint
+ * removed, or null when the failure is not a checkpoint-naming request-shape
+ * rejection (400/415/422) on a corpus-only Anthropic body that carries the
+ * checkpoint. The retry body is the exact pre-#1655 bytes: the same body with
+ * `system` set back to the block's plain text.
+ */
+function systemCacheCheckpointStripRetry(input: ChatRequestInput, failure: TransportFailure): SystemCacheCheckpointStripRetry | null {
+  if (failure.kind !== "http_status" || failure.status === undefined || !SHAPE_REJECTION_STATUSES.has(failure.status)) return null;
+  if (failure.body === undefined) return null;
+  const message = errorMessageText(failure.body).toLowerCase();
+  if (!namesSystemCacheCheckpoint(message)) return null;
+  if (input.apiFormat !== "anthropic") return null;
+  const body = input.payload.body as unknown as Record<string, unknown>;
+  const checkpoint = corpusOnlySystemCheckpoint(body);
+  if (checkpoint === null) return null;
+  const retryBody = { ...body, system: checkpoint.text };
+  return {
+    input: { ...input, payload: { ...input.payload, body: retryBody as unknown as TransportWirePayload["body"] } },
+    surface: "system cache checkpoint",
+  };
 }
 
 /**

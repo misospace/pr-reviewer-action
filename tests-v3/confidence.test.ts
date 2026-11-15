@@ -730,6 +730,39 @@ test("#1481: the scorer sends the token field RESOLVED INTO the profile, not an 
   assert.equal(anthropic.max_completion_tokens, undefined, "Anthropic never carries the OpenAI-only field");
 });
 
+test("#1655 review: the scorer's Anthropic request carries no prompt-cache checkpoint", async () => {
+  // The scorer makes EXACTLY ONE wire attempt (the boundary this module
+  // enforces), so it cannot retry without a marker it carries: a gateway
+  // that accepts only a string `system` would answer 400 and the confidence
+  // score would be lost. The scorer's request therefore keeps the
+  // plain-string system prompt it always sent — no `cache_control` anywhere.
+  const captured: Array<Record<string, unknown>> = [];
+  const transport = async (input: { payload: { body: unknown } }) => {
+    captured.push(input.payload.body as Record<string, unknown>);
+    return {
+      status: "ok" as const,
+      raw: okOpenAiResponse('{"score": 4, "risk": "low", "reason": "ok"}'),
+      response: {
+        id: "", object: "chat.completion", model: "scorer-model",
+        content: '{"score": 4, "risk": "low", "reason": "ok"}', toolCalls: [], finishReason: "stop", usage: null, error: undefined,
+      },
+    };
+  };
+  await runConfidenceScorer({
+    profile: profile({ apiFormat: "anthropic" }),
+    primaryApiKey: "",
+    prompt: { system: "scorer system", user: "scorer user" },
+    connectTimeoutSec: 5,
+    transport: transport as never,
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(captured.length, 1);
+  const body = captured[0]!;
+  assert.equal(body.system, "scorer system", "the system prompt stays the plain string");
+  assert.equal(JSON.stringify(body).includes("cache_control"), false, "no cache marker on the scorer's wire");
+});
+
 test("loopback endpoint without a key is allowed", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.statusCode = 200;

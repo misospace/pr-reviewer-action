@@ -443,6 +443,11 @@ async function liveRequest(argv: string[]): Promise<void> {
     reasoningEffort: "",
     anthropicEffortSupported: false,
     anthropicStructuredOutputSupported: false,
+    // #1655: the pilot mirrors the shipped scorer's wire, and the scorer
+    // makes exactly ONE call with no retry — so it carries no prompt-cache
+    // checkpoint (the marker it could not degrade away against a gateway
+    // that accepts only a string `system`).
+    anthropicCacheCheckpoint: false,
   });
   let outcome;
   try {
