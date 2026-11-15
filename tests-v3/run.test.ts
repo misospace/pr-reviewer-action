@@ -13,6 +13,7 @@ import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
+import { GitHubAdapter } from "../src/platform/github.js";
 import { publishReview } from "../src/publish/publish.js";
 import { FINDING_TRAILER } from "../src/context/review-threads.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
@@ -881,6 +882,217 @@ test("#977: runReview keeps the banner when thread settlement actually escalates
   });
   assert.equal(artifact.verdict, "request_changes");
   assert.match(String(artifact.review_markdown), /## Final Recommendation/);
+});
+
+// ── #1662 + #1654: a paginated live listing settles carried threads ──────
+//
+// Here the settlement-time authoritative re-read is the REAL GitHub adapter
+// over a scripted GraphQL transport, so nothing about pagination or
+// normalization is stubbed out: pages → normalized listing →
+// `buildThreadReconciliation` → `applyReviewThreadEnforcement` →
+// `FinalDisposition` → native review event.
+
+const carriedThreadShape = {
+  thread_id: "PRRT_page2",
+  path: "README.md",
+  line: 1,
+  original_line: 1,
+  resolved: false,
+  outdated: false,
+  comments: [{
+    id: 1,
+    user: { login: "human" },
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+    body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
+  }],
+};
+
+/** One GraphQL `reviewThreads` page in the live-listing shape. */
+function liveThreadsPage(ids: readonly string[], pageInfo: { hasNextPage: boolean; endCursor: string | null }): unknown {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo,
+            nodes: ids.map((id) => ({
+              id,
+              isResolved: false,
+              isOutdated: false,
+              path: "README.md",
+              line: 1,
+              originalLine: 1,
+              comments: { nodes: [{ databaseId: 1, body: `reply on ${id}`, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", author: { login: "human" } }] },
+            })),
+          },
+        },
+      },
+    },
+  };
+}
+
+const fillerIds = Array.from({ length: 100 }, (_, index) => `PRRT_filler${index}`);
+
+/** Run a review whose context-stage view carries one thread while the
+ * settlement-time authoritative re-read is served by the real paginated
+ * GitHub adapter: `serve` answers each GraphQL page the adapter requests. */
+async function runPaginatedSettlementVerdict(
+  modelVerdict: Record<string, unknown>,
+  serve: (variables: Record<string, unknown>) => { status: number; body: unknown },
+): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>>; pagesFetched: number }> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    let pagesFetched = 0;
+    const live = new GitHubAdapter({
+      repo: "o/r",
+      prNumber: "7",
+      token: "Bearer t",
+      fetchImpl: async (input, init) => {
+        assert.match(String(input), /\/graphql$/, "the live thread listing stays on the validated GraphQL endpoint");
+        pagesFetched += 1;
+        const variables = (JSON.parse(String(init?.body)) as { variables: Record<string, unknown> }).variables;
+        const served = serve(variables);
+        return new Response(JSON.stringify(served.body), { status: served.status });
+      },
+    });
+    const adapter = mockPlatform({ threads: [carriedThreadShape] }) as PlatformReadAdapter;
+    let reads = 0;
+    adapter.listReviewThreads = () => {
+      reads += 1;
+      // Context stage: the thread is carried into the enforcement view.
+      // Settlement: the authoritative re-read, through real pagination.
+      return reads === 1 ? Promise.resolve({ ok: true, data: [carriedThreadShape] }) : live.listReviewThreads();
+    };
+    const result = await runReview({
+      env: { VERDICT_POLICY: "strict" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": "strict",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: adapter,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return {
+      artifact: JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>,
+      result,
+      pagesFetched,
+    };
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#1662: a carried blocker beyond the first 100 live threads is proven live and still blocks", async () => {
+  const { artifact, result, pagesFetched } = await runPaginatedSettlementVerdict(
+    {
+      verdict: "approve",
+      review_markdown: "Looks fine.\n",
+      findings: [
+        { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+        { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+      ],
+    },
+    (variables) => variables.cursor === "C1"
+      // The carried thread sits outside the window the v2 read could see.
+      ? { status: 200, body: liveThreadsPage(["PRRT_page2"], { hasNextPage: false, endCursor: null }) }
+      : { status: 200, body: liveThreadsPage(fillerIds, { hasNextPage: true, endCursor: "C1" }) },
+  );
+  assert.equal(pagesFetched, 2, "the settlement read follows the cursor to page two");
+  assert.equal(artifact.verdict, "request_changes", "a thread proven live and unresolved blocks wherever it sits in the connection");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete", "a walk ended by hasNextPage: false is a proven-complete listing");
+  assert.equal(reconciliation.live_unresolved, 1);
+  assert.equal(reconciliation.absent, 0, "a thread the listing reports is never called absent");
+  assert.equal(reconciliation.unknown, 0, "and a proven listing leaves nothing unproven");
+  const findings = artifact.findings as Array<{ thread_id?: string; thread_reconciliation?: string; message?: string }>;
+  assert.equal(findings.find((finding) => finding.thread_id === "PRRT_page2")?.thread_reconciliation, "live_unresolved");
+  assert.ok(findings.some((finding) => finding.message === "nit"), "fresh current-head findings are untouched");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
+  assert.equal(result.finalDisposition?.kind, "request_changes", "the authoritative disposition proves the live thread's defect");
+  assert.ok(!(result.finalDisposition?.advisoryDiagnostics ?? []).some((entry) => entry.code === "stale_thread_bookkeeping"),
+    "a proven-complete reconciliation owes no incompleteness disclosure");
+});
+
+test("#1662: a carried thread absent from the proven-complete paginated listing cannot block", async () => {
+  const { artifact, result, pagesFetched } = await runPaginatedSettlementVerdict(
+    {
+      verdict: "approve",
+      review_markdown: "Looks fine.\n",
+      findings: [
+        { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+        { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+      ],
+    },
+    (variables) => variables.cursor === "C1"
+      ? { status: 200, body: liveThreadsPage(["PRRT_other1", "PRRT_other2"], { hasNextPage: false, endCursor: null }) }
+      : { status: 200, body: liveThreadsPage(fillerIds, { hasNextPage: true, endCursor: "C1" }) },
+  );
+  assert.equal(pagesFetched, 2);
+  assert.equal(artifact.verdict, "approve", "a thread a proven-complete listing omits is gone, not a defect");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete", "the walk proved the connection exhausted, so absence is proof");
+  assert.equal(reconciliation.absent, 1);
+  assert.equal(reconciliation.unknown, 0);
+  const findings = artifact.findings as Array<{ thread_id?: string; message?: string }>;
+  assert.ok(!findings.some((finding) => finding.thread_id === "PRRT_page2"), "the gone thread never re-enters the finding set");
+  assert.deepEqual(findings.map((finding) => finding.message), ["nit", "note"], "fresh current-head findings are unaffected");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event stays non-blocking");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the disposition proves no defect on the current head");
+  assert.ok(!(result.finalDisposition?.advisoryDiagnostics ?? []).some((entry) => entry.code === "stale_thread_bookkeeping"),
+    "a proven-complete reconciliation discloses nothing");
+});
+
+test("#1662: a settlement walk truncated by a failed page keeps the carried thread unknown, disclosed, never blocking", async () => {
+  // The carried thread is positively ON page one — and the listing is still
+  // not proven complete, so #1654's rule stands: an unproven enumeration
+  // proves neither presence nor absence, and pagination must not bypass it.
+  const { artifact, result, pagesFetched } = await runPaginatedSettlementVerdict(
+    {
+      verdict: "approve",
+      review_markdown: "Looks fine.\n",
+      findings: [
+        { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+        { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+      ],
+    },
+    (variables) => variables.cursor === "C1"
+      ? { status: 500, body: {} }
+      : { status: 200, body: liveThreadsPage(["PRRT_page2", ...fillerIds.slice(1)], { hasNextPage: true, endCursor: "C1" }) },
+  );
+  assert.equal(pagesFetched, 2, "the walk stops at the failed page and re-requests nothing");
+  assert.equal(artifact.verdict, "approve", "an unknown historical state never manufactures REQUEST_CHANGES");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "a truncated walk is never a proven-complete listing");
+  assert.equal(reconciliation.unknown, 1, "the thread the first page reported stays unknown, not live");
+  assert.equal(reconciliation.live_unresolved, 0, "a partial listing cannot certify a blocker either");
+  assert.equal(reconciliation.absent, 0, "nor can it certify absence");
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the truncation is disclosed in the review");
+  const findings = artifact.findings as Array<{ thread_id?: string }>;
+  assert.ok(!findings.some((finding) => finding.thread_id === "PRRT_page2"), "the unknown thread is not re-emitted as a finding");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event stays non-blocking");
+  assert.ok((result.finalDisposition?.advisoryDiagnostics ?? []).some((entry) => entry.code === "stale_thread_bookkeeping"),
+    "the truncated listing rides the one authoritative disposition as advisory provenance");
 });
 
 test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (cwd) as its own artifacts", async () => {
