@@ -498,6 +498,378 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
   assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
 });
 
+// #1645: the context-stage thread listing and the settlement-time
+// authoritative re-read are separately controllable — a carried thread must
+// be proven live-unresolved against the SECOND read before it can block.
+async function runStaleThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean } = {},
+): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const majorThread = {
+      thread_id: "PRRT_stale1",
+      path: "README.md",
+      line: 1,
+      original_line: 1,
+      resolved: false,
+      outdated: false,
+      comments: [{
+        id: 1,
+        user: { login: "bot" },
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
+      }],
+    };
+    const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    let reads = 0;
+    adapter.listReviewThreads = () => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve({ ok: true, data: [majorThread] });
+      if (options.secondReadFails === true) {
+        return Promise.resolve({ ok: false, error: "HTTP 502 from the forge" });
+      }
+      return Promise.resolve({
+        ok: true,
+        data: options.secondListing ?? [majorThread],
+        ...(options.secondListingComplete === false ? { complete: false } : {}),
+      });
+    };
+    const result = await runReview({
+      env: { VERDICT_POLICY: "strict" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": "strict",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: adapter,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return {
+      artifact: JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>,
+      result,
+      threadReads: reads,
+    };
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+/** #1645: one authoritative disposition, not four decision tables. The run's
+ * `final-disposition.json` object is what the publish step consumes, so the
+ * native review event, the published marker and the machine handoff must all
+ * be projections of it. */
+function assertDispositionAgreement(
+  result: Awaited<ReturnType<typeof runReview>>,
+  api: MinimalPublishApi,
+): void {
+  const disposition = result.finalDisposition;
+  assert.ok(disposition, "every run of this version produces an authoritative final disposition");
+  assert.equal(api.submitted.length, 1, "publish submits exactly one native review");
+  assert.equal(api.submitted[0]!.event, disposition!.nativeEvent, "the native event IS the disposition's event");
+  const marker = parseMetadata(result.marker) as Record<string, unknown> | null;
+  assert.equal(marker?.review_result, result.outputs.reviewResult, "the run marker echoes the handoff's review_result");
+  assert.equal(marker?.review_result === "issues", disposition!.kind === "request_changes",
+    "the marker's blocking state is the disposition's projection — no independent authority");
+  assert.match(api.submitted[0]!.body, new RegExp(`"review_result":"${String(marker?.review_result)}"`),
+    "the published body's marker agrees with the handoff and the native event");
+}
+
+/** Pipe a finished run's machine handoff into the publish step and return
+ * the recorded native reviews — the surface where the #1645 acceptance
+ * clause "handoff/native event/marker agree" is observable. */
+async function publishRunHandoff(
+  result: Awaited<ReturnType<typeof runReview>>,
+): Promise<MinimalPublishApi> {
+  const api = new MinimalPublishApi("a".repeat(40));
+  const published = await publishReview({
+    mode: "review_verdict",
+    reviewMarkdown: result.outputs.reviewMarkdown,
+    verdict: result.outputs.verdict,
+    verdictPolicy: result.verdictPolicy,
+    analysisEngine: result.outputs.analysisEngine,
+    baseSha: "b".repeat(40),
+    headSha: "a".repeat(40),
+    prNumber: "7",
+    commentMarker: "<!-- ai-pr-review -->",
+    requiredChecks: result.outputs.requiredChecks,
+    ...(result.requiredEvidenceState !== undefined ? { requiredEvidenceState: result.requiredEvidenceState } : {}),
+    reviewRoute: result.outputs.reviewRoute,
+    escalationReason: result.outputs.escalationReason,
+    cacheHitRatio: result.outputs.cacheHitRatio,
+    inlineFindings: false,
+    inlineFindingsMax: 5,
+    findings: JSON.parse(result.outputs.findings),
+    cleanupPreviousNativeReviews: "false",
+    allowApprove: true,
+    approveForks: false,
+    isForkPr: false,
+    upstreamLinkMode: "inert",
+    conditionalPresence: {
+      linkedIssue: false, evidenceProvider: false, standards: false,
+      toolHarnessFindings: false, toolHarnessResults: false,
+    },
+    forgejoPositions: false,
+    // #1656: the real wiring hands publish the run's own authoritative object
+    // (entrypoints reads `final-disposition.json`), so this exercises the
+    // authoritative path rather than the legacy scalar derivation.
+    ...(result.finalDisposition !== undefined ? { finalDisposition: result.finalDisposition } : {}),
+  }, api, { diffText: "" });
+  assert.equal(published.status, "published");
+  return api;
+}
+
+test("#1645: a carried thread absent from the settlement-time listing cannot force REQUEST_CHANGES", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [] });
+  assert.equal(artifact.verdict, "approve", "the stale major thread must not block the current head");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete");
+  assert.equal(reconciliation.absent, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string }>;
+  assert.ok(!findings.some((f) => f.thread_id === "PRRT_stale1"));
+  // Acceptance clause "handoff/native event/marker agree": the action-output
+  // handoff, the metadata marker, and the native review event the publish
+  // step derives from that handoff must all carry the same reconciled
+  // non-blocking disposition.
+  assert.equal(result.outputs.verdict, artifact.verdict, "the handoff verdict is the reconciled verdict");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the authoritative disposition proves no defect");
+  // A listing that PROVED the thread gone leaves nothing uncertain to
+  // disclose: the disposition carries no stale-bookkeeping diagnostic.
+  assert.ok(!result.finalDisposition?.advisoryDiagnostics.some((entry) => entry.code === "stale_thread_bookkeeping"),
+    "a proven-absent historical thread is a fact, not an unresolved question");
+});
+
+test("#1645: a carried thread proven live-unresolved at settlement still blocks", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { });
+  assert.equal(artifact.verdict, "request_changes", "the live carried major still blocks under strict policy");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.live_unresolved, 1);
+  const findings = artifact.findings as Array<{ thread_id?: string; thread_reconciliation?: string }>;
+  const carried = findings.find((f) => f.thread_id === "PRRT_stale1");
+  assert.equal(carried?.thread_reconciliation, "live_unresolved");
+  // Acceptance clause "handoff/native event/marker agree" on the blocking
+  // side too: a live unresolved thread blocks identically on every surface.
+  assert.equal(result.outputs.verdict, "request_changes", "the handoff verdict is the reconciled verdict");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
+  assert.equal(result.finalDisposition?.kind, "request_changes", "the disposition proves the live thread's defect");
+  assert.equal(result.finalDisposition?.reason, "blocker_proven");
+});
+
+test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
+  // The #1619 shape again, but the settlement read declares the listing
+  // incomplete (a GitHub 100-thread window or a Forgejo partial read): the
+  // carried major is UNSEEN, not proven absent — it must neither block nor
+  // be reported as gone, and the reconciliation must not claim completeness.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [], secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "an unverifiable carried thread fails open, never a fabricated block");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "a capped listing never claims complete reconciliation");
+  assert.equal(reconciliation.unknown, 1, "the unseen thread reconciles as unknown, not absent");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the incompleteness is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the disposition invents no defect");
+  assert.ok(result.finalDisposition?.advisoryDiagnostics.some((entry) => entry.code === "stale_thread_bookkeeping"),
+    "the unverifiable carried state is disclosed on the authoritative object too, as a diagnostic only");
+  assert.match(api.submitted[0]!.body, /reconciliation incomplete/,
+    "and the disclosure reaches the published human body, not just the artifact");
+});
+
+test("#1645: a capped settlement-time listing proves no state — a thread it reports is not a proven live blocker", async () => {
+  // A capped window (GitHub's 100-thread GraphQL window) or a partial Forgejo
+  // enumeration cannot prove that a thread it DOES report is live-unresolved:
+  // the enumeration does not cover the whole set, so historical state must
+  // never block on it (maintainer review 5885372900). Only a proven-complete
+  // listing may yield a proven state.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListingComplete: false });
+  assert.equal(artifact.verdict, "approve", "a thread a capped listing reports is not a proven live blocker");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete");
+  assert.equal(reconciliation.unknown, 1, "the reported thread reconciles as unknown too");
+  assert.equal(reconciliation.live_unresolved, 0, "an incomplete listing proves no live thread");
+  assert.equal(reconciliation.absent, 0);
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the capped listing is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  assert.notEqual(result.outputs.reviewResult, "issues", "the marker claims no blocking issues");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the disposition invents no defect");
+});
+
+test("#1645: a carried thread the listing still reports but cannot parse is unknown, never absent", async () => {
+  // The settlement read DOES contain the carried thread's row, but the row
+  // has no parseable comments — its live resolved/unresolved state cannot be
+  // established. The listing therefore proves nothing about absence: the
+  // thread reconciles `unknown` (disclosed, non-blocking), never `absent`,
+  // and an approve stands without claiming the thread is gone.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [{ thread_id: "PRRT_stale1", path: "README.md", resolved: false, comments: [] }] });
+  assert.equal(artifact.verdict, "approve", "unprovable carried state never blocks");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "the carried thread set did not fully reconcile — state agrees with the disclosure, not with the transport read");
+  assert.equal(reconciliation.unknown, 1, "the listed-but-unparsable thread reconciles as unknown");
+  assert.equal(reconciliation.absent, 0, "a listing cannot prove a thread absent while it still contains it");
+  const settled = artifact.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "unknown", "the carried record carries the accurate state");
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the unverifiable state is disclosed");
+  assert.equal(result.outputs.verdict, "approve", "the handoff agrees");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the disposition invents no defect");
+});
+
+test("#1645: a historical major the live listing reports RESOLVED does not block", async () => {
+  // A thread the live listing still enumerates but reports resolved: the
+  // engine's resolved-id set comes from the listing's own `resolved` flag, so
+  // the historical major is proven settled and cannot be re-emitted.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondListing: [{
+    thread_id: "PRRT_stale1",
+    path: "README.md",
+    line: 1,
+    original_line: 1,
+    resolved: true,
+    outdated: false,
+    comments: [{
+      id: 2,
+      user: { login: "human" },
+      created_at: "2026-10-05T00:00:00Z",
+      updated_at: "2026-10-05T00:00:00Z",
+      body: "fixed in the last push",
+    }],
+  }] });
+  assert.equal(artifact.verdict, "approve", "a resolved historical major cannot block");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete");
+  assert.equal(reconciliation.resolved, 1, "the listing positively reported it resolved");
+  assert.equal(reconciliation.unknown, 0, "a reported resolved thread is not an unknown");
+  const settled = artifact.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled[0]!.reconciliation, "resolved", "the settled record carries the proven state");
+  const findings = artifact.findings as Array<{ thread_id?: string }>;
+  assert.ok(!findings.some((f) => f.thread_id === "PRRT_stale1"));
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
+test("#1645: a failed settlement-time thread read is unknown with a bounded retry, never a fabricated absence", async () => {
+  // The forge read itself fails at settlement time. An empty reconciliation
+  // would read as "the listing proved the thread gone" (absent, non-blocking,
+  // and DISCLOSED AS PROVEN) — that is the fabrication #1645 exists to stop.
+  // The engine retries once and then fails open to `available: false`, which
+  // reconciles the carried thread `unknown`.
+  const { artifact, result, threadReads } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  }, { secondReadFails: true });
+  assert.equal(artifact.verdict, "approve", "a failed read never manufactures a blocker");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "incomplete", "a failed read is not a proven-complete reconciliation");
+  assert.equal(reconciliation.unknown, 1, "the carried thread reconciles unknown, not absent");
+  assert.equal(reconciliation.absent, 0, "a failed read cannot prove absence");
+  assert.equal(reconciliation.live_unresolved, 0, "nor can it prove a thread live");
+  assert.equal(threadReads, 3, "the context read plus exactly ONE bounded retry, no more");
+  assert.match(String(artifact.review_markdown), /reconciliation incomplete/, "the failure is disclosed");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.notEqual(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event is not a fabricated block");
+});
+
+test("#1645: a fresh current-head blocker still blocks while every historical thread is dropped", async () => {
+  // Reconciliation must never blunt a real current-head finding: the model
+  // reports a blocker on the reviewed head, the historical thread is proven
+  // gone, and the block survives on the fresh finding alone.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "blocker", category: "bug", file: "README.md", line: 1, message: "the current head breaks the entrypoint" },
+    ],
+  }, { secondListing: [] });
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.state, "complete", "the historical thread was proven absent");
+  assert.equal(reconciliation.absent, 1);
+  assert.equal(artifact.verdict, "request_changes", "the fresh blocker carries the block on its own");
+  const findings = artifact.findings as Array<{ severity: string; thread_id?: string }>;
+  assert.ok(findings.some((f) => f.severity === "blocker" && f.thread_id === undefined),
+    "the surviving blocker is the current-head finding, not a carried thread");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the fresh block");
+  assert.equal(result.finalDisposition?.kind, "request_changes");
+  assert.equal(result.finalDisposition?.reason, "blocker_proven");
+});
+
 test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
   const artifact = await runVerificationThreadVerdict({
     verdict: "approve",
