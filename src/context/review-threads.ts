@@ -61,6 +61,11 @@ export interface ReviewThread {
   resolved: boolean;
   outdated: boolean;
   comments: ReviewThreadComment[];
+  /** #1663: the root comment was authored by the forge identity this run
+   * authenticates as — trusted authorship metadata, never comment-body
+   * wording. `undefined` marks a legacy caller that supplied no identity; the
+   * enforcement view then falls back to the historical body-marker reading. */
+  botAuthored?: boolean;
 }
 
 export interface ReviewThreadView {
@@ -71,6 +76,8 @@ export interface ReviewThreadView {
   message: string;
   category: string | null;
   own_finding: boolean;
+  /** #1663: trusted bot authorship of the thread root. */
+  bot_authored: boolean;
   replies: number;
 }
 
@@ -118,7 +125,11 @@ function findingFields(body: string): [string, string, string | null] {
   return [severity, pyCodepointSlice(collapseWhitespace(text), MAX_MESSAGE_CHARS), category];
 }
 
-export function normalizeThread(raw: unknown, marker: string = DEFAULT_MANAGED_MARKER): ReviewThread | null {
+export function normalizeThread(
+  raw: unknown,
+  marker: string = DEFAULT_MANAGED_MARKER,
+  botIdentity?: string | null,
+): ReviewThread | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const rec = raw as Record<string, unknown>;
   const threadId = headerField(rec.thread_id !== null && rec.thread_id !== undefined ? rec.thread_id : rec.id);
@@ -138,6 +149,7 @@ export function normalizeThread(raw: unknown, marker: string = DEFAULT_MANAGED_M
     const idB = idSortString(b.id);
     return idA < idB ? -1 : idA > idB ? 1 : 0;
   });
+  const root = comments[0]!;
   return {
     threadId,
     path: headerField(rec.path),
@@ -146,13 +158,22 @@ export function normalizeThread(raw: unknown, marker: string = DEFAULT_MANAGED_M
     resolved: Boolean(rec.resolved),
     outdated: Boolean(rec.outdated),
     comments,
+    // #1663: with a proven forge identity, authorship is the trusted
+    // metadata alone (a body marker can be forged by a human). When the
+    // caller supplies no identity at all (legacy/replay), keep the historical
+    // body-marker reading so existing artifacts settle as they did.
+    ...(botIdentity === undefined ? {} : { botAuthored: botIdentity !== null && root.user === botIdentity }),
   };
 }
 
-export function prepareThreads(raw: readonly unknown[], marker: string = DEFAULT_MANAGED_MARKER): ReviewThread[] {
+export function prepareThreads(
+  raw: readonly unknown[],
+  marker: string = DEFAULT_MANAGED_MARKER,
+  botIdentity?: string | null,
+): ReviewThread[] {
   const threads: ReviewThread[] = [];
   for (const entry of raw) {
-    const thread = normalizeThread(entry, marker);
+    const thread = normalizeThread(entry, marker, botIdentity);
     if (thread !== null) threads.push(thread);
   }
   return threads;
@@ -270,7 +291,11 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
     let severity: string;
     let message: string;
     let category: string | null;
-    if (root.own) {
+    // #1663: with trusted authorship, a human root takes the human-thread
+    // contract even if its body forges this action's finding marker. A
+    // legacy caller without an identity keeps the body-marker reading.
+    const botRoot = thread.botAuthored === undefined ? root.own : thread.botAuthored;
+    if (botRoot) {
       [severity, message, category] = findingFields(cleanBody(root.body));
     } else {
       severity = "minor";
@@ -285,6 +310,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       message,
       category,
       own_finding: root.own,
+      bot_authored: thread.botAuthored ?? root.own,
       replies: thread.comments.length - 1,
     };
   });

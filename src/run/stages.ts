@@ -231,7 +231,18 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
   if (!fetched.ok) return;
   ws.write("review-threads.raw.json", pyJsonDumps(fetched.data));
   try {
-    const threads = prepareThreads(fetched.data);
+    // #1663: thread origin is decided from the forge's authorship metadata
+    // (the login this token posts as), never from comment-body wording. An
+    // unprovable identity fails closed to "not bot-authored": no historical
+    // bot finding can then manufacture a blocker, and no human thread is
+    // treated as the action's own.
+    let botIdentity: string | null = null;
+    try {
+      botIdentity = await adapter.authenticatedIdentity();
+    } catch {
+      botIdentity = null;
+    }
+    const threads = prepareThreads(fetched.data, undefined, botIdentity);
     const [markdown, rendered] = renderReviewThreads(threads, undefined, maxBytes, supersededCutoff);
     ws.write("review-threads.md", markdown);
     ws.write("review-threads.json", rendered.length > 0 ? `${pythonJsonStringify(threadEnforcementView(rendered))}\n` : "");

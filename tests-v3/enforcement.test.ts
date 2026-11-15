@@ -16,6 +16,8 @@ import { enforcementView, prepareThreads, renderReviewThreads } from "../src/con
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
 import { applyReviewThreadEnforcement, evidenceCitesCode } from "../src/enforcement/threads.js";
 import { applyHumanReviewEnforcement, inlineCode } from "../src/enforcement/human-reviews.js";
+import { buildDispositionEvidence, type DispositionEvidenceParts } from "../src/disposition/engine-evidence.js";
+import { computeFinalDisposition } from "../src/disposition/final.js";
 import {
   applyAllEnforcement,
   applyEvidenceBlockerEnforcement,
@@ -452,9 +454,11 @@ test("thread settlement handles no rows, missing/fixed evidence, and retained va
   const result = applyReviewThreadEnforcement(a, threads, "model");
   assert.equal(result.applied, true);
   const rows = a.thread_dispositions as any[];
-  assert.deepEqual(rows.map((x) => x.disposition), ["open", "open", "fixed", "disputed"]);
+  assert.deepEqual(rows.map((x) => x.disposition), ["open", "open", "fixed", "open"]);
   assert.equal(rows[0].enforced, "no disposition given");
   assert.equal(rows[1].enforced, "fixed without evidence citing current code");
+  assert.equal(rows[3].disposition, "open", "an unsupported invalidity claim is not a current-head resolution");
+  assert.equal(rows[3].enforced, "disputed without evidence citing current code");
   assert.ok(a.review_markdown.includes("## Unresolved Review Threads"));
   assert.ok(a.review_markdown.includes("- `bad`: open — fixed without evidence citing current code"));
   assert.equal((a.findings as any[]).filter((f) => f.thread_id).length, 3);
@@ -728,17 +732,22 @@ test("#792: a thread blocker settled as fixed with code evidence is not counted 
   assert.equal(a.verdict, "approve", "the gate must not escalate on a resolved blocker");
 });
 
-test("#792: the same blocker claimed fixed WITHOUT code evidence stays open and escalates", () => {
+test("#1663: the same blocker claimed fixed WITHOUT code evidence is withheld, never re-emitted as a blocker", () => {
   const a = artifact({ verdict: "approve", findings: [] });
   const threads = [
-    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: false, replies: 0 },
+    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: true, bot_authored: true, replies: 0 },
   ];
   a.thread_dispositions = [{ thread_id: "t1", disposition: "fixed", evidence: "trust me it is fixed" }];
-  applyReviewThreadEnforcement(a, threads, "findings_severity_gated");
-  assert.equal(a.findings.length, 1, "an unevidenced resolution downgrades to open");
-  const reemitted = a.findings[0] as unknown as { severity: string; thread_id?: string };
-  assert.equal(reemitted.severity, "blocker");
-  assert.equal(reemitted.thread_id, "t1");
+  applyReviewThreadEnforcement(a, threads, "findings_severity_gated", {
+    available: true,
+    unresolvedIds: new Set(["t1"]),
+    resolvedIds: new Set(),
+    headSha: "a".repeat(40),
+  });
+  assert.equal(a.findings.length, 0, "an unverified historical blocker does not re-enter the finding set");
+  assert.equal((a.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open");
+  assert.equal(a.thread_reconciliation?.unreassessed, 1, "the uncertainty is materially recorded");
+  assert.equal(a.verdict, "approve", "the historical severity no longer forces the verdict");
 });
 
 test("#812: the #814 shape — nine Minor/Info threads plus one Major resolved with evidence — never requests changes", () => {
@@ -848,7 +857,7 @@ test("#1645: live carried blocker still blocks; sibling absent thread drops", ()
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }],
   });
   applyReviewThreadEnforcement(a, staleThreads, "strict", {
     available: true,
@@ -936,7 +945,7 @@ test("#1645: a capped (incomplete) listing proves NO state — every carried thr
 });
 
 test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
-  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }] });
   applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict");
   assert.equal(a.findings.length, 1, "legacy callers re-emit as before");
   assert.equal(a.thread_reconciliation, undefined, "no provenance is fabricated for a read that never ran");
@@ -988,7 +997,10 @@ test("#1645: a dropped thread's stale record never supplies a disposition to a l
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", reconciliation: "absent", disposition: "withdrawn", evidence: null }],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", reconciliation: "absent", disposition: "withdrawn", evidence: null },
+      { thread_id: "PRRT_stale1", disposition: "open", evidence: null },
+    ],
   });
   applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
     available: true,
@@ -999,7 +1011,7 @@ test("#1645: a dropped thread's stale record never supplies a disposition to a l
   const settled = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(settled[0]!.disposition, "open", "the stale withdrawn record supplied no disposition");
   assert.equal(settled[0]!.reconciliation, "live_unresolved");
-  assert.equal(settled[0]!.enforced, "no disposition given");
+  assert.equal(settled[0]!.enforced, undefined, "the fresh open disposition stands; the stale withdrawn record did not supply it");
   const reemitted = a.findings.filter((f) => f.thread_id === "PRRT_stale1");
   assert.equal(reemitted.length, 1, "the reappearing live thread is re-emitted");
   assert.match(String(reemitted[0]!.message), /\(review thread PRRT_stale1: open\)$/, "it re-emits as an open thread, not a withdrawn one");
@@ -1075,6 +1087,213 @@ test("#1645: a listing that proves every carried thread's state owes no disclosu
   assert.equal(a.thread_reconciliation?.unknown, 0);
   assert.doesNotMatch(String(a.review_markdown), /reconciliation incomplete/, "no unverifiable state remains, so nothing is disclosed");
   assert.equal(a.verdict, "approve");
+});
+
+// ---------------------------------------------------------------------------
+// #1663: a live historical bot finding must be re-evaluated against the
+// current head before its old blocking severity can force REQUEST_CHANGES.
+// The model's disposition IS the re-evaluation (Reading A): `open` reaffirms,
+// code-citing `fixed`/`disputed` settles it, and an omitted or unsupported
+// answer is a MATERIAL unverified blocking claim (INCOMPLETE/COMMENT). Human
+// threads are closed only by the forge's resolved state.
+// ---------------------------------------------------------------------------
+
+const EMPTY_DISPOSITION_PARTS: DispositionEvidenceParts = {
+  completenessChecks: [],
+  obligations: [],
+  findings: [],
+  toolCapabilityFailure: null,
+  toolFloorUnmet: false,
+  noEvidenceReason: null,
+  partialCoverageStopReason: null,
+  traceUnresolvedMaterial: false,
+  traceUnmetClaimed: false,
+  mechanicallyProvenUnmetRequirements: 0,
+  ciConclusion: null,
+  ciEvidenceContractActive: false,
+};
+
+const liveListing = (...ids: string[]) => ({
+  available: true,
+  unresolvedIds: new Set(ids),
+  resolvedIds: new Set<string>(),
+  headSha: "a".repeat(40),
+});
+
+const botMajor = (threadId: string, overrides: Record<string, unknown> = {}) => ({
+  thread_id: threadId,
+  path: "src/a.ts",
+  line: 3,
+  severity: "major",
+  message: "old defect",
+  category: "bug",
+  own_finding: true,
+  bot_authored: true,
+  replies: 0,
+  ...overrides,
+});
+
+function finalKind(a: ReviewArtifact): string {
+  const build = buildDispositionEvidence({
+    ...EMPTY_DISPOSITION_PARTS,
+    findings: a.findings,
+    threadReconciliation: a.thread_reconciliation,
+  });
+  return computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: a.verdict,
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: a.findings.some((item) => item.severity === "blocker" || item.severity === "major"),
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: false,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  }).kind;
+}
+
+test("#1663: live bot major with no current-head disposition => INCOMPLETE/COMMENT", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.findings.length, 0, "the old severity alone never manufactures a blocker");
+  assert.equal(a.thread_reconciliation?.state, "incomplete");
+  assert.equal(a.thread_reconciliation?.unreassessed, 1);
+  assert.match(String(a.review_markdown), /no current-head re-evaluation/);
+  const build = buildDispositionEvidence({ ...EMPTY_DISPOSITION_PARTS, findings: a.findings, threadReconciliation: a.thread_reconciliation });
+  const disposition = computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true, evidence: build.evidence,
+  });
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.ok(disposition.materialUnknowns.some((entry) => entry.code === "unverified_blocking_claim"));
+  assert.equal(finalKind(a), "incomplete");
+});
+
+test("#1663: live bot major re-affirmed `open` keeps its blocking severity", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  const reemitted = a.findings.find((item) => item.thread_id === "t");
+  assert.equal(reemitted?.severity, "major");
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined);
+  assert.equal(finalKind(a), "request_changes");
+});
+
+test("#1663: live bot major proven fixed with code evidence never re-blocks", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence: "the guard is gone; see src/a.ts:9" }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false);
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined);
+  assert.equal(finalKind(a), "approve");
+});
+
+test("#1663: live bot major proven invalid keeps the explanation and never re-blocks", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "disputed", evidence: "src/a.ts:3 shows the old claim was wrong" }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false);
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "disputed");
+  assert.equal(record.evidence, "src/a.ts:3 shows the old claim was wrong");
+  assert.match(String(a.review_markdown), /`t`: disputed/, "the invalidity explanation stays visible");
+  assert.equal(finalKind(a), "approve");
+});
+
+test("#1663: unsupported fixed or invalidity claims cannot certify clean", () => {
+  for (const disposition of ["fixed", "disputed"]) {
+    const a = artifact({
+      verdict: "approve",
+      findings: [],
+      thread_dispositions: [{ thread_id: "t", disposition, evidence: "trust me" }],
+    });
+    applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+    assert.equal(a.findings.some((item) => item.thread_id === "t"), false, `unsupported ${disposition} never re-blocks`);
+    assert.equal(a.thread_reconciliation?.unreassessed, 1, `unsupported ${disposition} stays a material unknown`);
+    assert.equal(finalKind(a), "incomplete", `unsupported ${disposition} cannot certify a clean approval`);
+  }
+});
+
+test("#1663: duplicate historical thread ids yield one current concern with full provenance", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "t1", disposition: "open", evidence: null },
+      { thread_id: "t2", disposition: "open", evidence: null },
+    ],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t1"), botMajor("t2")], "strict", liveListing("t1", "t2"));
+  const concerns = a.findings.filter((item) => item.thread_id);
+  assert.equal(concerns.length, 1, "one underlying concern, one finding");
+  assert.deepEqual(concerns[0]!.thread_ids, ["t1", "t2"], "every historical thread id remains traceable");
+});
+
+test("#1663: distinct defects on the same line stay distinct", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "t1", disposition: "open", evidence: null },
+      { thread_id: "t2", disposition: "open", evidence: null },
+    ],
+  });
+  applyReviewThreadEnforcement(a, [
+    botMajor("t1", { message: "the lock is released twice" }),
+    botMajor("t2", { message: "the error path skips cleanup" }),
+  ], "strict", liveListing("t1", "t2"));
+  assert.equal(a.findings.filter((item) => item.thread_id).length, 2);
+});
+
+test("#1663: a fresh current-head major still requests changes regardless of historical settlement", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [{ severity: "major", category: "bug", file: "src/b.ts", line: 8, message: "fresh current-head defect" }],
+    thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence: "src/a.ts:9" }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.findings.filter((item) => item.thread_id).length, 0);
+  assert.equal(finalKind(a), "request_changes");
+});
+
+test("#1663: a human unresolved thread is not closed by a bot disposition", () => {
+  const human = botMajor("h", { severity: "minor", category: null, own_finding: false, bot_authored: false, message: "Should this handle None?" });
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "h", disposition: "fixed", evidence: "src/a.ts:9" }],
+  });
+  applyReviewThreadEnforcement(a, [human], "strict", liveListing("h"));
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "the forge's resolved state is the only human-thread closure");
+  assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
+  const reemitted = a.findings.find((item) => item.thread_id === "h");
+  assert.equal(reemitted?.severity, "minor", "human threads keep their existing non-blocking severity");
+  assert.equal(finalKind(a), "approve");
+});
+
+test("#1663: an unreadable listing keeps #1654's advisory-only unknown semantics", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", { ...liveListing(), available: false });
+  assert.equal(a.findings.length, 0);
+  assert.equal(a.thread_reconciliation?.unknown, 1);
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined, "unreadable live state is not a semantic re-evaluation gap");
+  assert.equal(finalKind(a), "approve", "unknown live state remains advisory, never a material veto");
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
     "source_head": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
     "origin": "Follow-up shape of the #1238 incident: a PRIOR review published the fabricated input-name claim as a native review thread; the author fixed nothing (the claim was false) and pushed a trivial change. The next run re-emits the unresolved thread as a live blocker finding after the deterministic boundary's first pass, so the boundary runs again over the settled findings - the registry witness positively contradicts the re-emitted claim and the strict mapping derives an approve instead of re-blocking on the carried-over fabrication. Sanitized: repository, endpoint, model, and secret names replaced with placeholders; the thread message preserves the incident claim in substance.",
     "evidence_transform": "sanitized",
-    "model_response": "Recorded representative response (zero live inference): a plain approve with an empty thread_dispositions, so deterministic settlement downgrades the un-dispositioned thread to open and re-emits the original finding."
+    "model_response": "Recorded representative response (zero live inference): a plain approve that re-affirms the prior thread open at the current head, so deterministic settlement re-emits the original finding; the next deterministic boundary pass refutes its fabricated claim."
   },
   "engine": "run-review",
   "pr": {
@@ -39,7 +39,7 @@
             },
             "created_at": "2026-10-23T14:03:00Z",
             "updated_at": "2026-10-23T14:03:00Z",
-            "body": "**🛑 Blocker (bug):** The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.\n\n_Automated finding from AI PR review._"
+            "body": "**\ud83d\uded1 Blocker (bug):** The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.\n\n_Automated finding from AI PR review._"
           }
         ]
       }
@@ -57,7 +57,13 @@
     "findings": [],
     "requirement_coverage": null,
     "required_check_dispositions": null,
-    "thread_dispositions": []
+    "thread_dispositions": [
+      {
+        "thread_id": "PRRT_1238",
+        "disposition": "open",
+        "evidence": null
+      }
+    ]
   },
   "config": {},
   "prior_blocker_id": "PRRT_1238",

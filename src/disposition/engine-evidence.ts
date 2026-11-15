@@ -130,11 +130,13 @@ export interface DispositionEvidenceParts {
    * NOT be proven was dropped from the finding set too (#1645 fails open) — so
    * this part must never add a material unknown (it would withhold approval for
    * a stale bookkeeping state the listing cannot speak about) and can never
-   * manufacture a blocking defect. It rides the reserved ADVISORY
+   * manufacture a blocking defect. `unknown` rides the reserved ADVISORY
    * `stale_thread_bookkeeping` code so the single authoritative disposition
    * carries the disclosure alongside the review's own incomplete-reconciliation
    * note, and a run whose listing proved every carried thread's state carries
-   * nothing.
+   * nothing. #1663's `unreassessed` count is different: a LIVE historical bot
+   * blocker with no usable current-head re-evaluation is a MATERIAL
+   * `unverified_blocking_claim` (INCOMPLETE/COMMENT), never a blocker.
    */
   threadReconciliation?: unknown;
 }
@@ -416,16 +418,38 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     : null;
   if (threadReconciliation !== null && threadReconciliation.state === "incomplete") {
     const unknown = typeof threadReconciliation.unknown === "number" && Number.isFinite(threadReconciliation.unknown)
-      ? Math.max(Math.trunc(threadReconciliation.unknown), 1)
+      ? Math.max(Math.trunc(threadReconciliation.unknown), 0)
       : 1;
-    evidence.push(
-      dispositionEvidence(
-        "stale_thread_bookkeeping",
-        "deterministic",
-        "advisory",
-        `carried review threads with no provable live state at settlement: ${unknown}`,
-      ),
-    );
+    if (unknown > 0) {
+      evidence.push(
+        dispositionEvidence(
+          "stale_thread_bookkeeping",
+          "deterministic",
+          "advisory",
+          `carried review threads with no provable live state at settlement: ${unknown}`,
+        ),
+      );
+    }
+    // #1663: a live historical bot blocker/major the current head did not
+    // re-evaluate is a MATERIAL unverified blocking claim. The original
+    // severity is already withheld from the finding set (the thread did not
+    // re-emit), so this is the one place that uncertainty reaches the
+    // authoritative disposition — INCOMPLETE/COMMENT, never a fabricated
+    // blocker and never a clean approval. Duplicate historical threads are
+    // counted once (the settlement stores distinct concern identities).
+    const unreassessed = typeof threadReconciliation.unreassessed === "number" && Number.isFinite(threadReconciliation.unreassessed)
+      ? Math.max(Math.trunc(threadReconciliation.unreassessed), 0)
+      : 0;
+    if (unreassessed > 0) {
+      evidence.push(
+        dispositionEvidence(
+          "unverified_blocking_claim",
+          "deterministic",
+          "material",
+          `carried review threads without current-head re-evaluation: ${unreassessed}`,
+        ),
+      );
+    }
   }
 
   return { evidence, provenUnmetRequirement };

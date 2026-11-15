@@ -418,6 +418,24 @@ async function runVerificationThreadVerdict(
   const { runDir, cleanup } = withRunDir();
   try {
     const body = options.threadBody ?? `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
+    const platform = mockPlatform({
+      threads: [{
+        thread_id: "PRRT_1",
+        path: "README.md",
+        line: 1,
+        original_line: 1,
+        resolved: false,
+        outdated: false,
+        comments: [{
+          id: 1,
+          user: { login: "bot" },
+          created_at: "2026-10-01T00:00:00Z",
+          updated_at: "2026-10-01T00:00:00Z",
+          body,
+        }],
+      }],
+    });
+    platform.authenticatedIdentity = () => Promise.resolve("bot");
     await runReview({
       env: { VERDICT_POLICY: policy },
       inputs: {
@@ -432,23 +450,7 @@ async function runVerificationThreadVerdict(
       },
       runDir,
       workspace: runDir,
-      platformAdapter: mockPlatform({
-        threads: [{
-          thread_id: "PRRT_1",
-          path: "README.md",
-          line: 1,
-          original_line: 1,
-          resolved: false,
-          outdated: false,
-          comments: [{
-            id: 1,
-            user: { login: "bot" },
-            created_at: "2026-10-01T00:00:00Z",
-            updated_at: "2026-10-01T00:00:00Z",
-            body,
-          }],
-        }],
-      }),
+      platformAdapter: platform,
       persistArtifacts: true,
       quiet: true,
     });
@@ -528,6 +530,9 @@ async function runStaleThreadVerdict(
       }],
     };
     const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    // #1663: trusted authorship metadata says the carried thread is the
+    // action's own; the body marker alone would not be trusted provenance.
+    adapter.authenticatedIdentity = () => Promise.resolve("bot");
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
@@ -665,7 +670,7 @@ test("#1645: a carried thread absent from the settlement-time listing cannot for
     "a proven-absent historical thread is a fact, not an unresolved question");
 });
 
-test("#1645: a carried thread proven live-unresolved at settlement still blocks", async () => {
+test("#1645: a carried thread proven live-unresolved at settlement still blocks when re-affirmed", async () => {
   const { artifact, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
@@ -673,6 +678,7 @@ test("#1645: a carried thread proven live-unresolved at settlement still blocks"
       { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
       { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
     ],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }],
   }, { });
   assert.equal(artifact.verdict, "request_changes", "the live carried major still blocks under strict policy");
   const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
@@ -688,6 +694,32 @@ test("#1645: a carried thread proven live-unresolved at settlement still blocks"
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", "the native event keeps the live block");
   assert.equal(result.finalDisposition?.kind, "request_changes", "the disposition proves the live thread's defect");
   assert.equal(result.finalDisposition?.reason, "blocker_proven");
+});
+
+test("#1663: a live historical bot major with no current-head re-evaluation is INCOMPLETE/COMMENT on every surface", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [
+      { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
+      { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
+    ],
+  });
+  assert.equal(artifact.verdict, "approve", "the old severity does not force the verdict");
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "the historical blocker is not re-emitted");
+  const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
+  assert.equal(reconciliation.unreassessed, 1);
+  assert.equal(reconciliation.state, "incomplete", "the carryover is materially unresolved, not silently clean");
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  assert.equal(result.finalDisposition?.reason, "material_unknown");
+  assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
+  assert.ok(result.finalDisposition?.materialUnknowns.some((entry) => entry.code === "unverified_blocking_claim"));
+  assert.match(String(artifact.review_markdown), /no current-head re-evaluation/);
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "COMMENT", "the native event is the disposition's COMMENT, not a fabricated block");
+  assert.match(api.submitted[0]!.body, /INCOMPLETE/);
 });
 
 test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
@@ -876,6 +908,7 @@ test("#977: runReview keeps the banner when thread settlement actually escalates
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "open", evidence: null }],
   }, {
     policy: "findings_severity_gated",
     threadBody: `**🛑 Blocker (bug):** real defect\n\n${FINDING_TRAILER}`,
@@ -901,7 +934,7 @@ const carriedThreadShape = {
   outdated: false,
   comments: [{
     id: 1,
-    user: { login: "human" },
+    user: { login: "bot" },
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
     body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
@@ -961,6 +994,7 @@ async function runPaginatedSettlementVerdict(
       },
     });
     const adapter = mockPlatform({ threads: [carriedThreadShape] }) as PlatformReadAdapter;
+    adapter.authenticatedIdentity = () => Promise.resolve("bot");
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
@@ -1006,6 +1040,7 @@ test("#1662: a carried blocker beyond the first 100 live threads is proven live 
         { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
         { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
       ],
+      thread_dispositions: [{ thread_id: "PRRT_page2", disposition: "open", evidence: null }],
     },
     (variables) => variables.cursor === "C1"
       // The carried thread sits outside the window the v2 read could see.
@@ -4036,6 +4071,8 @@ test("#812: unresolved bot threads re-emit with their original severity and Mino
   const { runDir, cleanup } = withRunDir();
   try {
     const platform = mockPlatform();
+    // #1663: origin comes from trusted forge authorship, not the body marker.
+    platform.authenticatedIdentity = () => Promise.resolve("reviewer-bot");
     const botThread = (id: string, label: string, message: string) => ({
       thread_id: id,
       path: "src/a.ts",

@@ -34,6 +34,12 @@ export interface ArtifactFinding {
   /** Set only on findings re-emitted from unresolved review threads (#766):
    * the publish step skips inlining these — the thread already exists. */
   thread_id?: string;
+  /** #1663: every historical thread id that describes this one current
+   * concern (a duplicate thread re-reporting the same stable finding
+   * identity, or the thread ids a fresh current-head finding already
+   * covers). Provenance only; the publish step keys inline suppression off
+   * `thread_id`, so a fresh finding stays publishable. */
+  thread_ids?: string[];
   /** #1645: how the re-emitted thread reconciled against the authoritative
    * live thread listing at settlement time. Only `live_unresolved` threads
    * are ever re-emitted. */
@@ -155,6 +161,12 @@ export interface ReviewArtifact {
     resolved: number;
     absent: number;
     unknown: number;
+    /** #1663: distinct live historical bot blocking concerns with no usable
+     * current-head re-evaluation. Their original severity is withheld, so
+     * this count rides the authoritative disposition as a MATERIAL
+     * unverified-blocking-claim unknown (INCOMPLETE/COMMENT). Present only
+     * when non-zero, preserving pre-#1663 provenance bytes otherwise. */
+    unreassessed?: number;
   };
   /** #774: replaced with the settled records by human-review enforcement. */
   human_review_dispositions?: Array<ArtifactHumanReviewDisposition | Record<string, unknown>>;

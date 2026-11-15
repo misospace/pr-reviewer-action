@@ -329,12 +329,15 @@ test("#1016 sanitized (non-authoritative) provenance cannot ground a marker clai
 });
 
 test("#1016 synthesized thread re-emissions added after the boundary are not demoted", async () => {
-  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({
+    findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+  });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(a.findings[0]!.grounding_status, "unverified");
   applyReviewThreadEnforcement(a, [{
     thread_id: "t", path: "src/b.ts", line: 4, severity: "blocker",
-    message: "unresolved thread mentioning [REDACTED]", category: "bug", own_finding: false, replies: 1,
+    message: "unresolved thread mentioning [REDACTED]", category: "bug", own_finding: true, replies: 1,
   }], "strict");
   const reemitted = a.findings.find((item) => item.thread_id === "t");
   assert.ok(reemitted, "expected the thread to re-emit as a finding");

@@ -3,15 +3,28 @@
  * `pr_reviewer/enforcement.py::apply_review_thread_enforcement`, carrying
  * #766 and the #770 context/enforcement contract).
  *
- * Every unresolved review thread the corpus listed must be dispositioned by
- * the model. A listed thread the model did not disposition, or marked
- * `fixed` without evidence that cites current code, is downgraded to
- * `open`. Every `open`/`disputed` thread is re-emitted as a finding carrying
- * `thread_id` (the publish step skips those inline — the thread already
- * exists). Under `findings_severity_gated` a re-emitted blocker escalates
- * the verdict like any other blocker; under `strict` (#811) the settlement
- * never forces a verdict — the strict mapping alone derives one from the
- * final still-open findings set.
+ * Every unresolved review thread the corpus listed is settled against the
+ * model's dispositions. #1663 splits two questions that were previously one:
+ * the forge proves whether a thread is live (the #1645 reconciliation), and
+ * the current-head review must still establish whether its finding is valid.
+ * A live historical BOT finding re-emits at its original severity only when
+ * the model re-affirms it `open`; a code-citing `fixed`/`disputed` settles it
+ * without re-emission; a missing or unsupported re-evaluation withholds the
+ * old blocking severity and records a MATERIAL `unverified_blocking_claim`
+ * through `thread_reconciliation.unreassessed` (INCOMPLETE/COMMENT).
+ * A HUMAN-authored unresolved thread is closed only by the forge's resolved
+ * state — a bot disposition never dismisses it — and keeps its existing
+ * non-blocking severity.
+ *
+ * Re-emitted findings carry `thread_id` (the publish step skips those inline
+ * — the thread already exists) plus `thread_ids` provenance. Duplicate
+ * historical threads and a concern a fresh current-head finding already
+ * reports are counted once by the existing stable finding identity; distinct
+ * defects (different message/category/severity) stay distinct. Under
+ * `findings_severity_gated` a re-emitted blocker escalates the verdict like
+ * any other blocker; under `strict` (#811) the settlement never forces a
+ * verdict — the strict mapping alone derives one from the final still-open
+ * findings set.
  *
  * #812: the re-emitted finding carries the thread's ORIGINAL severity —
  * the severity the context stage parsed from the managed finding comment
@@ -22,6 +35,7 @@
  */
 import { markRelaxationNotesSuperseded, type ArtifactFinding, type ReviewArtifact } from "./artifact.js";
 import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
+import { findingIdentity, findingIdentityFromRecord } from "../outcomes/identity.js";
 
 export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
 
@@ -67,6 +81,10 @@ export interface EnforcementThread {
   severity: string;
   message: string;
   own_finding: boolean;
+  /** #1663: trusted forge authorship of the thread root (the authenticated
+   * login posted the root comment). Absent for legacy callers, which keep the
+   * historical body-marker reading (`own_finding`). */
+  bot_authored?: boolean;
   replies: number;
   category?: string | null;
 }
@@ -127,12 +145,14 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
 
 /**
  * Settle every listed thread against the model's dispositions, in place.
- * Mirrors v2 exactly: the first disposition for a thread_id wins; unknown or
- * missing dispositions downgrade to `open`; `fixed` needs evidence citing
- * current code; open/disputed threads are re-emitted as findings with the
- * thread's original severity (default minor, never escalating, #812) unless
- * a finding already carries the thread_id; the settled records replace
- * `thread_dispositions` in the artifact.
+ * The first disposition for a thread_id wins. #1663: for a bot-authored
+ * blocking thread, `open` re-affirms it (re-emitted at its original
+ * severity, default minor, never escalating, #812); `fixed`/`disputed` need
+ * evidence citing current code and never re-emit; a missing or unsupported
+ * answer is recorded as unverified and its old blocking severity is withheld
+ * (never re-emitted). A human-authored unresolved thread is never closed by
+ * a bot disposition. The settled records replace `thread_dispositions` in
+ * the artifact.
  *
  * #1645: before a listed thread can settle into the finding set it must
  * reconcile against the authoritative live thread listing. Only a
@@ -184,11 +204,29 @@ export function applyReviewThreadEnforcement(
     findings.map((f) => f.thread_id).filter((id): id is string => typeof id === "string"),
   );
 
+  // #1663: current-head findings an old bot concern is already independently
+  // reported by. Keyed by the existing stable finding identity
+  // (path/severity/category/message) — never fuzzy text similarity.
+  const currentHeadByIdentity = new Map<string, ArtifactFinding>();
+  for (const finding of findings) {
+    if (typeof finding.thread_id === "string") continue;
+    const identity = findingIdentityFromRecord(finding);
+    if (identity !== null && !currentHeadByIdentity.has(identity)) {
+      currentHeadByIdentity.set(identity, finding);
+    }
+  }
+
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
   let settledWithdrawn = 0;
+  let invalidated = 0;
   const counted = new Set<string>();
   const reemitted: ArtifactFinding[] = [];
+  /** #1663: distinct carried concerns whose blocking validity the current
+   * head did not establish. Counted once per stable finding identity, so
+   * duplicate historical threads cannot multiply the uncertainty. */
+  const unreassessed = new Set<string>();
+  const carriedByIdentity = new Map<string, ArtifactFinding>();
   for (const thread of threads) {
     if (!thread || typeof thread.thread_id !== "string") continue;
     const threadId = thread.thread_id;
@@ -216,29 +254,76 @@ export function applyReviewThreadEnforcement(
       });
       continue;
     }
+    const severity = reemittedSeverity(thread.severity);
+    // #1663: legacy callers that supplied no trusted ownership keep treating
+    // a carried thread as action-authored; the pipeline always supplies it.
+    const botAuthored = thread.bot_authored ?? true;
+    const blocking = isBlockingSeverity(severity) && !isAlwaysNonBlockingCategory(thread.category);
     let disposition = entry.disposition as string | undefined;
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
     let note: string | null = null;
-    if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
+    // #1663: `confirmed` = current-head evidence still shows the defect;
+    // `resolved` = evidence proves it fixed; `invalid` = evidence proves the
+    // old finding was wrong; `unverified` = no usable current-head
+    // re-evaluation. Only `confirmed` may re-emit a historical blocking
+    // severity.
+    let reassessment: "confirmed" | "resolved" | "invalid" | "unverified" | null = null;
+    if (!botAuthored) {
+      // #1663: a human-authored unresolved thread is closed by the forge
+      // (its live state above), never by a bot disposition. The model's
+      // fixed/withdrawn/disputed claim is recorded as open and the thread is
+      // re-emitted at the existing human-thread severity (minor by default).
+      if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
+        disposition = "open";
+        note = "human-authored thread: a bot disposition cannot close it";
+      } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
+        disposition = "open";
+        note = "no disposition given";
+      }
+    } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
       disposition = "open";
       note = "no disposition given";
+      if (blocking) reassessment = "unverified";
     } else if (disposition === "fixed" && !evidenceCitesCode(evidence, thread.path)) {
       disposition = "open";
       note = "fixed without evidence citing current code";
+      if (blocking) reassessment = "unverified";
+    } else if (disposition === "fixed") {
+      reassessment = "resolved";
+    } else if (disposition === "disputed") {
+      // #1663: `disputed` is the reviewer's current-head claim that the old
+      // finding was invalid. It needs a concrete code-citing explanation;
+      // an unsupported invalidity claim is uncertainty, not proof.
+      if (!evidenceCitesCode(evidence, thread.path)) {
+        disposition = "open";
+        note = "disputed without evidence citing current code";
+        if (blocking) reassessment = "unverified";
+      } else {
+        reassessment = "invalid";
+      }
     } else if (disposition === "withdrawn") {
       if (!WITHDRAWABLE_CATEGORIES.has(thread.category ?? "")) {
         disposition = "open";
         note = "withdrawn without a verification/question finding";
+        if (blocking) reassessment = "unverified";
       } else if (!isAlwaysNonBlockingCategory(thread.category) && isBlockingSeverity(thread.severity)) {
         // #977: a question the model could have blocked on may be a real
         // defect in disguise — only `fixed`, which demands code evidence,
         // may close it.
         disposition = "open";
         note = "withdrawn on a blocking finding";
+        if (blocking) reassessment = "unverified";
       } else if (evidence === null || evidence.trim() === "") {
         disposition = "open";
         note = "withdrawn without evidence from a reply";
+        if (blocking) reassessment = "unverified";
+      } else {
+        reassessment = "resolved";
       }
+    } else {
+      // An explicit `open` is the model's current-head re-evaluation that
+      // the defect remains (#1663 Reading A); it preserves the severity.
+      reassessment = "confirmed";
     }
     // #1645: `reconciliation` is stamped only when reconciliation actually
     // ran — a legacy caller (no input) keeps byte-identical settled records.
@@ -250,47 +335,78 @@ export function applyReviewThreadEnforcement(
     }
     settled.push(record);
     if (disposition === "withdrawn") settledWithdrawn += 1;
+    if (reassessment === "invalid") invalidated += 1;
+
+    const identity = findingIdentity({
+      path: thread.path ?? "",
+      severity,
+      category: thread.category ?? "",
+      message: thread.message || "Unresolved review thread",
+    });
+    if (state === "live_unresolved" && blocking && botAuthored && reassessment === "unverified") {
+      // #1663: a live historical bot blocker the current head did not
+      // re-evaluate is neither a blocker nor a clean resolution. Record the
+      // uncertainty for the authoritative disposition (INCOMPLETE/COMMENT).
+      unreassessed.add(identity);
+    }
     // #1645: only a thread proven live and unresolved re-enters the finding
     // set. An `unknown` thread settles as bookkeeping but never blocks.
-    if (
-      state === "live_unresolved"
-      && disposition !== "fixed" && disposition !== "withdrawn"
-      && !knownThreadIds.has(threadId)
-    ) {
-      const finding: ArtifactFinding = {
-        severity: reemittedSeverity(thread.severity),
-        // #977: carry the non-blocking marker forward so a verification ask
-        // cannot return as a blocking `other` finding on the next run. Every
-        // other kind stays `other` — re-emission never changes what can block.
-        category: thread.category && isAlwaysNonBlockingCategory(thread.category) ? thread.category : "other",
-        file: thread.path,
-        line: thread.line,
-        message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
-        thread_id: threadId,
-        ...(reconciliation !== null && reconciliation !== undefined ? { thread_reconciliation: "live_unresolved" as const } : {}),
-      };
-      findings.push(finding);
-      reemitted.push(finding);
+    // #1663: a historical bot blocker only re-enters when the current head
+    // re-affirmed it (`open`); fixed/invalid/unverified never preserve it.
+    const reemit = state === "live_unresolved"
+      && disposition === "open"
+      && !(blocking && botAuthored && reassessment === "unverified")
+      && !knownThreadIds.has(threadId);
+    if (!reemit) continue;
+    const currentHeadFinding = currentHeadByIdentity.get(identity);
+    const alreadyCarried = carriedByIdentity.get(identity);
+    const existing = currentHeadFinding ?? alreadyCarried;
+    if (existing !== undefined) {
+      // #1663: one concern is counted once even when several historical
+      // threads (or a fresh current-head finding) describe it. Keep every
+      // thread id as provenance; never broaden into text similarity.
+      const ids = Array.isArray(existing.thread_ids)
+        ? existing.thread_ids.filter((id): id is string => typeof id === "string")
+        : [];
+      if (!ids.includes(threadId)) ids.push(threadId);
+      existing.thread_ids = ids;
+      continue;
     }
+    const finding: ArtifactFinding = {
+      severity,
+      // #977: carry the non-blocking marker forward so a verification ask
+      // cannot return as a blocking `other` finding on the next run. Every
+      // other kind stays `other` — re-emission never changes what can block.
+      category: thread.category && isAlwaysNonBlockingCategory(thread.category) ? thread.category : "other",
+      file: thread.path,
+      line: thread.line,
+      message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
+      thread_id: threadId,
+      thread_ids: [threadId],
+      ...(reconciliation !== null && reconciliation !== undefined ? { thread_reconciliation: "live_unresolved" as const } : {}),
+    };
+    findings.push(finding);
+    reemitted.push(finding);
+    carriedByIdentity.set(identity, finding);
   }
 
-  // #1645: persist bounded reconciliation provenance whenever reconciliation
-  // ran, independent of whether settlement changed the artifact. The state
-  // describes the CARRIED THREAD SET, under the same authority as the
-  // disclosure below: "incomplete" iff some carried thread reconciled
-  // unknown (its live state could not be proven), "complete" iff every
-  // carried thread is proven — the artifact can never claim a complete
-  // reconciliation the published review discloses as incomplete, or the
-  // reverse. The listing's own `complete` flag remains provenance for the
+  // #1645/#1663: persist bounded reconciliation provenance whenever
+  // reconciliation ran, independent of whether settlement changed the
+  // artifact. `state` describes the CARRIED THREAD SET: "incomplete" iff a
+  // thread's live state could not be proven (unknown) OR a live historical
+  // bot blocker had no usable current-head re-evaluation — in both cases the
+  // artifact can never claim a settlement the published review discloses as
+  // unresolved. The listing's own `complete` flag remains provenance for the
   // `absent` rule in reconcileThreadState, not for this field.
   if (reconciliation !== null && reconciliation !== undefined) {
     artifact.thread_reconciliation = {
-      state: counts.unknown > 0 ? "incomplete" : "complete",
+      state: counts.unknown > 0 || unreassessed.size > 0 ? "incomplete" : "complete",
       head_sha: reconciliation.headSha,
       live_unresolved: counts.live_unresolved,
       resolved: counts.resolved,
       absent: counts.absent,
       unknown: counts.unknown,
+      ...(unreassessed.size > 0 ? { unreassessed: unreassessed.size } : {}),
     };
   }
 
@@ -299,7 +415,8 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
+  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0
+    || invalidated > 0 || unreassessed.size > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
   // review still has to say the live listing could not be proven. `unknown`
@@ -322,6 +439,12 @@ export function applyReviewThreadEnforcement(
       lines.push(
         "",
         "_Review-thread reconciliation incomplete: the live thread listing could not be read in full at settlement time, so carried threads were recorded but not treated as blocking._",
+      );
+    }
+    if (unreassessed.size > 0) {
+      lines.push(
+        "",
+        `_${unreassessed.size} live historical bot blocking concern(s) had no current-head re-evaluation; their original severity is not treated as a blocker, and the review cannot certify a clean result._`,
       );
     }
     artifact.review_markdown = (artifact.review_markdown || "") + lines.join("\n");
@@ -349,6 +472,6 @@ export function applyReviewThreadEnforcement(
   }
   return {
     applied: true,
-    reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}`,
+    reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}${unreassessed.size > 0 ? `, ${unreassessed.size} blocking concern(s) without current-head re-evaluation` : ""}`,
   };
 }
