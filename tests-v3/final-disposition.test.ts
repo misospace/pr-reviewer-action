@@ -1275,3 +1275,69 @@ test("#1658 trace summary classes settle the disposition with no second authorit
   assert.equal(blocked.kind, "request_changes", "a deterministically refuted mandatory requirement is REQUEST_CHANGES territory");
   assert.equal(blocked.nativeEvent, "REQUEST_CHANGES");
 });
+
+test("#1645: thread reconciliation is provenance at the seam — an unverifiable carried thread never blocks and never vetoes approval", () => {
+  const base = {
+    completenessChecks: [] as const,
+    obligations: [] as const,
+    findings: [] as const,
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  } as const;
+  const decide = (evidence: ReturnType<typeof buildDispositionEvidence>["evidence"]) => computeFinalDisposition({
+    reviewProduced: true, validVerdict: true, verdict: "approve", degraded: false,
+    exactHead: true, publicationHeadBound: true, blockingFindingOpen: false,
+    evidenceProviderBlocker: false, provenUnmetRequirement: false,
+    verdictBearing: true, approvalScopeAllowed: true, evidence,
+  });
+  // The listing could not establish a carried thread's live state (a failed,
+  // capped or partly unparsable read): ONE advisory diagnostic, never a
+  // material unknown — the current head earned its approval and a stale
+  // bookkeeping state the listing cannot speak about must not withhold it,
+  // let alone synthesize a defect.
+  const incomplete = buildDispositionEvidence({
+    ...base,
+    threadReconciliation: {
+      state: "incomplete", head_sha: "a".repeat(40),
+      live_unresolved: 1, resolved: 2, absent: 0, unknown: 3,
+    },
+  });
+  assert.deepEqual(incomplete.evidence.map((entry) => entry.code), ["stale_thread_bookkeeping"]);
+  assert.deepEqual(incomplete.evidence.map((entry) => entry.materiality), ["advisory"], "the reserved code stays advisory — the parser refuses the cross-pairing");
+  assert.match(incomplete.evidence[0]!.subject, /no provable live state at settlement: 3/);
+  assert.equal(incomplete.provenUnmetRequirement, false, "thread bookkeeping never proves a requirement");
+  const approved = decide(incomplete.evidence);
+  assert.equal(approved.kind, "approve");
+  assert.equal(approved.reason, "approval_certified");
+  assert.equal(approved.nativeEvent, "APPROVE", "unknown thread state never fabricates a blocking defect");
+  assert.deepEqual(approved.materialUnknowns, []);
+  assert.equal(approved.advisoryDiagnostics.length, 1, "the uncertainty is still observable on the authoritative object");
+  // A complete enumeration proved every carried thread's state (live,
+  // resolved or absent): nothing to disclose — the disclosure below must not
+  // claim a gap the listing did not leave.
+  assert.deepEqual(buildDispositionEvidence({
+    ...base,
+    threadReconciliation: { state: "complete", head_sha: "a".repeat(40), live_unresolved: 2, resolved: 1, absent: 4, unknown: 0 },
+  }).evidence, []);
+  // No reconciliation ran (legacy caller, replay) or a shape the run never
+  // writes: contributes nothing, and a hostile/unparsable value is read
+  // defensively — it can never raise the count of material entries.
+  assert.deepEqual(buildDispositionEvidence({ ...base, threadReconciliation: null }).evidence, []);
+  assert.deepEqual(buildDispositionEvidence({ ...base }).evidence, []);
+  const hostile = buildDispositionEvidence({
+    ...base,
+    threadReconciliation: { state: "incomplete", unknown: "3\u0000\u001b injections\nof prose" } as never,
+  });
+  assert.equal(hostile.evidence.length, 1);
+  assert.equal(hostile.evidence[0]!.code, "stale_thread_bookkeeping");
+  assert.equal(hostile.evidence[0]!.materiality, "advisory");
+  assert.doesNotMatch(hostile.evidence[0]!.subject, /[\u0000-\u001f]/, "the subject stays a bounded single-line identity");
+  assert.equal(decide(hostile.evidence).nativeEvent, "APPROVE");
+});

@@ -84,9 +84,15 @@ Advisory codes (observable, never vetoing, never independent authorities):
 `proof_shape_mismatch`, `citation_allocation_failed`,
 `stale_thread_bookkeeping`, `generic_scrutiny_row_missing`,
 `serialization_diagnostic`, `investigation_floor_unmet`,
-`investigation_partial`. These are SEAM vocabulary: the engine feeds only
-`investigation_floor_unmet` today (the configured min-successful CALL-COUNT
-floor — a count never defines adequacy).
+`investigation_partial`. These are SEAM vocabulary: the engine feeds
+`investigation_floor_unmet` (the configured min-successful CALL-COUNT floor —
+a count never defines adequacy), `generic_scrutiny_row_missing` and
+`investigation_partial` (#1657/#1659 row metadata), and `stale_thread_bookkeeping`
+(#1645: the settlement-time reconciliation of carried review threads reported
+`incomplete`, i.e. at least one carried thread whose live state the listing
+could not prove — provenance for the disclosure only, never a veto and never a
+blocker). `proof_shape_mismatch`, `citation_allocation_failed` and
+`serialization_diagnostic` stay unfed reserved vocabulary.
 
 The mapping after #1657/#1658 (`buildDispositionEvidence`) — still
 deliberately CONSERVATIVE where settlement has not arrived, so #1656 does not

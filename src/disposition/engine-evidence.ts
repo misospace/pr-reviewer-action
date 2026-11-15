@@ -120,6 +120,23 @@ export interface DispositionEvidenceParts {
    * `investigation_unavailable` disclosure, never silence. Absent/0 is the
    * clean and the legacy shape alike. */
   settlementRecordDroppedRows?: number;
+  /**
+   * #1645: the run's `thread_reconciliation` artifact field — the bounded
+   * provenance of the settlement-time reconciliation of CARRIED review-thread
+   * findings against the live forge thread listing (null/absent when no
+   * reconciliation ran). Consumed as PROVENANCE ONLY, never as a second
+   * verdict authority: a carried thread the listing proved resolved or gone is
+   * already out of the finding set, and a carried thread whose live state could
+   * NOT be proven was dropped from the finding set too (#1645 fails open) — so
+   * this part must never add a material unknown (it would withhold approval for
+   * a stale bookkeeping state the listing cannot speak about) and can never
+   * manufacture a blocking defect. It rides the reserved ADVISORY
+   * `stale_thread_bookkeeping` code so the single authoritative disposition
+   * carries the disclosure alongside the review's own incomplete-reconciliation
+   * note, and a run whose listing proved every carried thread's state carries
+   * nothing.
+   */
+  threadReconciliation?: unknown;
 }
 
 /** The trusted #1657 row class of one completeness row, read from the
@@ -375,6 +392,38 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
         "deterministic",
         "material",
         `malformed settlement rows dropped: ${parts.settlementRecordDroppedRows}`,
+      ),
+    );
+  }
+
+  // #1645: carried review-thread bookkeeping. The reconciliation pass already
+  // decided what may block — only a thread PROVEN live and unresolved in a
+  // complete listing re-enters the finding set, so the blocking question is
+  // settled by the finding set above. What is left to disclose is the
+  // uncertainty: `state: "incomplete"` means at least one carried thread could
+  // not be reconciled (an unreadable read, a capped/partial listing, or a
+  // listed row whose live state could not be parsed). That stays an ADVISORY
+  // diagnostic under #1656's reserved code — never a material unknown (a stale,
+  // unverifiable historical thread state must not withhold an approval that the
+  // current head earned, and must not be promoted into a defect) and never a
+  // second decision table. `state: "complete"` proved every carried thread, so
+  // nothing is disclosed.
+  const rawThreadReconciliation = parts.threadReconciliation;
+  const threadReconciliation = typeof rawThreadReconciliation === "object"
+    && rawThreadReconciliation !== null
+    && !Array.isArray(rawThreadReconciliation)
+    ? rawThreadReconciliation as Record<string, unknown>
+    : null;
+  if (threadReconciliation !== null && threadReconciliation.state === "incomplete") {
+    const unknown = typeof threadReconciliation.unknown === "number" && Number.isFinite(threadReconciliation.unknown)
+      ? Math.max(Math.trunc(threadReconciliation.unknown), 1)
+      : 1;
+    evidence.push(
+      dispositionEvidence(
+        "stale_thread_bookkeeping",
+        "deterministic",
+        "advisory",
+        `carried review threads with no provable live state at settlement: ${unknown}`,
       ),
     );
   }
