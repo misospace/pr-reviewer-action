@@ -86,6 +86,10 @@ export interface EnforcementThread {
    * login posted the root comment). Absent for legacy callers, which keep the
    * historical body-marker reading (`own_finding`). */
   bot_authored?: boolean;
+  /** #1663: false when `bot_authored` is only the body-marker fallback
+   * because the forge identity could not be resolved. Absent for legacy
+   * callers, which keep the pre-#1663 settlement. */
+  authorship_proven?: boolean;
   replies: number;
   category?: string | null;
 }
@@ -260,6 +264,13 @@ export function applyReviewThreadEnforcement(
     // #1663: legacy callers that supplied no trusted ownership keep treating
     // a carried thread as action-authored; the pipeline always supplies it.
     const botAuthored = thread.bot_authored ?? true;
+    // #1663: `authorship_proven === false` means the forge identity could
+    // not be resolved and `bot_authored` is only the body-marker fallback.
+    // Neither direction may be assumed: a bot disposition still cannot close
+    // the thread (human authority is unproven, so it must not be dismissed),
+    // and a blocking concern is never re-emitted on unproven authority (it
+    // becomes the material unverified claim instead).
+    const unprovenAuthorship = thread.authorship_proven === false;
     const blocking = isBlockingSeverity(severity) && !isAlwaysNonBlockingCategory(thread.category);
     let disposition = entry.disposition as string | undefined;
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
@@ -270,7 +281,18 @@ export function applyReviewThreadEnforcement(
     // re-evaluation. Only `confirmed` may re-emit a historical blocking
     // severity.
     let reassessment: "confirmed" | "resolved" | "invalid" | "unverified" | null = null;
-    if (!botAuthored) {
+    if (unprovenAuthorship) {
+      if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
+        disposition = "open";
+        note = "authorship unproven: a bot disposition cannot close the thread";
+      } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
+        disposition = "open";
+        note = "no disposition given";
+      }
+      // Only a PROVEN bot root may re-emit a blocking severity. Unproven
+      // ownership withholds it and records the gap instead.
+      if (blocking) reassessment = "unverified";
+    } else if (!botAuthored) {
       // #1663: a human-authored unresolved thread is closed by the forge
       // (its live state above), never by a bot disposition. The model's
       // fixed/withdrawn/disputed claim is recorded as open and the thread is

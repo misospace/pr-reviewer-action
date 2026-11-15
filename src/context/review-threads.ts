@@ -66,6 +66,12 @@ export interface ReviewThread {
    * wording. `undefined` marks a legacy caller that supplied no identity; the
    * enforcement view then falls back to the historical body-marker reading. */
   botAuthored?: boolean;
+  /** #1663: whether `botAuthored` came from a PROVEN forge identity (`true`)
+   * or from the body-marker fallback used when the identity could not be
+   * resolved (`false`). Unproven authorship is handled conservatively: a bot
+   * disposition still cannot close the thread, and a blocking concern stays a
+   * material unknown. `undefined` marks a legacy caller. */
+  authorshipProven?: boolean;
 }
 
 export interface ReviewThreadView {
@@ -78,6 +84,10 @@ export interface ReviewThreadView {
   own_finding: boolean;
   /** #1663: trusted bot authorship of the thread root. */
   bot_authored: boolean;
+  /** #1663: false when `bot_authored` is only the body-marker fallback
+   * because the forge identity could not be resolved. Absent for legacy
+   * callers. */
+  authorship_proven?: boolean;
   replies: number;
 }
 
@@ -158,11 +168,19 @@ export function normalizeThread(
     resolved: Boolean(rec.resolved),
     outdated: Boolean(rec.outdated),
     comments,
-    // #1663: with a proven forge identity, authorship is the trusted
-    // metadata alone (a body marker can be forged by a human). When the
-    // caller supplies no identity at all (legacy/replay), keep the historical
-    // body-marker reading so existing artifacts settle as they did.
-    ...(botIdentity === undefined ? {} : { botAuthored: botIdentity !== null && root.user === botIdentity }),
+    // #1663: a proven forge identity decides authorship in both directions
+    // (the action's login is bot, any other login is human even if its body
+    // forges the marker). When the caller supplies no identity at all
+    // (legacy/replay) the historical body-marker reading applies. When the
+    // caller passes `null` (identity unprovable) the marker still classifies
+    // the root, but `authorshipProven: false` stops a bot disposition from
+    // closing it and keeps a blocking concern material.
+    ...(botIdentity === undefined
+      ? {}
+      : {
+          botAuthored: botIdentity === null ? root.own : root.user === botIdentity,
+          authorshipProven: botIdentity !== null,
+        }),
   };
 }
 
@@ -311,6 +329,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       category,
       own_finding: root.own,
       bot_authored: thread.botAuthored ?? root.own,
+      ...(thread.authorshipProven === undefined ? {} : { authorship_proven: thread.authorshipProven }),
       replies: thread.comments.length - 1,
     };
   });

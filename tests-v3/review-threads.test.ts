@@ -107,6 +107,21 @@ test("enforcement view parses severity and message from the finding body", () =>
   ]);
 });
 
+test("#1663: trusted identity settles authorship in both directions", () => {
+  const marked = thread("PRRT_1", [comment(1, "bot", "2026-09-25T22:32:00Z", OWN_FINDING)]);
+  const forged = thread("H", [comment(2, "alice", "2026-09-25T22:33:00Z", OWN_FINDING)]);
+  const bot = enforcementView(prepareThreads([marked], undefined, "bot"))[0]!;
+  assert.equal(bot.bot_authored, true);
+  assert.equal(bot.authorship_proven, true);
+  assert.equal(bot.severity, "major");
+  const human = enforcementView(prepareThreads([forged], undefined, "bot"))[0]!;
+  assert.equal(human.bot_authored, false, "a human root that forges the marker is still human");
+  assert.equal(human.severity, "minor", "and keeps the human-thread severity contract");
+  const unproven = enforcementView(prepareThreads([marked], undefined, null))[0]!;
+  assert.equal(unproven.bot_authored, true, "the unproven fallback still reads the managed marker");
+  assert.equal(unproven.authorship_proven, false, "but the authority is marked unproven");
+});
+
 test("#812: thread comments older than the PR's last edit are labeled superseded", () => {
   const raw = [thread("PRRT_1", [
     comment(1, "reviewer-bot", "2026-09-28T08:00:00Z", "**🛑 Blocker (bug):** do not merge until X\n\n" + FINDING_TRAILER),

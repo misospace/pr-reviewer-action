@@ -236,17 +236,18 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
     // PROVEN identity settles ownership in both directions: the action's
     // login is bot-authored, any other login is human-authored even when its
     // body forges the managed marker. When the identity cannot be proven the
-    // caller falls back to the historical body-marker reading (undefined):
-    // treating an unprovable root as human would demote a carried bot blocker
-    // to a non-blocking human thread and let a clean APPROVE be certified
-    // against an unevaluated historical blocker (#1663 review).
+    // caller passes `null`: the view still classifies the root by the managed
+    // marker, but marks the authorship unproven, so settlement neither lets a
+    // bot disposition close the thread nor re-emits its blocking severity —
+    // the gap rides the material `unverified_blocking_claim` instead (#1663
+    // review).
     let botIdentity: string | null = null;
     try {
       botIdentity = await adapter.authenticatedIdentity();
     } catch {
       botIdentity = null;
     }
-    const threads = prepareThreads(fetched.data, undefined, botIdentity ?? undefined);
+    const threads = prepareThreads(fetched.data, undefined, botIdentity);
     const [markdown, rendered] = renderReviewThreads(threads, undefined, maxBytes, supersededCutoff);
     ws.write("review-threads.md", markdown);
     ws.write("review-threads.json", rendered.length > 0 ? `${pythonJsonStringify(threadEnforcementView(rendered))}\n` : "");

@@ -1305,6 +1305,21 @@ test("#1663: a human unresolved thread is not closed by a bot disposition", () =
   assert.equal(finalKind(a), "approve");
 });
 
+test("#1663: unproven authorship neither closes nor re-blocks a carried marker finding", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence: "src/a.ts:9" }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t", { authorship_proven: false })], "strict", liveListing("t"));
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "an unproven root cannot be closed by a bot disposition");
+  assert.equal(record.enforced, "authorship unproven: a bot disposition cannot close the thread");
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "unproven authority never re-emits a blocking severity");
+  assert.equal(a.thread_reconciliation?.unreassessed, 1, "the carried blocker stays a material unknown");
+  assert.equal(finalKind(a), "incomplete", "clean approval cannot be certified on unproven authority");
+});
+
 test("#1663: an unreadable listing keeps #1654's advisory-only unknown semantics", () => {
   const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(a, [botMajor("t")], "strict", { ...liveListing(), available: false });
