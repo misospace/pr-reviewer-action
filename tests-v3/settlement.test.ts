@@ -273,11 +273,37 @@ test("#1659: a dependency shape row joins ONLY the classifier-owned must_check r
   assert.deepEqual([unrelated[0]!.semantic, unrelated[0]!.foldCovered], ["unknown", false]);
   // A NON-must_check row is never an owner through its text, however exactly it
   // names the obligation: unrelated `derived`/`risk`/trusted-base prose cannot
-  // resolve the dependency question.
-  for (const source of ["derived", "risk", "trusted_base_guidance"] as const) {
-    const foreign = reconcileSettlements([row], [{ id: "derived-1", source, status: "satisfied" as const, text: foldRow.text }]);
-    assert.deepEqual([foreign[0]!.semantic, foreign[0]!.foldCovered], ["unknown", false], source);
+  // resolve the dependency question, and a foreign NEGATIVE never makes the
+  // shape row a `finding` either. Ids follow the real producers
+  // (`obligation-<n>`, `derived-<n>`, `risk-<n>`) so the fixture stays
+  // producible by the shipped pipeline.
+  for (const [source, id] of [
+    ["derived", "derived-1"],
+    ["risk", "risk-1"],
+    ["trusted_base_guidance", "obligation-9"],
+  ] as const) {
+    for (const status of ["satisfied", "unmet", "unresolved"] as const) {
+      const foreign = reconcileSettlements([row], [{ id, source, status, text: foldRow.text }]);
+      // Every foreign status leaves the shape question `unknown` — in
+      // particular a foreign `unmet` never turns it into a `finding`, and a
+      // foreign `satisfied` never resolves it.
+      assert.deepEqual([foreign[0]!.semantic, foreign[0]!.foldCovered], ["unknown", false], `${source}/${status}`);
+    }
   }
+  // An outcome row with NO source is never an owner through its text either
+  // (the field is optional; fail-closed, not lenient).
+  const sourceless = reconcileSettlements([row], [{ id: "obligation-7", status: "satisfied" as const, text: foldRow.text }]);
+  assert.deepEqual([sourceless[0]!.semantic, sourceless[0]!.foldCovered], ["unknown", false]);
+  // The helper agrees, including conservative aggregation across legitimate
+  // owners (a satisfied owner plus an `unmet` one settles to `unmet`).
+  assert.equal(foldOwnershipForDependencyQuestions([{ id: "obligation-7", source: "derived" as const, status: "satisfied" as const, text: foldRow.text }]).has("provenance"), false);
+  assert.deepEqual(
+    foldOwnershipForDependencyQuestions([
+      foldRow,
+      { id: "obligation-8", source: "must_check" as const, status: "unmet" as const, text: "establish upstream provenance for the updated chart" },
+    ]).get("provenance")?.status,
+    "unmet",
+  );
   // Only a trace row may be `not-tracked` (the #1658 provenance summary owns it).
   const trace = reconcileSettlements([settlement({ id: "trace:req-1", kind: "trace", source: undefined })], []);
   assert.deepEqual([trace[0]!.semantic, trace[0]!.foldCovered], ["not-tracked", false]);
@@ -745,12 +771,21 @@ test("#1659 P1: a material open / failed-acquisition / unanswered question canno
     ["risk", "risk-1"],
     ["trusted_base_guidance", "obligation-9"],
   ] as const) {
-    const foreignRows = reconcileSettlements(
-      [openShape()],
-      [{ id, source, status: "satisfied" as const, text: questionText }],
-    );
+    const outcome = { id, source, status: "satisfied" as const, text: questionText };
+    // The shipped pipeline feeds the SAME rows to both consumers
+    // (`review.ts` reconciles over `resolvedObligations.obligations` and hands
+    // the identical fold rows to the disposition), so the fixture does too —
+    // a foreign row stays a real fold row, it just never owns the question.
+    const foreignObligation = { id, source, text: questionText, status: "satisfied" as const, cause: null, reason: "ok" as const };
+    const foreignRows = reconcileSettlements([openShape()], [outcome]);
     assert.deepEqual([foreignRows[0]!.semantic, foreignRows[0]!.foldCovered], ["unknown", false], source);
-    const foreignBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: foreignRows }));
+    const foreignBuild = buildDispositionEvidence(dispositionParts({
+      obligations: [foreignObligation],
+      finalSettlements: foreignRows,
+    }));
+    // One entry only, and it belongs to the unanswered dependency question: a
+    // SATISFIED foreign row self-discloses nothing, so the foreign prose
+    // neither adds a false negative nor suppresses the real unknown.
     assert.deepEqual(foreignBuild.evidence.map((entry) => [entry.code, entry.materiality, entry.subject]),
       [["investigation_unavailable", "material", "left unanswered: security_advisory"]], source);
     const foreignDisposition = publish(foreignBuild);
