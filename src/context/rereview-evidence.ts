@@ -16,8 +16,7 @@
  * the conservative direction; over-seeding a path whose bytes are not proven
  * identical is refused. */
 
-import { runProcess } from "../runtime/subprocess.js";
-import { fencedList, type ReReviewScopeDelta } from "./rereview-scope.js";
+import { fencedList, hasControlChar, runGit, type ReReviewScopeDelta } from "./rereview-scope.js";
 import type { RelatedContext } from "./related-context.js";
 import { pyJsonDump } from "./py-json.js";
 
@@ -27,8 +26,6 @@ const SHA_RE = /^[0-9a-f]{7,64}$/i;
  * 64 KiB, and a capped tree enumeration here is a degraded plan, not a
  * usable one. */
 const MAX_GIT_OUTPUT_BYTES = 1_048_576;
-const GIT_TIMEOUT_MS = 10_000;
-const TERMINATE_GRACE_MS = 2_000;
 /** Paths whose blob digests get verified and seeded. */
 export const MAX_EVIDENCE_CANDIDATES = 500;
 /** Maximum entries rendered per list in the markdown section. */
@@ -85,54 +82,6 @@ export interface ReReviewEvidenceProbeOptions {
 export interface RelatedCodeEvidenceInput {
   context: RelatedContext;
   anchorsTruncated?: boolean;
-}
-
-interface GitOutcome {
-  ok: boolean;
-  /** True when the capture hit its byte cap: the output is a prefix, and a
-   * consumer must treat the capture as incomplete. */
-  truncated: boolean;
-  stdout: string;
-}
-
-/** Read-only git probe in the reviewed checkout, bounded and fail-soft — the
- * same restricted environment as the #1426 delta probe. */
-async function runGit(
-  workspace: string,
-  args: readonly string[],
-  maxOutputBytes: number,
-): Promise<GitOutcome> {
-  try {
-    const handle = runProcess({
-      file: "git",
-      args: [...args],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-      timeoutMs: GIT_TIMEOUT_MS,
-      maxOutputBytes,
-      terminateGraceMs: TERMINATE_GRACE_MS,
-    });
-    const result = await handle.result;
-    if (result.status !== "exited" || result.exitCode !== 0) {
-      return { ok: false, truncated: false, stdout: "" };
-    }
-    return {
-      ok: true,
-      truncated: result.stdout.length >= maxOutputBytes,
-      stdout: result.stdout.toString("utf8"),
-    };
-  } catch {
-    return { ok: false, truncated: false, stdout: "" };
-  }
-}
-
-/** Control characters never render and never match a real path this seam can
- * vouch for; see the #1426 renderer's identical rule. */
-function hasControlChar(text: string): boolean {
-  for (const character of text) {
-    if (character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f) return true;
-  }
-  return false;
 }
 
 /** A forced-fresh path set: the paths a changed/renamed/deleted delta record
