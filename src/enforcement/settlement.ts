@@ -17,9 +17,11 @@
  *    the existing verdict from the run's own folded outcomes
  *    (`reconcileSettlements`): `resolved` (the fold credited the question
  *    clean), `finding` (the reviewer answered it unmet — the finding path
- *    carries the defect), `unknown` (no semantic answer: unresolved row, cap
- *    release, or a loop that stopped before settlement), or `not-tracked`
- *    (an objective shape row whose semantics another fold owns).
+ *    carries the defect), `unknown` (no semantic answer: an unresolved fold
+ *    row, a cap/budget release, a failed acquisition, or a loop that stopped
+ *    before settlement), or `not-tracked` (RESERVED for rows another
+ *    provenance owner settles — the #1658 requirement-trace summary — so it
+ *    can never hide an unanswered material question).
  *
  * The semantic state is derived from the SAME fold results the disposition
  * already consumes, so the canonical record and the final disposition cannot
@@ -29,15 +31,17 @@
  * semantic resolution, one receipt may support several questions, and no
  * allocation or one-call-per-row rule exists.
  *
- * Disposition consumption: a cap-released MATERIAL question becomes a named
- * material unknown (`investigation_unavailable`) — never "settled clean" —
- * and a cap-released NON-material question becomes the ADVISORY
- * `investigation_partial` diagnostic, which never vetoes. The code choice is
- * not cosmetic: `parseFinalDisposition` refuses a material code carrying
- * advisory materiality, so reusing `investigation_unavailable` would turn a
- * certified APPROVE into an UNAVAILABLE abstention at the publisher. For
- * every other unknown state the existing per-question fold entry
- * (completeness text or obligation id) is the single disclosed result; the
+ * Disposition consumption: a MATERIAL question that has no semantic
+ * resolution AND no fold row owning it (left `open`, cap/budget released, or
+ * an acquisition that failed) becomes a named material unknown
+ * (`investigation_unavailable`) — never a clean settlement that certifies a
+ * native APPROVE — and a NON-material one in the same state becomes the
+ * ADVISORY `investigation_partial` diagnostic, which never vetoes. The code
+ * choice is not cosmetic: `parseFinalDisposition` refuses a material code
+ * carrying advisory materiality, so reusing `investigation_unavailable` would
+ * turn a certified APPROVE into an UNAVAILABLE abstention at the publisher.
+ * A question a fold row owns keeps that fold's single entry (obligation id,
+ * or the must_check completeness text the dependency question maps to); the
  * record never duplicates it.
  *
  * Row classes come from TRUSTED PRODUCER METADATA, never inferred from prose
@@ -48,6 +52,8 @@
  * `dependencyObligationForCheckText` is tracked ONLY as a shape row —
  * src/tools/harness.ts), so one question yields one settlement row.
  */
+
+import { dependencyObligationForCheckText } from "../tools/dependency-evidence.js";
 
 /** Which loop surface the question came from. */
 export type SettlementKind = "prose" | "dependency" | "trace";
@@ -73,9 +79,11 @@ export type SettlementEvidenceState = "acquired" | "cap-released" | "open";
 
 /**
  * The post-verdict SEMANTIC state — what the review concluded, reconciled
- * from the run's folded outcomes after the verdict. `unknown` is the only
- * state that discloses a settlement gap; a `cap-released` evidence state is
- * always at least `unknown` (a budget release is never a clean settlement).
+ * from the run's folded outcomes after the verdict. `unknown` is the state
+ * that discloses a settlement gap; `not-tracked` is RESERVED for rows another
+ * provenance owner settles (the #1658 requirement-trace summary) — it is never
+ * assigned to a prose or dependency-evidence question, so it cannot hide an
+ * unanswered material question.
  */
 export type SettlementSemanticState = "resolved" | "finding" | "unknown" | "not-tracked";
 
@@ -91,10 +99,14 @@ export type SettlementAcquisition = "available" | "unavailable" | "failed" | "tr
 export type SettlementObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
 /** The folded semantic outcome of one tracked question (#1656's obligation
- * fold status — the SAME input the final disposition consumes). */
+ * fold status — the SAME input the final disposition consumes). `text` rides
+ * so a dependency-evidence shape row can find the obligation row that carries
+ * its question (they are keyed differently: shape rows by obligation NAME,
+ * fold rows by `obligation-<n>`). */
 export interface SettlementObligationOutcome {
   id: string;
   status: "satisfied" | "unmet" | "unresolved";
+  text?: string;
 }
 
 /** One tracked review question's loop-side evidence record. */
@@ -130,6 +142,15 @@ export interface LoopEvidenceSettlement {
  * evidence state joined with the fold's semantic outcome. */
 export interface FinalSettlementRow extends LoopEvidenceSettlement {
   semantic: SettlementSemanticState;
+  /** True when a FOLD row accounts for this question — matched by id, or for a
+   * dependency shape row by the obligation row whose text names that
+   * dependency obligation. Such a question's unresolved/unmet state is
+   * already rendered by the fold's own material-unknown entry, so the record
+   * must not add a second one. False means the folds carry NO entry for the
+   * question at all: the settlement record is the only surface that can
+   * disclose it, and a material question here is never allowed to read as a
+   * clean settlement. */
+  foldCovered: boolean;
 }
 
 /** The snake_case shape persisted in the harness artifact's telemetry budget block. */
@@ -148,6 +169,7 @@ export interface LoopEvidenceSettlementArtifactRow {
 /** The snake_case shape persisted in the run's `review-coverage.json`. */
 export interface FinalSettlementArtifactRow extends LoopEvidenceSettlementArtifactRow {
   semantic: SettlementSemanticState;
+  fold_covered: boolean;
 }
 
 const KINDS: readonly SettlementKind[] = ["prose", "dependency", "trace"];
@@ -181,6 +203,7 @@ export function finalSettlementsToArtifact(rows: readonly FinalSettlementRow[]):
   return rows.map((row) => ({
     ...settlementsToArtifact([row])[0]!,
     semantic: row.semantic,
+    fold_covered: row.foldCovered,
   }));
 }
 
@@ -193,30 +216,63 @@ export function finalSettlementsToArtifact(rows: readonly FinalSettlementRow[]):
  * Rules (deterministic; the fold is the semantic authority):
  * - the fold status wins when it exists: `satisfied` → `resolved`,
  *   `unmet` → `finding`, `unresolved` → `unknown`;
- * - no fold row: an objective shape row the loop merely acquired evidence
- *   for is `not-tracked` here (the required-check / evidence-receipt fold
- *   owns its semantics), and a row the loop never settled (`open` /
- *   `cap-released`) is `unknown` — a budget release is NEVER a clean
- *   settlement.
+ * - a dependency-evidence shape row is keyed by obligation NAME while the
+ *   fold row carrying the same question is keyed `obligation-<n>`, so the join
+ *   for those rows is the fold row's own TEXT through the shared
+ *   `dependencyObligationForCheckText` mapping the harness used to dedupe the
+ *   question into the loop. Several fold rows naming one obligation resolve
+ *   conservatively (the worst status wins);
+ * - no fold row at all: a trace row is `not-tracked` (the #1658 provenance
+ *   summary owns its settlement), and EVERY other row is `unknown` — including
+ *   one whose evidence demonstrably arrived. Acquired evidence with no semantic
+ *   settlement is an unanswered material question, never a clean one, so
+ *   `not-tracked` can never hide one; a budget release or a failed acquisition
+ *   is never a clean settlement either.
+ *
+ * `foldCovered` records whether a fold row accounts for the question, which
+ * is what lets the disposition dedupe: an accounted question's unresolved
+ * state is already its own entry, an unaccounted one has no other surface.
  */
 export function reconcileSettlements(
   rows: readonly LoopEvidenceSettlement[],
   outcomes: readonly SettlementObligationOutcome[],
 ): FinalSettlementRow[] {
   const statusById = new Map(outcomes.map((outcome) => [outcome.id, outcome.status]));
+  const statusByDependencyObligation = new Map<string, SettlementObligationOutcome["status"]>();
+  for (const outcome of outcomes) {
+    if (outcome.text === undefined) continue;
+    const obligation = dependencyObligationForCheckText(outcome.text);
+    if (obligation === null) continue;
+    const current = statusByDependencyObligation.get(obligation);
+    if (current === undefined || statusSeverity(outcome.status) > statusSeverity(current)) {
+      statusByDependencyObligation.set(obligation, outcome.status);
+    }
+  }
   return rows.map((row) => {
-    const status = statusById.get(row.id);
+    const status = statusById.get(row.id)
+      ?? (row.kind === "dependency" ? statusByDependencyObligation.get(row.id) : undefined);
+    const foldCovered = status !== undefined;
     const semantic: SettlementSemanticState = status === "satisfied"
       ? "resolved"
       : status === "unmet"
       ? "finding"
       : status === "unresolved"
       ? "unknown"
-      : row.evidenceState === "acquired"
+      // No fold row carries the question. A trace row's settlement belongs to
+      // the #1658 provenance summary, so it is the ONLY row allowed to read as
+      // not-tracked; every other row is `unknown`, including one whose evidence
+      // demonstrably arrived — acquired evidence with no semantic settlement is
+      // an unanswered question, never a clean one.
+      : row.kind === "trace"
       ? "not-tracked"
       : "unknown";
-    return { ...row, semantic };
+    return { ...row, semantic, foldCovered };
   });
+}
+
+/** Worst-status ordering for the conservative dependency join. */
+function statusSeverity(status: SettlementObligationOutcome["status"]): number {
+  return status === "unmet" ? 2 : status === "unresolved" ? 1 : 0;
 }
 
 /**
@@ -298,7 +354,9 @@ export function parseFinalSettlements(value: unknown): FinalSettlementRow[] {
     if (row === null || !isStringRecord(entry)) continue;
     const semantic = entry.semantic;
     if (!SEMANTIC_STATES.includes(semantic as SettlementSemanticState)) continue;
-    rows.push({ ...row, semantic: semantic as SettlementSemanticState });
+    const foldCovered = entry.fold_covered;
+    if (typeof foldCovered !== "boolean") continue;
+    rows.push({ ...row, semantic: semantic as SettlementSemanticState, foldCovered });
   }
   return rows;
 }

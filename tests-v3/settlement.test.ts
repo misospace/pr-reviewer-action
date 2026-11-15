@@ -92,7 +92,7 @@ const final = (
   overrides: Partial<Omit<FinalSettlementRow, "source">> & { source?: SettlementObligationSource | undefined } = {},
 ): FinalSettlementRow => {
   const { source, ...rest } = overrides;
-  const merged: FinalSettlementRow = { ...settlement(), semantic: "unknown", ...rest, ...(source !== undefined ? { source } : {}) };
+  const merged: FinalSettlementRow = { ...settlement(), semantic: "unknown", foldCovered: false, ...rest, ...(source !== undefined ? { source } : {}) };
   if (source === undefined && Object.prototype.hasOwnProperty.call(overrides, "source")) {
     const { source: _drop, ...withoutSource } = merged;
     return withoutSource;
@@ -158,12 +158,15 @@ test("#1659: the final record carries the semantic state through its own strict 
   const artifact = finalSettlementsToArtifact(rows);
   assert.deepEqual(parseFinalSettlements(artifact), rows);
   // A missing/invented semantic state drops the row (the loop reader alone
-  // cannot stand in for the post-verdict record).
+  // cannot stand in for the post-verdict record), and so does a missing
+  // `fold_covered` flag — the dedupe the disposition performs depends on it,
+  // so an unreadable flag is never assumed.
   assert.deepEqual(
     parseFinalSettlements([
       { ...artifact[0]!, semantic: "settled-clean" },
       { ...artifact[1]!, semantic: undefined },
-      artifact[2],
+      { ...artifact[2]!, fold_covered: undefined },
+      artifact[3] ?? artifact[2],
     ]),
     [rows[2]],
   );
@@ -219,24 +222,51 @@ test("#1659: reconciliation derives the semantic state from the fold, never from
     { id: "obligation-2", status: "unmet" },
     { id: "obligation-3", status: "unresolved" },
   ]);
-  assert.deepEqual(reconciled.map((row) => [row.id, row.semantic]), [
+  assert.deepEqual(reconciled.map((row) => [row.id, row.semantic, row.foldCovered]), [
     // A successful admitted call is NOT a semantic resolution.
-    ["obligation-1", "resolved"],
-    ["obligation-2", "finding"],
-    ["obligation-3", "unknown"],
-    // An objective shape row the loop merely acquired evidence for is the
-    // required-check fold's business, not this record's semantics.
-    ["provenance", "not-tracked"],
+    ["obligation-1", "resolved", true],
+    ["obligation-2", "finding", true],
+    ["obligation-3", "unknown", true],
+    // A shape row with NO fold row is `unknown`, not `not-tracked`: acquired
+    // evidence with no semantic settlement is an unanswered question, and
+    // `not-tracked` must never hide one.
+    ["provenance", "unknown", false],
     // A row the loop never settled can never read as clean.
-    ["release_delta", "unknown"],
+    ["release_delta", "unknown", false],
     // A cap/budget release is never a semantic settlement.
-    ["security_advisory", "unknown"],
+    ["security_advisory", "unknown", false],
   ]);
   // The fold still wins when it does have an outcome.
   assert.equal(
     reconcileSettlements([settlement({ id: "security_advisory", kind: "dependency", source: undefined, evidenceState: "cap-released" })], [{ id: "security_advisory", status: "satisfied" }])[0]!.semantic,
     "resolved",
   );
+});
+
+test("#1659: a dependency shape row joins the fold row that NAMES its question (keyed differently)", () => {
+  // The loop keys a shape row by obligation NAME (`provenance`); the fold keys
+  // the same question `obligation-<n>`. The join is the fold row's own TEXT
+  // through the shared dependency mapping — no id fudging, no new key scheme.
+  const row = settlement({ id: "provenance", kind: "dependency", source: undefined });
+  const foldRow = {
+    id: "obligation-7",
+    status: "satisfied" as const,
+    text: "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+  };
+  const resolved = reconcileSettlements([row], [foldRow]);
+  assert.deepEqual([resolved[0]!.semantic, resolved[0]!.foldCovered], ["resolved", true]);
+  // Conservative when several fold rows name the same obligation.
+  const conservative = reconcileSettlements([row], [
+    foldRow,
+    { id: "obligation-8", status: "unresolved", text: "establish upstream provenance for the updated chart" },
+  ]);
+  assert.deepEqual([conservative[0]!.semantic, conservative[0]!.foldCovered], ["unknown", true]);
+  // Unrelated fold text never matches.
+  const unrelated = reconcileSettlements([row], [{ id: "obligation-9", status: "satisfied", text: "run the test suite" }]);
+  assert.deepEqual([unrelated[0]!.semantic, unrelated[0]!.foldCovered], ["unknown", false]);
+  // Only a trace row may be `not-tracked` (the #1658 provenance summary owns it).
+  const trace = reconcileSettlements([settlement({ id: "trace:req-1", kind: "trace", source: undefined })], []);
+  assert.deepEqual([trace[0]!.semantic, trace[0]!.foldCovered], ["not-tracked", false]);
 });
 
 // ---------------------------------------------------------------------------
@@ -599,6 +629,196 @@ test("#1659: an ABSENT settlement field stays legacy-clean; a PRESENT malformed 
     evidence: legacyBuild.evidence,
   });
   assert.equal(legacyDisposition.kind, "approve");
+});
+
+test("#1659 P1: a material open / failed-acquisition / unanswered question cannot escape the disposition", () => {
+  // The escape this closes: the loop tracked a MATERIAL dependency question the
+  // required-check fold cannot account for (e.g. the dependency plan falling
+  // back to the full obligation set when the classifier's checklist is
+  // missing/unusable), the acquisition stayed `open` or FAILED, and an
+  // otherwise-clean model APPROVE was certified anyway. Every case below runs
+  // the whole real path: loop record -> reconcileSettlements ->
+  // buildDispositionEvidence -> computeFinalDisposition -> the serialized
+  // artifact read back by the standalone publisher.
+  const publish = (
+    build: ReturnType<typeof buildDispositionEvidence>,
+    extra: { blockingFindingOpen?: boolean } = {},
+  ) => {
+    const disposition = computeFinalDisposition({
+      reviewProduced: true,
+      validVerdict: true,
+      verdict: "approve",
+      degraded: false,
+      exactHead: true,
+      publicationHeadBound: true,
+      blockingFindingOpen: extra.blockingFindingOpen ?? false,
+      evidenceProviderBlocker: false,
+      provenUnmetRequirement: build.provenUnmetRequirement,
+      verdictBearing: true,
+      approvalScopeAllowed: true,
+      evidence: build.evidence,
+    });
+    const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
+    assert.ok(parsed !== null, "the published artifact must stay readable");
+    assert.equal(parsed.nativeEvent, disposition.nativeEvent);
+    assert.equal(parsed.kind, disposition.kind);
+    return parsed;
+  };
+  const shapeRow = (overrides: Partial<LoopEvidenceSettlement>): LoopEvidenceSettlement => ({
+    ...settlement({ id: "security_advisory", kind: "dependency", source: undefined, ...overrides }),
+  });
+
+  // (1) MATERIAL dependency question left `open`, no fold row: INCOMPLETE /
+  // COMMENT, and the entry names the question.
+  const open = reconcileSettlements(
+    [shapeRow({ evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })],
+    [],
+  );
+  assert.deepEqual([open[0]!.semantic, open[0]!.foldCovered], ["unknown", false]);
+  const openBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: open }));
+  assert.deepEqual(openBuild.evidence.map((entry) => [entry.code, entry.materiality, entry.subject]),
+    [["investigation_unavailable", "material", "left unanswered: security_advisory"]]);
+  const openDisposition = publish(openBuild);
+  assert.equal(openDisposition.kind, "incomplete");
+  assert.equal(openDisposition.nativeEvent, "COMMENT");
+
+  // (2) MATERIAL question whose acquisition FAILED: same withholding, through a
+  // different loop state.
+  const failed = reconcileSettlements(
+    [shapeRow({ acquisition: "failed", successfulAttempt: false, successfulBy: [] })],
+    [],
+  );
+  assert.equal(failed[0]!.semantic, "unknown");
+  const failedBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: failed }));
+  assert.deepEqual(failedBuild.evidence.map((entry) => [entry.code, entry.subject]),
+    [["investigation_unavailable", "acquisition failed: security_advisory"]]);
+  assert.equal(publish(failedBuild).kind, "incomplete");
+
+  // (3) The SAME question already accounted for by an unresolved objective
+  // required-check row: the fold's entry is the single disclosure — no
+  // duplicate material-unknown entry. The text is the classifier's real
+  // dependency-evidence check for this obligation.
+  const questionText = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+  const foldObligation = {
+    id: "obligation-4",
+    source: "must_check" as const,
+    text: questionText,
+    status: "unresolved" as const,
+    cause: null,
+    reason: "receipt-absent" as const,
+  };
+  const coveredRows = reconcileSettlements(
+    [shapeRow({ evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })],
+    [{ id: foldObligation.id, status: foldObligation.status, text: foldObligation.text }],
+  );
+  assert.deepEqual([coveredRows[0]!.semantic, coveredRows[0]!.foldCovered], ["unknown", true]);
+  const coveredBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [foldObligation],
+    completenessChecks: [{ check: questionText, status: "unresolved", reason: "receipt-absent", row_class: "objective" }],
+    finalSettlements: coveredRows,
+  }));
+  assert.deepEqual(coveredBuild.evidence.map((entry) => [entry.code, entry.subject]),
+    [["mandatory_requirement_unresolved", questionText]]);
+  assert.equal(publish(coveredBuild).kind, "incomplete");
+
+  // (4) Acquired AND semantically resolved (the fold credits it through the
+  // dependency-text join): APPROVE stays eligible, with no evidence entry.
+  const resolvedRows = reconcileSettlements(
+    [shapeRow({})],
+    [{ id: foldObligation.id, status: "satisfied" as const, text: questionText }],
+  );
+  assert.deepEqual([resolvedRows[0]!.semantic, resolvedRows[0]!.foldCovered], ["resolved", true]);
+  const resolvedBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [{ ...foldObligation, status: "satisfied" as const, reason: "ok" as const }],
+    completenessChecks: [{ check: questionText, status: "satisfied", reason: "ok", row_class: "objective" }],
+    finalSettlements: resolvedRows,
+  }));
+  assert.deepEqual(resolvedBuild.evidence, []);
+  const resolvedDisposition = publish(resolvedBuild);
+  assert.equal(resolvedDisposition.kind, "approve");
+  assert.equal(resolvedDisposition.nativeEvent, "APPROVE");
+
+  // (5) An ADVISORY unresolved question keeps APPROVE eligible (the diagnostic
+  // rides the artifact, it never vetoes).
+  const advisoryRows = reconcileSettlements(
+    [settlement({ id: "obligation-9", source: "trusted_base_guidance", materiality: "advisory", evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })],
+    [],
+  );
+  const advisoryBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: advisoryRows }));
+  assert.deepEqual(advisoryBuild.evidence.map((entry) => [entry.code, entry.materiality, entry.subject]),
+    [["investigation_partial", "advisory", "left unanswered: obligation-9"]]);
+  const advisoryDisposition = publish(advisoryBuild);
+  assert.equal(advisoryDisposition.kind, "approve");
+  assert.equal(advisoryDisposition.nativeEvent, "APPROVE");
+  assert.deepEqual(advisoryDisposition.advisoryDiagnostics.map((entry) => entry.code), ["investigation_partial"]);
+
+  // (6) A proven blocking finding still produces REQUEST_CHANGES — the
+  // settlement unknown never outranks it, and never replaces it.
+  const blockerBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: open }));
+  const blockerDisposition = publish(blockerBuild, { blockingFindingOpen: true });
+  assert.equal(blockerDisposition.kind, "request_changes");
+  assert.equal(blockerDisposition.reason, "blocker_proven");
+  assert.equal(blockerDisposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+// ---------------------------------------------------------------------------
+// the reachable loop shape end-to-end: the dependency plan tracked questions
+// the required-check fold cannot account for (the plan's full-set fallback),
+// the loop ran out of rounds, and nothing else settled them.
+// ---------------------------------------------------------------------------
+
+test("#1659 P1 end-to-end: an unsettled dependency question from the real loop withholds the native approve", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Every turn optional, nothing ever targets the shape rows: the loop stops
+  // on rounds with the tracked dependency questions `open`.
+  const responses = Array.from({ length: 6 }, (_, i) => openAiCall(`c${i}`, "read_file", `{"path":"misc/${i}.md"}`));
+  const { postFn, executeFn } = recordingLoop(responses);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 6, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: depRows(3),
+    timeFn: recordingTime(),
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  // The fold carries nothing for these questions (the classifier's checklist
+  // was missing/unusable, which is what made the plan track the full set).
+  const reconciled = reconcileSettlements(outcome.requiredEvidenceSettlements, []);
+  assert.deepEqual(reconciled.map((row) => [row.id, row.semantic, row.foldCovered]), [
+    ["provenance", "unknown", false],
+    ["release_delta", "unknown", false],
+    ["security_advisory", "unknown", false],
+  ]);
+  const build = buildDispositionEvidence(dispositionParts({ finalSettlements: reconciled }));
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["investigation_unavailable", "material"],
+    ["investigation_unavailable", "material"],
+    ["investigation_unavailable", "material"],
+  ]);
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: build.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  });
+  const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
+  assert.ok(parsed !== null);
+  assert.equal(parsed.kind, "incomplete");
+  assert.equal(parsed.reason, "material_unknown");
+  // The native event is a COMMENT: no certified approval, and no invented
+  // blocker either.
+  assert.equal(parsed.nativeEvent, "COMMENT");
+  assert.equal(reviewResultFromDisposition(parsed, { strict: true, openFindings: 0 }), "partial");
 });
 
 test("#1659: a resolved/cap-released row the fold credited feeds nothing, and trace rows stay with #1658", () => {

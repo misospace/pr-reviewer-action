@@ -121,19 +121,22 @@ settle a state:
   only evidence-ready, never proof of a clean settlement), and after the
   verdict the engine reconciles each tracked question with the fold's
   SEMANTIC outcome (`resolved` / `finding` / `unknown` / `not-tracked`) over
-  the SAME obligation rows this disposition consumes, so the record and the
-  disposition cannot disagree. A CAP-RELEASED material question becomes a
-  MATERIAL `investigation_unavailable` unknown (never "settled clean"), a
-  cap-released non-material question becomes an ADVISORY
-  `investigation_partial` diagnostic that never vetoes — never a material
-  code carrying advisory materiality, which `parseFinalDisposition` refuses
-  as a cross-pairing and the standalone publisher would publish as an
-  UNAVAILABLE abstention — and every question the folds
-  already decided keeps its single entry — the record never duplicates it.
-  Admission alone never overrides this disposition, and trace-kind rows stay
-  with #1658's provenance settlement. A persisted record the strict reader
-  had to DROP rows from is itself a MATERIAL `investigation_unavailable`
-  unknown — a corrupted record can never read as "no gaps";
+  the SAME obligation rows this disposition consumes — dependency shape rows
+  join their fold row through that row's own TEXT, since the loop keys them
+  by obligation name. So the record and the disposition cannot disagree. A
+  MATERIAL question with no semantic resolution AND no fold row owning it
+  (left `open`, cap/budget released, or an acquisition that failed) becomes a
+  MATERIAL `investigation_unavailable` unknown — never a certified
+  APPROVE; a non-material one becomes the ADVISORY `investigation_partial`
+  diagnostic (never a material code with advisory materiality, which
+  `parseFinalDisposition` refuses). A question the folds already own keeps
+  its single entry — the obligation row (or the must_check completeness row
+  found through the text join) is the disclosure; `not-tracked` is reserved
+  for the #1658 trace rows, so it can never hide an unanswered material
+  question. Admission alone never overrides this disposition. A persisted
+  record the strict reader had to DROP rows from is itself a MATERIAL
+  `investigation_unavailable` unknown — a corrupted record can never read as
+  "no gaps";
 - the exact-head CI floor reads the CI gate's already-paid conclusion — a
   KNOWN failure is always material, a PENDING one withholds only when the
   #1594 head-bound evidence contract proves CI materially required.

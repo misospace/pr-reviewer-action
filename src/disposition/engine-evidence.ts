@@ -38,6 +38,7 @@
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
+import { dependencyObligationForCheckText } from "../tools/dependency-evidence.js";
 import type { FinalSettlementRow } from "../enforcement/settlement.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
@@ -103,15 +104,16 @@ export interface DispositionEvidenceParts {
    * #1659: the canonical post-verdict settlement rows — the native loop's
    * evidence state (`acquired`/`cap-released`/`open`) JOINED with the fold's
    * semantic outcome (`resolved`/`finding`/`unknown`/`not-tracked`) by
-   * `reconcileSettlements` over the SAME `obligations` above. Persisted in
+   * `reconcileSettlements` over the SAME `obligations` above (dependency shape
+   * rows join their fold row through the row's own text). Persisted in
    * `review-coverage.json`; absent for legacy artifacts and every non-native
    * path (the pre-#1659 behavior). Objective provenance only: a successful
    * call never certifies a semantic resolution (#1657), and a cap/budget
-   * release is never a clean settlement. The record adds the ONE
-   * disclosure the folds cannot represent — a cap-released material question
-   * as MATERIAL `investigation_unavailable`, a cap-released non-material
-   * question as ADVISORY `investigation_partial` — and never duplicates a
-   * question the folds already decided.
+   * release or a failed acquisition is never a clean settlement. The record
+   * discloses exactly what no fold carries — a MATERIAL question with no
+   * semantic resolution becomes `investigation_unavailable`, a non-material
+   * one the ADVISORY `investigation_partial` diagnostic — and `foldCovered`
+   * is what keeps a question the folds already own from being counted twice.
    */
   finalSettlements?: ReadonlyArray<FinalSettlementRow>;
   /** #1659: how many persisted settlement rows the strict reader refused
@@ -293,44 +295,63 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     evidence.push(dispositionEvidence("exact_head_evidence_unavailable", "deterministic", "material", "required ci pending"));
   }
 
-  // #1659: the canonical post-verdict settlement rows. A cap/budget release
-  // is NOT a semantic settlement — the loop's `obligations-settled` stop only
-  // means the evidence window is ready — and the folds cannot see it, so a
-  // cap-released MATERIAL question becomes a named material unknown
-  // (`investigation_unavailable`) here, never "settled clean". A cap-released
-  // NON-material question becomes an ADVISORY `investigation_partial` entry
-  // that never vetoes the approval — the loop's evidence window was cut short,
-  // which is exactly that code's meaning. The code polarity is not
-  // decorative: `parseFinalDisposition` refuses a material code carrying
-  // advisory materiality, so an advisory `investigation_unavailable` would
-  // make the published run read as an UNAVAILABLE abstention instead of
-  // preserving its certified result. Every other semantic state is already
-  // carried by the folds below (`unknown` rows have their one
-  // completeness/obligation entry; `resolved`/`finding` carry no unknown;
-  // `not-tracked` objective shape rows are the required-check fold's
-  // business), so the record never duplicates a question. Trace-kind rows are
-  // skipped: the requirement trace settles by PROVENANCE (#1658) through the
-  // summary classes above. This join is what keeps the canonical record and
-  // the disposition from disagreeing — the semantic state is derived from
-  // these same fold outcomes.
+  // #1659: the canonical post-verdict settlement rows. A cap/budget release, a
+  // question the loop left `open`, or an acquisition that FAILED is not a
+  // semantic settlement — the loop's `obligations-settled` stop only means the
+  // evidence window is ready — and the folds cannot see those loop states, so a
+  // MATERIAL question in that state becomes a named material unknown
+  // (`investigation_unavailable`) here, never a clean settlement that certifies
+  // a native APPROVE. A NON-material question in the same state becomes the
+  // ADVISORY `investigation_partial` diagnostic that never vetoes — never a
+  // material code carrying advisory materiality, since `parseFinalDisposition`
+  // refuses that cross-pairing and the standalone publisher would then read the
+  // run as an UNAVAILABLE abstention instead of preserving its result.
+  //
+  // Dedup is decided by FOLD ACCOUNT, not by assumption: a question the
+  // obligation fold carries (directly by `obligation-<n>`/`derived-<n>` id, or
+  // — for a dependency shape row keyed by obligation NAME — the fold row whose
+  // TEXT names that obligation) is already disclosed by the fold's own entry:
+  // the obligation loop above for a non-must_check row, the completeness fold
+  // by check text for a must_check row. A question with NO fold row has no
+  // other surface, so the settlement record discloses it — that is the case
+  // where the loop tracked a question the required-check fold cannot account
+  // for (e.g. the dependency plan falling back to the full obligation set).
+  // `not-tracked` can therefore never hide a material unanswered question:
+  // reconciliation only assigns it when evidence demonstrably reached the
+  // reviewer or the #1658 trace provenance owns the row. Trace-kind rows are
+  // skipped: the requirement trace settles by PROVENANCE through the summary
+  // classes above. The join lives in `reconcileSettlements`, which derives the
+  // semantic state from these same fold outcomes, so the canonical record and
+  // the disposition cannot disagree.
+  const foldCheckTexts = new Set(
+    parts.completenessChecks
+      .map((row) => (typeof row.check === "string" ? row.check : ""))
+      .filter((text) => text !== ""),
+  );
+  const obligationById = new Map(parts.obligations.map((row) => [row.id, row]));
   for (const settlement of parts.finalSettlements ?? []) {
     if (settlement.kind === "trace") continue;
     if (settlement.semantic !== "unknown") continue;
-    if (settlement.evidenceState !== "cap-released") continue;
+    const owner = obligationById.get(settlement.id)
+      ?? (settlement.kind === "dependency"
+        ? parts.obligations.find((row) => row.text !== undefined
+          && dependencyObligationForCheckText(row.text) === settlement.id)
+        : undefined);
+    if (owner !== undefined) {
+      if (owner.source !== "must_check") continue;
+      if (owner.text !== undefined && owner.text !== "" && foldCheckTexts.has(owner.text)) continue;
+    }
+    const reason = settlement.evidenceState === "cap-released"
+      ? `cap-released unprovable: ${settlement.id}`
+      : settlement.evidenceState === "open"
+        ? `left unanswered: ${settlement.id}`
+        : settlement.acquisition === "available" || settlement.acquisition === "truncated"
+          ? `unanswered: ${settlement.id}`
+          : `acquisition failed: ${settlement.id}`;
     evidence.push(
       settlement.materiality === "material"
-        ? dispositionEvidence(
-          "investigation_unavailable",
-          "deterministic",
-          "material",
-          `cap-released unprovable: ${settlement.id}`,
-        )
-        : dispositionEvidence(
-          "investigation_partial",
-          "deterministic",
-          "advisory",
-          `cap-released non-material: ${settlement.id}`,
-        ),
+        ? dispositionEvidence("investigation_unavailable", "deterministic", "material", reason)
+        : dispositionEvidence("investigation_partial", "deterministic", "advisory", reason),
     );
   }
 
