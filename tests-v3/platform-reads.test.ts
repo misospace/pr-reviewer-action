@@ -9,7 +9,7 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsTruncated, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsPageInfo, MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
@@ -343,7 +343,7 @@ test("github GraphQL reads POST the verbatim v2 queries with typed variables", a
   const { fetchImpl, seen } = recorder((_url, init) => {
     const query = String(JSON.parse(String(init?.body)).query);
     return json(query.includes("reviewThreads")
-      ? { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }
+      ? { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } }
       : { data: { repository: { pullRequest: { comments: { nodes: [] } } } } });
   });
   const adapter = new GitHubAdapter({ repo: "own/name", prNumber: "42", token: "Bearer t", fetchImpl });
@@ -355,39 +355,256 @@ test("github GraphQL reads POST the verbatim v2 queries with typed variables", a
   assert.deepEqual(JSON.parse(seen[1]!.body!).query, GITHUB_REVIEW_THREADS_QUERY);
 });
 
-test("#1645: a capped GitHub review-threads window declares the listing incomplete; a proven-full window does not", async () => {
-  const threadNodes = (count: number) => Array.from({ length: count }, (_, index) => ({
-    id: `PRRT_${index}`, isResolved: false, path: "a.ts", line: 1, originalLine: 1, comments: { nodes: [] },
-  }));
-  const cases: Array<{ pageInfo?: { hasPreviousPage: boolean }; count: number; incomplete: boolean }> = [
-    { pageInfo: { hasPreviousPage: true }, count: 100, incomplete: true },
-    { pageInfo: { hasPreviousPage: false }, count: 100, incomplete: false },
-    { count: 100, incomplete: true }, // no pageInfo: the filled window cannot disprove truncation
-    { count: 99, incomplete: false },
-  ];
-  // A response that never enumerated the connection proves nothing — the
-  // helper must not read its way to "complete".
-  assert.equal(githubReviewThreadsTruncated({ data: null }, 0), true);
-  assert.equal(githubReviewThreadsTruncated({ data: { repository: { pullRequest: { reviewThreads: null } } } }, 0), true);
-  for (const { pageInfo, count, incomplete } of cases) {
-    const { fetchImpl } = recorder(() => json({
-      data: { repository: { pullRequest: { reviewThreads: { ...(pageInfo ? { pageInfo } : {}), nodes: threadNodes(count) } } } },
-    }));
-    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
-    const read = await adapter.listReviewThreads();
-    assert.equal(read.ok, true);
-    if (!read.ok) continue;
-    assert.equal(read.data.length, count);
-    assert.equal(read.complete, incomplete ? false : undefined,
-      `pageInfo=${JSON.stringify(pageInfo)} count=${count}`);
+// ── #1662: the review-thread listing is paginated, and only a walk proven
+//    exhausted may claim completeness (#1654's contract) ─────────────────
+//
+// #1654 decided what a thread listing may CLAIM: absence from a listing proves
+// absence only inside a PROVEN-complete listing. So the walk certifies itself
+// only on a page's own `pageInfo.hasNextPage === false`. Every other stop — a
+// failed or unnormalizable LATER page, missing or malformed page-info,
+// `hasNextPage: true` with no usable cursor, a repeated cursor, or the
+// MAX_PAGES bound — returns the pages actually read with `complete: false`,
+// the same bound-and-degrade posture as the Forgejo thread read (#1645):
+// reconciliation then keeps carried threads unknown instead of certifying an
+// absence the read never established. A FIRST page that fails or cannot be
+// read still fails the read — nothing was enumerated, and the caller's bounded
+// retry has to see that.
+
+const threadNode = (id: string) => ({
+  id,
+  isResolved: false,
+  isOutdated: false,
+  path: "a.ts",
+  line: 1,
+  originalLine: 1,
+  comments: { nodes: [{ databaseId: 1, body: id, createdAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z", author: { login: "rev" } }] },
+});
+
+/** One review-threads page; `pageInfo` is absent from the payload when the
+ * argument is omitted, which is what a v2-shaped response looks like. */
+const threadsPage = (ids: readonly string[], pageInfo?: unknown) => json({
+  data: { repository: { pullRequest: { reviewThreads: { ...(pageInfo === undefined ? {} : { pageInfo }), nodes: ids.map(threadNode) } } } },
+});
+
+const threadIds = (data: unknown[]): string[] => (data as { thread_id: string }[]).map((thread) => thread.thread_id);
+const sentVariables = (seen: readonly { body: string | undefined }[]): Record<string, unknown>[] =>
+  seen.map((entry) => (JSON.parse(entry.body!) as { variables: Record<string, unknown> }).variables);
+const sentCursors = (seen: readonly { body: string | undefined }[]): unknown[] => sentVariables(seen).map((variables) => variables.cursor ?? null);
+const requestedCursor = (init: RequestInit | undefined): string | undefined =>
+  (JSON.parse(String(init?.body)).variables as { cursor?: string }).cursor;
+
+test("#1662: the review-threads document is forward-paginated, not the v2 capped window", () => {
+  assert.match(GITHUB_REVIEW_THREADS_QUERY, /reviewThreads\(first: 100, after: \$cursor\)/);
+  assert.match(GITHUB_REVIEW_THREADS_QUERY, /pageInfo \{ hasNextPage endCursor \}/);
+  assert.doesNotMatch(GITHUB_REVIEW_THREADS_QUERY, /reviewThreads\(last: /);
+});
+
+test("#1662: one page whose pageInfo proves the connection exhausted is a complete listing", async () => {
+  const { fetchImpl, seen } = recorder(() => threadsPage(["T1", "T2"], { hasNextPage: false, endCursor: null }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.deepEqual(read.data[0], {
+    thread_id: "T1",
+    path: "a.ts",
+    line: 1,
+    original_line: 1,
+    resolved: false,
+    outdated: false,
+    comments: [{ id: 1, user: "rev", created_at: "2026-11-13T00:00:00Z", updated_at: "2026-11-13T00:00:00Z", body: "T1" }],
+  }, "the normalized thread shape is unchanged by pagination");
+  assert.equal(read.complete, undefined, "a walk ended by hasNextPage: false asserts completeness");
+  assert.deepEqual(sentVariables(seen), [{ owner: "o", name: "r", number: 7 }], "the first request carries no cursor");
+  assert.equal(seen.length, 1, "no request follows an exhausted connection");
+});
+
+test("#1662: a carried thread beyond the first 100 is read on page two, merged in order, listing complete", async () => {
+  const first = Array.from({ length: 100 }, (_, index) => `T${index + 1}`);
+  const { fetchImpl, seen } = recorder((_url, init) =>
+    requestedCursor(init) === "C1"
+      ? threadsPage(["T101"], { hasNextPage: false, endCursor: null })
+      : threadsPage(first, { hasNextPage: true, endCursor: "C1" }),
+  );
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  const ids = threadIds(read.data);
+  assert.equal(ids.length, 101);
+  assert.deepEqual(ids.slice(0, 3), ["T1", "T2", "T3"], "page order is preserved");
+  assert.equal(ids[100], "T101", "the thread outside the old capped window is present, not dropped");
+  assert.equal(read.complete, undefined, "a walk ended by hasNextPage: false is proven complete");
+  assert.deepEqual(sentCursors(seen), [null, "C1"], "the opaque endCursor rides back as $cursor");
+  for (const entry of seen) {
+    assert.deepEqual(JSON.parse(entry.body!).query, GITHUB_REVIEW_THREADS_QUERY, "every page requests the paginated document");
+    assert.equal(entry.auth, "Bearer t", "every page carries the credential");
   }
 });
 
-test("github GraphQL targets <host>/api/graphql on a GHES /api/v3 base, and GraphQL errors fail the read", async () => {
-  const { fetchImpl, seen } = recorder(() => json({ data: null, errors: [{ message: "nope" }] }));
-  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://ghe.example/api/v3", fetchImpl });
-  assert.equal((await adapter.listReviewThreads()).ok, false);
-  assert.equal(seen[0]!.url, "https://ghe.example/api/graphql");
+test("#1654 + #1662: a page without usable pageInfo never certifies its listing", async () => {
+  const shapes: Array<[string, unknown]> = [
+    ["no pageInfo at all (the v2-shaped response)", undefined],
+    ["pageInfo null", null],
+    ["pageInfo not an object", "yes"],
+    ["hasNextPage absent", { endCursor: null }],
+    ["hasNextPage null", { hasNextPage: null, endCursor: null }],
+    ["hasNextPage a string", { hasNextPage: "false", endCursor: null }],
+  ];
+  for (const [label, pageInfo] of shapes) {
+    const { fetchImpl, seen } = recorder(() => threadsPage(["T1"], pageInfo));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+    const read = await adapter.listReviewThreads();
+    assert.equal(read.ok, true, label);
+    if (!read.ok) continue;
+    assert.deepEqual(threadIds(read.data), ["T1"], `${label}: what was read is still returned`);
+    assert.equal(read.complete, false, `${label}: an unproven page cannot certify completeness`);
+    assert.equal(seen.length, 1, `${label}: no further request is invented`);
+  }
+});
+
+test("#1662: hasNextPage: true with no usable cursor stops the walk and declares the listing incomplete", async () => {
+  const oversized = "C".repeat(MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS + 1);
+  const shapes: unknown[] = [
+    { hasNextPage: true, endCursor: "" },
+    { hasNextPage: true },
+    { hasNextPage: true, endCursor: null },
+    { hasNextPage: true, endCursor: oversized },
+  ];
+  for (const [index, pageInfo] of shapes.entries()) {
+    const { fetchImpl, seen } = recorder(() => threadsPage(["T1"], pageInfo));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+    const read = await adapter.listReviewThreads();
+    assert.equal(read.ok, true, `case ${index}`);
+    if (!read.ok) continue;
+    assert.equal(read.complete, false, `case ${index}: a promised next page that can never be requested truncates the listing`);
+    assert.equal(seen.length, 1, `case ${index}: an unusable cursor issues no second request`);
+  }
+});
+
+test("#1662: a repeated, non-advancing cursor stops the walk without certifying the listing", async () => {
+  let requests = 0;
+  const { fetchImpl, seen } = recorder(() => {
+    requests += 1;
+    // Every page promises another under the SAME cursor: nothing advances.
+    return threadsPage([`T${requests}`], { hasNextPage: true, endCursor: "C1" });
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.deepEqual(threadIds(read.data), ["T1", "T2"], "the pages actually read are kept");
+  assert.equal(read.complete, false, "a cursor that does not advance never certifies a listing");
+  assert.deepEqual(sentCursors(seen), [null, "C1"]);
+  assert.equal(seen.length, 2, "the walk stops as soon as a cursor repeats, without burning the page bound");
+});
+
+test("#1662: the MAX_PAGES bound stops an advancing walk and a capped listing is never certified", async () => {
+  let requests = 0;
+  const { fetchImpl, seen } = recorder(() => {
+    requests += 1;
+    // Fresh cursor every page, always another page promised: only the bound stops it.
+    return threadsPage([`T${requests}`], { hasNextPage: true, endCursor: `C${requests}` });
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true, "a bounded walk degrades to an incomplete listing, it does not fail the run");
+  if (!read.ok) return;
+  assert.equal(read.complete, false, "a capped listing never claims completeness");
+  assert.equal(threadIds(read.data).length, 100, "the pages read are still returned");
+  assert.equal(seen.length, 100, "the bound fires before the 101st request");
+});
+
+test("#1662: a later page that fails keeps the earlier pages and declares the listing incomplete", async () => {
+  const { fetchImpl, seen } = recorder((_url, init) =>
+    requestedCursor(init) === "C1"
+      ? json({}, 500)
+      : threadsPage(["T1"], { hasNextPage: true, endCursor: "C1" }),
+  );
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const read = await adapter.listReviewThreads();
+  assert.equal(read.ok, true, "the pages already read still serve the context stage (#1645's posture)");
+  if (!read.ok) return;
+  assert.deepEqual(threadIds(read.data), ["T1"]);
+  assert.equal(read.complete, false, "the first page alone is never an authoritative complete listing");
+  assert.equal(seen.length, 2, "the walk stops at the failed page");
+});
+
+test("#1662: a first page that fails still fails the read, where nothing was enumerated", async () => {
+  const { fetchImpl, seen } = recorder(() => json({ errors: [{ message: "nope" }] }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  assert.equal((await adapter.listReviewThreads()).ok, false, "a GraphQL error is a failed read, so the caller's bounded retry can fire");
+  assert.equal(seen.length, 1);
+});
+
+test("#1662: a later page whose nodes cannot be enumerated keeps the earlier pages, incomplete", async () => {
+  for (const body of [
+    { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: "not an array" } } } } },
+    { data: { repository: { pullRequest: "not an object" } } },
+  ]) {
+    const { fetchImpl, seen } = recorder((_url, init) =>
+      requestedCursor(init) === "C1"
+        ? json(body)
+        : threadsPage(["T1"], { hasNextPage: true, endCursor: "C1" }),
+    );
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const read = await adapter.listReviewThreads();
+    assert.equal(read.ok, true, "an unreadable later page fails that page, and never rejects the call");
+    if (!read.ok) continue;
+    assert.deepEqual(threadIds(read.data), ["T1"]);
+    assert.equal(read.complete, false, "a listing it could not finish never certifies");
+    assert.equal(seen.length, 2);
+  }
+});
+
+test("#1662: a first page whose body cannot be read fails the read instead of rejecting", async () => {
+  for (const body of [{ data: "not an object" }, { data: { repository: { pullRequest: "not an object" } } }]) {
+    const { fetchImpl } = recorder(() => json(body));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const result = await adapter.listReviewThreads();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Cannot index/);
+  }
+});
+
+test("#1662: an absent reviewThreads connection fails the read — an enumeration that never started proves nothing", async () => {
+  for (const body of [{ data: { repository: { pullRequest: {} } } }, { data: { repository: { pullRequest: { reviewThreads: null } } } }]) {
+    const { fetchImpl } = recorder(() => json(body));
+    const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    const result = await adapter.listReviewThreads();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Cannot iterate over null/);
+  }
+});
+
+test("#1662: githubReviewThreadsPageInfo certifies only a boolean hasNextPage", () => {
+  for (const body of [
+    { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+    { data: { repository: { pullRequest: null } } },
+    { data: null },
+    { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: "false" }, nodes: [] } } } } },
+  ]) {
+    assert.deepEqual(githubReviewThreadsPageInfo(body), { proven: false, hasNextPage: false, endCursor: null });
+  }
+  assert.deepEqual(
+    githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true, endCursor: "C" }, nodes: [] } } } } }),
+    { proven: true, hasNextPage: true, endCursor: "C" },
+  );
+  assert.deepEqual(
+    githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } } } } }),
+    { proven: true, hasNextPage: false, endCursor: null },
+  );
+  // A blank, missing or oversized endCursor never advances the walk, even
+  // beside hasNextPage: true.
+  for (const endCursor of ["", null, undefined, "C".repeat(MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS + 1)]) {
+    assert.deepEqual(
+      githubReviewThreadsPageInfo({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true, endCursor }, nodes: [] } } } } }),
+      { proven: true, hasNextPage: true, endCursor: null },
+    );
+  }
+  // A non-object intermediate throws (JqError): the adapter turns that into a
+  // failed or explicitly incomplete read, never into "no more pages".
+  assert.throws(() => githubReviewThreadsPageInfo({ data: "not an object" }), /Cannot index/);
 });
 
 test("github paginated reviews follow Link rel=next and merge pages in order", async () => {
