@@ -5,6 +5,7 @@ import {
   GITHUB_CONVERSATION_COMMENTS_QUERY,
   GITHUB_PR_BODY_REVISION_QUERY,
   GITHUB_REVIEW_THREADS_QUERY,
+  githubReviewThreadsTruncated,
   normalizeExternalChecks,
   normalizeGithubConversationComments,
   normalizeGithubReviewThreads,
@@ -410,7 +411,12 @@ export class GitHubAdapter implements PlatformReadAdapter {
     const response = await this.graphql(GITHUB_REVIEW_THREADS_QUERY);
     if (!response.ok) return response;
     try {
-      return { ok: true, data: normalizeGithubReviewThreads(response.data) };
+      const threads = normalizeGithubReviewThreads(response.data);
+      // A capped window cannot prove any unseen thread absent (#1645): the
+      // settlement reconciliation only trusts `absent` from a complete listing.
+      return githubReviewThreadsTruncated(response.data, threads.length)
+        ? { ok: true, data: threads, complete: false }
+        : { ok: true, data: threads };
     } catch (error) {
       return { ok: false, error: errorText(error) };
     }

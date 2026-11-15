@@ -26,8 +26,29 @@ export type { ExternalCheck } from "./types.js";
 export const GITHUB_CONVERSATION_COMMENTS_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }";
 
+/** The review-thread window is capped: a PR with more threads than this has a
+ * listing that CANNOT prove any given absent thread is gone. `pageInfo` is
+ * selected so the adapter can tell; #1645's settlement reconciliation treats
+ * a capped listing as incomplete. */
+export const GITHUB_REVIEW_THREADS_WINDOW = 100;
+
 export const GITHUB_REVIEW_THREADS_QUERY =
-  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }";
+  `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: ${GITHUB_REVIEW_THREADS_WINDOW}) { pageInfo { hasPreviousPage } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }`;
+
+/** True when the review-threads connection proves (or cannot rule out) that
+ * the window dropped threads. A response without the connection object at all
+ * enumerated nothing, so it proves nothing; on an existing connection it is
+ * `hasPreviousPage` when carried, else the conservative `count >= window`
+ * fallback. */
+export function githubReviewThreadsTruncated(response: unknown, count: number): boolean {
+  const connection = jqPath(response, "data", "repository", "pullRequest", "reviewThreads");
+  if (!isPlainObject(connection)) return true;
+  const pageInfo = isPlainObject(connection.pageInfo) ? connection.pageInfo : null;
+  if (pageInfo && typeof pageInfo.hasPreviousPage === "boolean") {
+    return pageInfo.hasPreviousPage;
+  }
+  return count >= GITHUB_REVIEW_THREADS_WINDOW;
+}
 
 /** #812: body and `lastEditedAt` in ONE document — the atomic snapshot the
  * whole metadata pass consumes. `lastEditedAt` is the body's own edit
