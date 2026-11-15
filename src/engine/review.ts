@@ -2883,10 +2883,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const settlementRecord = persistedLoopSettlements(enforcementInputs.toolHarness);
   const finalSettlements = reconcileSettlements(
     settlementRecord.settlements,
-    // The fold rows ride with their TEXT: a dependency-evidence shape row is
-    // keyed by obligation name in the loop while the fold row carrying the same
-    // question is keyed `obligation-<n>`, so the join needs the text mapping.
-    resolvedObligations.obligations.map((row) => ({ id: row.id, status: row.status, text: row.text })),
+    // The fold rows ride with their SOURCE and TEXT: a dependency-evidence
+    // shape row is keyed by obligation name in the loop while the fold row
+    // carrying the same question is keyed `obligation-<n>`, so the join needs
+    // the text mapping — and ownership, since only the classifier-owned
+    // must_check row may settle a dependency question.
+    resolvedObligations.obligations.map((row) => ({ id: row.id, source: row.source, status: row.status, text: row.text })),
   );
   const dispositionBuild = buildDispositionEvidence({
     completenessChecks: Array.isArray(completenessResult?.result?.checks)

@@ -123,7 +123,12 @@ settle a state:
   SEMANTIC outcome (`resolved` / `finding` / `unknown` / `not-tracked`) over
   the SAME obligation rows this disposition consumes — dependency shape rows
   join their fold row through that row's own TEXT, since the loop keys them
-  by obligation name. So the record and the disposition cannot disagree. A
+  by obligation name, and ONLY the classifier-owned `must_check` row may own
+  one (`foldOwnershipForDependencyQuestions`, the mirror of the harness's
+  shape-row dedupe — a satisfied `derived`/`risk`/trusted-base row that
+  merely mentions the dependency vocabulary can neither resolve the question
+  nor hide it; reconcile and the disposition's dedupe call the SAME helper).
+  So the record and the disposition cannot disagree. A
   MATERIAL question with no semantic resolution AND no fold row owning it
   (left `open`, cap/budget released, or an acquisition that failed) becomes a
   MATERIAL `investigation_unavailable` unknown — never a certified

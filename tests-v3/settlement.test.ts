@@ -11,6 +11,7 @@ import {
 } from "../src/tools/loop.js";
 import {
   finalSettlementsToArtifact,
+  foldOwnershipForDependencyQuestions,
   parseFinalSettlements,
   parseLoopSettlements,
   parseLoopSettlementsReport,
@@ -245,27 +246,38 @@ test("#1659: reconciliation derives the semantic state from the fold, never from
   );
 });
 
-test("#1659: a dependency shape row joins the fold row that NAMES its question (keyed differently)", () => {
+test("#1659: a dependency shape row joins ONLY the classifier-owned must_check row that NAMES its question", () => {
   // The loop keys a shape row by obligation NAME (`provenance`); the fold keys
   // the same question `obligation-<n>`. The join is the fold row's own TEXT
-  // through the shared dependency mapping — no id fudging, no new key scheme.
+  // through the shared dependency mapping — no id fudging, no new key scheme —
+  // and it is OWNERSHIP-gated: only the classifier-owned `must_check` source
+  // may settle the question (the mirror of the harness's must_check-only
+  // shape-row dedupe).
   const row = settlement({ id: "provenance", kind: "dependency", source: undefined });
   const foldRow = {
     id: "obligation-7",
+    source: "must_check" as const,
     status: "satisfied" as const,
     text: "establish upstream provenance for the updated dependency: publisher and canonical source repository",
   };
   const resolved = reconcileSettlements([row], [foldRow]);
   assert.deepEqual([resolved[0]!.semantic, resolved[0]!.foldCovered], ["resolved", true]);
-  // Conservative when several fold rows name the same obligation.
+  // Conservative when several legitimate must_check rows name the same obligation.
   const conservative = reconcileSettlements([row], [
     foldRow,
-    { id: "obligation-8", status: "unresolved", text: "establish upstream provenance for the updated chart" },
+    { id: "obligation-8", source: "must_check" as const, status: "unresolved" as const, text: "establish upstream provenance for the updated chart" },
   ]);
   assert.deepEqual([conservative[0]!.semantic, conservative[0]!.foldCovered], ["unknown", true]);
   // Unrelated fold text never matches.
-  const unrelated = reconcileSettlements([row], [{ id: "obligation-9", status: "satisfied", text: "run the test suite" }]);
+  const unrelated = reconcileSettlements([row], [{ id: "obligation-9", source: "must_check" as const, status: "satisfied" as const, text: "run the test suite" }]);
   assert.deepEqual([unrelated[0]!.semantic, unrelated[0]!.foldCovered], ["unknown", false]);
+  // A NON-must_check row is never an owner through its text, however exactly it
+  // names the obligation: unrelated `derived`/`risk`/trusted-base prose cannot
+  // resolve the dependency question.
+  for (const source of ["derived", "risk", "trusted_base_guidance"] as const) {
+    const foreign = reconcileSettlements([row], [{ id: "derived-1", source, status: "satisfied" as const, text: foldRow.text }]);
+    assert.deepEqual([foreign[0]!.semantic, foreign[0]!.foldCovered], ["unknown", false], source);
+  }
   // Only a trace row may be `not-tracked` (the #1658 provenance summary owns it).
   const trace = reconcileSettlements([settlement({ id: "trace:req-1", kind: "trace", source: undefined })], []);
   assert.deepEqual([trace[0]!.semantic, trace[0]!.foldCovered], ["not-tracked", false]);
@@ -711,7 +723,7 @@ test("#1659 P1: a material open / failed-acquisition / unanswered question canno
   };
   const coveredRows = reconcileSettlements(
     [shapeRow({ evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" })],
-    [{ id: foldObligation.id, status: foldObligation.status, text: foldObligation.text }],
+    [{ id: foldObligation.id, source: foldObligation.source, status: foldObligation.status, text: foldObligation.text }],
   );
   assert.deepEqual([coveredRows[0]!.semantic, coveredRows[0]!.foldCovered], ["unknown", true]);
   const coveredBuild = buildDispositionEvidence(dispositionParts({
@@ -723,11 +735,34 @@ test("#1659 P1: a material open / failed-acquisition / unanswered question canno
     [["mandatory_requirement_unresolved", questionText]]);
   assert.equal(publish(coveredBuild).kind, "incomplete");
 
+  // (3b) P1 (review round 5): the SAME open question with a SATISFIED
+  // non-must_check obligation whose text mentions the dependency vocabulary:
+  // that prose is NOT the question's owner, so it can neither resolve the
+  // investigation nor hide it. Every foreign source withholds.
+  const openShape = () => shapeRow({ evidenceState: "open", successfulAttempt: false, admittedBy: [], successfulBy: [], acquisition: "unavailable" });
+  for (const [source, id] of [
+    ["derived", "derived-1"],
+    ["risk", "risk-1"],
+    ["trusted_base_guidance", "obligation-9"],
+  ] as const) {
+    const foreignRows = reconcileSettlements(
+      [openShape()],
+      [{ id, source, status: "satisfied" as const, text: questionText }],
+    );
+    assert.deepEqual([foreignRows[0]!.semantic, foreignRows[0]!.foldCovered], ["unknown", false], source);
+    const foreignBuild = buildDispositionEvidence(dispositionParts({ finalSettlements: foreignRows }));
+    assert.deepEqual(foreignBuild.evidence.map((entry) => [entry.code, entry.materiality, entry.subject]),
+      [["investigation_unavailable", "material", "left unanswered: security_advisory"]], source);
+    const foreignDisposition = publish(foreignBuild);
+    assert.equal(foreignDisposition.kind, "incomplete", source);
+    assert.equal(foreignDisposition.nativeEvent, "COMMENT", source);
+  }
+
   // (4) Acquired AND semantically resolved (the fold credits it through the
   // dependency-text join): APPROVE stays eligible, with no evidence entry.
   const resolvedRows = reconcileSettlements(
     [shapeRow({})],
-    [{ id: foldObligation.id, status: "satisfied" as const, text: questionText }],
+    [{ id: foldObligation.id, source: foldObligation.source, status: "satisfied" as const, text: questionText }],
   );
   assert.deepEqual([resolvedRows[0]!.semantic, resolvedRows[0]!.foldCovered], ["resolved", true]);
   const resolvedBuild = buildDispositionEvidence(dispositionParts({
@@ -813,15 +848,16 @@ test("#1659: the loop records a non-gating producer row as ADVISORY, never mater
   assert.equal(disposition.nativeEvent, "APPROVE");
 });
 
-test("#1659: an unmet or non-must_check fold owner through the text join is disclosed once", () => {
+test("#1659: a legitimate must_check owner is disclosed once; foreign-source prose never owns the question", () => {
   const questionText = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
   const shapeRow = settlement({ id: "security_advisory", kind: "dependency", source: undefined });
 
-  // (a) An `unmet` owner: the semantic state is `finding`, and the obligation
-  // fold's own entry is the single disclosure — the record adds nothing.
+  // (a) An `unmet` must_check owner: the semantic state is `finding`, and the
+  // completeness fold's own entry is the single disclosure — the record adds
+  // nothing, and the negative semantics stay intact.
   const unmetObligation = {
     id: "obligation-5",
-    source: "derived" as const,
+    source: "must_check" as const,
     text: questionText,
     status: "unmet" as const,
     cause: null,
@@ -829,18 +865,23 @@ test("#1659: an unmet or non-must_check fold owner through the text join is disc
   };
   const unmetRows = reconcileSettlements(
     [shapeRow],
-    [{ id: unmetObligation.id, status: unmetObligation.status, text: unmetObligation.text }],
+    [{ id: unmetObligation.id, source: unmetObligation.source, status: unmetObligation.status, text: unmetObligation.text }],
   );
   assert.deepEqual([unmetRows[0]!.semantic, unmetRows[0]!.foldCovered], ["finding", true]);
   const unmetBuild = buildDispositionEvidence(dispositionParts({
     obligations: [unmetObligation],
+    completenessChecks: [{ check: questionText, status: "unmet", reason: "no-disposition", row_class: "objective" }],
     finalSettlements: unmetRows,
   }));
   assert.deepEqual(unmetBuild.evidence.map((entry) => [entry.code, entry.subject]),
-    [["mandatory_requirement_unresolved", "obligation-5"]]);
+    [["mandatory_requirement_unresolved", questionText]]);
 
-  // (b) A non-must_check owner matched ONLY through the text join: the
-  // obligation loop discloses it, so the settlement loop must not duplicate.
+  // (b) P1 (review round 5): a `derived` row naming the dependency vocabulary
+  // is NOT the shape question's owner. It never resolves or hides the
+  // dependency investigation; each question keeps its own entry — the derived
+  // obligation discloses itself, the settlement record discloses the
+  // unanswered dependency question. Neither side implements the ownership
+  // rule independently: both call `foldOwnershipForDependencyQuestions`.
   const derivedObligation = {
     id: "derived-2",
     source: "derived" as const,
@@ -851,15 +892,19 @@ test("#1659: an unmet or non-must_check fold owner through the text join is disc
   };
   const derivedRows = reconcileSettlements(
     [shapeRow],
-    [{ id: derivedObligation.id, status: derivedObligation.status, text: derivedObligation.text }],
+    [{ id: derivedObligation.id, source: derivedObligation.source, status: derivedObligation.status, text: derivedObligation.text }],
   );
-  assert.deepEqual([derivedRows[0]!.semantic, derivedRows[0]!.foldCovered], ["unknown", true]);
+  assert.deepEqual([derivedRows[0]!.semantic, derivedRows[0]!.foldCovered], ["unknown", false]);
   const derivedBuild = buildDispositionEvidence(dispositionParts({
     obligations: [derivedObligation],
     finalSettlements: derivedRows,
   }));
   assert.deepEqual(derivedBuild.evidence.map((entry) => [entry.code, entry.subject]),
-    [["mandatory_requirement_unresolved", "derived-2"]]);
+    [["mandatory_requirement_unresolved", "derived-2"], ["investigation_unavailable", "unanswered: security_advisory"]]);
+  // The helper itself agrees: the derived row is not an owner.
+  assert.equal(foldOwnershipForDependencyQuestions([
+    { id: derivedObligation.id, source: derivedObligation.source, status: derivedObligation.status, text: derivedObligation.text },
+  ]).has("security_advisory"), false);
 });
 
 // ---------------------------------------------------------------------------

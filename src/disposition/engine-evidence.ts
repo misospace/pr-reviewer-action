@@ -38,8 +38,7 @@
  */
 import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
-import { dependencyObligationForCheckText } from "../tools/dependency-evidence.js";
-import type { FinalSettlementRow } from "../enforcement/settlement.js";
+import { foldOwnershipForDependencyQuestions, type FinalSettlementRow } from "../enforcement/settlement.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
 
 export interface DispositionEvidenceParts {
@@ -309,34 +308,42 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   //
   // Dedup is decided by FOLD ACCOUNT, not by assumption: a question the
   // obligation fold carries (directly by `obligation-<n>`/`derived-<n>` id, or
-  // — for a dependency shape row keyed by obligation NAME — the fold row whose
-  // TEXT names that obligation) is already disclosed by the fold's own entry:
-  // the obligation loop above for a non-must_check row, the completeness fold
-  // by check text for a must_check row. A question with NO fold row has no
-  // other surface, so the settlement record discloses it — that is the case
-  // where the loop tracked a question the required-check fold cannot account
-  // for (e.g. the dependency plan falling back to the full obligation set).
-  // `not-tracked` can therefore never hide a material unanswered question:
-  // reconciliation only assigns it when evidence demonstrably reached the
-  // reviewer or the #1658 trace provenance owns the row. Trace-kind rows are
-  // skipped: the requirement trace settles by PROVENANCE through the summary
-  // classes above. The join lives in `reconcileSettlements`, which derives the
-  // semantic state from these same fold outcomes, so the canonical record and
-  // the disposition cannot disagree.
+  // — for a dependency shape row keyed by obligation NAME — ONLY through the
+  // shared ownership rule in `foldOwnershipForDependencyQuestions`: the
+  // classifier-owned `must_check` fold row whose TEXT names that obligation)
+  // is already disclosed by the fold's own entry: the obligation loop above
+  // for a non-must_check row, the completeness fold by check text for a
+  // must_check row. A `derived`, `risk` or trusted-base row is NEVER an owner
+  // through its text — that prose may mention "security advisories" while
+  // knowing nothing about the upstream investigation, so it can neither resolve
+  // the dependency question in `reconcileSettlements` nor hide it here; both
+  // sides call the SAME helper, so the ownership rule cannot drift. A question
+  // with NO fold row has no other surface, so the settlement record discloses
+  // it — that is the case where the loop tracked a question the required-check
+  // fold cannot account for (e.g. the dependency plan falling back to the full
+  // obligation set). `not-tracked` can therefore never hide a material
+  // unanswered question: reconciliation only assigns it when evidence
+  // demonstrably reached the reviewer or the #1658 trace provenance owns the
+  // row. Trace-kind rows are skipped: the requirement trace settles by
+  // PROVENANCE through the summary classes above. The join lives in
+  // `reconcileSettlements`, which derives the semantic state from these same
+  // fold outcomes, so the canonical record and the disposition cannot disagree.
   const foldCheckTexts = new Set(
     parts.completenessChecks
       .map((row) => (typeof row.check === "string" ? row.check : ""))
       .filter((text) => text !== ""),
   );
   const obligationById = new Map(parts.obligations.map((row) => [row.id, row]));
+  const dependencyOwnership = foldOwnershipForDependencyQuestions(
+    parts.obligations.map((row) => ({ id: row.id, source: row.source, status: row.status, text: row.text })),
+  );
   for (const settlement of parts.finalSettlements ?? []) {
     if (settlement.kind === "trace") continue;
     if (settlement.semantic !== "unknown") continue;
-    const owner = obligationById.get(settlement.id)
-      ?? (settlement.kind === "dependency"
-        ? parts.obligations.find((row) => row.text !== undefined
-          && dependencyObligationForCheckText(row.text) === settlement.id)
-        : undefined);
+    const ownerId = settlement.kind === "dependency"
+      ? dependencyOwnership.get(settlement.id)?.id
+      : settlement.id;
+    const owner = ownerId === undefined ? undefined : obligationById.get(ownerId);
     if (owner !== undefined) {
       if (owner.source !== "must_check") continue;
       if (owner.text !== undefined && owner.text !== "" && foldCheckTexts.has(owner.text)) continue;

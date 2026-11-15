@@ -50,7 +50,12 @@
  * The prose/shape dedupe lives upstream at harness row construction (a
  * must_check row mapping to a dependency obligation through
  * `dependencyObligationForCheckText` is tracked ONLY as a shape row —
- * src/tools/harness.ts), so one question yields one settlement row.
+ * src/tools/harness.ts), so one question yields one settlement row. The
+ * fold-side join is the MIRROR of that dedupe: a dependency shape question is
+ * owned ONLY by the classifier-owned `must_check` row whose text names it
+ * (`foldOwnershipForDependencyQuestions`) — a `derived`, `risk` or
+ * trusted-base row that merely mentions the dependency vocabulary can never
+ * resolve or hide it.
  */
 
 import { dependencyObligationForCheckText } from "../tools/dependency-evidence.js";
@@ -102,9 +107,15 @@ export type SettlementObligationSource = "must_check" | "trusted_base_guidance" 
  * fold status — the SAME input the final disposition consumes). `text` rides
  * so a dependency-evidence shape row can find the obligation row that carries
  * its question (they are keyed differently: shape rows by obligation NAME,
- * fold rows by `obligation-<n>`). */
+ * fold rows by `obligation-<n>`). `source` rides so the TEXT join can enforce
+ * OWNERSHIP: only the classifier-owned `must_check` row may settle a
+ * dependency-evidence question (see `foldOwnershipForDependencyQuestions`) —
+ * prose from another source that merely mentions the dependency vocabulary
+ * must never resolve or hide it. A row with no source is never an owner
+ * through its text. */
 export interface SettlementObligationOutcome {
   id: string;
+  source?: SettlementObligationSource;
   status: "satisfied" | "unmet" | "unresolved";
   text?: string;
 }
@@ -208,6 +219,47 @@ export function finalSettlementsToArtifact(rows: readonly FinalSettlementRow[]):
 }
 
 /**
+ * The ONE fold-OWNERSHIP rule for dependency-evidence shape questions, shared
+ * by `reconcileSettlements` and the disposition's dedupe so the two can never
+ * implement matching independently:
+ *
+ * A dependency shape row (keyed by obligation NAME, e.g. `security_advisory`)
+ * is owned ONLY by the classifier-owned `must_check` obligation row whose text
+ * the shared `dependencyObligationForCheckText` mapping resolves to that
+ * obligation. That is the exact source the harness deduped the question on at
+ * admission (`record.source === "must_check"` in src/tools/harness.ts), so the
+ * fold row and the shape row are the same question by construction.
+ *
+ * A `derived`, `risk` or `trusted_base_guidance` row is NEVER an owner through
+ * its text: that prose is model- or scan-adjacent and may mention "security
+ * advisories" while knowing nothing about the upstream investigation, so it
+ * must never resolve or hide a dependency-evidence question. Only the direct
+ * id match (a fold row literally keyed like the settlement row) still applies
+ * to every kind. Several legitimate `must_check` owners aggregate
+ * conservatively: the worst status wins.
+ */
+export function foldOwnershipForDependencyQuestions(
+  outcomes: readonly SettlementObligationOutcome[],
+): Map<string, SettlementObligationOutcome> {
+  const owners = new Map<string, SettlementObligationOutcome>();
+  for (const outcome of outcomes) {
+    if (outcome.source !== "must_check" || outcome.text === undefined) continue;
+    const obligation = dependencyObligationForCheckText(outcome.text);
+    if (obligation === null) continue;
+    const current = owners.get(obligation);
+    if (current === undefined || statusSeverity(outcome.status) > statusSeverity(current.status)) {
+      owners.set(obligation, outcome);
+    }
+  }
+  return owners;
+}
+
+/** Worst-status ordering for the conservative dependency join. */
+function statusSeverity(status: SettlementObligationOutcome["status"]): number {
+  return status === "unmet" ? 2 : status === "unresolved" ? 1 : 0;
+}
+
+/**
  * Reconcile the loop's evidence state with the run's folded semantic
  * outcomes — the ONE join between investigation and finalization. Runs AFTER
  * the verdict, over the SAME `ReviewObligation` rows the final disposition
@@ -216,12 +268,12 @@ export function finalSettlementsToArtifact(rows: readonly FinalSettlementRow[]):
  * Rules (deterministic; the fold is the semantic authority):
  * - the fold status wins when it exists: `satisfied` → `resolved`,
  *   `unmet` → `finding`, `unresolved` → `unknown`;
- * - a dependency-evidence shape row is keyed by obligation NAME while the
- *   fold row carrying the same question is keyed `obligation-<n>`, so the join
- *   for those rows is the fold row's own TEXT through the shared
- *   `dependencyObligationForCheckText` mapping the harness used to dedupe the
- *   question into the loop. Several fold rows naming one obligation resolve
- *   conservatively (the worst status wins);
+ * - a dependency-evidence shape row joins its fold row ONLY through the
+ *   shared ownership rule (`foldOwnershipForDependencyQuestions`): the
+ *   classifier-owned `must_check` row whose text names the obligation.
+ *   Prose from another source never settles it, however closely its wording
+ *   matches the dependency vocabulary. Several owners resolve conservatively
+ *   (the worst status wins);
  * - no fold row at all: a trace row is `not-tracked` (the #1658 provenance
  *   summary owns its settlement), and EVERY other row is `unknown` — including
  *   one whose evidence demonstrably arrived. Acquired evidence with no semantic
@@ -238,19 +290,10 @@ export function reconcileSettlements(
   outcomes: readonly SettlementObligationOutcome[],
 ): FinalSettlementRow[] {
   const statusById = new Map(outcomes.map((outcome) => [outcome.id, outcome.status]));
-  const statusByDependencyObligation = new Map<string, SettlementObligationOutcome["status"]>();
-  for (const outcome of outcomes) {
-    if (outcome.text === undefined) continue;
-    const obligation = dependencyObligationForCheckText(outcome.text);
-    if (obligation === null) continue;
-    const current = statusByDependencyObligation.get(obligation);
-    if (current === undefined || statusSeverity(outcome.status) > statusSeverity(current)) {
-      statusByDependencyObligation.set(obligation, outcome.status);
-    }
-  }
+  const dependencyOwners = foldOwnershipForDependencyQuestions(outcomes);
   return rows.map((row) => {
     const status = statusById.get(row.id)
-      ?? (row.kind === "dependency" ? statusByDependencyObligation.get(row.id) : undefined);
+      ?? (row.kind === "dependency" ? dependencyOwners.get(row.id)?.status : undefined);
     const foldCovered = status !== undefined;
     const semantic: SettlementSemanticState = status === "satisfied"
       ? "resolved"
@@ -268,11 +311,6 @@ export function reconcileSettlements(
       : "unknown";
     return { ...row, semantic, foldCovered };
   });
-}
-
-/** Worst-status ordering for the conservative dependency join. */
-function statusSeverity(status: SettlementObligationOutcome["status"]): number {
-  return status === "unmet" ? 2 : status === "unresolved" ? 1 : 0;
 }
 
 /**
