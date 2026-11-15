@@ -506,7 +506,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean } = {},
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null } = {},
 ): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -532,7 +532,7 @@ async function runStaleThreadVerdict(
     const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
     // #1663: trusted authorship metadata says the carried thread is the
     // action's own; the body marker alone would not be trusted provenance.
-    adapter.authenticatedIdentity = () => Promise.resolve("bot");
+    adapter.authenticatedIdentity = () => Promise.resolve(options.identity === undefined ? "bot" : options.identity);
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
@@ -720,6 +720,21 @@ test("#1663: a live historical bot major with no current-head re-evaluation is I
   assertDispositionAgreement(result, api);
   assert.equal(api.submitted[0]!.event, "COMMENT", "the native event is the disposition's COMMENT, not a fabricated block");
   assert.match(api.submitted[0]!.body, /INCOMPLETE/);
+});
+
+test("#1663: an unprovable identity never demotes a marker-bearing bot blocker to a human minor", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, { identity: null });
+  assert.equal(artifact.verdict, "approve", "the old severity does not force the verdict");
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "an unprovable root author must not be re-emitted as a non-blocking human thread");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1,
+    "the managed marker keeps the carried finding bot-authored, so the gap stays material");
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
 });
 
 test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {

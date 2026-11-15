@@ -143,18 +143,21 @@ export interface ReviewArtifact {
    * the artifact, so a future reader can tell a current-head finding from a
    * carried thread finding and why the latter was allowed to block. */
   thread_reconciliation?: {
-    /** About the CARRIED THREAD SET (#1645): "complete" iff every carried
-     * thread reconciled a proven state (live_unresolved, resolved, or
-     * absent); "incomplete" iff one or more reconciled unknown — the live
-     * listing could not establish a carried thread's state (an unreadable
-     * read, a listing that is not provably complete, or a listed row that
-     * could not be parsed). The same authority that renders the review's
-     * incomplete-reconciliation disclosure, so the artifact and the
-     * disclosure cannot disagree. The listing's own completeness flag gates
-     * EVERY carried thread's state, not only the unseen ones: an
-     * incomplete enumeration reconciles them all to `unknown`, so this
-     * field reads `incomplete` whenever the enumeration was not provably
-     * complete (#1645, maintainer review 5885372900). */
+    /** About the CARRIED THREAD SET: "complete" iff every carried thread
+     * reconciled a proven state (live_unresolved, resolved, or absent) AND
+     * no live historical bot blocking concern lacked a current-head
+     * re-evaluation; "incomplete" otherwise. #1645's half: one or more
+     * threads reconciled unknown — the live listing could not establish a
+     * carried thread's state (an unreadable read, a listing that is not
+     * provably complete, or a listed row that could not be parsed). #1663's
+     * half: a live bot-authored blocker/major settled unverified, counted in
+     * `unreassessed`. The same authority that renders the review's
+     * disclosure, so the artifact and the disclosure cannot disagree. The
+     * listing's own completeness flag gates EVERY carried thread's state,
+     * not only the unseen ones: an incomplete enumeration reconciles them
+     * all to `unknown`, so this field reads `incomplete` whenever the
+     * enumeration was not provably complete (#1645, maintainer review
+     * 5885372900). */
     state: "complete" | "incomplete";
     head_sha: string;
     live_unresolved: number;

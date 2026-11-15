@@ -232,17 +232,21 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
   ws.write("review-threads.raw.json", pyJsonDumps(fetched.data));
   try {
     // #1663: thread origin is decided from the forge's authorship metadata
-    // (the login this token posts as), never from comment-body wording. An
-    // unprovable identity fails closed to "not bot-authored": no historical
-    // bot finding can then manufacture a blocker, and no human thread is
-    // treated as the action's own.
+    // (the login this token posts as), never from comment-body wording. A
+    // PROVEN identity settles ownership in both directions: the action's
+    // login is bot-authored, any other login is human-authored even when its
+    // body forges the managed marker. When the identity cannot be proven the
+    // caller falls back to the historical body-marker reading (undefined):
+    // treating an unprovable root as human would demote a carried bot blocker
+    // to a non-blocking human thread and let a clean APPROVE be certified
+    // against an unevaluated historical blocker (#1663 review).
     let botIdentity: string | null = null;
     try {
       botIdentity = await adapter.authenticatedIdentity();
     } catch {
       botIdentity = null;
     }
-    const threads = prepareThreads(fetched.data, undefined, botIdentity);
+    const threads = prepareThreads(fetched.data, undefined, botIdentity ?? undefined);
     const [markdown, rendered] = renderReviewThreads(threads, undefined, maxBytes, supersededCutoff);
     ws.write("review-threads.md", markdown);
     ws.write("review-threads.json", rendered.length > 0 ? `${pythonJsonStringify(threadEnforcementView(rendered))}\n` : "");

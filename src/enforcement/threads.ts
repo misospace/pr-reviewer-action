@@ -8,8 +8,9 @@
  * the forge proves whether a thread is live (the #1645 reconciliation), and
  * the current-head review must still establish whether its finding is valid.
  * A live historical BOT finding re-emits at its original severity only when
- * the model re-affirms it `open`; a code-citing `fixed`/`disputed` settles it
- * without re-emission; a missing or unsupported re-evaluation withholds the
+ * the model re-affirms it `open`; a code-citing `fixed` or a reasoned
+ * `disputed` (the old finding was originally invalid) settles it without
+ * re-emission; a missing or unsupported re-evaluation withholds the
  * old blocking severity and records a MATERIAL `unverified_blocking_claim`
  * through `thread_reconciliation.unreassessed` (INCOMPLETE/COMMENT).
  * A HUMAN-authored unresolved thread is closed only by the forge's resolved
@@ -147,8 +148,9 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
  * Settle every listed thread against the model's dispositions, in place.
  * The first disposition for a thread_id wins. #1663: for a bot-authored
  * blocking thread, `open` re-affirms it (re-emitted at its original
- * severity, default minor, never escalating, #812); `fixed`/`disputed` need
- * evidence citing current code and never re-emit; a missing or unsupported
+ * severity, default minor, never escalating, #812); `fixed` needs evidence
+ * citing current code and `disputed` needs a reasoned explanation — neither
+ * re-emits; a missing or unsupported
  * answer is recorded as unverified and its old blocking severity is withheld
  * (never re-emitted). A human-authored unresolved thread is never closed by
  * a bot disposition. The settled records replace `thread_dispositions` in
@@ -292,11 +294,14 @@ export function applyReviewThreadEnforcement(
       reassessment = "resolved";
     } else if (disposition === "disputed") {
       // #1663: `disputed` is the reviewer's current-head claim that the old
-      // finding was invalid. It needs a concrete code-citing explanation;
-      // an unsupported invalidity claim is uncertainty, not proof.
-      if (!evidenceCitesCode(evidence, thread.path)) {
+      // finding was originally invalid. Unlike `fixed`, that claim is not
+      // about current code, so a reasoned explanation is enough — the
+      // maintainer policy explicitly does not require fabricated
+      // `path:line` proof for an originally invalid concern. An empty
+      // answer is still unsupported and becomes uncertainty, not proof.
+      if (evidence === null || evidence.trim() === "") {
         disposition = "open";
-        note = "disputed without evidence citing current code";
+        note = "disputed without an explanation";
         if (blocking) reassessment = "unverified";
       } else {
         reassessment = "invalid";

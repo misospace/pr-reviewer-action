@@ -457,8 +457,8 @@ test("thread settlement handles no rows, missing/fixed evidence, and retained va
   assert.deepEqual(rows.map((x) => x.disposition), ["open", "open", "fixed", "open"]);
   assert.equal(rows[0].enforced, "no disposition given");
   assert.equal(rows[1].enforced, "fixed without evidence citing current code");
-  assert.equal(rows[3].disposition, "open", "an unsupported invalidity claim is not a current-head resolution");
-  assert.equal(rows[3].enforced, "disputed without evidence citing current code");
+  assert.equal(rows[3].disposition, "open", "an unexplained invalidity claim is not a current-head resolution");
+  assert.equal(rows[3].enforced, "disputed without an explanation");
   assert.ok(a.review_markdown.includes("## Unresolved Review Threads"));
   assert.ok(a.review_markdown.includes("- `bad`: open — fixed without evidence citing current code"));
   assert.equal((a.findings as any[]).filter((f) => f.thread_id).length, 3);
@@ -1215,18 +1215,36 @@ test("#1663: live bot major proven invalid keeps the explanation and never re-bl
   assert.equal(finalKind(a), "approve");
 });
 
-test("#1663: unsupported fixed or invalidity claims cannot certify clean", () => {
-  for (const disposition of ["fixed", "disputed"]) {
+test("#1663: unsupported fixed or unexplained invalidity claims cannot certify clean", () => {
+  for (const [disposition, evidence] of [["fixed", "trust me"], ["disputed", null], ["disputed", "   "]] as const) {
     const a = artifact({
       verdict: "approve",
       findings: [],
-      thread_dispositions: [{ thread_id: "t", disposition, evidence: "trust me" }],
+      thread_dispositions: [{ thread_id: "t", disposition, evidence }],
     });
     applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
     assert.equal(a.findings.some((item) => item.thread_id === "t"), false, `unsupported ${disposition} never re-blocks`);
     assert.equal(a.thread_reconciliation?.unreassessed, 1, `unsupported ${disposition} stays a material unknown`);
     assert.equal(finalKind(a), "incomplete", `unsupported ${disposition} cannot certify a clean approval`);
   }
+});
+
+test("#1663: a reasoned (non-code-citing) invalidity claim settles an originally invalid concern", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{
+      thread_id: "t",
+      disposition: "disputed",
+      evidence: "the old finding misread the guard: it only defended the empty-input branch, which is unreachable here",
+    }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false);
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "disputed", "the reasoned invalidity claim stands without a fabricated path:line");
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined);
+  assert.equal(finalKind(a), "approve");
 });
 
 test("#1663: duplicate historical thread ids yield one current concern with full provenance", () => {
