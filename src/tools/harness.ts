@@ -67,7 +67,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
-import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry } from "../enforcement/evidence-receipts.js";
+import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
 import { settlementsToArtifact } from "../enforcement/settlement.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, TRACE_PLAN_ARTIFACT, type TracePlanRow } from "../requirements/trace-plan.js";
@@ -4468,7 +4468,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     const parsed = candidateArtifact ? JSON.parse(candidateArtifact) as { injected?: unknown; obligations?: unknown } : null;
     if (parsed?.injected === true && Array.isArray(parsed.obligations)) {
       for (const row of parsed.obligations) {
-        const record = (row ?? {}) as { id?: unknown; source?: unknown; text?: unknown };
+        const record = (row ?? {}) as { id?: unknown; source?: unknown; text?: unknown; row_class?: unknown };
         if (typeof record.id !== "string" || typeof record.text !== "string") continue;
         // #1659: the row's trusted obligation source rides the admission row
         // so the settlement record's materiality derives from it (must_check/
@@ -4478,13 +4478,27 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
         const rowSource = (["must_check", "trusted_base_guidance", "derived", "risk"] as const).includes(record.source as never)
           ? record.source as "must_check" | "trusted_base_guidance" | "derived" | "risk"
           : undefined;
+        // #1659 (review): the producer's evidence class rides too. `attention`
+        // and `review-prompt` are the NON-GATING classes (#1657) — the
+        // completeness fold records them as advisory diagnostics and the
+        // obligation fold drops attention rows entirely — so the settlement
+        // record must read them as advisory, never as a material veto. This is
+        // producer metadata, never wording-based classification.
+        const rowClass = (["attention", "objective", "review-prompt", "legacy"] as const).includes(record.row_class as never)
+          ? record.row_class as RequiredEvidenceRowClass
+          : undefined;
         if (dependencyReserve > 0 && record.source === "must_check") {
           // A dependency-evidence obligation row: it re-enters below once,
           // as a shape row, so it must not also gate on its prose tokens.
           if (dependencyObligationForCheckText(record.text) !== null) continue;
         }
         const tokens = obligationAdmissionTokens(record.text);
-        if (tokens !== null) requiredEvidence.push({ id: record.id, tokens, ...(rowSource !== undefined ? { source: rowSource } : {}) });
+        if (tokens !== null) requiredEvidence.push({
+          id: record.id,
+          tokens,
+          ...(rowSource !== undefined ? { source: rowSource } : {}),
+          ...(rowClass !== undefined ? { rowClass } : {}),
+        });
       }
     }
   } catch {

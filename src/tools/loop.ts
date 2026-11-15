@@ -51,7 +51,7 @@ import {
 // authority for the rows it tracks, and finalization consumes its own
 // terminal state instead of re-deriving it. The call-id scheme is the shared
 // #1657 `call-<n>` scheme (`evidence-receipts.ts` is its single source).
-import { executedCallId } from "../enforcement/evidence-receipts.js";
+import { executedCallId, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
 import {
   type LoopEvidenceSettlement,
   type SettlementObligationSource,
@@ -312,6 +312,14 @@ export interface RequiredEvidenceRow {
    * (must_check/derived/risk are material, trusted_base_guidance is
    * advisory). Absent on dependency shape rows and trace rows. */
   source?: SettlementObligationSource;
+  /** #1659 (review): the producer's trusted evidence class from the same
+   * candidates row. An `attention` or `review-prompt` row is NON-GATING by
+   * #1657 contract — the completeness fold records it as an advisory
+   * diagnostic — so its settlement row can never carry a material veto, even
+   * when the obligation fold drops it (attention rows are dropped there) and
+   * the settlement record is therefore the only surface left. Absent means
+   * untagged (legacy behavior: materiality comes from `source` alone). */
+  rowClass?: RequiredEvidenceRowClass;
 }
 
 /** #1396: whether one call admits (counts toward discharging) one pending row. */
@@ -2048,7 +2056,13 @@ export async function driveToolLoop(
     return {
       id: row.id,
       kind: row.obligation !== undefined ? "dependency" : row.tools !== undefined ? "trace" : "prose",
-      materiality: row.tools !== undefined
+      materiality: row.rowClass === "attention" || row.rowClass === "review-prompt"
+        // #1657's NON-GATING producer classes: the completeness fold records
+        // them as advisory diagnostics, and an `attention` row is dropped from
+        // the obligation fold entirely — so the settlement record must not
+        // hand one a material veto it was never allowed to carry.
+        ? "advisory"
+        : row.tools !== undefined
         ? "material"
         : row.obligation !== undefined
         ? "material"

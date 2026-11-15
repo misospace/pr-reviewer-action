@@ -132,8 +132,12 @@ settle a state:
   `parseFinalDisposition` refuses). A question the folds already own keeps
   its single entry — the obligation row (or the must_check completeness row
   found through the text join) is the disclosure; `not-tracked` is reserved
-  for the #1658 trace rows, so it can never hide an unanswered material
-  question. Admission alone never overrides this disposition. A persisted
+  for the #1658 trace rows AND is refused by the strict reader on any other
+  row kind, so it can never hide an unanswered material question. A question
+  the producer tagged `attention` or `review-prompt` is recorded ADVISORY
+  even when the obligation fold drops it (#1657's non-gating classes can
+  never acquire a material veto through this seam). Admission alone never
+  overrides this disposition. A persisted
   record the strict reader had to DROP rows from is itself a MATERIAL
   `investigation_unavailable` unknown — a corrupted record can never read as
   "no gaps";

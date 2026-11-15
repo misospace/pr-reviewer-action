@@ -152,7 +152,7 @@ test("#1659: the evidence reader is fail-closed — malformed rows are dropped, 
 test("#1659: the final record carries the semantic state through its own strict reader", () => {
   const rows: FinalSettlementRow[] = [
     final({ semantic: "unknown" }),
-    final({ id: "provenance", kind: "dependency", source: undefined, semantic: "not-tracked" }),
+    final({ id: "trace:req-1", kind: "trace", source: undefined, semantic: "not-tracked" }),
     final({ id: "obligation-2", semantic: "resolved" }),
   ];
   const artifact = finalSettlementsToArtifact(rows);
@@ -160,13 +160,15 @@ test("#1659: the final record carries the semantic state through its own strict 
   // A missing/invented semantic state drops the row (the loop reader alone
   // cannot stand in for the post-verdict record), and so does a missing
   // `fold_covered` flag — the dedupe the disposition performs depends on it,
-  // so an unreadable flag is never assumed.
+  // so an unreadable flag is never assumed. `not-tracked` on a NON-trace row
+  // contradicts the reconciliation contract and is refused too.
   assert.deepEqual(
     parseFinalSettlements([
       { ...artifact[0]!, semantic: "settled-clean" },
       { ...artifact[1]!, semantic: undefined },
       { ...artifact[2]!, fold_covered: undefined },
-      artifact[3] ?? artifact[2],
+      { ...artifact[0]!, semantic: "not-tracked" },
+      artifact[2],
     ]),
     [rows[2]],
   );
@@ -759,6 +761,105 @@ test("#1659 P1: a material open / failed-acquisition / unanswered question canno
   assert.equal(blockerDisposition.kind, "request_changes");
   assert.equal(blockerDisposition.reason, "blocker_proven");
   assert.equal(blockerDisposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1659: the loop records a non-gating producer row as ADVISORY, never material", async () => {
+  // #1657's row classes ride the admission row from the candidates artifact
+  // (producer metadata, never wording). An `attention` row is additionally
+  // dropped from the obligation fold, so the settlement record is its ONLY
+  // surface — and it must never hand it a material veto.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = Array.from({ length: 4 }, (_, i) => openAiCall(`c${i}`, "read_file", `{"path":"misc/${i}.md"}`));
+  const { postFn, executeFn } = recordingLoop(responses);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 4, 120),
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [
+      { id: "obligation-1", tokens: ["misc"], source: "must_check", rowClass: "attention" },
+      { id: "obligation-2", tokens: ["other"], source: "must_check", rowClass: "review-prompt" },
+    ],
+    timeFn: recordingTime(),
+  });
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((row) => [row.id, row.kind, row.materiality, row.evidenceState]), [
+    // obligation-1 is admitted by the `misc/…` reads; obligation-2 never is.
+    ["obligation-1", "prose", "advisory", "acquired"],
+    ["obligation-2", "prose", "advisory", "open"],
+  ]);
+  // End-to-end: the same row, unaccounted by any fold, stays a diagnostic.
+  const reconciled = reconcileSettlements(outcome.requiredEvidenceSettlements, []);
+  const build = buildDispositionEvidence(dispositionParts({ finalSettlements: reconciled }));
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["investigation_partial", "advisory"],
+    ["investigation_partial", "advisory"],
+  ]);
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: build.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  });
+  assert.equal(disposition.kind, "approve");
+  assert.equal(disposition.nativeEvent, "APPROVE");
+});
+
+test("#1659: an unmet or non-must_check fold owner through the text join is disclosed once", () => {
+  const questionText = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+  const shapeRow = settlement({ id: "security_advisory", kind: "dependency", source: undefined });
+
+  // (a) An `unmet` owner: the semantic state is `finding`, and the obligation
+  // fold's own entry is the single disclosure — the record adds nothing.
+  const unmetObligation = {
+    id: "obligation-5",
+    source: "derived" as const,
+    text: questionText,
+    status: "unmet" as const,
+    cause: null,
+    reason: "no-disposition" as const,
+  };
+  const unmetRows = reconcileSettlements(
+    [shapeRow],
+    [{ id: unmetObligation.id, status: unmetObligation.status, text: unmetObligation.text }],
+  );
+  assert.deepEqual([unmetRows[0]!.semantic, unmetRows[0]!.foldCovered], ["finding", true]);
+  const unmetBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [unmetObligation],
+    finalSettlements: unmetRows,
+  }));
+  assert.deepEqual(unmetBuild.evidence.map((entry) => [entry.code, entry.subject]),
+    [["mandatory_requirement_unresolved", "obligation-5"]]);
+
+  // (b) A non-must_check owner matched ONLY through the text join: the
+  // obligation loop discloses it, so the settlement loop must not duplicate.
+  const derivedObligation = {
+    id: "derived-2",
+    source: "derived" as const,
+    text: questionText,
+    status: "unresolved" as const,
+    cause: null,
+    reason: "ungrounded-derived" as const,
+  };
+  const derivedRows = reconcileSettlements(
+    [shapeRow],
+    [{ id: derivedObligation.id, status: derivedObligation.status, text: derivedObligation.text }],
+  );
+  assert.deepEqual([derivedRows[0]!.semantic, derivedRows[0]!.foldCovered], ["unknown", true]);
+  const derivedBuild = buildDispositionEvidence(dispositionParts({
+    obligations: [derivedObligation],
+    finalSettlements: derivedRows,
+  }));
+  assert.deepEqual(derivedBuild.evidence.map((entry) => [entry.code, entry.subject]),
+    [["mandatory_requirement_unresolved", "derived-2"]]);
 });
 
 // ---------------------------------------------------------------------------

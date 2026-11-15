@@ -345,6 +345,13 @@ function parseLoopSettlementEntry(entry: unknown): LoopEvidenceSettlement | null
  * `review-coverage.json`. The evidence fields reuse the strict loop reader;
  * the semantic field is validated against its closed vocabulary and a row
  * whose semantic state is missing/unknown-to-this-runtime is dropped.
+ *
+ * This surface is DISCLOSURE-ONLY today: the engine writes `final_settlements`
+ * and no decision path reads it back (the decision path reads the loop's own
+ * record through `parseLoopSettlementsReport`, which reports its drop count).
+ * A consumer that ever wants to gate on these rows must add a counted variant
+ * (`{ rows, dropped }`) so a stripped or legacy-shaped record fails closed the
+ * same way, instead of reading as "no gaps".
  */
 export function parseFinalSettlements(value: unknown): FinalSettlementRow[] {
   if (!Array.isArray(value)) return [];
@@ -356,6 +363,11 @@ export function parseFinalSettlements(value: unknown): FinalSettlementRow[] {
     if (!SEMANTIC_STATES.includes(semantic as SettlementSemanticState)) continue;
     const foldCovered = entry.fold_covered;
     if (typeof foldCovered !== "boolean") continue;
+    // Coherence, not vocabulary: `not-tracked` is assigned ONLY to a trace row
+    // (the #1658 provenance summary owns its settlement). A persisted record
+    // pairing it with a prose or dependency row contradicts the reconciliation
+    // contract, so it is refused rather than trusted.
+    if (semantic === "not-tracked" && row.kind !== "trace") continue;
     rows.push({ ...row, semantic: semantic as SettlementSemanticState, foldCovered });
   }
   return rows;
