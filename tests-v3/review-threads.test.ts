@@ -122,6 +122,16 @@ test("#1663: trusted identity settles authorship in both directions", () => {
   assert.equal(unproven.authorship_proven, false, "but the authority is marked unproven");
 });
 
+test("#1663: logins compare case-insensitively and treat <app>[bot] as the app login", () => {
+  const marked = thread("PRRT_1", [comment(1, "Its-Saffron[bot]", "2026-09-25T22:32:00Z", OWN_FINDING)]);
+  const view = enforcementView(prepareThreads([marked], undefined, "its-saffron"))[0]!;
+  assert.equal(view.bot_authored, true, "the App's comment author spelling is the token's bare login");
+  assert.equal(view.authorship_proven, true);
+  assert.equal(view.severity, "major");
+  const other = enforcementView(prepareThreads([marked], undefined, "another-app"))[0]!;
+  assert.equal(other.bot_authored, false, "a proven different login stays human");
+});
+
 test("#812: thread comments older than the PR's last edit are labeled superseded", () => {
   const raw = [thread("PRRT_1", [
     comment(1, "reviewer-bot", "2026-09-28T08:00:00Z", "**🛑 Blocker (bug):** do not merge until X\n\n" + FINDING_TRAILER),

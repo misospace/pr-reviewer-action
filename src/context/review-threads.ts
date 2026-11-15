@@ -107,6 +107,17 @@ function isOwn(body: string, marker: string): boolean {
   return body.includes(marker);
 }
 
+/** #1663: forge logins are case-insensitive, and a GitHub App's comments are
+ * authored by `<app>[bot]` while the installation token's `viewer` login is
+ * the bare app slug. Compare both spellings as the same identity; never let a
+ * cosmetic difference demote the action's own thread to human authority. */
+function normalizeLogin(login: unknown): string | null {
+  if (typeof login !== "string") return null;
+  const trimmed = login.trim().toLowerCase();
+  if (trimmed === "") return null;
+  return trimmed.endsWith("[bot]") ? trimmed.slice(0, -"[bot]".length) : trimmed;
+}
+
 function collapseWhitespace(text: string): string {
   return text.split(/\s+/).filter((part) => part !== "").join(" ");
 }
@@ -170,17 +181,22 @@ export function normalizeThread(
     comments,
     // #1663: a proven forge identity decides authorship in both directions
     // (the action's login is bot, any other login is human even if its body
-    // forges the marker). When the caller supplies no identity at all
-    // (legacy/replay) the historical body-marker reading applies. When the
-    // caller passes `null` (identity unprovable) the marker still classifies
-    // the root, but `authorshipProven: false` stops a bot disposition from
-    // closing it and keeps a blocking concern material.
+    // forges the marker). Logins compare case-insensitively and treat the
+    // GitHub App `<app>[bot]` author spelling as the token's bare login.
+    // When the caller supplies no identity at all (legacy/replay) the
+    // historical body-marker reading applies. When the caller passes `null`
+    // (identity unprovable) the marker still classifies the root, but
+    // `authorshipProven: false` stops a bot disposition from closing it and
+    // keeps a blocking concern material.
     ...(botIdentity === undefined
       ? {}
-      : {
-          botAuthored: botIdentity === null ? root.own : root.user === botIdentity,
-          authorshipProven: botIdentity !== null,
-        }),
+      : (() => {
+          const proven = normalizeLogin(botIdentity);
+          return {
+            botAuthored: proven === null ? root.own : normalizeLogin(root.user) === proven,
+            authorshipProven: proven !== null,
+          };
+        })()),
   };
 }
 

@@ -425,6 +425,10 @@ export function applyReviewThreadEnforcement(
   // artifact can never claim a settlement the published review discloses as
   // unresolved. The listing's own `complete` flag remains provenance for the
   // `absent` rule in reconcileThreadState, not for this field.
+  // The engine supplies a reconciliation input whenever it supplies carried
+  // threads (a failed read still arrives as `available: false`), so the
+  // material count below is not lost on the production path; a legacy unit
+  // caller without one keeps the pre-#1663 settlement exactly.
   if (reconciliation !== null && reconciliation !== undefined) {
     artifact.thread_reconciliation = {
       state: counts.unknown > 0 || unreassessed.size > 0 ? "incomplete" : "complete",

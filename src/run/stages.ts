@@ -243,7 +243,10 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
     // review).
     let botIdentity: string | null = null;
     try {
-      botIdentity = await adapter.authenticatedIdentity();
+      const resolved = await adapter.authenticatedIdentity();
+      // A forge that answers with something other than a usable login is
+      // unproven, exactly like a failed read (#1663 review).
+      botIdentity = typeof resolved === "string" && resolved.trim() !== "" ? resolved : null;
     } catch {
       botIdentity = null;
     }

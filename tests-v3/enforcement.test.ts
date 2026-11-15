@@ -1320,6 +1320,20 @@ test("#1663: unproven authorship neither closes nor re-blocks a carried marker f
   assert.equal(finalKind(a), "incomplete", "clean approval cannot be certified on unproven authority");
 });
 
+test("#1663: unproven authorship withholds an explicit open re-affirmation's blocking severity", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t", { authorship_proven: false })], "strict", liveListing("t"));
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "the re-affirmation is kept on the record");
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "but unproven authority never re-emits the blocking severity");
+  assert.equal(a.thread_reconciliation?.unreassessed, 1);
+  assert.equal(finalKind(a), "incomplete");
+});
+
 test("#1663: an unreadable listing keeps #1654's advisory-only unknown semantics", () => {
   const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(a, [botMajor("t")], "strict", { ...liveListing(), available: false });
