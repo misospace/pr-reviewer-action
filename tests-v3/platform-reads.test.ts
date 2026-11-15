@@ -393,6 +393,13 @@ const sentCursors = (seen: readonly { body: string | undefined }[]): unknown[] =
 const requestedCursor = (init: RequestInit | undefined): string | undefined =>
   (JSON.parse(String(init?.body)).variables as { cursor?: string }).cursor;
 
+test("github GraphQL targets <host>/api/graphql on a GHES /api/v3 base, and GraphQL errors fail the read", async () => {
+  const { fetchImpl, seen } = recorder(() => json({ data: null, errors: [{ message: "nope" }] }));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://ghe.example/api/v3", fetchImpl });
+  assert.equal((await adapter.listReviewThreads()).ok, false);
+  assert.equal(seen[0]!.url, "https://ghe.example/api/graphql");
+});
+
 test("#1662: the review-threads document is forward-paginated, not the v2 capped window", () => {
   assert.match(GITHUB_REVIEW_THREADS_QUERY, /reviewThreads\(first: 100, after: \$cursor\)/);
   assert.match(GITHUB_REVIEW_THREADS_QUERY, /pageInfo \{ hasNextPage endCursor \}/);
