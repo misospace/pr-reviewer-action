@@ -137,5 +137,6 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/self-hosted-deployment.md`](docs/self-hosted-deployment.md) — #738 self-hosted deployment runbook: controller/worker OCI images, the bjw-s `common`-based Helm chart, external PostgreSQL, forge credentials, metrics, upgrades
 - [`docs/self-hosted-qualification.md`](docs/self-hosted-qualification.md) — #1486 self-hosted qualification harness: what it proves, the forge-capability routing rule, local and CI run steps
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
+- [`docs/audits/reliability-architecture-audit-2026-11-12.md`](docs/audits/reliability-architecture-audit-2026-11-12.md) — dated historical snapshot: #1636 reliability-seam survey at `main` `ec3c52c`; superseded as current architecture by the five-audit synthesis (#1656–#1659)
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
 - [`SECURITY.md`](SECURITY.md) — threat model and operational security guidance
