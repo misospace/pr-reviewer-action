@@ -47,6 +47,15 @@ import {
   dependencyEvidenceObligationsForCall,
   type DependencyEvidenceObligation,
 } from "./dependency-evidence.js";
+// #1659: the canonical settlement record — the loop is the single settlement
+// authority for the rows it tracks, and finalization consumes its own
+// terminal state instead of re-deriving it. The call-id scheme is the shared
+// #1657 `call-<n>` scheme (`evidence-receipts.ts` is its single source).
+import { executedCallId, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
+import {
+  type LoopEvidenceSettlement,
+  type SettlementObligationSource,
+} from "../enforcement/settlement.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -298,6 +307,19 @@ export interface RequiredEvidenceRow {
   /** #1506: the closed set of tools that may discharge this row. Absent
    * means any tool may — the #1381 prose rows behave exactly as before. */
   tools?: readonly string[];
+  /** #1659: for a prose row, the obligation source from the candidates
+   * artifact — the settlement record's materiality derives from it
+   * (must_check/derived/risk are material, trusted_base_guidance is
+   * advisory). Absent on dependency shape rows and trace rows. */
+  source?: SettlementObligationSource;
+  /** #1659 (review): the producer's trusted evidence class from the same
+   * candidates row. An `attention` or `review-prompt` row is NON-GATING by
+   * #1657 contract — the completeness fold records it as an advisory
+   * diagnostic — so its settlement row can never carry a material veto, even
+   * when the obligation fold drops it (attention rows are dropped there) and
+   * the settlement record is therefore the only surface left. Absent means
+   * untagged (legacy behavior: materiality comes from `source` alone). */
+  rowClass?: RequiredEvidenceRowClass;
 }
 
 /** #1396: whether one call admits (counts toward discharging) one pending row. */
@@ -836,10 +858,29 @@ export interface LoopOutcome {
   requiredEvidenceReleased: boolean;
   /** #1627: whether the deterministic `obligations-settled` early stop
    * fired — the obligation surface was active at some point this run and
-   * every tracked row settled (discharged or cap-released) with budget
-   * still unspent. False for a run with no obligation surface, a run whose
-   * rows never all settled, and every other stop reason. */
+   * every tracked row settled its EVIDENCE window (acquired or cap-released)
+   * with budget still unspent. This is an evidence-ready stop, never a claim
+   * that the questions were answered cleanly; the semantic outcome is
+   * reconciled after the verdict. False for a run with no obligation
+   * surface, a run whose rows never all settled, and every other stop
+   * reason. */
   requiredEvidenceSettledStop: boolean;
+  /**
+   * #1659: the canonical per-row evidence-settlement record — ONE
+   * vocabulary shared with final publication completeness. One row per
+   * tracked question: identity, kind/materiality, the loop-side EVIDENCE
+   * state (`acquired` = the window covered the row, `cap-released` = a
+   * budget release, `open` = the loop stopped before settlement — none of
+   * these is a semantic conclusion), whether any admitted executed call
+   * succeeded, the admitting call ids (objective provenance, the shared
+   * `call-<n>` scheme), and the evidence acquisition state. Written on
+   * EVERY exit path, next to the run-wide counters above; the post-verdict
+   * SEMANTIC state is joined onto it by `reconcileSettlements`. Receipts
+   * never certify a semantic resolution (#1657's receipts-are-provenance
+   * boundary): they stop the loop's own state from being lost between
+   * loop → verdict → fallback → finalization. The harness persists it as
+   * `required_evidence_settlements` in the telemetry budget block. */
+  requiredEvidenceSettlements: LoopEvidenceSettlement[];
 }
 
 /**
@@ -1106,6 +1147,7 @@ export async function driveToolLoop(
     requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
     requiredEvidenceSettledStop: false,
+    requiredEvidenceSettlements: [],
   };
   // #1396: hoisted unified reserve; 0 disables the whole mechanism (notes and
   // enforcement alike) so a loop with nothing reserved keeps byte-identical
@@ -1206,6 +1248,13 @@ export async function driveToolLoop(
   // pre-existing budget/round/no-calls stops (pre-#1627 exploration freedom
   // in exactly the stranding case).
   const rowSuccessfulAttempt = new Set<string>();
+  // #1659: the per-row admitting executed-call ids (the shared `call-<n>`
+  // scheme) — the objective provenance receipts the settlement record
+  // carries. The successful subset is tracked separately: a FAILED call never
+  // backs a satisfied row's receipt. Receipts are provenance only (#1657):
+  // they never certify a semantic resolution.
+  const rowAdmittingCalls = new Map<string, string[]>();
+  const rowSuccessfulCalls = new Map<string, string[]>();
   let anySuccessfulWindowEvidence = false;
   const seenKeys = new Set<string>();
 
@@ -1813,7 +1862,29 @@ export async function driveToolLoop(
       }
       const exec = toExecute.get(disposition.data)!;
       const result = resultsByIdx.get(disposition.data)!;
+      // #1659: the call's positional id is fixed HERE — by its order in
+      // `outcome.executed`, the exact scheme the evidence ledger assigns
+      // (`executedCallId(index + 1)`) — so the settlement record's receipts
+      // always name ids the folds can verify against the artifact's trace.
+      const executedCallReceipt = executedCallId(outcome.executed.length + 1);
       outcome.executed.push({ tool: exec.name, args: exec.args, result });
+      // #1659: record the admitting call id for every row this call targeted
+      // (discharged or partially credited — an attempt is provenance too);
+      // the successful subset fills only when the execution finished ok. A
+      // failed call never backs a satisfied row's receipt.
+      const admittedRows = execRowTargets.get(disposition.data);
+      if (admittedRows !== undefined) {
+        for (const rowId of admittedRows.rows) {
+          const admitted = rowAdmittingCalls.get(rowId);
+          if (admitted === undefined) rowAdmittingCalls.set(rowId, [executedCallReceipt]);
+          else admitted.push(executedCallReceipt);
+          if (result.status === "ok") {
+            const succeeded = rowSuccessfulCalls.get(rowId);
+            if (succeeded === undefined) rowSuccessfulCalls.set(rowId, [executedCallReceipt]);
+            else succeeded.push(executedCallReceipt);
+          }
+        }
+      }
       try {
         outcome.toolResultBytes += Buffer.byteLength(
           pyDumps((result.result ?? {}) as unknown),
@@ -1947,6 +2018,65 @@ export async function driveToolLoop(
   outcome.requiredEvidenceAttempts = evidenceAttempts;
   outcome.requiredEvidenceWindowAttempts = windowEvidenceAttempts;
   outcome.requiredEvidenceReleased = reserve <= 0 || !hasActiveRow();
+  // #1659: the canonical per-row evidence record — written on every exit
+  // path next to the run-wide counters. `acquired` means the loop's
+  // admission window covered the row (EVIDENCE ready, not a semantic
+  // conclusion); a shape row's cap-release is recorded as `cap-released` (a
+  // budget release, NEVER a settlement — #1659's acceptance makes a
+  // cap-released material question a material unknown downstream); a row the
+  // loop stopped before settling is `open`. The acquisition state
+  // distinguishes evidence the run actually got (`available`) from attempts
+  // that all failed (`failed`) and evidence the run never got to attempt
+  // (`unavailable` — refused or unattempted), so a provider failure before
+  // meaningful evidence is never misread as a completed review. The SEMANTIC
+  // state is reconciled onto this record after the verdict
+  // (`reconcileSettlements`).
+  outcome.requiredEvidenceSettlements = pendingRows.map((row) => {
+    const admittedBy = rowAdmittingCalls.get(row.id) ?? [];
+    const successfulBy = rowSuccessfulCalls.get(row.id) ?? [];
+    const successfulAttempt = rowSuccessfulAttempt.has(row.id);
+    // EVIDENCE state only — `acquired` means the loop's admission
+    // bookkeeping covered the row; the SEMANTIC outcome is reconciled after
+    // the verdict (`reconcileSettlements`) and never asserted here.
+    const evidenceState = discharged.has(row.id)
+      ? "acquired"
+      : row.obligation !== undefined && windowEvidenceAttempts >= attemptsCap
+      ? "cap-released"
+      : "open";
+    const acquisition = successfulAttempt
+      ? "available"
+      : admittedBy.length > 0
+      ? "failed"
+      // A #1145 continuation seeds a row the prior loop already acquired: the
+      // evidence exists but this loop holds no admitting call id for it, so
+      // the record says `truncated` — never `unavailable`.
+      : seededDischarged.has(row.id)
+      ? "truncated"
+      : "unavailable";
+    return {
+      id: row.id,
+      kind: row.obligation !== undefined ? "dependency" : row.tools !== undefined ? "trace" : "prose",
+      materiality: row.rowClass === "attention" || row.rowClass === "review-prompt"
+        // #1657's NON-GATING producer classes: the completeness fold records
+        // them as advisory diagnostics, and an `attention` row is dropped from
+        // the obligation fold entirely — so the settlement record must not
+        // hand one a material veto it was never allowed to carry.
+        ? "advisory"
+        : row.tools !== undefined
+        ? "material"
+        : row.obligation !== undefined
+        ? "material"
+        : row.source === "trusted_base_guidance"
+        ? "advisory"
+        : "material",
+      ...(row.source !== undefined ? { source: row.source } : {}),
+      evidenceState,
+      successfulAttempt,
+      admittedBy,
+      successfulBy,
+      acquisition,
+    };
+  });
   // #702: close out the telemetry on every exit path.
   outcome.requestsRemaining = Math.max(0, budgets.maxToolCalls - callsExecuted);
   outcome.elapsedSec = timeFn() - started;

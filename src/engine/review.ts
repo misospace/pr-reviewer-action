@@ -119,6 +119,7 @@ import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -525,6 +526,32 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * artifact and the demotion note reflect every pass. Findings the first
  * pass processed are skipped inside the boundary itself, so the second
  * pass only reports newly settled findings. */
+/** #1659: the persisted loop EVIDENCE record — read from the harness
+ * artifact's telemetry budget block (`tool_loop_telemetry.budget`) with the
+ * strict fail-closed reader. The raw `tool_loop_meta` is consumed at write
+ * time, so the telemetry block is the persisted surface. An ABSENT telemetry
+ * block, budget block or field is the legacy/non-native shape: no rows and no
+ * drops (the byte-identical pre-#1659 behavior). A PRESENT but structurally
+ * invalid one (a telemetry/budget value that is not an object, a settlement
+ * field that is not an array) is corruption and reports a drop, so the
+ * disposition discloses it as a material unknown instead of reading it as
+ * "no gaps". Malformed entries are dropped AND counted for the same reason.
+ * The caller reconciles the rows against the fold's semantic outcomes
+ * (`reconcileSettlements`) before the disposition consumes them. Exported
+ * for the integration test of the harness → engine join. */
+export function persistedLoopSettlements(harness: unknown): { settlements: LoopEvidenceSettlement[]; dropped: number } {
+  if (harness === null || typeof harness !== "object" || Array.isArray(harness)) return { settlements: [], dropped: 0 };
+  const record = (harness as Record<string, unknown>).tool_loop_telemetry;
+  // Absent telemetry is the legacy/non-native shape: no record, no gap.
+  if (record === undefined || record === null) return { settlements: [], dropped: 0 };
+  if (typeof record !== "object" || Array.isArray(record)) return { settlements: [], dropped: 1 };
+  const budget = (record as Record<string, unknown>).budget;
+  if (budget === undefined || budget === null) return { settlements: [], dropped: 0 };
+  if (typeof budget !== "object" || Array.isArray(budget)) return { settlements: [], dropped: 1 };
+  const report = parseLoopSettlementsReport((budget as Record<string, unknown>).required_evidence_settlements);
+  return { settlements: report.rows, dropped: report.dropped };
+}
+
 /**
  * Fold the run's review-owned required-evidence obligations (#1381).
  *
@@ -653,7 +680,7 @@ function resolveReviewObligations(
   // PRESENT-but-malformed trace REFUSES the ledger, which keeps the gate
   // active with nothing usable (#1634 review's fail-closed rule, carried
   // over). No model prose, no tool result bodies: objective fields only.
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown; tool_loop_telemetry?: unknown } | null;
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
     for (const anchor of row.anchors ?? []) {
@@ -2846,6 +2873,23 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // claim stays disclosure-only.
   const traceUnmetClaimed = requirementTraceResult !== null && requirementTraceResult.applied
     && traceUnmetClaimedInScopeRows(requirementTraceResult.trace).length > 0;
+  // #1659: reconcile the native loop's evidence record against the run's own
+  // folded semantic outcomes — the SAME `resolvedObligations` rows the
+  // disposition consumes. This is the one join between investigation and
+  // finalization: `acquired` evidence never implies a clean settlement, a
+  // cap release stays unknown, and the canonical record cannot disagree with
+  // the disposition (both derive from these folds). No second reviewer,
+  // proof validator, or model call.
+  const settlementRecord = persistedLoopSettlements(enforcementInputs.toolHarness);
+  const finalSettlements = reconcileSettlements(
+    settlementRecord.settlements,
+    // The fold rows ride with their SOURCE and TEXT: a dependency-evidence
+    // shape row is keyed by obligation name in the loop while the fold row
+    // carrying the same question is keyed `obligation-<n>`, so the join needs
+    // the text mapping — and ownership, since only the classifier-owned
+    // must_check row may settle a dependency question.
+    resolvedObligations.obligations.map((row) => ({ id: row.id, source: row.source, status: row.status, text: row.text })),
+  );
   const dispositionBuild = buildDispositionEvidence({
     completenessChecks: Array.isArray(completenessResult?.result?.checks)
       ? (completenessResult!.result.checks as Array<{ check?: unknown; status?: unknown; reason?: unknown }>)
@@ -2885,6 +2929,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // required (#1656 audit delta). No new forge call.
     ciConclusion: traceCiState,
     ciEvidenceContractActive: ciGateEvidence !== null,
+    // #1659: the canonical post-verdict settlement rows (provenance only —
+    // never a semantic certification). A cap-released material question is
+    // disclosed as a material unknown; a cap-released advisory question
+    // stays non-gating; every other semantic state is already carried by the
+    // folds above, so the record never duplicates a question. Absent/legacy
+    // artifact ⇒ [] (pre-#1659 behavior).
+    finalSettlements,
+    // A record the strict reader had to drop rows from is corrupted: disclose
+    // it as a material unknown instead of reading it as "no gaps" (the
+    // pre-#1659 failure mode this record exists to close).
+    settlementRecordDroppedRows: settlementRecord.dropped,
   });
   // The objective approval scope gates (fork policy, publish mode): the
   // same fail-closed rule `evaluateApprovalGuardrails` applies (an unknown
@@ -2961,6 +3016,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       required_evidence_state: requiredState,
       required_evidence_reason: requiredState === "complete" ? null : "not-discharged",
     } : {}),
+    // #1659: the canonical post-verdict settlement rows — one per tracked
+    // question, the loop's evidence state joined with the fold's semantic
+    // outcome. The record and the final disposition derive from the same
+    // folds, so they cannot disagree; a cap-released material question is
+    // disclosed as a material unknown, never "settled clean". Absent on runs
+    // without a native loop, keeping the pre-#1659 artifact byte-identical.
+    ...(finalSettlements.length > 0 ? { final_settlements: finalSettlementsToArtifact(finalSettlements) } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
 
