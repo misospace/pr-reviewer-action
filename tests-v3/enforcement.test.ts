@@ -1334,6 +1334,23 @@ test("#1663: unproven authorship withholds an explicit open re-affirmation's blo
   assert.equal(finalKind(a), "incomplete");
 });
 
+test("#1663: a fresh current-head finding proves the concern, so it is not an unverified gap", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [{
+      severity: "major",
+      category: "bug",
+      file: "src/a.ts",
+      line: 3,
+      message: "old defect",
+    }],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined, "the fresh finding is the current-head proof");
+  assert.equal(finalKind(a), "request_changes", "and it blocks on its own authority");
+});
+
 test("#1663: an unreadable listing keeps #1654's advisory-only unknown semantics", () => {
   const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(a, [botMajor("t")], "strict", { ...liveListing(), available: false });

@@ -370,7 +370,17 @@ export function applyReviewThreadEnforcement(
       category: thread.category ?? "",
       message: thread.message || "Unresolved review thread",
     });
-    if (state === "live_unresolved" && blocking && botAuthored && reassessment === "unverified") {
+    if (
+      state === "live_unresolved"
+      && blocking
+      && botAuthored
+      && reassessment === "unverified"
+      // #1663: a fresh current-head finding that already proves the same
+      // concern keeps it blocking on its own authority — its thread fallback
+      // is not an unverified gap. Identity includes severity, so a match here
+      // is the same blocking concern, not a weaker restatement.
+      && !currentHeadByIdentity.has(identity)
+    ) {
       // #1663: a live historical bot blocker the current head did not
       // re-evaluate is neither a blocker nor a clean resolution. Record the
       // uncertainty for the authoritative disposition (INCOMPLETE/COMMENT).
