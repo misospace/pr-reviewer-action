@@ -14,7 +14,7 @@ import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseN
 import { capCiEvidenceFindings, parseCiCheckNames } from "../src/enforcement/ci-evidence.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "../src/context/review-threads.js";
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
-import { applyReviewThreadEnforcement, evidenceCitesCode } from "../src/enforcement/threads.js";
+import { applyReviewThreadEnforcement, evidenceCitesCode, type EnforcementThread } from "../src/enforcement/threads.js";
 import { applyHumanReviewEnforcement, inlineCode } from "../src/enforcement/human-reviews.js";
 import { buildDispositionEvidence, type DispositionEvidenceParts } from "../src/disposition/engine-evidence.js";
 import { computeFinalDisposition } from "../src/disposition/final.js";
@@ -465,7 +465,7 @@ test("thread settlement handles no rows, missing/fixed evidence, and retained va
 });
 
 test("threads reemit severity once and findings policy escalates blocker threads", () => {
-  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }] });
+  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: a.py:3 never validates the input" }] });
   const thread = { thread_id: "t", path: "a.py", line: 3, severity: "blocker", message: "issue", own_finding: false, replies: 0 };
   applyReviewThreadEnforcement(a, [thread], "findings_severity_gated");
   assert.equal(a.findings.length, 1);
@@ -473,7 +473,7 @@ test("threads reemit severity once and findings policy escalates blocker threads
   assert.equal(a.verdict, "request_changes");
   assert.equal(a.verdict_source, "findings");
   assert.ok(a.review_markdown.includes("_Verdict escalated from unresolved review threads (verdict_policy=findings_severity_gated): 1 blocker thread(s) still open; model verdict was 'approve'._"));
-  const existing = artifact({ findings: [{ ...finding("minor"), thread_id: "t" }], thread_dispositions: [{ thread_id: "t", disposition: "open" }] });
+  const existing = artifact({ findings: [{ ...finding("minor"), thread_id: "t" }], thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: a.py:3 never validates the input" }] });
   applyReviewThreadEnforcement(existing, [thread], "model");
   assert.equal(existing.findings.length, 1);
   const defaultSeverity = artifact({ thread_dispositions: [] });
@@ -734,8 +734,8 @@ test("#792: a thread blocker settled as fixed with code evidence is not counted 
 
 test("#1663: the same blocker claimed fixed WITHOUT code evidence is withheld, never re-emitted as a blocker", () => {
   const a = artifact({ verdict: "approve", findings: [] });
-  const threads = [
-    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: true, bot_authored: true, replies: 0 },
+  const threads: EnforcementThread[] = [
+    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: true, authorship: "action", replies: 0 },
   ];
   a.thread_dispositions = [{ thread_id: "t1", disposition: "fixed", evidence: "trust me it is fixed" }];
   applyReviewThreadEnforcement(a, threads, "findings_severity_gated", {
@@ -857,7 +857,7 @@ test("#1645: live carried blocker still blocks; sibling absent thread drops", ()
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
   applyReviewThreadEnforcement(a, staleThreads, "strict", {
     available: true,
@@ -945,7 +945,7 @@ test("#1645: a capped (incomplete) listing proves NO state — every carried thr
 });
 
 test("#1645: without a reconciliation input the enforcement view stays authoritative (legacy)", () => {
-  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }] });
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }] });
   applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict");
   assert.equal(a.findings.length, 1, "legacy callers re-emit as before");
   assert.equal(a.thread_reconciliation, undefined, "no provenance is fabricated for a read that never ran");
@@ -957,7 +957,10 @@ test("#1645: incomplete reconciliation is disclosed even when nothing changed", 
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open" }, { thread_id: "PRRT_stale2", disposition: "open" }],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
+      { thread_id: "PRRT_stale2", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
+    ],
   });
   const settlement = applyReviewThreadEnforcement(a, staleThreads, "strict", {
     available: false,
@@ -999,7 +1002,7 @@ test("#1645: a dropped thread's stale record never supplies a disposition to a l
     findings: [],
     thread_dispositions: [
       { thread_id: "PRRT_stale1", reconciliation: "absent", disposition: "withdrawn", evidence: null },
-      { thread_id: "PRRT_stale1", disposition: "open", evidence: null },
+      { thread_id: "PRRT_stale1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
     ],
   });
   applyReviewThreadEnforcement(a, staleThreads.slice(0, 1), "strict", {
@@ -1120,7 +1123,7 @@ const liveListing = (...ids: string[]) => ({
   headSha: "a".repeat(40),
 });
 
-const botMajor = (threadId: string, overrides: Record<string, unknown> = {}) => ({
+const botMajor = (threadId: string, overrides: Partial<EnforcementThread> = {}): EnforcementThread => ({
   thread_id: threadId,
   path: "src/a.ts",
   line: 3,
@@ -1128,7 +1131,7 @@ const botMajor = (threadId: string, overrides: Record<string, unknown> = {}) => 
   message: "old defect",
   category: "bug",
   own_finding: true,
-  bot_authored: true,
+  authorship: "action",
   replies: 0,
   ...overrides,
 });
@@ -1179,7 +1182,7 @@ test("#1663: live bot major re-affirmed `open` keeps its blocking severity", () 
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
   applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
   const reemitted = a.findings.find((item) => item.thread_id === "t");
@@ -1252,8 +1255,8 @@ test("#1663: duplicate historical thread ids yield one current concern with full
     verdict: "approve",
     findings: [],
     thread_dispositions: [
-      { thread_id: "t1", disposition: "open", evidence: null },
-      { thread_id: "t2", disposition: "open", evidence: null },
+      { thread_id: "t1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
+      { thread_id: "t2", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
     ],
   });
   applyReviewThreadEnforcement(a, [botMajor("t1"), botMajor("t2")], "strict", liveListing("t1", "t2"));
@@ -1267,8 +1270,8 @@ test("#1663: distinct defects on the same line stay distinct", () => {
     verdict: "approve",
     findings: [],
     thread_dispositions: [
-      { thread_id: "t1", disposition: "open", evidence: null },
-      { thread_id: "t2", disposition: "open", evidence: null },
+      { thread_id: "t1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
+      { thread_id: "t2", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" },
     ],
   });
   applyReviewThreadEnforcement(a, [
@@ -1290,7 +1293,7 @@ test("#1663: a fresh current-head major still requests changes regardless of his
 });
 
 test("#1663: a human unresolved thread is not closed by a bot disposition", () => {
-  const human = botMajor("h", { severity: "minor", category: null, own_finding: false, bot_authored: false, message: "Should this handle None?" });
+  const human = botMajor("h", { severity: "minor", category: null, own_finding: false, authorship: "human", message: "Should this handle None?" });
   const a = artifact({
     verdict: "approve",
     findings: [],
@@ -1311,7 +1314,7 @@ test("#1663: unproven authorship neither closes nor re-blocks a carried marker f
     findings: [],
     thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence: "src/a.ts:9" }],
   });
-  applyReviewThreadEnforcement(a, [botMajor("t", { authorship_proven: false })], "strict", liveListing("t"));
+  applyReviewThreadEnforcement(a, [botMajor("t", { authorship: "unproven" })], "strict", liveListing("t"));
   const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "open", "an unproven root cannot be closed by a bot disposition");
   assert.equal(record.enforced, "authorship unproven: a bot disposition cannot close the thread");
@@ -1324,9 +1327,9 @@ test("#1663: unproven authorship withholds an explicit open re-affirmation's blo
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
-  applyReviewThreadEnforcement(a, [botMajor("t", { authorship_proven: false })], "strict", liveListing("t"));
+  applyReviewThreadEnforcement(a, [botMajor("t", { authorship: "unproven" })], "strict", liveListing("t"));
   const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "open", "the re-affirmation is kept on the record");
   assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "but unproven authority never re-emits the blocking severity");
@@ -1458,7 +1461,7 @@ test("#1248: a findings_severity_gated thread-escalation flip supersedes the pri
     verdict: "approve",
     verdict_source: "findings",
     review_markdown: "review" + GATED_RELAX_NOTE,
-    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
   applyReviewThreadEnforcement(a, [
     { thread_id: "t", path: "a.py", line: 3, severity: "blocker", message: "issue", own_finding: false, replies: 0 },

@@ -7,15 +7,27 @@
  * model's dispositions. #1663 splits two questions that were previously one:
  * the forge proves whether a thread is live (the #1645 reconciliation), and
  * the current-head review must still establish whether its finding is valid.
- * A live historical BOT finding re-emits at its original severity only when
- * the model re-affirms it `open`; a code-citing `fixed` or a reasoned
- * `disputed` (the old finding was originally invalid) settles it without
- * re-emission; a missing or unsupported re-evaluation withholds the
- * old blocking severity and records a MATERIAL `unverified_blocking_claim`
- * through `thread_reconciliation.unreassessed` (INCOMPLETE/COMMENT).
- * A HUMAN-authored unresolved thread is closed only by the forge's resolved
- * state — a bot disposition never dismisses it — and keeps its existing
- * non-blocking severity.
+ *
+ * Authorship comes from forge metadata, never from comment bodies
+ * (`ThreadAuthorship` in `src/context/review-threads.ts`): `action` (this
+ * run's own login), `other_bot` (a forge-reported automation author under a
+ * different login — a rotated publisher stays a bot finding), `human` (a
+ * forge-reported `User`), and `unproven` (nothing usable). A login mismatch
+ * alone never converts a historical bot finding into a human one, and a
+ * managed marker in a human's body never buys bot authority.
+ *
+ * A live historical bot finding (`action` or `other_bot`) re-emits at its
+ * original severity only on a SUPPORTED re-affirmation: `open` plus what the
+ * review checked that still shows the defect. A code-citing `fixed` or a
+ * reasoned `disputed` (the old finding was originally invalid) settles it
+ * without re-emission. An omitted disposition, an evidence-free `open`, or an
+ * unsupported claim withholds the old severity and records a MATERIAL
+ * `unverified_blocking_claim` through `thread_reconciliation.unreassessed`
+ * (INCOMPLETE/COMMENT) — so a ghost blocker cannot block and an unevaluated
+ * concern cannot certify a clean approval. An `unproven` root is conservative
+ * in both directions: no bot disposition closes it, and its severity is never
+ * re-emitted. A `human` thread is closed only by the forge's resolved state
+ * and keeps its existing non-blocking severity.
  *
  * Re-emitted findings carry `thread_id` (the publish step skips those inline
  * — the thread already exists) plus `thread_ids` provenance. Duplicate
@@ -37,6 +49,7 @@
 import { markRelaxationNotesSuperseded, type ArtifactFinding, type ReviewArtifact } from "./artifact.js";
 import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
 import { findingIdentity, findingIdentityFromRecord } from "../outcomes/identity.js";
+import type { ThreadAuthorship } from "../context/review-threads.js";
 
 export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
 
@@ -81,15 +94,12 @@ export interface EnforcementThread {
   line: number | null;
   severity: string;
   message: string;
+  /** #1663: the root body carries the managed finding marker — a CLAIM that
+   * this is the action's finding, never proof of authorship. */
   own_finding: boolean;
-  /** #1663: trusted forge authorship of the thread root (the authenticated
-   * login posted the root comment). Absent for legacy callers, which keep the
-   * historical body-marker reading (`own_finding`). */
-  bot_authored?: boolean;
-  /** #1663: false when `bot_authored` is only the body-marker fallback
-   * because the forge identity could not be resolved. Absent for legacy
-   * callers, which keep the pre-#1663 settlement. */
-  authorship_proven?: boolean;
+  /** #1663: what the forge metadata proves about the root author. Absent for
+   * legacy callers, which keep the historical body-marker reading. */
+  authorship?: ThreadAuthorship;
   replies: number;
   category?: string | null;
 }
@@ -150,15 +160,15 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
 
 /**
  * Settle every listed thread against the model's dispositions, in place.
- * The first disposition for a thread_id wins. #1663: for a bot-authored
- * blocking thread, `open` re-affirms it (re-emitted at its original
+ * The first disposition for a thread_id wins. #1663: for a carried bot
+ * finding, a SUPPORTED `open` re-affirms it (re-emitted at its original
  * severity, default minor, never escalating, #812); `fixed` needs evidence
  * citing current code and `disputed` needs a reasoned explanation — neither
- * re-emits; a missing or unsupported
- * answer is recorded as unverified and its old blocking severity is withheld
- * (never re-emitted). A human-authored unresolved thread is never closed by
- * a bot disposition. The settled records replace `thread_dispositions` in
- * the artifact.
+ * re-emits. An omitted disposition, an evidence-free `open`, or an
+ * unsupported answer is recorded as unverified and its old blocking severity
+ * is withheld (never re-emitted). A human-authored unresolved thread is never
+ * closed by a bot disposition. The settled records replace
+ * `thread_dispositions` in the artifact.
  *
  * #1645: before a listed thread can settle into the finding set it must
  * reconcile against the authoritative live thread listing. Only a
@@ -261,17 +271,16 @@ export function applyReviewThreadEnforcement(
       continue;
     }
     const severity = reemittedSeverity(thread.severity);
-    // #1663: legacy callers that supplied no trusted ownership keep treating
-    // a carried thread as action-authored; the pipeline always supplies it.
-    const botAuthored = thread.bot_authored ?? true;
-    // #1663: `authorship_proven === false` means the forge identity could
-    // not be resolved and `bot_authored` is only the body-marker fallback.
-    // Neither direction may be assumed: a bot disposition still cannot close
-    // the thread (human authority is unproven, so it must not be dismissed),
-    // and a blocking concern is never re-emitted on unproven authority (it
-    // becomes the material unverified claim instead).
-    const unprovenAuthorship = thread.authorship_proven === false;
+    // #1663: what the forge proves about the root author. A legacy caller
+    // that supplied no authorship keeps the historical reading in which the
+    // enforcement view is the action's own listing.
+    const authorship: ThreadAuthorship = thread.authorship ?? "action";
+    // A carried concern the current review could not re-evaluate is only
+    // worth a material unknown when its body actually claims to be one of
+    // this action's findings; a stranger's marker-less comment is not a
+    // blocking claim this reviewer has to settle.
     const blocking = isBlockingSeverity(severity) && !isAlwaysNonBlockingCategory(thread.category);
+    const materialIfUnverified = blocking && (authorship !== "unproven" || thread.own_finding);
     let disposition = entry.disposition as string | undefined;
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
     let note: string | null = null;
@@ -281,7 +290,13 @@ export function applyReviewThreadEnforcement(
     // re-evaluation. Only `confirmed` may re-emit a historical blocking
     // severity.
     let reassessment: "confirmed" | "resolved" | "invalid" | "unverified" | null = null;
-    if (unprovenAuthorship) {
+    if (authorship === "unproven") {
+      // The forge never established who wrote this root, so neither
+      // authority may be asserted: no bot disposition closes it (it may be a
+      // human thread), and its historical severity is never re-emitted (it
+      // may be an automation finding under a publisher identity this run
+      // cannot identify). A marker-bearing blocking concern settles as the
+      // material unknown instead.
       if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
         disposition = "open";
         note = "authorship unproven: a bot disposition cannot close the thread";
@@ -289,10 +304,8 @@ export function applyReviewThreadEnforcement(
         disposition = "open";
         note = "no disposition given";
       }
-      // Only a PROVEN bot root may re-emit a blocking severity. Unproven
-      // ownership withholds it and records the gap instead.
-      if (blocking) reassessment = "unverified";
-    } else if (!botAuthored) {
+      if (materialIfUnverified) reassessment = "unverified";
+    } else if (authorship === "human") {
       // #1663: a human-authored unresolved thread is closed by the forge
       // (its live state above), never by a bot disposition. The model's
       // fixed/withdrawn/disputed claim is recorded as open and the thread is
@@ -307,11 +320,11 @@ export function applyReviewThreadEnforcement(
     } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
       disposition = "open";
       note = "no disposition given";
-      if (blocking) reassessment = "unverified";
+      if (materialIfUnverified) reassessment = "unverified";
     } else if (disposition === "fixed" && !evidenceCitesCode(evidence, thread.path)) {
       disposition = "open";
       note = "fixed without evidence citing current code";
-      if (blocking) reassessment = "unverified";
+      if (materialIfUnverified) reassessment = "unverified";
     } else if (disposition === "fixed") {
       reassessment = "resolved";
     } else if (disposition === "disputed") {
@@ -324,7 +337,7 @@ export function applyReviewThreadEnforcement(
       if (evidence === null || evidence.trim() === "") {
         disposition = "open";
         note = "disputed without an explanation";
-        if (blocking) reassessment = "unverified";
+        if (materialIfUnverified) reassessment = "unverified";
       } else {
         reassessment = "invalid";
       }
@@ -332,24 +345,35 @@ export function applyReviewThreadEnforcement(
       if (!WITHDRAWABLE_CATEGORIES.has(thread.category ?? "")) {
         disposition = "open";
         note = "withdrawn without a verification/question finding";
-        if (blocking) reassessment = "unverified";
+        if (materialIfUnverified) reassessment = "unverified";
       } else if (!isAlwaysNonBlockingCategory(thread.category) && isBlockingSeverity(thread.severity)) {
         // #977: a question the model could have blocked on may be a real
         // defect in disguise — only `fixed`, which demands code evidence,
         // may close it.
         disposition = "open";
         note = "withdrawn on a blocking finding";
-        if (blocking) reassessment = "unverified";
+        if (materialIfUnverified) reassessment = "unverified";
       } else if (evidence === null || evidence.trim() === "") {
         disposition = "open";
         note = "withdrawn without evidence from a reply";
-        if (blocking) reassessment = "unverified";
+        if (materialIfUnverified) reassessment = "unverified";
       } else {
         reassessment = "resolved";
       }
+    } else if (blocking && (evidence === null || evidence.trim() === "")) {
+      // #1663: `open` is the reviewer's claim that the defect remains at this
+      // head, and for a carried BLOCKING concern that claim must carry the
+      // reason the review settled on — the same support the reviewer gives
+      // for a current-head finding. This check demands neither a citation
+      // format nor a token count: it distinguishes a re-affirmation from the
+      // default word the output shape encourages. An unsupported claim
+      // withholds the historical severity and becomes the material unknown;
+      // it never fabricates a blocker.
+      note = "open without a current-head reason";
+      if (materialIfUnverified) reassessment = "unverified";
     } else {
-      // An explicit `open` is the model's current-head re-evaluation that
-      // the defect remains (#1663 Reading A); it preserves the severity.
+      // A supported `open` is the current-head re-affirmation (#1663 Reading
+      // A); it preserves the severity.
       reassessment = "confirmed";
     }
     // #1645: `reconciliation` is stamped only when reconciliation actually
@@ -372,8 +396,6 @@ export function applyReviewThreadEnforcement(
     });
     if (
       state === "live_unresolved"
-      && blocking
-      && botAuthored
       && reassessment === "unverified"
       // #1663: a fresh current-head finding that already proves the same
       // concern keeps it blocking on its own authority — its thread fallback
@@ -388,11 +410,12 @@ export function applyReviewThreadEnforcement(
     }
     // #1645: only a thread proven live and unresolved re-enters the finding
     // set. An `unknown` thread settles as bookkeeping but never blocks.
-    // #1663: a historical bot blocker only re-enters when the current head
-    // re-affirmed it (`open`); fixed/invalid/unverified never preserve it.
+    // #1663: a historical blocking severity only re-enters when the current
+    // head supported the re-affirmation; fixed/invalid/unverified never
+    // preserve it.
     const reemit = state === "live_unresolved"
       && disposition === "open"
-      && !(blocking && botAuthored && reassessment === "unverified")
+      && reassessment !== "unverified"
       && !knownThreadIds.has(threadId);
     if (!reemit) continue;
     const currentHeadFinding = currentHeadByIdentity.get(identity);

@@ -506,8 +506,8 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null } = {},
-): Promise<{ artifact: Record<string, unknown>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown> } = {},
+): Promise<{ artifact: Record<string, unknown>; threadView: Array<Record<string, unknown>>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict(modelVerdict)));
@@ -523,7 +523,9 @@ async function runStaleThreadVerdict(
       outdated: false,
       comments: [{
         id: 1,
-        user: { login: "bot" },
+        // #1663: the root author as the forge reports it. The default is this run's
+        // own identity; cases below vary the login and the actor type.
+        user: options.threadUser ?? { login: "bot", type: "Bot" },
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
         body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
@@ -566,6 +568,9 @@ async function runStaleThreadVerdict(
     });
     return {
       artifact: JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>,
+      // #1663: the enforcement view the settlement actually consumed, read
+      // before the run directory is cleaned up.
+      threadView: JSON.parse(readFileSync(join(runDir, "review-threads.json"), "utf8")) as Array<Record<string, unknown>>,
       result,
       threadReads: reads,
     };
@@ -678,7 +683,7 @@ test("#1645: a carried thread proven live-unresolved at settlement still blocks 
       { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
       { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
     ],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   }, { });
   assert.equal(artifact.verdict, "request_changes", "the live carried major still blocks under strict policy");
   const reconciliation = artifact.thread_reconciliation as Record<string, unknown>;
@@ -735,6 +740,121 @@ test("#1663: an unprovable identity never demotes a marker-bearing bot blocker t
     "the managed marker keeps the carried finding bot-authored, so the gap stays material");
   assert.equal(result.finalDisposition?.kind, "incomplete");
   assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
+});
+
+test("#1663: a bare `open` with no current-head reason is INCOMPLETE, never a ghost block", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "open", evidence: null }],
+  });
+  assert.equal(artifact.verdict, "approve", "the word 'open' alone never restores the historical severity");
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "an unsupported re-affirmation never re-emits the historical blocker");
+  assert.equal((artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.enforced,
+    "open without a current-head reason");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1);
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "COMMENT", "the native event is the disposition's COMMENT, not a block");
+  assert.match(String(artifact.review_markdown), /open without a current-head reason/);
+});
+
+test("#1663: a supported `open` reason re-affirms the historical blocker on every surface", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{
+      thread_id: "PRRT_stale1",
+      disposition: "open",
+      evidence: "the token-comparison branch is still missing in README.md at this head; nothing in the diff adds it",
+    }],
+  });
+  const carried = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
+  assert.equal(carried?.severity, "major", "a supported re-affirmation carries the historical severity as a current finding");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined);
+  assert.equal(result.finalDisposition?.kind, "request_changes");
+  assert.equal(result.finalDisposition?.reason, "blocker_proven");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+});
+
+test("#1663: a historical Major under a different bot identity is never silently APPROVED", async () => {
+  // The previous publisher posted as `previous-runner`; this run authenticates
+  // as `bot`. The forge reports the root's actor type, so the mismatch reads as
+  // another automation author — never as a human minor the review can ignore.
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, { identity: "someone-else", threadUser: { login: "previous-runner", type: "Bot" } });
+  assert.equal(threadView[0]!.authorship, "other_bot", "identity mismatch alone never means human authorship");
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "the historical severity is not restored on the old authority");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1,
+    "nor is the unevaluated concern quietly dropped");
+  assert.equal(result.finalDisposition?.kind, "incomplete", "so the run can certify neither a block nor a clean approve");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+});
+
+test("#1663: a rotated-identity historical Major with a supported reason still blocks", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{
+      thread_id: "PRRT_stale1",
+      disposition: "open",
+      evidence: "still applies at this head: the retry path drops the separator exactly as the thread says",
+    }],
+  }, { identity: "someone-else", threadUser: { login: "previous-runner", type: "Bot" } });
+  const carried = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
+  assert.equal(carried?.severity, "major", "another automation author does not erase the current-head claim");
+  assert.equal(result.finalDisposition?.kind, "request_changes");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+});
+
+test("#1663: a human-authored thread carrying the managed marker gains no bot authority", async () => {
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
+  }, { threadUser: { login: "alice", type: "User" } });
+  assert.equal(threadView[0]!.authorship, "human", "the marker in the body never outranks the forge's actor type");
+  assert.equal(threadView[0]!.severity, "minor", "and no blocker severity is parsed out of a human comment");
+  const reemitted = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
+  assert.equal(reemitted?.severity, "minor", "the thread stays open at the human-thread severity, never the forged one");
+  assert.equal((artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.enforced,
+    "human-authored thread: a bot disposition cannot close it");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the human thread stays non-blocking, as before #1663");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "no native block is manufactured from a human thread");
+  assert.ok(!(result.finalDisposition?.materialUnknowns ?? []).some((entry) => entry.code === "unverified_blocking_claim"),
+    "a proven human root is not a re-evaluation gap either");
+});
+
+test("#1663: an unresolvable forge identity keeps a carried Major material instead of dropping it", async () => {
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, { identity: null });
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1);
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "unproven authority never restores the historical severity either");
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "COMMENT");
 });
 
 test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
@@ -923,7 +1043,7 @@ test("#977: runReview keeps the banner when thread settlement actually escalates
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   }, {
     policy: "findings_severity_gated",
     threadBody: `**🛑 Blocker (bug):** real defect\n\n${FINDING_TRAILER}`,
@@ -1055,7 +1175,7 @@ test("#1662: a carried blocker beyond the first 100 live threads is proven live 
         { severity: "minor", category: "tests", file: "README.md", line: 1, message: "nit" },
         { severity: "info", category: "docs", file: "README.md", line: 2, message: "note" },
       ],
-      thread_dispositions: [{ thread_id: "PRRT_page2", disposition: "open", evidence: null }],
+      thread_dispositions: [{ thread_id: "PRRT_page2", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
     },
     (variables) => variables.cursor === "C1"
       // The carried thread sits outside the window the v2 read could see.

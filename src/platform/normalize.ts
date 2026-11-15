@@ -44,7 +44,7 @@ export const MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS = 1024;
  * and #1654's completeness contract decides whether the merged listing may
  * claim completeness. */
 export const GITHUB_REVIEW_THREADS_QUERY =
-  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }`;
+  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { __typename login } } } } } } } }`;
 
 /** Pagination state of ONE review-threads page, read fail closed.
  *
@@ -167,9 +167,14 @@ export function normalizeForgejoIssue(data: unknown): unknown {
 export const CONVERSATION_COMMENTS_SNAPSHOT_CAP = 100;
 
 function conversationNode(node: unknown): Record<string, unknown> {
+  const actorType = jqPath(node, "author", "__typename");
   return {
     id: jqField(node, "databaseId"),
     user: jqAlt(jqPath(node, "author", "login"), ""),
+    // #1663: the forge-authoritative actor type (`Bot` / `User`), when the
+    // document asked for it. Omitted when the document only selected `login`
+    // — a missing type means unproven authorship, never an inferred one.
+    ...(typeof actorType === "string" && actorType !== "" ? { user_type: actorType } : {}),
     created_at: jqAlt(jqField(node, "createdAt"), ""),
     updated_at: jqAlt(jqField(node, "updatedAt"), ""),
     body: jqAlt(jqField(node, "body"), ""),
@@ -263,7 +268,7 @@ interface ForgejoThread {
   original_line: unknown;
   resolved: boolean;
   outdated: boolean;
-  comments: { id: unknown; user: string; created_at: string; updated_at: string; body: string }[];
+  comments: { id: unknown; user: string; user_type?: string; created_at: string; updated_at: string; body: string }[];
 }
 
 /** `list_review_threads` grouping (Forgejo): comments from every fetched
@@ -294,9 +299,14 @@ export function groupForgejoReviewThreads(commentLists: readonly unknown[][]): u
       }
       if (pyTruthy(pyGet(comment, "resolver", null))) group.resolved = true;
       const user = pyGet(comment, "user", null);
+      const userType = isPlainObject(user) ? pyStr(pyOr(pyGet(user, "type", pyGet(user, "user_type", null)), "")) : "";
       group.comments.push({
         id: pyGet(comment, "id", null),
         user: isPlainObject(user) ? pyStr(pyOr(pyGet(user, "login", null), "")) : "",
+        // #1663: Forgejo's review-comment user object has no documented bot
+        // flag; carry any `type`/`user_type` the server does return and treat
+        // a missing value as unproven authorship downstream.
+        ...(userType !== "" ? { user_type: userType } : {}),
         created_at: pyStr(pyOr(pyGet(comment, "created_at", null), "")),
         updated_at: pyStr(pyOr(pyGet(comment, "updated_at", null), "")),
         body: pyStr(pyOr(pyGet(comment, "body", null), "")),

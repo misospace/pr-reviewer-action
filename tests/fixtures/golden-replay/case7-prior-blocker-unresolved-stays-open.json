@@ -61,7 +61,7 @@
       {
         "thread_id": "PRRT_917",
         "disposition": "open",
-        "evidence": null
+        "evidence": "still present at this head: the reviewed diff does not add the guard this thread asked for"
       }
     ]
   },
@@ -85,7 +85,7 @@
       {
         "thread_id": "PRRT_917",
         "disposition": "open",
-        "evidence": null
+        "evidence": "still present at this head: the reviewed diff does not add the guard this thread asked for"
       }
     ]
   }

@@ -331,7 +331,7 @@ test("#1016 sanitized (non-authoritative) provenance cannot ground a marker clai
 test("#1016 synthesized thread re-emissions added after the boundary are not demoted", async () => {
   const a = artifact({
     findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })],
-    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(a.findings[0]!.grounding_status, "unverified");

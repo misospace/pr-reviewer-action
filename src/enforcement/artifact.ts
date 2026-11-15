@@ -165,7 +165,8 @@ export interface ReviewArtifact {
     absent: number;
     unknown: number;
     /** #1663: distinct live historical bot blocking concerns with no usable
-     * current-head re-evaluation. Their original severity is withheld, so
+     * current-head re-evaluation (omitted disposition, evidence-free `open`,
+     * or an unsupported claim). Their original severity is withheld, so
      * this count rides the authoritative disposition as a MATERIAL
      * unverified-blocking-claim unknown (INCOMPLETE/COMMENT). Present only
      * when non-zero, preserving pre-#1663 provenance bytes otherwise. */

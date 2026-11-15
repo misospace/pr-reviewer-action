@@ -53,6 +53,30 @@ export interface ReviewThreadComment extends PrThreadComment {
   own: boolean;
 }
 
+/** #1663: what the forge metadata proves about who wrote the thread root.
+ *
+ * - `action` — the root carries this run's own authenticated login. The
+ *   action's own historical finding; the current-head review must
+ *   re-evaluate it.
+ * - `other_bot` — the forge reports the author as an automation actor
+ *   (`__typename: Bot`) that is NOT this run's login. A previous publisher
+ *   identity, a renamed App, or a different bot: definitively not a human,
+ *   and definitively not proven to be this action. It keeps the
+ *   re-evaluation contract; a login mismatch never converts it to human.
+ * - `human` — the forge reports a `User`-typed author that is not this run's
+ *   login. Only then may the human-thread contract apply.
+ * - `unproven` — the forge gave no usable actor type and the login does not
+ *   match this run's identity. Ownership cannot be established, so neither
+ *   bot authority (which could re-emit the old severity) nor human authority
+ *   (which a bot disposition must not dismiss) may be asserted.
+ *
+ * GitHub reports the actor type through GraphQL (`author { __typename }`).
+ * Forgejo's review-comment user object has no documented bot flag, so on
+ * that forge every non-matching root is `unproven` unless the deployment
+ * reports a type — the conservative reading, deliberately chosen over
+ * asserting a human author the forge never identified. */
+export type ThreadAuthorship = "action" | "other_bot" | "human" | "unproven";
+
 export interface ReviewThread {
   threadId: string;
   path: string;
@@ -61,17 +85,10 @@ export interface ReviewThread {
   resolved: boolean;
   outdated: boolean;
   comments: ReviewThreadComment[];
-  /** #1663: the root comment was authored by the forge identity this run
-   * authenticates as — trusted authorship metadata, never comment-body
-   * wording. `undefined` marks a legacy caller that supplied no identity; the
-   * enforcement view then falls back to the historical body-marker reading. */
-  botAuthored?: boolean;
-  /** #1663: whether `botAuthored` came from a PROVEN forge identity (`true`)
-   * or from the body-marker fallback used when the identity could not be
-   * resolved (`false`). Unproven authorship is handled conservatively: a bot
-   * disposition still cannot close the thread, and a blocking concern stays a
-   * material unknown. `undefined` marks a legacy caller. */
-  authorshipProven?: boolean;
+  /** #1663: what the forge metadata proves about the root author. Absent for
+   * a legacy caller that supplied no identity at all, which keeps the
+   * historical body-marker reading. */
+  authorship?: ThreadAuthorship;
 }
 
 export interface ReviewThreadView {
@@ -81,13 +98,12 @@ export interface ReviewThreadView {
   severity: string;
   message: string;
   category: string | null;
+  /** #1663: the root body carries the managed finding marker, i.e. it CLAIMS
+   * to be this action's finding. A claim, never authority: untrusted body
+   * text can never decide who wrote a thread. */
   own_finding: boolean;
-  /** #1663: trusted bot authorship of the thread root. */
-  bot_authored: boolean;
-  /** #1663: false when `bot_authored` is only the body-marker fallback
-   * because the forge identity could not be resolved. Absent for legacy
-   * callers. */
-  authorship_proven?: boolean;
+  /** #1663: what the forge metadata proves about the root author. */
+  authorship: ThreadAuthorship;
   replies: number;
 }
 
@@ -116,6 +132,43 @@ function normalizeLogin(login: unknown): string | null {
   const trimmed = login.trim().toLowerCase();
   if (trimmed === "") return null;
   return trimmed.endsWith("[bot]") ? trimmed.slice(0, -"[bot]".length) : trimmed;
+}
+
+/** The forge-reported actor types that prove an automation author. Only the
+ * forge's own type field counts; a login that merely looks bot-like proves
+ * nothing. */
+const AUTOMATION_AUTHOR_TYPES: ReadonlySet<string> = new Set(["bot", "automation"]);
+/** The forge-reported actor type that proves a human account. */
+const HUMAN_AUTHOR_TYPES: ReadonlySet<string> = new Set(["user"]);
+
+/** #1663: decide what the forge metadata proves about the thread root.
+ *
+ * The current run's authenticated login is authoritative ONLY for identity:
+ * a root that carries it is this action's own finding. A root that does not
+ * carry it is NOT therefore human — a renamed App, a rotated publisher, or a
+ * second automation account all mismatch. Only the forge's actor type can
+ * tell those apart, so when the type is missing the authorship stays
+ * `unproven` rather than silently becoming human authority. */
+function classifyAuthorship(root: ReviewThreadComment, botIdentity: string | null): ThreadAuthorship {
+  const identity = normalizeLogin(botIdentity);
+  const author = normalizeLogin(root.user);
+  if (identity !== null && author !== null && author === identity) {
+    return "action";
+  }
+  const actorType = typeof root.userType === "string" ? root.userType.trim().toLowerCase() : "";
+  if (AUTOMATION_AUTHOR_TYPES.has(actorType)) {
+    // A proven automation author under a different login: still a bot
+    // finding, still bound by the current-head re-evaluation contract.
+    return "other_bot";
+  }
+  if (HUMAN_AUTHOR_TYPES.has(actorType)) {
+    return "human";
+  }
+  // No usable type and no identity match. The managed marker says the body
+  // CLAIMS to be this action's finding; that keeps the concern visible and
+  // material, but it buys no blocking authority, and the thread is never
+  // read as human either.
+  return "unproven";
 }
 
 function collapseWhitespace(text: string): string {
@@ -179,24 +232,10 @@ export function normalizeThread(
     resolved: Boolean(rec.resolved),
     outdated: Boolean(rec.outdated),
     comments,
-    // #1663: a proven forge identity decides authorship in both directions
-    // (the action's login is bot, any other login is human even if its body
-    // forges the marker). Logins compare case-insensitively and treat the
-    // GitHub App `<app>[bot]` author spelling as the token's bare login.
-    // When the caller supplies no identity at all (legacy/replay) the
-    // historical body-marker reading applies. When the caller passes `null`
-    // (identity unprovable) the marker still classifies the root, but
-    // `authorshipProven: false` stops a bot disposition from closing it and
-    // keeps a blocking concern material.
-    ...(botIdentity === undefined
-      ? {}
-      : (() => {
-          const proven = normalizeLogin(botIdentity);
-          return {
-            botAuthored: proven === null ? root.own : normalizeLogin(root.user) === proven,
-            authorshipProven: proven !== null,
-          };
-        })()),
+    // #1663: authorship comes from forge metadata, never body wording. A
+    // caller that supplies no identity at all keeps the historical
+    // body-marker reading (the `authorship` field stays absent).
+    ...(botIdentity === undefined ? {} : { authorship: classifyAuthorship(root, botIdentity) }),
   };
 }
 
@@ -325,11 +364,18 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
     let severity: string;
     let message: string;
     let category: string | null;
-    // #1663: with trusted authorship, a human root takes the human-thread
-    // contract even if its body forges this action's finding marker. A
-    // legacy caller without an identity keeps the body-marker reading.
-    const botRoot = thread.botAuthored === undefined ? root.own : thread.botAuthored;
-    if (botRoot) {
+    // #1663: the severity/message shape follows what the forge proves about
+    // the root, not what the body claims. A proven human root keeps the
+    // human-thread reading even when its body forges the managed finding
+    // marker; an unproven root reads as a finding only because the marker
+    // makes the concern visible, which never grants blocking authority (the
+    // settlement pass enforces that). A legacy caller that supplied no
+    // identity keeps the historical body-marker reading.
+    const authorship: ThreadAuthorship = thread.authorship ?? (root.own ? "action" : "human");
+    const findingRoot = authorship === "action"
+      || authorship === "other_bot"
+      || (authorship === "unproven" && root.own);
+    if (findingRoot) {
       [severity, message, category] = findingFields(cleanBody(root.body));
     } else {
       severity = "minor";
@@ -344,8 +390,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       message,
       category,
       own_finding: root.own,
-      bot_authored: thread.botAuthored ?? root.own,
-      ...(thread.authorshipProven === undefined ? {} : { authorship_proven: thread.authorshipProven }),
+      authorship,
       replies: thread.comments.length - 1,
     };
   });

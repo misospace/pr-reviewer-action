@@ -143,7 +143,7 @@ test("withdrawal without non-empty evidence is downgraded", () => {
 });
 
 test("an open verification thread re-emits as non-blocking under strict policy", () => {
-  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }] });
+  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }] });
   applyReviewThreadEnforcement(a, [{ thread_id: "t", path: "src/a.ts", line: 4, severity: "major", message: "check behavior", category: "verification", own_finding: false, replies: 1 }], "strict");
   assert.equal((a.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open");
   assert.equal(a.findings[0]!.severity, "major");
@@ -298,7 +298,7 @@ test("#977: a thread settlement that escalated the verdict does contribute to th
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
   });
   const blockerThread = { ...unresolvedVerificationThread, severity: "blocker", category: "bug" };
   applyAllEnforcement(a, {

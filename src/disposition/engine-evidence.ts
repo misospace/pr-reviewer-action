@@ -431,12 +431,14 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
       );
     }
     // #1663: a live historical bot blocker/major the current head did not
-    // re-evaluate is a MATERIAL unverified blocking claim. The original
-    // severity is already withheld from the finding set (the thread did not
-    // re-emit), so this is the one place that uncertainty reaches the
-    // authoritative disposition — INCOMPLETE/COMMENT, never a fabricated
-    // blocker and never a clean approval. Duplicate historical threads are
-    // counted once (the settlement stores distinct concern identities).
+    // support (no disposition, an evidence-free `open`, or an unsupported
+    // claim) is a MATERIAL unverified blocking claim. The original severity
+    // is already withheld from the finding set (the thread did not re-emit),
+    // so this is the one place that uncertainty reaches the authoritative
+    // disposition — INCOMPLETE/COMMENT, never a fabricated blocker and never
+    // a clean approval. Duplicate historical threads are counted once (the
+    // settlement stores distinct concern identities), and a fresh
+    // current-head finding proving the same concern removes the gap.
     const unreassessed = typeof threadReconciliation.unreassessed === "number" && Number.isFinite(threadReconciliation.unreassessed)
       ? Math.max(Math.trunc(threadReconciliation.unreassessed), 0)
       : 0;
