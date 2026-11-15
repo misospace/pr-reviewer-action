@@ -21,33 +21,68 @@ import { pyCompareTuples, pyDict, pyGet, pyIsInt, pyOr, PyError, pyStr, pyTruthy
 import type { ExternalCheck } from "./types.js";
 export type { ExternalCheck } from "./types.js";
 
-// ── GraphQL queries (verbatim from scripts/platform_api.sh) ─────────────
+// ── GraphQL queries (ports of the v2 scripts/platform_api.sh programs;
+//    #1662: the review-threads document is forward-paginated and no longer
+//    verbatim) ─────────────
 
 export const GITHUB_CONVERSATION_COMMENTS_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }";
 
-/** The review-thread window is capped: a PR with more threads than this has a
- * listing that CANNOT prove any given absent thread is gone. `pageInfo` is
- * selected so the adapter can tell; #1645's settlement reconciliation treats
- * a capped listing as incomplete. */
 export const GITHUB_REVIEW_THREADS_WINDOW = 100;
 
-export const GITHUB_REVIEW_THREADS_QUERY =
-  `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: ${GITHUB_REVIEW_THREADS_WINDOW}) { pageInfo { hasPreviousPage } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }`;
+/** Upper bound on the opaque `endCursor` the adapter will echo back as
+ * `$cursor`. GitHub connection cursors are short opaque tokens; anything
+ * longer is corrupt or hostile, and echoing it back only inflates the next
+ * request. An over-long cursor counts as no cursor at all, which stops the
+ * walk WITHOUT certifying the listing. */
+export const MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS = 1024;
 
-/** True when the review-threads connection proves (or cannot rule out) that
- * the window dropped threads. A response without the connection object at all
- * enumerated nothing, so it proves nothing; on an existing connection it is
- * `hasPreviousPage` when carried, else the conservative `count >= window`
- * fallback. */
-export function githubReviewThreadsTruncated(response: unknown, count: number): boolean {
+/** #1662: the review-thread read is forward-paginated (`first: $WINDOW,
+ * after: $cursor`) so the adapter reads the WHOLE listing — a live unresolved
+ * thread outside the v2 `last: 100` window must be provable at settlement
+ * time, which a capped window can never establish. `pageInfo` rides per page
+ * and #1654's completeness contract decides whether the merged listing may
+ * claim completeness. */
+export const GITHUB_REVIEW_THREADS_QUERY =
+  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }`;
+
+/** Pagination state of ONE review-threads page, read fail closed.
+ *
+ * `proven` is the only signal that may certify a listing: it is true exactly
+ * when the page carried a `pageInfo` OBJECT with a boolean `hasNextPage`. A
+ * response without page-info, or with `hasNextPage` absent, null, or
+ * non-boolean, is NOT proven exhausted: #1654's contract is that absence from
+ * a listing proves absence only in a PROVEN-complete listing, and the old
+ * capped-window fallback (`count >= window`) does not carry over to a
+ * `first:/after:` walk, where one page's node count says nothing about what
+ * follows. `endCursor` is the opaque next-page cursor, null unless the page
+ * carried a usable non-empty string within `MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS`,
+ * so `hasNextPage: true` beside a missing, blank, or oversized cursor is a
+ * contradiction the adapter must not walk through.
+ *
+ * A response whose path to the connection is not an object throws (JqError),
+ * like the normalizer of the same document; the adapter turns that into a
+ * failed or explicitly incomplete read, never into "no more pages". */
+export interface GithubReviewThreadsPage {
+  proven: boolean;
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+export function githubReviewThreadsPageInfo(response: unknown): GithubReviewThreadsPage {
   const connection = jqPath(response, "data", "repository", "pullRequest", "reviewThreads");
-  if (!isPlainObject(connection)) return true;
-  const pageInfo = isPlainObject(connection.pageInfo) ? connection.pageInfo : null;
-  if (pageInfo && typeof pageInfo.hasPreviousPage === "boolean") {
-    return pageInfo.hasPreviousPage;
-  }
-  return count >= GITHUB_REVIEW_THREADS_WINDOW;
+  const pageInfo = isPlainObject(connection) && isPlainObject(connection.pageInfo) ? connection.pageInfo : null;
+  const hasNextPage = pageInfo?.hasNextPage;
+  const endCursor = pageInfo?.endCursor;
+  const proven = pageInfo !== null && typeof hasNextPage === "boolean";
+  return {
+    proven,
+    hasNextPage: proven && hasNextPage === true,
+    endCursor:
+      typeof endCursor === "string" && endCursor !== "" && endCursor.length <= MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS
+        ? endCursor
+        : null,
+  };
 }
 
 /** #812: body and `lastEditedAt` in ONE document — the atomic snapshot the
@@ -187,7 +222,9 @@ export function normalizeForgejoConversationComments(rawComments: readonly unkno
 
 // ── Review threads ──────────────────────────────────────────────────────
 
-/** GitHub GraphQL `reviewThreads(last: 100)` → the review_threads.py shape. */
+/** One `reviewThreads` page of the #1662 paginated read → the
+ * review_threads.py shape. Only `nodes` is read; page traversal lives in
+ * `githubReviewThreadsPageInfo` / the adapter. */
 export function normalizeGithubReviewThreads(response: unknown): unknown[] {
   const nodes = jqEach(jqPath(response, "data", "repository", "pullRequest", "reviewThreads", "nodes"));
   return nodes.map((node) => ({
