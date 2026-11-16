@@ -9,13 +9,14 @@
  * 1..TOOL_REQUEST_HARD_MAX; an unparsable value falls through to the next
  * source, never widening the budget.
  *
- * #810: when no explicit override wins, the default is derived from the PR's
- * changed-file count, changed lines and specialist-lead count, floored at the
- * route's tier default (so a small PR's budget matches the pre-#810 value
- * exactly) and capped at the hard ceiling. The derivation needs workspace
- * artifacts (pr.json / pr-files.json / specialist-*.json); when the caller
- * supplies no size signal the tier default is used as-is, as tested in
- * tests-v3/budget.test.ts.
+ * #810/#1688: when no explicit override wins and a trustworthy PR-size
+ * signal exists, the default is derived from changed-file count, changed
+ * lines and specialist-lead count and may scale DOWN as well as up. The old
+ * 40-call primary floor let small ordinary PRs consume the entire reviewer
+ * budget even after the substantive surface was covered. Route-specific
+ * size floors preserve headroom without turning 40 calls into a minimum.
+ * When the caller has no size signal at all, the historical tier default is
+ * retained fail-open.
  *
  * This module is the v3 port of `tool_budget_route` /
  * `resolve_tool_max_requests` in scripts/run_tool_harness.py. The two stay
@@ -49,6 +50,17 @@ export const TOOL_REQUEST_HARD_MAX = 50;
 export const TOOL_REQUEST_TIER_DEFAULTS: Readonly<
   Record<ToolBudgetTier, number>
 > = Object.freeze({ primary: 40, smart: 45, escalated: 50 });
+
+/**
+ * #1688: minimum derived budget when the harness HAS a real PR-size signal.
+ * These are intentionally far below the fail-open no-signal defaults above:
+ * size-aware ordinary reviews must not inherit a 40-call exploration floor.
+ * Larger diffs/leads still scale naturally and explicit operator overrides
+ * remain authoritative.
+ */
+export const TOOL_REQUEST_SIZE_FLOORS: Readonly<
+  Record<ToolBudgetTier, number>
+> = Object.freeze({ primary: 8, smart: 16, escalated: 24 });
 
 /**
  * PR-size weights for the #810 scaled default. One request per few changed
@@ -144,9 +156,11 @@ export function toolBudgetSizeFromArtifacts(
 }
 
 /**
- * The #810 size-scaled default: enough requests to touch the diff at the
- * weights above, floored at the route's tier default (a small PR keeps
- * today's budget) and capped at the hard ceiling.
+ * The #810/#1688 size-scaled default: enough requests to touch the diff at
+ * the weights above, with a modest route-specific floor and the hard ceiling.
+ * Crucially, a small PR no longer inherits the historical 40-call primary
+ * default merely because it is ordinary app code. The historical tier
+ * defaults are used only when no trustworthy size signal exists at all.
  */
 export function sizeScaledToolBudget(size: ToolBudgetSizeInput, route: ToolBudgetTier): number {
   const derived =
@@ -155,8 +169,14 @@ export function sizeScaledToolBudget(size: ToolBudgetSizeInput, route: ToolBudge
     countOf(size.specialistLeads) * TOOL_BUDGET_REQUESTS_PER_LEAD;
   return Math.min(
     TOOL_REQUEST_HARD_MAX,
-    Math.max(TOOL_REQUEST_TIER_DEFAULTS[route], derived),
+    Math.max(TOOL_REQUEST_SIZE_FLOORS[route], derived),
   );
+}
+
+function hasToolBudgetSizeSignal(size: ToolBudgetSizeInput): boolean {
+  return countOf(size.changedFiles) > 0
+    || countOf(size.changedLines) > 0
+    || countOf(size.specialistLeads) > 0;
 }
 
 export type EnvLike = Readonly<Record<string, string | undefined>>;
@@ -230,11 +250,13 @@ export function resolveToolMaxRequests(
   if (explicit !== null) {
     return { route, budget: explicit, source: "explicit", configured: explicit };
   }
-  if (size !== undefined && size !== null) {
-    const scaled = sizeScaledToolBudget(size, route);
-    if (scaled > TOOL_REQUEST_TIER_DEFAULTS[route]) {
-      return { route, budget: scaled, source: "size-scaled", configured: null };
-    }
+  if (size !== undefined && size !== null && hasToolBudgetSizeSignal(size)) {
+    return {
+      route,
+      budget: sizeScaledToolBudget(size, route),
+      source: "size-scaled",
+      configured: null,
+    };
   }
   return {
     route,
