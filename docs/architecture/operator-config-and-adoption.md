@@ -117,6 +117,11 @@ Gitea-labelled reconcile poll and the instance's webhook deliveries converge
 on one generation and one head never buys a second review. The daemon
 refuses a cross-family binding (integration, intake, or poll) at startup.
 
+The Gitea intake is the operator host's ONE webhook route — one router, one
+follow-up consumer, one durable Q&A budget — with no per-path
+`/webhooks/gitea` mount (see
+[controller-daemon.md](controller-daemon.md)).
+
 `reviewer-defaults` keys must be `repo-configurable` contract inputs
 (secrets, endpoints, and required inputs are structurally excluded by
 `validateContract`), with values validated by the same per-type rules the
