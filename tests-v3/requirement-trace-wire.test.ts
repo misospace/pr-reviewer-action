@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import { USER_MESSAGE_BASE } from "../src/prompt/user-message.js";
+import { VERDICT_USER_INSTRUCTION } from "../src/model/conversation.js";
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), "trace-wire-"));
@@ -380,5 +382,66 @@ test("#252 boundary: the boundary token itself — control-character wire refs a
     assert.deepEqual(trace.summary.unresolved_material, ["req-nl", "req-nul", "req-del"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1660 review: mixed-shape out-of-scope claims resolve by additive precedence, never by union", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/unrelated/widget.ts", ["export const widget = () => 1;"]);
+    const ledger = ledgerWith([
+      { id: "req-met", text: "The changelog must be posted to the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+      { id: "req-bogus", text: "The banner must be announced in the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+      { id: "req-add-unmet", text: "The migration must be announced in the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+    ]);
+    const scope = {
+      paths: ["src/unrelated/widget.ts"],
+      fileLines: [{ path: "src/unrelated/widget.ts", lines: ["+ export const widget = () => 1;"] }],
+    };
+    const trace = validateRequirementTrace([
+      // Valid additive `met` must NOT be overridden by a stray wire `violated`.
+      { requirement_id: "req-met", disposition: "met", status: "violated", evidence: [{ kind: "file", ref: "src/unrelated/widget.ts:1", detail: "stray contradiction" }] },
+      // Malformed additive must NOT shadow a valid wire gap claim.
+      { requirement_id: "req-bogus", disposition: "not_a_ladder_value", status: "violated", evidence: [{ kind: "file", ref: "src/unrelated/widget.ts:1", detail: "no banner announcement exists" }] },
+      // Valid additive `unmet` with a reason stays the gap claim even beside a wire `satisfied`.
+      { requirement_id: "req-add-unmet", disposition: "unmet", reason: "no migration announcement exists", status: "satisfied", evidence: [] },
+    ], ledger, workspace, "+ export const widget = () => 1;", scope);
+    const met = trace.rows.find((row) => row.requirement_id === "req-met");
+    const bogus = trace.rows.find((row) => row.requirement_id === "req-bogus");
+    const addUnmet = trace.rows.find((row) => row.requirement_id === "req-add-unmet");
+    assert.equal(met?.disposition, "not_applicable", "the additive `met` wins: no unmet_claimed from the wire contradiction");
+    assert.equal(met?.materiality, "advisory");
+    assert.equal(bogus?.disposition, "unmet", "the malformed additive falls to the wire `violated`");
+    assert.equal(bogus?.resolution, "unmet_claimed");
+    assert.equal(bogus?.materiality, "material");
+    assert.equal(bogus?.reason, "no banner announcement exists");
+    assert.ok(bogus?.notes.includes("out-of-scope-reported-unmet"));
+    assert.equal(addUnmet?.disposition, "unmet", "the valid additive `unmet` keeps the gap claim over a wire `satisfied`");
+    assert.equal(addUnmet?.resolution, "unmet_claimed");
+    assert.deepEqual(trace.summary.unmet_claimed, ["req-bogus", "req-add-unmet"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1660 review: the coverage instruction demands semantic adequacy, never citation existence", () => {
+  for (const [name, text] of [
+    ["USER_MESSAGE_BASE", USER_MESSAGE_BASE],
+    ["VERDICT_USER_INSTRUCTION", VERDICT_USER_INSTRUCTION],
+  ] as const) {
+    // `satisfied` is a judgement that the required behavior HOLDS, and a
+    // location or test citation is evidence identification, not proof.
+    assert.ok(text.includes("supports that the required behavior actually holds"), name);
+    assert.ok(text.includes("does not establish semantic correctness by itself"), name);
+    // `violated` needs a supported counterexample or failure evidence.
+    assert.ok(text.includes("supported counterexample or evidence that the requirement is not met"), name);
+    // `unknown` explicitly covers located-but-adequacy-unestablished.
+    assert.ok(text.includes("cannot establish its adequacy"), name);
+    // The shared-observation allowance survives (no per-requirement budget).
+    assert.ok(text.includes("One genuine observation may support several requirements; cite it for each."), name);
+    // The old locate-meets-satisfied wording must not return.
+    assert.equal(text.includes("located the enforcing implementation"), false, name);
+    // The vocabulary itself is unchanged: the fold consumes exactly these.
+    for (const status of ["satisfied", "violated", "unknown"]) assert.ok(text.includes(status), `${name}:${status}`);
   }
 });

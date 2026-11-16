@@ -2747,13 +2747,21 @@ export function validateRequirementTrace(
   // claim).
   for (const { entry, reason } of outOfScope) {
     const claim = claimsById.get(entry.id);
-    // #1095/#1660: the reviewer's own gap claim, in either vocabulary, with a
-    // usable reason (additive `reason` or the wire evidence details).
     const claimReason = claim !== undefined
       ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(coverageClaimEvidence(claim).details.join("; ")))
       : "";
-    const claimedUnmet = claimReason !== "" && ((typeof claim?.disposition === "string" && claim.disposition.toLowerCase() === "unmet")
-      || (claim !== undefined && coverageStatusDisposition(claim) === "unmet"));
+    // #1095/#1660: the reviewer's own gap claim, with a usable reason
+    // (additive `reason` or the wire evidence details). #1660 review: the
+    // SAME precedence rule as the in-scope and non-code branches — a VALID
+    // additive `disposition` answers the claim exclusively (an additive
+    // `met` is not overridden by a stray wire `violated`), and only a
+    // missing/malformed additive falls to the wire `status`.
+    const additiveClaim = typeof claim?.disposition === "string" && TRACE_DISPOSITIONS.includes(claim.disposition.toLowerCase())
+      ? claim.disposition.toLowerCase()
+      : null;
+    const claimedUnmet = claimReason !== "" && (additiveClaim !== null
+      ? additiveClaim === "unmet"
+      : claim !== undefined && coverageStatusDisposition(claim) === "unmet");
     if (claimedUnmet) {
       unmetClaimedIds.push(entry.id);
       rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: ["out-of-scope-reported-unmet"] });
