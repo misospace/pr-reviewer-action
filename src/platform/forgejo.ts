@@ -20,7 +20,7 @@ import {
   type ExternalCheck,
 } from "./normalize.js";
 import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
-import type { GiteaFamilyForge } from "./resolve.js";
+import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
 import type {
@@ -248,9 +248,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     // authenticate — the same constructor-time refusal shape `resolvePlatform`
     // uses for `tangled` without a DID.
     if (this.forge === "gitea" && this.isAuthorizedIntegrationMode()) {
-      throw new Error(
-        "Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token",
-      );
+      throw new Error(GITEA_INTEGRATION_REFUSAL);
     }
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;

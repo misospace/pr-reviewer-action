@@ -18,7 +18,7 @@ import { ForgejoAdapter } from "./forgejo.js";
 import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
-import type { GiteaFamilyForge } from "./resolve.js";
+import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 
 export type PublishPlatformName = "github" | "forgejo" | "tangled";
 
@@ -1031,9 +1031,7 @@ constructor(options: {
     // publish boundary names itself as the rejecter regardless of the order the
     // adapter below is constructed in.
     if (options.forge === "gitea" && this.integrationMode) {
-      throw new Error(
-        "Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token",
-      );
+      throw new Error(GITEA_INTEGRATION_REFUSAL);
     }
     this.authorization = new ForgejoAdapter({
       repo: options.repo,

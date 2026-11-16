@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import {
   computeGiteaWebhookSignature,
@@ -10,10 +12,12 @@ import {
   verifyGiteaWebhookSignature,
   type GiteaWebhookDelivery,
 } from "../src/ingress/gitea-events.js";
+import { createForgejoWebhookHandler } from "../src/ingress/webhook-handler.js";
 import { normalizeGitHubEvent } from "../src/events/normalize.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 
 const SECRET = "gitea-webhook-secret";
+const HEAD = "a".repeat(40);
 
 function sign(body: string): string {
   return computeGiteaWebhookSignature(SECRET, body);
@@ -453,4 +457,93 @@ test("the Gitea projection and the Forgejo projection agree outside the two Gite
     const forgejo = normalizeGitHubEvent(projectGiteaWebhookPayload(eventHeader, typeHeader, payload));
     assert.deepEqual(gitea, forgejo, `${eventHeader}/${typeHeader} diverged`);
   }
+});
+
+// --- HTTP intake (socket-level, the security boundary) --------------------
+
+async function post(
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", ...headers } }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode ?? 0));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+test("Gitea intake over a socket: 401 bad signature, 400 bad header, 202 accepted, 200 ping", async () => {
+  const events: CanonicalForgeEvent[] = [];
+  const handler = createGiteaWebhookHandler({ secret: SECRET, onEvent: (e) => { events.push(e); } });
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/webhooks/gitea`;
+    assert.equal(await post(url, SYNCED, { "x-gitea-event": "pull_request", "x-gitea-signature": "nope" }), 401);
+    assert.equal(await post(url, SYNCED, { "x-gitea-event": "bad header!", "x-gitea-signature": sign(SYNCED) }), 400);
+    assert.equal(await post(url, "{not json", { "x-gitea-event": "pull_request", "x-gitea-signature": sign("{not json") }), 400);
+    assert.equal(await post(url, SYNCED, { "x-gitea-event": "pull_request", "x-gitea-signature": sign(SYNCED) }), 202);
+    const ping = JSON.stringify({ zen: true });
+    assert.equal(await post(url, ping, { "x-gitea-event": "ping", "x-gitea-signature": sign(ping) }), 200);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.kind, "synchronize");
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("the Gitea intake schedules a PR-comment follow-up the Forgejo intake drops", async () => {
+  // Gitea's IssueCommentPayload sets issue.pull_request to a PullRequestMeta
+  // with NO number. The shared Forgejo projection leaves an already-present
+  // issue.pull_request alone, so the normalizer prefers the top-level PR and
+  // the issue origin — which `follow_up` requires — is never taken.
+  const body = JSON.stringify({
+    action: "created",
+    repository: { full_name: "acme/widgets" },
+    issue: { number: 12, pull_request: { merged: false, draft: false, html_url: "https://gitea.test/x" } },
+    pull_request: { number: 12, head: { sha: HEAD }, base: { repo: { full_name: "acme/widgets" } } },
+    comment: { id: 91, user: { login: "asker" } },
+    is_pull: true,
+  });
+  const kinds: string[] = [];
+  const build = (factory: typeof createGiteaWebhookHandler | typeof createForgejoWebhookHandler) =>
+    createServer(factory({ secret: SECRET, onEvent: (e) => { kinds.push(e.kind); } }));
+
+  const giteaServer = build(createGiteaWebhookHandler);
+  await new Promise<void>((resolve) => giteaServer.listen(0, "127.0.0.1", resolve));
+  const forgejoServer = build(createForgejoWebhookHandler);
+  await new Promise<void>((resolve) => forgejoServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const headers = {
+      "x-gitea-event": "issue_comment",
+      "x-gitea-event-type": "pull_request_comment",
+      "x-gitea-signature": sign(body),
+    };
+    await post(`http://127.0.0.1:${(giteaServer.address() as AddressInfo).port}/`, body, headers);
+    await post(`http://127.0.0.1:${(forgejoServer.address() as AddressInfo).port}/`, body, headers);
+    assert.deepEqual(kinds, ["follow_up", "unknown"]);
+  } finally {
+    for (const s of [giteaServer, forgejoServer]) {
+      s.closeAllConnections();
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+  }
+});
+
+test("a Gitea review-comment delivery reaches follow_up through the pull_request_comment group", async () => {
+  // Gitea's HookEventPullRequestReviewComment.Event() IS `pull_request_comment`,
+  // so the GROUP header alone (no type header) must route it.
+  const event = parseGiteaWebhookEvent("pull_request_comment", {
+    action: "created",
+    repository: { full_name: "acme/widgets" },
+    issue: { number: 4, pull_request: { merged: false } },
+    pull_request: { number: 4, head: { sha: "f".repeat(40) }, base: { repo: { full_name: "acme/widgets" } } },
+    comment: { id: 55, user: { login: "reviewer" } },
+  }, { eventTypeHeader: "pull_request_review_comment" });
+  assert.equal(event?.kind, "follow_up");
 });

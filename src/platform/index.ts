@@ -17,6 +17,8 @@ export {
 } from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export {
+  GITEA_INTEGRATION_REFUSAL,
+  declaredFamilyForge,
   declaredForgeId,
   forgeWireFamily,
   resolvePlatform,

@@ -79,15 +79,14 @@ export function computeGiteaWebhookSignature(secret: string, rawBody: Buffer | s
   return computeForgejoWebhookSignature(secret, rawBody);
 }
 
-/** Gitea's `PullRequestMeta` at `issue.pull_request`: present on every
- * PR-linked issue, but it carries NO `number`, so the normalizer cannot resolve
- * a PR from it and `follow_up` needs the issue origin to win. */
-function isIssuePullRequestMeta(value: unknown): boolean {
-  return isPlainObject(value) && typeof value.number !== "number";
-}
-
 /** Move Gitea's top-level PR onto `issue.pull_request` so the #728 normalizer
- * takes the issue-origin path the `follow_up` kind requires. */
+ * takes the issue-origin path the `follow_up` kind requires.
+ *
+ * The keep-put condition is the SHARED projection's (`issue.pull_request` is
+ * already a plain object) narrowed by one test: it must also carry a PR
+ * `number`. Anything else — absent, a `PullRequestMeta`, or a malformed
+ * non-object — takes the move, so the two projections can only differ on the
+ * `number`-less meta this module exists to handle. */
 function projectGiteaCommentEvent(payload: Record<string, unknown>): Record<string, unknown> {
   const projected: Record<string, unknown> = { ...payload, name: "issue_comment" };
   const topPr = payload.pull_request;
@@ -95,7 +94,8 @@ function projectGiteaCommentEvent(payload: Record<string, unknown>): Record<stri
 
   const issue = payload.issue;
   const issuePr = isPlainObject(issue) ? issue.pull_request : undefined;
-  if (issuePr === undefined || isIssuePullRequestMeta(issuePr)) {
+  const usableIssuePr = isPlainObject(issuePr) && typeof issuePr.number === "number";
+  if (!usableIssuePr) {
     // DELETE the top-level key (not set it to `undefined`) so `resolvePr`
     // takes the issue-origin path.
     delete projected.pull_request;
@@ -176,27 +176,37 @@ export function projectGiteaWebhookPayload(
   const group = eventHeader === "pull_request_sync" ? "pull_request" : eventHeader;
   const action = typeof payload.action === "string" ? payload.action : "";
 
-  // PR comments. Gitea's `issue_comment` group with a `pull_request_comment`
-  // type, and the PR-review-comment group (whose `Event()` is
-  // `pull_request_comment`), both become the GitHub `issue_comment` envelope —
-  // but only when the signed action is `created`. A non-`created` action falls
-  // through to the shared projection, so a forged comment hint can never
-  // re-nest a PR into a `follow_up`-shaped `issue.pull_request`.
-  if (
-    (group === "issue_comment" ||
-      eventHeader === "pull_request_comment" ||
-      specific === "pull_request_comment") &&
-    action === "created"
-  ) {
-    return projectGiteaCommentEvent(payload);
-  }
+  // The two Gitea branches below read untrusted fields directly, so they are
+  // contained: a hostile accessor on `issue` / `pull_request` / `label` degrades
+  // to the SHARED projection (which is itself total) rather than escaping this
+  // boundary. Without the guard the module's "never throws" claim would hold
+  // only by construction.
+  try {
+    // PR comments. Gitea's `issue_comment` group with a `pull_request_comment`
+    // type, and the PR-review-comment group (whose `Event()` is
+    // `pull_request_comment`), both become the GitHub `issue_comment` envelope —
+    // but only when the signed action is `created`. A non-`created` action falls
+    // through to the shared projection, so a forged comment hint can never
+    // re-nest a PR into a `follow_up`-shaped `issue.pull_request`.
+    if (
+      (group === "issue_comment" ||
+        eventHeader === "pull_request_comment" ||
+        specific === "pull_request_comment") &&
+      action === "created"
+    ) {
+      return projectGiteaCommentEvent(payload);
+    }
 
-  // PR label delivery: grouped `pull_request` with a `label_updated` action, or
-  // the `pull_request_label` group header. Both are gated on the same signed
-  // action, so a label hint on a non-label body degrades to the shared
-  // projection's passthrough (which maps to `unknown`).
-  if (action === "label_updated" && (group === "pull_request" || eventHeader === "pull_request_label")) {
-    return projectGiteaLabelEvent(payload, options);
+    // PR label delivery: grouped `pull_request` with a `label_updated` action, or
+    // the `pull_request_label` group header. Both are gated on the same signed
+    // action, so a label hint on a non-label body degrades to the shared
+    // projection's passthrough (which maps to `unknown`).
+    if (action === "label_updated" && (group === "pull_request" || eventHeader === "pull_request_label")) {
+      return projectGiteaLabelEvent(payload, options);
+    }
+  } catch {
+    // Fall through to the shared projection. It never synthesizes a name this
+    // boundary would not have produced, and it never rethrows.
   }
 
   return projectForgejoWebhookPayload(eventHeader, eventTypeHeader, payload, options);

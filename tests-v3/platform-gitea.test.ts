@@ -17,6 +17,10 @@ import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import { GITEA_WEBHOOK_PATH, FORGEJO_WEBHOOK_PATH, selectIngressEndpoints } from "../src/ingress/endpoints.js";
 import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/api-client.js";
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
+import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
+import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
+import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
+import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
 const INSTANCE = "https://git.example.internal:3000";
 
@@ -113,14 +117,20 @@ test("giteaTokenFromEnv refuses authorized_integration instead of returning no t
   const refusal =
     "Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token";
   assert.throws(
-    () => giteaTokenFromEnv({ GITEA_AUTH_METHOD: "authorized_integration", FORGEJO_TOKEN: "ft" }),
-    (e: unknown) => e instanceof Error && e.message === refusal,
-  );
-  // The family's variable is honored too, so a shared config cannot slip past.
-  assert.throws(
     () => giteaTokenFromEnv({ FORGEJO_AUTH_METHOD: "authorized_integration", GITEA_TOKEN: "gt" }),
     (e: unknown) => e instanceof Error && e.message === refusal,
   );
+  // A bare audience is refused too: on Forgejo an audience alone forces
+  // integration mode, so token lookup that accepted it would let the run
+  // degrade silently instead of naming the misconfiguration.
+  assert.throws(
+    () => giteaTokenFromEnv({ FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: "https://gitea.test", GITEA_TOKEN: "gt" }),
+    /forgejo-authorized-integration-audience/,
+  );
+  // There is deliberately NO `GITEA_AUTH_METHOD`: the family reads one method
+  // variable, and a Gitea-only alias would make the review lane refuse while
+  // the CI-wait gate and ancillary writes kept going in token mode.
+  assert.equal(giteaTokenFromEnv({ GITEA_AUTH_METHOD: "authorized_integration", GITEA_TOKEN: "gt" }), "gt");
 });
 
 test("giteaAdapterFromEnv resolves the family's configured API base", () => {
@@ -264,4 +274,92 @@ test("#1678: the family token resolver accepts the GITEA_TOKEN alias too", () =>
   assert.equal(forgejoTokenFromEnv({ GITEA_TOKEN: "gt" }), "gt");
   assert.equal(forgejoTokenFromEnv({ FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
   assert.equal(forgejoTokenFromEnv({ GITHUB_TOKEN: "ght", GITEA_TOKEN: "gt" }), "gt");
+});
+
+// --- env boundary: the refusal is reachable without loadConfig -------------
+
+test("#1678: buildAdapter refuses authorized_integration on the env path", () => {
+  const env = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTH_METHOD: "authorized_integration",
+  } as NodeJS.ProcessEnv;
+  assert.throws(() => buildAdapter(env), /Gitea does not support auth method 'authorized_integration'/);
+});
+
+test("#1678: a bare audience is refused on Gitea, not silently downgraded", () => {
+  // On Forgejo an audience ALONE forces integration mode, so a Gitea run that
+  // only refused the explicit method would degrade into token mode here.
+  const env = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: "https://gitea.test",
+  } as NodeJS.ProcessEnv;
+  assert.throws(() => buildAdapter(env), /forgejo-authorized-integration-audience/);
+  assert.throws(() => buildPublishApi(env), /forgejo-authorized-integration-audience/);
+});
+
+test("#1678: buildPublishApi refuses authorized_integration on the env path", () => {
+  const env = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTH_METHOD: "authorized_integration",
+  } as NodeJS.ProcessEnv;
+  assert.throws(() => buildPublishApi(env), /Gitea does not support auth method 'authorized_integration'/);
+});
+
+test("#1678: the env-built lanes carry the Gitea identity on a token-mode config", () => {
+  const env = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    GITEA_TOKEN: "gt",
+  } as NodeJS.ProcessEnv;
+  const adapter = buildAdapter(env);
+  assert.equal(adapter.platform, "forgejo");
+  assert.equal((adapter as ForgejoAdapter).forge, "gitea");
+  // The publish lane resolves the same identity, so the read and write sides
+  // cannot disagree about which product's capabilities apply.
+  assert.equal(buildPublishApi(env).platform, "forgejo");
+});
+
+test("#1678: the CI-wait gate and ancillary writes thread the identity too", async () => {
+  // Both construct their own ForgejoAdapter from the environment, so the
+  // declared identity has to reach those constructors or the guard there can
+  // never fire.
+  const env = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_AUTH_METHOD: "authorized_integration",
+  } as NodeJS.ProcessEnv;
+  assert.throws(() => ciAdapterFromEnv(env, "acme/widgets", "7", "gt"),
+    /Gitea does not support auth method 'authorized_integration'/);
+  await assert.rejects(
+    () => forgejoAncillaryWrite(env, `${INSTANCE}/api/v1/repos/acme/widgets/issues/7/labels`, "POST"),
+    /Gitea does not support auth method 'authorized_integration'/);
+});
+
+test("#1678: every refusal boundary quotes the same text", () => {
+  const env = { FORGEJO_AUTH_METHOD: "authorized_integration" };
+  assert.throws(() => giteaTokenFromEnv(env), (error: unknown) =>
+    (error as Error).message === GITEA_INTEGRATION_REFUSAL);
+  assert.throws(() => createGiteaPlatform({ repo: "a/b", prNumber: "1", baseUrl: INSTANCE, token: "t",
+    // The factory's option type drops the method; cast keeps the assertion honest.
+    authMethod: "authorized_integration" } as never), (error: unknown) =>
+    (error as Error).message === GITEA_INTEGRATION_REFUSAL);
+  assert.throws(() => createGiteaPullRequestClient({ repo: "a/b", prNumber: "1", baseUrl: INSTANCE, token: "t",
+    authMethod: "authorized_integration" } as never), (error: unknown) =>
+    (error as Error).message === GITEA_INTEGRATION_REFUSAL);
 });

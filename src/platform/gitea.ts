@@ -25,6 +25,7 @@ import { ForgejoAdapter, type ForgejoAdapterOptions } from "./forgejo.js";
 import { forgejoTokenFromEnv } from "./forgejo-auth.js";
 import { ForgejoPublishApi } from "./publish-api.js";
 import type { FetchLike } from "./http.js";
+import { GITEA_INTEGRATION_REFUSAL } from "./resolve.js";
 
 /** A Gitea API token from the environment.
  *
@@ -35,17 +36,26 @@ import type { FetchLike } from "./http.js";
  * through `forgejoTokenFromEnv`. A Gitea-specific precedence would let one run
  * authenticate the review with one credential and the CI read with another.
  *
- * `authorized_integration` is refused here as well as in the adapter: the auth
- * METHOD is read from the same environment, and a token lookup that silently
- * returned `undefined` would let the run start and fail later with an
- * authentication error that no longer names the misconfiguration. */
+ * The auth METHOD has no alias on purpose: `FORGEJO_AUTH_METHOD` is the family's
+ * single method variable, exactly as `forgejo-api-url` and `forgejo-token` are
+ * the family's settings. A `GITEA_AUTH_METHOD` that only this function read
+ * would make one run refuse the method on the review lane while the CI-wait gate
+ * and the ancillary writes carried on in token mode.
+ *
+ * The refusal covers every way a caller can select Authorized Integration —
+ * the explicit method AND a bare audience, which on Forgejo forces integration
+ * mode by itself (`ForgejoAdapter.isAuthorizedIntegrationMode`). Refusing only
+ * the method would let an audience-only configuration degrade silently into
+ * token mode on Gitea instead of naming the misconfiguration. */
 export function giteaTokenFromEnv(
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-  const method = (env.GITEA_AUTH_METHOD ?? env.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase();
-  if (method === "authorized_integration") {
+  if ((env.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() === "authorized_integration") {
+    throw new Error(GITEA_INTEGRATION_REFUSAL);
+  }
+  if ((env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE ?? "").trim() !== "") {
     throw new Error(
-      "Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token",
+      "Gitea does not support 'forgejo-authorized-integration-audience'; remove it and use a Gitea access token",
     );
   }
   return forgejoTokenFromEnv(env);

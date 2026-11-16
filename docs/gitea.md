@@ -40,20 +40,27 @@ would leave the others unauthenticated.
 
 ## Refused: authorized_integration
 
-`forgejo-auth-method: authorized_integration` is refused when `platform`
-is `gitea`. Authorized OAuth Integrations, an OIDC-asserted JWT exchange,
-exist only on Forgejo.
+Authorized OAuth Integrations, an OIDC-asserted JWT exchange, exist only on
+Forgejo. On Gitea every way of selecting that mode is refused:
 
-The refusal fires at config validation, before any token lookup or
-request, and again at adapter and publish-client construction, so a direct
-caller cannot bypass it. The construction refusal says:
+- `platform: gitea` with `forgejo-auth-method: authorized_integration` is
+  rejected at config validation, before any token lookup or request.
+- A bare `forgejo-authorized-integration-audience` is rejected too. On Forgejo
+  an audience alone forces integration mode, so refusing only the explicit
+  method would let that configuration degrade silently into token mode.
+- The read adapter and the publish client repeat the refusal at construction,
+  so a direct caller that skips config validation cannot bypass it. The
+  construction refusal says:
 
 ```text
 Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token
 ```
 
-Config validation rejects the same combination first. Use `token` mode
-with a Gitea access token.
+The auth method has one name for the whole family: `FORGEJO_AUTH_METHOD`. There
+is no `GITEA_AUTH_METHOD`, and `giteaTokenFromEnv` is the only reader that
+would have honored one. A method key that one lane reads makes one run refuse
+the mode on the review path while the CI-wait gate and ancillary writes carry
+on in token mode.
 
 ## Webhooks
 
@@ -66,11 +73,22 @@ two event headers are unauthenticated hints: they may refine a projection
 that the signed body's own `action` already authorizes, and they can
 never rewrite one.
 
-Mount the Gitea intake at `/webhooks/gitea` (the `GITEA_WEBHOOK_PATH`
-constant, `src/ingress/endpoints.ts`). Set a webhook secret on the
-instance and on the controller. An empty secret accepts nothing: the
-handler fails closed, and it verifies the signature over the raw body
-before parsing any JSON.
+The Gitea intake route is `/webhooks/gitea` (`GITEA_WEBHOOK_PATH`,
+`src/ingress/endpoints.ts`). Set a webhook secret on the instance and on
+the controller. An empty secret accepts nothing: the handler fails
+closed, and it verifies the signature over the raw body before parsing
+any JSON.
+
+`createGiteaWebhookHandler` and `dispatchGiteaWebhookEvent` are served
+today by the Action runtime and by `createOperatorHost({ platform:
+"gitea" })`. The shipped controller daemon does not select them yet: its
+instance schema accepts only `kind: github` and `kind: forgejo`
+(`src/config/instance-config.ts`), and its webhook listener mounts one
+handler for every path. A Gitea instance behind the daemon must
+configure `kind: forgejo`, which means the deliveries run the Forgejo
+projection. Wiring `gitea` through the instance schema and the daemon
+intake is tracked separately; until it lands, do not set
+`kind: gitea` — validation rejects it.
 
 Subscribe the webhook to the events that schedule reviews:
 
@@ -100,6 +118,8 @@ and the two would never converge.
 
 ## Not covered by this change
 
+- The shipped controller daemon cannot select the Gitea intake. Its instance
+  forge `kind` still accepts only `github` and `forgejo`. See Webhooks above.
 - No new `gitea-*` action inputs. The shared `forgejo-*` settings stay.
 - No separate Gitea REST client class. The Forgejo client serves both.
 - No per-release Gitea version qualification. The shared family is not
