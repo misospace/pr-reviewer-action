@@ -742,17 +742,17 @@ inputs:
     v2_id: tool_max_requests
     required: false
     default: ""
-    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty resolves a tier-aware budget from the review route (#701) — 40 for primary, 45 for smart, 50 for escalated — then scales upward for PR size (#810) up to the hard ceiling of 50. Explicit route-specific inputs outrank tool-max-requests; tool-max-requests otherwise overrides the derived tier budget. Wall-clock and round limits still bind."
+    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty uses PR-size-aware derived budgets (#810/#1688) when size data is available: the size signal may scale DOWN or up with route floors 8 primary / 16 smart / 24 escalated and hard ceiling 50. If no usable size signal exists, fail-open historical tier defaults are 40/45/50. Explicit route-specific inputs outrank tool-max-requests; tool-max-requests otherwise overrides the derived budget. Wall-clock and round limits still bind."
   - id: primary-tool-max-requests
     v2_id: primary_tool_max_requests
     required: false
     default: ""
-    description: "Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty keeps the primary tier default (40)."
+    description: "Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty uses the size-aware derived primary budget when PR-size data exists; 40 is only the fail-open no-size fallback."
   - id: smart-tool-max-requests
     v2_id: smart_tool_max_requests
     required: false
     default: ""
-    description: "Request budget for the smart and escalated routes only, bounded to 1..50. Outranks tool_max_requests on those routes and leaves the primary tier untouched. Empty (the default) keeps the tier defaults."
+    description: "Request budget for the smart and escalated routes only, bounded to 1..50. Outranks tool_max_requests on those routes and leaves the primary tier untouched. Empty uses size-aware derived budgets when PR-size data exists; historical tier defaults apply only when size data is unavailable."
   - id: tool-max-rounds
     v2_id: tool_max_rounds
     required: false
