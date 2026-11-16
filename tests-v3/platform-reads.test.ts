@@ -9,7 +9,8 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsPageInfo, MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY,
+  groupForgejoReviewThreads, normalizeGithubReviewThreads, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsPageInfo, MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
@@ -1817,4 +1818,34 @@ test("#1121: forgejo sticky upsert stays fail closed when its strict enumeration
   assert.deepEqual(await forgejo(ok.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`), {
     ok: true, created: false, commentId: 7, updatedAt: "2026-10-16T09:00:00Z",
   });
+});
+
+// #1663: the GitHub review-thread seam MUST project the forge-reported
+// actor type; without it every marked root classifies `unproven` and the
+// automation contract never engages on the real wire.
+test("#1663: the review-thread GraphQL seam carries author.__typename into the normalized actor type", () => {
+  assert.match(GITHUB_REVIEW_THREADS_QUERY, /author \{ __typename login \}/,
+    "the shipped query selects the actor type beside the login");
+  const page = { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+    { id: "PRRT_a", isResolved: false, isOutdated: false, path: "a.ts", line: 1, originalLine: 1,
+      comments: { nodes: [
+        { databaseId: 1, body: "finding", createdAt: "2026-11-13T00:00:00Z", updatedAt: "", author: { __typename: "Bot", login: "its-saffron[bot]" } },
+        { databaseId: 2, body: "reply", createdAt: "2026-11-13T01:00:00Z", updatedAt: "", author: { __typename: "User", login: "alice" } },
+        { databaseId: 3, body: "legacy", createdAt: "2026-11-13T02:00:00Z", updatedAt: "", author: { login: "old-doc" } },
+      ] } },
+  ] } } } } };
+  const [thread] = normalizeGithubReviewThreads(page) as Array<{ comments: Array<Record<string, unknown>> }>;
+  assert.ok(thread);
+  assert.equal(thread.comments[0]!.user_type, "Bot", "a GitHub App author is proven automation on the wire");
+  assert.equal(thread.comments[1]!.user_type, "User", "and a person is proven human");
+  assert.equal("user_type" in thread.comments[2]!, false, "a document that selected no type projects none — never an inferred one");
+  // The Forgejo grouping carries `type`/`user_type` when the deployment
+  // reports it, and stays silent when it does not.
+  const [group] = groupForgejoReviewThreads([[
+    { id: 1, body: "c", created_at: "", updated_at: "", user: { login: "ci-bot", type: "bot" } },
+    { id: 2, body: "d", created_at: "", updated_at: "", user: { login: "someone" } },
+  ]]) as Array<{ comments: Array<Record<string, unknown>> }>;
+  assert.ok(group);
+  assert.equal(group.comments[0]!.user_type, "bot");
+  assert.equal("user_type" in group.comments[1]!, false);
 });

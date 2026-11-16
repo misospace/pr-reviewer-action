@@ -14,8 +14,8 @@ import { findingToBody, recoverPublishedSuggestion } from "../src/publish/inline
 
 const OWN_FINDING = "**⚠️ Major (bug):** retry drops the `--` separator\n\n" + FINDING_TRAILER;
 
-function comment(id: number, login: string, created: string, body: string): Record<string, unknown> {
-  return { id, user: { login }, created_at: created, updated_at: created, body };
+function comment(id: number, login: string, created: string, body: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { id, user: { login }, created_at: created, updated_at: created, body, ...extra };
 }
 
 function thread(threadId: string, comments: unknown[], extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -102,9 +102,58 @@ test("enforcement view parses severity and message from the finding body", () =>
   const t = normalizeThread(thread("PRRT_1", [comment(1, "bot", "2026-09-25T22:32:00Z", OWN_FINDING), comment(2, "dev", "2026-09-26T02:00:00Z", "reply")]))!;
   const human = normalizeThread(thread("H", [comment(3, "alice", "2026-09-26T03:00:00Z", "Should this handle None?")], { path: "a.py", line: 4 }))!;
   assert.deepEqual(enforcementView([t, human]), [
-    { thread_id: "PRRT_1", path: "pr_reviewer/tool_executors.py", line: 593, severity: "major", message: "retry drops the `--` separator", category: "bug", own_finding: true, replies: 1 },
-    { thread_id: "H", path: "a.py", line: 4, severity: "minor", message: "Should this handle None?", category: null, own_finding: false, replies: 0 },
+    { thread_id: "PRRT_1", path: "pr_reviewer/tool_executors.py", line: 593, severity: "major", message: "retry drops the `--` separator", category: "bug", own_finding: true, authorship: "action", replies: 1 },
+    { thread_id: "H", path: "a.py", line: 4, severity: "minor", message: "Should this handle None?", category: null, own_finding: false, authorship: "human", replies: 0 },
   ]);
+});
+
+test("#1663: authorship is four-way and account identity is never comment provenance", () => {
+  const marked = (login: string, extra: Record<string, unknown> = {}): Record<string, unknown> =>
+    thread("PRRT_1", [comment(1, login, "2026-09-25T22:32:00Z", OWN_FINDING, extra)]);
+  const Bot = { user_type: "Bot" };
+  const User = { user_type: "User" };
+
+  // `action` = forge-reported AUTOMATION author under this run's login —
+  // including the GitHub App `[bot]` spelling and casing.
+  assert.equal(enforcementView(prepareThreads([marked("bot", Bot)], undefined, "bot"))[0]!.authorship, "action");
+  assert.equal(enforcementView(prepareThreads([marked("Its-Saffron[bot]", Bot)], undefined, "its-saffron"))[0]!.authorship, "action");
+  assert.equal(enforcementView(prepareThreads([marked("BOT", Bot)], undefined, " bot "))[0]!.authorship, "action");
+
+  // Failure A guard: a MATCHING login on a human-typed (or untyped) account
+  // is a shared PAT, not proof this comment was action-published. An
+  // unmarked root under the run's own identity stays human: dismissal
+  // authority never comes from the token alone.
+  const question = (login: string, extra: Record<string, unknown> = {}) =>
+    thread("H", [comment(9, login, "2026-09-26T03:00:00Z", "Should this handle None?", extra)]);
+  assert.equal(enforcementView(prepareThreads([question("alice", User)], undefined, "bot"))[0]!.authorship, "human");
+  assert.equal(enforcementView(prepareThreads([question("bot", User)], undefined, "bot"))[0]!.authorship, "human",
+    "the owner's hand-written comment under the run's own shared PAT is still human");
+  assert.equal(enforcementView(prepareThreads([question("bot")], undefined, "bot"))[0]!.authorship, "unproven",
+    "no type and no marker proves nothing; settlement treats it human-side, never material");
+
+  // A proven automation author under ANOTHER login is still a bot finding —
+  // a publisher identity mismatch never converts it to human.
+  const rotated = enforcementView(prepareThreads([marked("github-actions", Bot)], undefined, "its-saffron"))[0]!;
+  assert.equal(rotated.authorship, "other_bot", "the forge-reported Bot type outranks the login mismatch");
+  assert.equal(rotated.severity, "major", "and its historical finding fields stay visible for the re-evaluation");
+
+  // Failure B guard: a marker-bearing root on a USER-typed account is
+  // AMBIGUOUS — it may be the action's historical finding published under a
+  // human PAT, or a human copying the marker. Not `human` (the action's real
+  // Major must not be silently demoted), not `action` (a copied marker must
+  // not buy dismissal authority): `unproven`, material, unclosable.
+  const forged = enforcementView(prepareThreads([marked("alice", User)], undefined, "bot"))[0]!;
+  assert.equal(forged.authorship, "unproven", "a marker on a human-typed account proves nothing about who posted it");
+  assert.equal(forged.severity, "major", "its concern stays visible for the re-evaluation, neither demoted nor dismissed");
+
+  // A marker on an untyped foreign login: the pre-existing ambiguous reading.
+  assert.equal(enforcementView(prepareThreads([marked("someone-else")], undefined, "bot"))[0]!.authorship, "unproven");
+  // A missing or malformed authenticated identity proves nothing either: a
+  // marked root stays ambiguous; an automation-typed one is still automation.
+  assert.equal(enforcementView(prepareThreads([marked("bot")], undefined, null))[0]!.authorship, "unproven");
+  assert.equal(enforcementView(prepareThreads([marked("bot")], undefined, "   "))[0]!.authorship, "unproven");
+  assert.equal(enforcementView(prepareThreads([marked("ai-pr-review", Bot)], undefined, null))[0]!.authorship, "other_bot",
+    "the forge still proved automation even without a resolvable token identity");
 });
 
 test("#812: thread comments older than the PR's last edit are labeled superseded", () => {

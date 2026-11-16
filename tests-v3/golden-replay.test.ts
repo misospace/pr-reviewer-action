@@ -261,7 +261,10 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
-    authenticatedIdentity: () => Promise.resolve(null),
+    // #1663: the recorded fixtures' review threads are authored by the
+    // action's own login; trusted authorship metadata (not the body marker)
+    // is what lets their settlement re-evaluate them as bot findings.
+    authenticatedIdentity: () => Promise.resolve("ai-pr-review"),
     // #1238/#1240: the pinned-revision witness fetches the action's own
     // manifest and gate implementation at the exact pinned commit through
     // the contents-API seam (`repos/<slug>/contents/<path>?ref=<sha>`).
