@@ -59,7 +59,21 @@
       "component": "source",
       "include-component-in-tag": true,
       "include-v-in-tag": true,
-      "skip-github-release": true
+      "skip-github-release": true,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "deploy/charts/pr-reviewer/Chart.yaml"
+        },
+        {
+          "type": "generic",
+          "path": "deploy/charts/pr-reviewer/examples/values-controller-only.yaml"
+        },
+        {
+          "type": "generic",
+          "path": "deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml"
+        }
+      ]
     }
   }
 }

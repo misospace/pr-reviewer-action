@@ -119,6 +119,59 @@ signals come from `pr.json`/`pr-files.json` and the per-role specialist lead
 artifacts already in the harness workspace; a workspace without size signals
 just uses the tier default.
 
+#### Low-risk evidence envelope (#1629)
+
+A derived budget (tier-default or size-scaled source only) on the ordinary
+primary/fallback routes is additionally narrowed when the trusted
+deterministic classification proves the low-risk shape: **no risk flags at
+all**, linked-issue metadata **not uncertain** (`linked_metadata_uncertain`
+exactly `false` — the same uncertainty that makes role-selection pick every
+specialist role, because unretrieved GitHub/Linear metadata may conceal
+security, audit, or priority signals), and either a digest-only kind
+(`image_digest_only`, `renovate_digest_only` — a single local verification
+row, no upstream version range to evidence) or a lockfile-only refresh whose
+#1595 triage parsed and found **zero material bumps** (the exact #1618
+scoped-review semantics; `material` must be an actual non-negative integer —
+a coercible `null`/`""`/`false`/`"0"` is no triage). The envelope is
+`4 + 2 × mandatory MATERIAL rows` requests — the gated must_check rows plus
+the derived admission rows the same planner enforces (#1449,
+`DERIVED_OBLIGATIONS=true`) — clamped to **6..12**: mandatory evidence stays
+reachable; the optional archaeology around it is what gets bounded. A
+surface the clamped envelope's reservation window (`floor(cap / 2)`) could
+no longer cover one protected opportunity per row is not the low-risk shape
+either and retains the full budget. Any risk flag retains the full envelope
+(risk escalation outranks proportionality), as do the obligation-bearing
+image/chart families, a material lockfile bump, an unparseable triage, an
+explicit or route-override budget, the deep smart route, and an absent,
+unshaped, or malformed classification artifact — absent or malformed
+`risk_flags`, `must_check`, `linked_metadata_uncertain`, or `pr_kind` is
+never proof of low risk (fail open). The required-evidence and
+dependency-evidence reservations are computed against the effective (capped)
+budget, so the reserved tail can never exceed the envelope. The per-row
+allowance keeps the admission window at or above the counted material
+surface whenever the counted rows fit below the envelope ceiling (before the
+12-clamp, 4 + 2n always leaves floor(cap/2) ≥ n; the retention rule above
+closes the ceiling gap); uncounted advisory guidance rows and heavier mixed
+surfaces stay attemptable within the reservation's patience, and anything
+genuinely left unsettled fails closed the canonical way — a material row
+becomes a named material unknown, never a clean settlement.
+
+The decision rides the artifact and the telemetry as `low_risk_budget`
+(`envelope`: `capped`/`retained`, closed `basis` vocabulary —
+`digest-only`, `low-risk-lockfile`, `risk-flags`, `metadata-uncertain`,
+`material-lockfile`, `unparseable-triage`, `obligation-bearing-kind`,
+`obligation-surface`, `no-signal` — plus `mandatory_rows`, the `cap`, and on
+a capped run the `derived_budget` it was narrowed from), and a capped run
+reports `tool_budget_source: low-risk-cap`. A capped run that stops with a
+MATERIAL
+question unsettled is recorded — through #1659's canonical settlement state,
+not any parallel completion notion — as a named material unknown
+(`investigation_unavailable`), which the authoritative `FinalDisposition`
+publishes as INCOMPLETE/COMMENT, never as a clean attestation. The generic
+`obligations-settled` early stop (#1627) is the completion-aware
+counterpart: once every mandatory row has settled with budget left, the
+loop stops exploring instead of spending the envelope on optional work.
+
 ### Round cap
 
 A round is one model turn. `tool-max-rounds` left empty (the default)
@@ -264,6 +317,7 @@ unresolved blocker hypotheses and verdict evidence.
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
 | `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
+| `investigation-complete` | Successful deterministic completion after a round with no refused or failed calls, all changed files and file-bound specialist leads covered by successful reads or certified complete corpus diffs, and no outstanding material evidence acquisition. It precedes same-round budget exhaustion and proceeds to the in-conversation verdict; it is not a budget stop and does not produce partial coverage. No-file specialist leads remain advisory reviewer context. |
 | `obligations-settled` | The deterministic early stop (#1627): the run carried an active required-evidence obligation surface and every tracked row settled — discharged by an admitted call or cap-released as unprovable — with budget still unspent, so further rounds could only be optional exploration. A normal, verdict-producing completion: never a harness error, never a fallback trigger, and deliberately not a budget stop (no Partial Coverage Notice, no `coverage_stop_reason`). |
 
 `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and
@@ -271,7 +325,7 @@ unresolved blocker hypotheses and verdict evidence.
 off, not finished by choice. On any
 budget stop, the harness folds its own call log against the changed-file
 manifest and the specialist-lead artifacts to compute which changed files
-were never read and which specialist leads were never resolved. If that gap
+were never read and which file-bound specialist leads were never resolved. No-file leads remain advisory context rather than file-coverage gaps. If that gap
 is non-empty, the published review carries a **Partial Coverage Notice**
 listing the unread files and unresolved leads (capped at 20 each, with a
 count for the rest), closing with "Absence of findings in the unread paths

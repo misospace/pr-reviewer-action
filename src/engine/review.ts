@@ -2991,10 +2991,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // #1645: the settlement-time reconciliation of carried review threads, read
     // back from the run's own artifact field — the SAME value the published
     // review discloses, so the disposition and the artifact cannot disagree. It
-    // is provenance for one ADVISORY diagnostic: what may block was already
-    // decided by the reconciled FINDING set (only a thread proven live and
-    // unresolved in a complete listing re-entered it), and an unverifiable
-    // carried thread fails open rather than vetoes an approval. Gated on the
+    // feeds the ADVISORY `stale_thread_bookkeeping` diagnostic (what may
+    // block was already decided by the reconciled FINDING set), plus #1663's
+    // MATERIAL `unverified_blocking_claim`: a live historical bot blocker with
+    // no current-head re-evaluation withholds the finding-set severity but is
+    // never certified clean — it forces INCOMPLETE/COMMENT. Gated on the
     // engine having served a reconciliation, so a model-authored field of the
     // same name can never speak for a pass that never ran.
     threadReconciliation: enforcementInputs.threadReconciliation !== undefined

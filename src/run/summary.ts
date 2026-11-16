@@ -175,6 +175,14 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
             : {}),
           attempts: typeof primaryHarness?.native_loop_verdict_attempts === "number" ? primaryHarness.native_loop_verdict_attempts : 0,
           retried: primaryHarness?.native_loop_verdict_retried === true,
+          // #1687: WHICH recovery `retried` says — a closed-set re-read of
+          // the harness token, so a transport retry is never read as the
+          // streamed fallback in this artifact. Omitted when no retry ran
+          // or a foreign artifact carries anything else.
+          ...(primaryHarness?.native_loop_verdict_retry_kind === "stream"
+            || primaryHarness?.native_loop_verdict_retry_kind === "transport"
+            ? { retryKind: String(primaryHarness.native_loop_verdict_retry_kind) }
+            : {}),
           ...(primaryHarness?.native_loop_verdict_reason !== undefined && primaryHarness.native_loop_verdict_reason !== null
             ? { reason: String(primaryHarness.native_loop_verdict_reason) }
             : {}),

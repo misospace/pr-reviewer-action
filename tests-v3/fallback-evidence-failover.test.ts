@@ -27,7 +27,7 @@ function mockPlatform(): PlatformReadAdapter {
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },
         user: { login: "someone" },
-        changed_files: 1,
+        changed_files: 2,
         additions: 4,
         deletions: 1,
         html_url: "https://github.com/o/r/pull/7",
@@ -37,7 +37,7 @@ function mockPlatform(): PlatformReadAdapter {
       return Promise.resolve("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n");
     },
     listPrFiles: () => {
-      return Promise.resolve({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 4, deletions: 1, changes: 5 }] });
+      return Promise.resolve({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 4, deletions: 1, changes: 5 }, { filename: "uncovered.ts", status: "modified", additions: 1, deletions: 0, changes: 1 }] });
     },
     getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),

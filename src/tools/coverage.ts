@@ -40,9 +40,7 @@
  * that.
  *
  * A specialist lead is resolved when its own file (if it names one) was
- * read by the rules above. A lead without a file path cannot be tied to any
- * read, so on a budget stop it always reports as unresolved — the loop has
- * no evidence showing it was investigated.
+ * read by the rules above. No-file leads remain advisory, not file-coverage gaps.
  */
 
 import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
@@ -355,11 +353,18 @@ export function computePartialCoverage(
   },
 ): PartialCoverage | null {
   if (!isIncompleteInvestigationStopReason(outcome.stopReason)) return null;
+  return coverageGaps(outcome, inputs);
+}
+
+export function coverageGaps(
+  outcome: LoopOutcome,
+  inputs: { changedFiles: string[]; leads: CoverageLeadRef[]; corpusDiffCoveredFiles?: ReadonlySet<string> },
+): PartialCoverage | null {
   const touched = pathsTouchedByLoop(outcome);
   const corpus = inputs.corpusDiffCoveredFiles ?? new Set<string>();
   const unreadFiles = inputs.changedFiles.filter((path) => !touched.has(path) && !corpus.has(path));
   const unresolvedLeads = inputs.leads.filter(
-    (lead) => lead.file === null || (!touched.has(lead.file) && !corpus.has(lead.file)),
+    (lead) => lead.file !== null && !touched.has(lead.file) && !corpus.has(lead.file),
   );
   if (unreadFiles.length === 0 && unresolvedLeads.length === 0) return null;
   return {

@@ -125,12 +125,11 @@ test("verified withdrawal settles without re-emitting its verification thread", 
   assert.equal(a.findings.filter((item) => item.thread_id === "t").length, 0);
 });
 
-test("withdrawal of a bug thread is downgraded and re-emitted", () => {
+test("#1663: withdrawal of a bug thread is downgraded to an unverified claim, not re-emitted", () => {
   const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "withdrawn", evidence: "human confirmed" }] });
-  applyReviewThreadEnforcement(a, [{ thread_id: "t", path: "src/a.ts", line: 4, severity: "major", message: "fix bug", category: "bug", own_finding: false, replies: 1 }], "strict");
+  applyReviewThreadEnforcement(a, [{ thread_id: "t", path: "src/a.ts", line: 4, severity: "major", message: "fix bug", category: "bug", own_finding: true, replies: 1 }], "strict");
   assert.deepEqual(a.thread_dispositions, [{ thread_id: "t", disposition: "open", evidence: "human confirmed", enforced: "withdrawn without a verification/question finding" }]);
-  assert.equal(a.findings.some((item) => item.thread_id === "t"), true);
-  assert.equal(a.findings.find((item) => item.thread_id === "t")!.category, "other");
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "an unsupported closure cannot preserve the old blocking severity");
 });
 
 test("withdrawal without non-empty evidence is downgraded", () => {
@@ -144,7 +143,7 @@ test("withdrawal without non-empty evidence is downgraded", () => {
 });
 
 test("an open verification thread re-emits as non-blocking under strict policy", () => {
-  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }] });
+  const a = artifact({ thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }] });
   applyReviewThreadEnforcement(a, [{ thread_id: "t", path: "src/a.ts", line: 4, severity: "major", message: "check behavior", category: "verification", own_finding: false, replies: 1 }], "strict");
   assert.equal((a.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open");
   assert.equal(a.findings[0]!.severity, "major");
@@ -157,20 +156,20 @@ test("an open verification thread re-emits as non-blocking under strict policy",
 
 test("blocking question threads cannot be withdrawn with evidence", () => {
   const a = artifact({ thread_dispositions: [{ thread_id: "q", disposition: "withdrawn", evidence: "answered in the thread" }] });
-  applyReviewThreadEnforcement(a, [{ thread_id: "q", path: null, line: null, severity: "blocker", message: "question", category: "question", own_finding: false, replies: 1 }], "strict");
+  applyReviewThreadEnforcement(a, [{ thread_id: "q", path: null, line: null, severity: "blocker", message: "question", category: "question", own_finding: true, replies: 1 }], "strict");
   const rows = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(rows[0]!.disposition, "open");
   assert.equal(rows[0]!.enforced, "withdrawn on a blocking finding");
-  assert.equal(a.findings.some((item) => item.thread_id === "q"), true);
+  assert.equal(a.findings.some((item) => item.thread_id === "q"), false, "#1663: no current-head re-evaluation, no preserved blocker");
 });
 
 test("major question threads cannot be withdrawn with evidence", () => {
   const a = artifact({ thread_dispositions: [{ thread_id: "q", disposition: "withdrawn", evidence: "answered in the thread" }] });
-  applyReviewThreadEnforcement(a, [{ thread_id: "q", path: null, line: null, severity: "major", message: "question", category: "question", own_finding: false, replies: 1 }], "strict");
+  applyReviewThreadEnforcement(a, [{ thread_id: "q", path: null, line: null, severity: "major", message: "question", category: "question", own_finding: true, replies: 1 }], "strict");
   const rows = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(rows[0]!.disposition, "open");
   assert.equal(rows[0]!.enforced, "withdrawn on a blocking finding");
-  assert.equal(a.findings.some((item) => item.thread_id === "q"), true);
+  assert.equal(a.findings.some((item) => item.thread_id === "q"), false, "#1663: no current-head re-evaluation, no preserved blocker");
 });
 
 test("question threads can also be withdrawn with evidence", () => {
@@ -296,7 +295,11 @@ test("#977: an evidence blocker that forced request_changes still writes the ban
 });
 
 test("#977: a thread settlement that escalated the verdict does contribute to the banner", () => {
-  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
+  });
   const blockerThread = { ...unresolvedVerificationThread, severity: "blocker", category: "bug" };
   applyAllEnforcement(a, {
     ...enforcementInputs([blockerThread]),

@@ -231,7 +231,28 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
   if (!fetched.ok) return;
   ws.write("review-threads.raw.json", pyJsonDumps(fetched.data));
   try {
-    const threads = prepareThreads(fetched.data);
+    // #1663: thread origin is decided from the forge's authorship metadata,
+    // never from comment-body wording. The forge's actor type (`Bot` from
+    // GitHub's `author { __typename }`, `user.type` where a Forgejo
+    // deployment reports one) decides everything: only an AUTOMATION-typed
+    // author under this run's authenticated login is the action's own
+    // finding, another automation identity stays a bot finding (a rotated
+    // publisher never becomes a human minor), a `User`-typed root with no
+    // action publication metadata is human even under the run's own shared
+    // PAT identity, and a marker-bearing root on a human-typed or untyped
+    // account is ambiguous provenance — dismissible by no bot disposition,
+    // never re-emitting a blocking severity, the gap riding the material
+    // `unverified_blocking_claim` instead (#1663 review).
+    let botIdentity: string | null = null;
+    try {
+      const resolved = await adapter.authenticatedIdentity();
+      // A forge that answers with something other than a usable login is
+      // unproven, exactly like a failed read (#1663 review).
+      botIdentity = typeof resolved === "string" && resolved.trim() !== "" ? resolved : null;
+    } catch {
+      botIdentity = null;
+    }
+    const threads = prepareThreads(fetched.data, undefined, botIdentity);
     const [markdown, rendered] = renderReviewThreads(threads, undefined, maxBytes, supersededCutoff);
     ws.write("review-threads.md", markdown);
     ws.write("review-threads.json", rendered.length > 0 ? `${pythonJsonStringify(threadEnforcementView(rendered))}\n` : "");

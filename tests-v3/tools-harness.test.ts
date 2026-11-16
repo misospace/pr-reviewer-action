@@ -12,6 +12,8 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
+import { applyRequirementTraceEnforcement, unresolvedTraceRequirementIds, validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
 import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
 import { TransportFailure } from "../src/transport/http.js";
@@ -23,7 +25,10 @@ import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
 import { toolBudgetRoute } from "../src/tools/budget.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
-import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
+import { resolvePartialCoverage, toolBudgetTelemetryOf, persistedLoopSettlements } from "../src/engine/review.js";
+import { reconcileSettlements } from "../src/enforcement/settlement.js";
+import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
+import { computeFinalDisposition } from "../src/disposition/final.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
 import { linesInsideCodeFences, startMockServer } from "./helpers.js";
 
@@ -67,6 +72,7 @@ function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) =
 
 const openAiText = (content: string) => ({ choices: [{ message: { content } }] });
 const withPrompt = { env: { SYSTEM_PROMPT: "You are the reviewer." } };
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const openAiCall = (id: string, name: string, args: string) => ({
   choices: [{ message: { content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }],
 });
@@ -1473,7 +1479,10 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
     timeFn,
     transport: async () => {
       transportCalls++;
-      return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+      return { choices: [{ message: { content: null, tool_calls: [
+        { id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"src.ts"}' } },
+        { id: "bad", type: "function", function: { name: "read_file", arguments: '{"path":' } },
+      ] } }] };
     },
   }));
   assert.equal(result.stop_reason, "wall-clock-exceeded");
@@ -2187,7 +2196,6 @@ test("#810: a budget-exhausted loop records the exact unread files and leads and
   assert.equal(coverage.leads_total, 2);
   assert.deepEqual(coverage.unresolved_leads, [
     { role: "security", file: "src/c.ts", excerpt: "unvalidated input" },
-    { role: "tests", file: null, excerpt: "new flag untested" },
   ]);
   // Persisted (redacted) in the harness artifact for the publish layer.
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
@@ -3214,6 +3222,241 @@ test("#1464: the non-streamed verdict retry fails closed — a payload without m
   assert.equal(outcome.budgetRaisedTo, undefined, "no raise is reported for a request that was never sent");
 });
 
+// ---------------------------------------------------------------------------
+// #1687: an initial NON-streamed closing verdict gets its own one-shot retry
+// for PROVEN transient transport failures — identical payload, same absolute
+// deadline, no third attempt, fail-closed on everything else.
+// ---------------------------------------------------------------------------
+
+const verdictInput = (
+  transport: HarnessDeps["transport"],
+  overrides: Partial<Parameters<typeof produceNativeVerdict>[0]> = {},
+): Parameters<typeof produceNativeVerdict>[0] => ({
+  verdictPayload: {
+    messages: [{ role: "user", content: "the whole tool-loop conversation" }],
+    stream: false,
+    max_tokens: 512,
+  },
+  baseUrl: "http://model.test/v1",
+  apiFormat: "openai",
+  apiKey: "k",
+  turnTimeout: 30,
+  usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+  deadline: 100,
+  transport,
+  timeFn: () => 1,
+  tier: "primary",
+  ...overrides,
+});
+
+test("#1687: an initial non-streamed ECONNRESET verdict is retried ONCE and recovered in-conversation", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+    calls.push(structuredClone(payload) as Record<string, unknown>);
+    timeouts.push(timeoutSec);
+    if (calls.length === 1) throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    return validVerdict();
+  }));
+  assert.equal(outcome.ok, true, "the recovered attempt is the native-loop verdict itself");
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.retryKind, "transport");
+  assert.equal(outcome.transport, "non-streamed-transport-retry");
+  assert.equal(outcome.attempts, 2);
+  assert.equal(calls.length, 2, "at most ONE retry");
+  assert.deepEqual(calls[1]!.messages, calls[0]!.messages, "the retry carries the same complete conversation");
+  assert.deepEqual(calls[1]!, calls[0]!, "the retry payload is identical — same model, same format, no new tool execution");
+  assert.equal(calls[1]!.stream, false);
+  assert.equal(calls[1]!.max_tokens, 512, "a transport failure carries no token-cap evidence: no budget raise");
+  assert.equal(outcome.budgetRaisedTo, undefined);
+  assert.equal(outcome.streamFailureKind, "", "the streamed-fallback surface stays unused");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.reason, "connection_closed", "typed TransportFailure kind, never prose");
+  assert.equal(rec.status, null);
+  assert.equal(rec.route, "primary");
+  assert.ok(rec.retry_elapsed_sec !== null, "the retry's own elapsed rides the record");
+  // #1628's terminal rule mirrored: a proven wire death may not restart a
+  // full turn wait — the retry's timeout is the pair's remainder, not 30.
+  assert.equal(timeouts[0], 30);
+  assert.ok(timeouts[1]! < 30 && timeouts[1]! >= 1, `terminal cap expected below the full turn timeout, got ${timeouts[1]}`);
+});
+
+test("#1687: a repeated transient failure stays bounded at two attempts and falls back", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }));
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "transport");
+  assert.equal(calls, 2, "exactly one retry, never a third attempt");
+  assert.equal(outcome.attempts, 2);
+  assert.equal(outcome.retryKind, "transport");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.reason, "connection_closed");
+  assert.ok(rec.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+});
+
+test("#1687: an ambiguous timeout retries with the configured turn timeout as its authority", async () => {
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, _payload, _apiKey, timeoutSec) => {
+    timeouts.push(timeoutSec);
+    if (timeouts.length === 1) throw new TransportFailure("request_timeout", "model request timed out");
+    return validVerdict();
+  }));
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.transportRetry!.reason, "transport_timeout");
+  assert.deepEqual(timeouts, [30, 30], "the idle case is not assumed terminal: the configured authority stands (the run deadline still clamps)");
+});
+
+test("#1687: a proven wire death does not restart a full turn wait for the verdict retry", async () => {
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, _payload, _apiKey, timeoutSec) => {
+    timeouts.push(timeoutSec);
+    if (timeouts.length === 1) {
+      await sleepMs(1100);
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    }
+    return validVerdict();
+  }, { turnTimeout: 2 }));
+  assert.equal(outcome.ok, true);
+  // The discarded attempt spent ~1.1s of the 2s turn timeout; the retry gets
+  // the pair's remainder (2 − 1.1 → floored at 1), not a fresh 2s wait.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1687: terminal, cancelled, byte-cap, and untyped failures never retry the non-streamed verdict", async () => {
+  const cases: Array<[string, unknown]> = [
+    // http_status arrives here only AFTER the transport's own 429/5xx
+    // backoff spent itself — auth/config/format rejections stay rejections.
+    ["auth", new TransportFailure("http_status", "model endpoint returned HTTP 401", { status: 401 })],
+    ["unsupported-format", new TransportFailure("http_status", "model endpoint returned HTTP 404", { status: 404 })],
+    ["exhausted-backoff", new TransportFailure("http_status", "model endpoint returned HTTP 503", { status: 503 })],
+    ["cancelled", new TransportFailure("cancelled", "model request cancelled")],
+    ["byte-cap", new TransportFailure("response_too_large", "response exceeded the transport response-byte limit")],
+    // An UNtyped throw whose message merely says ECONNRESET: transient
+    // status is never inferred from prose the seam cannot type-check.
+    ["untyped-prose", new Error("socket said ECONNRESET")],
+  ];
+  for (const [label, failure] of cases) {
+    let calls = 0;
+    const outcome = await produceNativeVerdict(verdictInput(async () => {
+      calls += 1;
+      throw failure;
+    }));
+    assert.equal(calls, 1, `${label}: no retry may be dialed`);
+    assert.equal(outcome.ok, false, label);
+    assert.equal(outcome.reason, "transport", label);
+    assert.equal(outcome.retried, false, `${label}: no retry`);
+    assert.equal(outcome.retryKind, "", label);
+    assert.equal(outcome.transportRetry, undefined, label);
+  }
+});
+
+test("#1687: a verdict body the verifier rejects is never transport-retried", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    // A well-answered 200 whose content the verdict parser rejects: real
+    // content rejection, not a transport hole.
+    return openAiText("not a verdict body");
+  }));
+  assert.equal(calls, 1, "the verifier's rejection is final for this turn");
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "parse");
+  assert.equal(outcome.retryKind, "");
+  assert.equal(outcome.transportRetry, undefined);
+});
+
+test("#1687: an expired deadline refuses the retry before any wire call, counted as nothing", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { timeFn: () => (calls === 0 ? 10 : 1000) }));
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 1, "the retry must never open a request past the absolute deadline");
+  assert.equal(outcome.detail, "tool-loop wall-clock budget exhausted");
+  assert.equal(outcome.attempts, 1, "a retry that was never opened is not a model call — the record must claim one attempt, not two");
+  assert.equal(outcome.timing.attempts, 1, "the transport-call count says the same");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.retry_elapsed_sec, null, "no retry was fired; the discarded attempt still gets its record");
+});
+
+test("#1687: a streamed-first verdict keeps the #637 single fallback — never a third attempt", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { verdictPayload: { messages: [{ role: "user", content: "conversation" }], stream: true, max_tokens: 512 } }));
+  assert.equal(calls, 2, "the streamed attempt plus its one non-streamed fallback — the transport retry may not add a third");
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.retryKind, "stream", "the retry spent is still the streamed fallback");
+  assert.equal(outcome.transportRetry, undefined, "the #1687 surface stays unclaimed");
+  assert.equal(outcome.streamFailureKind, "transport");
+});
+
+test("#1687: the transport retry fails closed when the payload lost its messages", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { verdictPayload: { stream: false, max_tokens: 512 } }));
+  assert.equal(calls, 1, "a conversation-less retry never reaches the wire");
+  assert.equal(outcome.detail, "non-streamed transport retry payload carries no messages — not sent");
+  assert.equal(outcome.attempts, 1, "the unsent retry is not counted as an attempt");
+  assert.equal(outcome.transportRetry!.retry_elapsed_sec, null, "no retry was fired");
+});
+
+test("#1687: the recovered non-streamed verdict is produced IN-CONVERSATION with its own bounded record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  const scripted: unknown[] = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      const body = scripted[Math.min(n, scripted.length - 1)];
+      if (n === 2) {
+        n += 1;
+        assert.equal((payload as Record<string, unknown>).stream, false, "the verdict turn rides the lane's non-streamed setting");
+        throw new TransportFailure("network", "model request failed (ECONNRESET)");
+      }
+      n += 1;
+      return body;
+    },
+  }));
+  // The recovered answer IS the native-loop verdict: the engine's reuse
+  // seam (engine/review.ts, `native_loop_verdict_produced === true`) skips
+  // the separate corpus-only review call on exactly this flag — pinned for
+  // the engine side by the run-level reuse tests (run.test.ts).
+  assert.equal(n, 4, "two loop turns, the failed verdict attempt, and its one retry");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.equal(result.native_loop_verdict_transport, "non-streamed-transport-retry");
+  assert.equal(result.native_loop_verdict_retried, true);
+  assert.equal(result.native_loop_verdict_stream_failure, undefined, "this was never a streamed fallback");
+  const rec = result.native_loop_verdict_transport_retry as Record<string, unknown>;
+  assert.equal(rec.reason, "connection_closed");
+  assert.equal(rec.route, "primary");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.tool_loop_telemetry.verdict.streamed_fallback, false);
+  assert.equal(artifact.tool_loop_telemetry.verdict.attempts, 2);
+  // The artifact the engine consumes for reuse exists with the recovered body.
+  const aiResponse = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  assert.ok(JSON.stringify(aiResponse).includes("Looks fine."), "the recovered verdict envelope is persisted for reuse");
+  assert.ok(logs.some((l) => l.includes("closing non-streamed verdict attempt failed") && l.includes("recovered")));
+  assert.ok(logs.some((l) => l.includes("via non-streamed transport retry (#1687)")));
+});
+
 test("#1258: the planner's diff-head excerpt adapts its fence to the diff's backtick runs", () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "pr.json"), '{"number": 7, "title": "Fix parser", "author": {"login": "dev"}}');
@@ -3243,6 +3486,103 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
   assert.ok(inside.has(lines.findIndex((line) => line === "+# PR Classification")), "the forged heading stays inert");
   assert.ok(!inside.has(lines.findIndex((line) => line === "# Planning Notes")), "the notes heading stays live");
 });
+
+// ---------------------------------------------------------------------------
+// #1687 (cont.): the fallback and completeness surfaces, end to end.
+// ---------------------------------------------------------------------------
+
+test("#1687: a failed transport retry keeps the corpus-only fallback — no verdict is produced", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      n += 1;
+      if (n <= 2) return n === 1 ? openAiCall("c1", "read_file", '{"path":"src.ts"}') : openAiText("evidence gathered");
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(n, 4, "two loop turns, the failed verdict attempt, and exactly one retry — then give up");
+  // The engine consumes exactly these fields: `native_loop_verdict_produced`
+  // unset means producePrimaryReview() makes the separate corpus-only
+  // standard review call (engine/review.ts), and #1673's INCOMPLETE
+  // enforcement downstream is untouched.
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "transport");
+  assert.equal(result.native_loop_verdict_retry_kind, "transport");
+  const rec = result.native_loop_verdict_transport_retry as Record<string, unknown>;
+  assert.equal(rec.reason, "connection_closed");
+  assert.ok(rec.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("transport retry failed") && l.includes("no further retry")));
+  assert.ok(logs.some((l) => l.includes("no reusable in-conversation verdict")));
+});
+
+test("#1687: a recovered transport never relaxes missing structured requirement coverage", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  const scripted: unknown[] = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    transport: async () => {
+      const body = scripted[Math.min(n, scripted.length - 1)];
+      if (n === 2) {
+        n += 1;
+        throw new TransportFailure("network", "model request failed (ECONNRESET)");
+      }
+      n += 1;
+      return body;
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true, "the transport recovered in-conversation");
+
+  // #1673's exact shape: the recovered verdict says `approve` but carries NO
+  // structured `requirement_coverage` for an in-scope requirement. The
+  // recovery must change nothing about the completeness enforcement — the
+  // trace records the missing claim as a material unknown, never a met one.
+  const envelope = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  const parsed = parseVerdictResponse(envelope, ["k"]);
+  assert.equal(parsed.verdict, "approve");
+  const coverage = Array.isArray(parsed.requirementCoverage) ? parsed.requirementCoverage : [];
+  assert.equal(coverage.length, 0, "the recovered body genuinely lacks the structured claim");
+
+  const ledger = { requirements: [{ id: "req-join", text: "The join must use the `[[ ... ]]` conditional command.", kind: "acceptance" }] };
+  const trace = validateRequirementTrace(coverage, ledger, root);
+  assert.equal(trace.rows.length, 1);
+  assert.equal(trace.rows[0]!.disposition, "unverifiable");
+  assert.equal(trace.rows[0]!.resolution, "unresolved");
+  assert.equal(trace.rows[0]!.materiality, "material");
+  assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+  assert.deepEqual(trace.summary.unresolved_material, ["req-join"]);
+  // The disposition's unresolved set (what withholds the native APPROVE as
+  // INCOMPLETE/COMMENT — the engine-side mapping #1673 showed in production)
+  // sees the gap with the recovered transport in place.
+  assert.deepEqual(unresolvedTraceRequirementIds(trace).ids, ["req-join"]);
+
+  // Enforcement applies over the recovered artifact without synthesizing a
+  // satisfied claim or flipping the model's verdict itself.
+  const art = {
+    verdict: parsed.verdict,
+    required_checks: "none",
+    review_markdown: parsed.reviewMarkdown,
+    findings: parsed.findings,
+  } as unknown as ReviewArtifact;
+  const enforced = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace: root });
+  assert.equal(enforced.applied, true);
+  assert.equal((art as unknown as Record<string, unknown>).requirement_coverage, undefined, "no coverage claim is synthesized");
+  assert.equal(art.findings.length, 0, "the trace never synthesizes findings");
+});
+
 
 // ── #1379: dependency-evidence budget reserve from the classification ─────
 
@@ -4228,8 +4568,6 @@ test("#1598: an unknown tool harness tier still fails closed", async () => {
 // per attempt.
 // ---------------------------------------------------------------------------
 
-const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 test("#1628: a pair of fallback rounds reports their own reasons and times, not two booleans", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
@@ -4524,4 +4862,709 @@ test("#1627: the verdict turn carries the proof index when the loop executed cal
   assert.match(verdictUser, /- obligation-1 \(must_check\): Verify the auth boundary at head/);
   assert.match(verdictUser, /- call-1 — `read_file` \(ok\)/);
   assert.match(verdictUser, /a pointer, never proof/);
+});
+
+// ── #1629: the deterministic low-risk evidence envelope ──────────────────
+
+test("#1629: a no-risk image-digest PR caps the derived budget to the mandatory-row envelope and the loop stops on it", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const files = ["src/a1.ts", "src/a2.ts", "src/a3.ts", "src/a4.ts", "src/a5.ts", "src/a6.ts", "src/a7.ts", "src/a8.ts"];
+  for (const file of files) fs.writeFileSync(path.join(root, file), "export const a = 1;\n");
+  // One deterministic explorer trace, used for BOTH runs: a batch-heavy model
+  // that demands 8 calls in 4 rounds before emitting its verdict. The
+  // envelope's cut is the delta between the two runs on this same script.
+  const responses: unknown[] = [];
+  for (let batch = 0; batch < 4; batch++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * batch, 2 * batch + 1].map((offset, i) => ({
+            id: `c${offset + i}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: files[offset] }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict());
+
+  let cappedTurn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[cappedTurn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.executed_request_count, 6, "the loop must stop at the capped budget: the 4th batch is never executed");
+  // The receipt rides the budget telemetry provenance (the artifact's
+  // tool_loop_telemetry, already folded by writeOutputs).
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  assert.equal(budget.source, "low-risk-cap");
+  assert.deepEqual(budget.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+
+  // The same explorer trace without the envelope (explicit operator budget)
+  // executes the whole 8-call exploration and closes with its verdict — the
+  // delta is exactly the envelope's cut.
+  let defaultTurn = 0;
+  const uncapped = await runToolHarness(deps({
+    transport: async () => responses[defaultTurn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_REQUESTS: "40" },
+  }));
+  assert.equal(uncapped.result.tool_request_budget, 40);
+  assert.equal(uncapped.result.tool_budget_source, "explicit");
+  assert.equal(uncapped.result.low_risk_budget, undefined);
+  assert.equal(uncapped.result.executed_request_count, 8, "without the envelope the same explorer spends all 8 calls");
+  assert.equal(uncapped.result.native_loop_verdict_produced, true);
+});
+
+test("#1629: the low-risk lockfile envelope caps to the scoped rows' sum", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+    lockfile_only_refresh: { material: 0, low_risk: 7, parseable: true },
+  }));
+  const { result } = await runToolHarness(deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 10);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "low-risk-lockfile", mandatory_rows: 3, cap: 10, derived_budget: 40 });
+});
+
+test("#1629: any risk flag, a material lockfile bump, or an unparseable triage retains the full envelope with a receipt", async () => {
+  const write = (root: string, body: Record<string, unknown>) => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    [{ pr_kind: "image_digest_only", risk_flags: ["linked_priority_p1"], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "risk-flags", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: 2, low_risk: 5, parseable: true } },
+      { envelope: "retained", basis: "material-lockfile", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: [], lockfile_only_refresh: { material: 0, low_risk: 0, parseable: false } },
+      { envelope: "retained", basis: "unparseable-triage", mandatory_rows: 0 }],
+    [{ pr_kind: "renovate_image_update", risk_flags: [], linked_metadata_uncertain: false, must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: 1 }],
+    // #1648 review: a PRESENT-but-malformed risk_flags is an unshaped
+    // classification — fail open, never read as "no risk flags". The
+    // enforced-surface count still rides the receipt (honest fail-open).
+    [{ pr_kind: "image_digest_only", risk_flags: "none", linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // #1648 review: an ABSENT risk_flags is equally unshaped — absence of
+    // risk information is not proof that risk flags are empty.
+    [{ pr_kind: "image_digest_only", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // #1648 review: a coercible-to-zero `material` (null / "" / false / "0")
+    // is NOT proof of zero material bumps — the same shaped-signal rule the
+    // risk_flags field follows. A non-shaped triage field reads as no triage.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: null, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: "0", low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: false, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are the reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629: no classification artifact, an explicit override, or the smart tier keeps the pre-#1629 shape byte-for-byte", async () => {
+  // No classification.json: no receipt, tier-default budget, artifact shape
+  // untouched.
+  const bare = workspace();
+  fs.writeFileSync(path.join(bare.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const bareResult = await runToolHarness(bare.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(bareResult.result.tool_request_budget, 40);
+  assert.equal(bareResult.result.tool_budget_source, "tier-default");
+  assert.equal(bareResult.result.low_risk_budget, undefined);
+  // The receipt is also absent from the telemetry provenance on a run that
+  // never had a classification artifact (the capped-run test above pins the
+  // present side; the degraded no-tool-calls run carries no telemetry object
+  // at all, so the artifact-level absence is the pin here).
+  assert.ok(!JSON.stringify(bareResult.result).includes("low_risk_budget"));
+
+  // An explicit operator value is an operator decision — never narrowed, no
+  // receipt (the envelope only shapes DERIVED budgets).
+  const explicit = workspace();
+  fs.writeFileSync(path.join(explicit.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(explicit.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  const explicitResult = await runToolHarness(explicit.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_REQUESTS: "20" },
+  }));
+  assert.equal(explicitResult.result.tool_request_budget, 20);
+  assert.equal(explicitResult.result.tool_budget_source, "explicit");
+  assert.equal(explicitResult.result.low_risk_budget, undefined);
+
+  // VALIDATE_REQUIRED_CHECKS=false keeps deterministic rows out of the
+  // contract at BOTH layers: zero enforced rows, floor envelope.
+  const gated = workspace();
+  fs.writeFileSync(path.join(gated.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(gated.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  const gatedResult = await runToolHarness(gated.deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer.", VALIDATE_REQUIRED_CHECKS: "false" },
+  }));
+  assert.equal(gatedResult.result.tool_request_budget, 6);
+  assert.deepEqual(gatedResult.result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 0, cap: 6, derived_budget: 40 });
+});
+
+test("#1629: a capped low-risk run whose mandatory row settles stops on obligations, not the envelope", async () => {
+  // The completion-aware half of the envelope: once the enforced obligation
+  // surface is discharged with a successful in-window-capable attempt, the
+  // #1627 `obligations-settled` stop preempts the remaining envelope — the
+  // cap bounds optional archaeology, it never forces it to be spent.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "verify the changed digests against the release notes and confirm only image digests changed",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs/upstream-release-notes.md"), "digest refresh, no functional change\n");
+  const responses = [
+    openAiCall("c1", "read_file", JSON.stringify({ path: "docs/upstream-release-notes.md" })),
+    validVerdict(),
+  ];
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.equal(result.stop_reason, "obligations-settled");
+  assert.equal(result.executed_request_count, 1, "the settled stop must preempt the remaining envelope");
+  assert.equal(result.native_loop_verdict_produced, true);
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(
+    { id: rows[0]!.id, materiality: rows[0]!.materiality, evidence_state: rows[0]!.evidence_state, acquisition: rows[0]!.acquisition },
+    { id: "obligation-1", materiality: "material", evidence_state: "acquired", acquisition: "available" },
+  );
+});
+
+test("#1629: a capped run that stops with the material row unanswered is a named material unknown, never an APPROVE", async () => {
+  // The envelope must never manufacture certainty: the model explores only
+  // unrelated files, the reserved tail protects the mandatory row, the loop
+  // stops with the row UNSETTLED, and the model still says approve. The
+  // #1659 canonical record — read back through the REAL artifact — turns
+  // that into a material unknown, and the authoritative disposition withholds
+  // (INCOMPLETE/COMMENT). No parallel completion notion is consulted.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "verify the changed digests against the release notes and confirm only image digests changed",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  const responses: unknown[] = [];
+  for (let round = 0; round < 4; round++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * round, 2 * round + 1].map((offset) => ({
+            id: `c${offset}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: `src/other-${offset}.ts` }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict("approve"));
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict("approve"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.executed_request_count, 5, "the reserved tail survives the unrelated exploration");
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  // The whole canonical path over the run's REAL artifact: reader -> reconcile
+  // (no fold owns the question) -> disposition evidence -> final disposition.
+  const { settlements, dropped } = persistedLoopSettlements(result);
+  assert.equal(dropped, 0);
+  assert.equal(settlements.length, 1);
+  assert.deepEqual(
+    { materiality: settlements[0]!.materiality, evidence_state: settlements[0]!.evidenceState, acquisition: settlements[0]!.acquisition },
+    { materiality: "material", evidence_state: "open", acquisition: "unavailable" },
+  );
+  const finalRows = reconcileSettlements(settlements, []);
+  assert.equal(finalRows[0]!.semantic, "unknown", "a budget stop is not semantic completion");
+  const build = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+    finalSettlements: finalRows,
+  });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "material"]]);
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: build.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  });
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
+test("#1629: mandatory security evidence stays reachable inside the capped envelope", async () => {
+  // The cap never starves the enforced surface: five unrelated explorations
+  // spend everything but the reserved final request, and the sixth — the one
+  // naming the obligation vocabulary — is admitted, executed, and settles the
+  // row inside the envelope.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["check the upstream advisory feed for the pinned image version before the digest refresh"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "check the upstream advisory feed for the pinned image version before the digest refresh",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  fs.writeFileSync(path.join(root, "docs/security-advisory-notes.md"), "no open advisories for the pinned version\n");
+  const responses: unknown[] = [];
+  for (let i = 0; i < 5; i++) responses.push(openAiCall(`c${i}`, "read_file", JSON.stringify({ path: `src/other-${i}.ts` })));
+  responses.push(openAiCall("c9", "read_file", JSON.stringify({ path: "docs/security-advisory-notes.md" })));
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.executed_request_count, 6, "the reserved final request pays for the mandatory evidence");
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(
+    { materiality: rows[0]!.materiality, evidence_state: rows[0]!.evidence_state, acquisition: rows[0]!.acquisition, successful_attempt: rows[0]!.successful_attempt },
+    { materiality: "material", evidence_state: "acquired", acquisition: "available", successful_attempt: true },
+  );
+});
+
+test("#1629: the smart route keeps its full budget through an executing loop", async () => {
+  // Exemption proven by EXECUTION, not just the artifact value: the same
+  // batch-heavy trace the capped primary run cuts at six calls runs all
+  // eight rounds-deep under the smart tier's default, untouched.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const files = ["src/a1.ts", "src/a2.ts", "src/a3.ts", "src/a4.ts", "src/a5.ts", "src/a6.ts", "src/a7.ts", "src/a8.ts"];
+  for (const file of files) fs.writeFileSync(path.join(root, file), "export const a = 1;\n");
+  const responses: unknown[] = [];
+  for (let batch = 0; batch < 4; batch++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * batch, 2 * batch + 1].map((offset) => ({
+            id: `c${offset}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: files[offset] }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: {
+      SYSTEM_PROMPT: "You are the reviewer.",
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart-m",
+      SMART_API_KEY: "smart-k",
+    },
+  }));
+  assert.equal(result.tier, "smart");
+  assert.equal(result.tool_request_budget, 45);
+  assert.equal(result.tool_budget_source, "tier-default");
+  assert.equal(result.low_risk_budget, undefined, "the deep smart route is never narrowed");
+  assert.equal(result.executed_request_count, 8, "the whole exploration the primary envelope cuts runs free on the smart tier");
+  assert.equal(result.native_loop_verdict_produced, true);
+});
+
+test("#1629: enforced obligation rows the envelope did not count are still reservation-protected under the cap", async () => {
+  // The envelope scales with the classification's must_check surface; the
+  // ENFORCED admission surface also includes trusted-base guidance rows the
+  // cap does not count. The cap must never under-protect that surface: the
+  // reservation is computed over the ACTUAL rows against the EFFECTIVE
+  // budget, and a guidance row left unresolved stays ADVISORY in the
+  // canonical record — it never becomes a material unknown either.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), [
+    "# Repository Standards and Conventions",
+    "## Evidence required before approval",
+    "Verify the registry mirror configuration file for the base image source.",
+    "# Changed Manifest Context",
+    "+ change",
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify the changed digests against the release manifest and confirm only image digests changed"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  fs.writeFileSync(path.join(root, "docs/upstream-release-notes.md"), "digest refresh, matrix unchanged\n");
+  const responses: unknown[] = [];
+  for (let i = 0; i < 5; i++) responses.push(openAiCall(`c${i}`, "read_file", JSON.stringify({ path: `src/other-${i}.ts` })));
+  responses.push(openAiCall("c9", "read_file", JSON.stringify({ path: "docs/upstream-release-notes.md" })));
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6, "the cap scales with the one must_check row, not the guidance row");
+  // Reservation: min(2 rows, floor(6 / 2)) = 2 held requests. The first
+  // three unrelated explorations run free; the fourth (three left) is
+  // refused; the reserved tail admits the call that names the obligation
+  // vocabulary, and the model then closes with its verdict (one request to
+  // spare — the envelope bounds optional work, it does not force it).
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.executed_request_count, 5);
+  assert.equal(result.refused_request_count, 1);
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2, "the uncounted guidance row is tracked in the canonical record too");
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.materiality, row.evidence_state]),
+    [["obligation-1", "material", "acquired"], ["obligation-2", "advisory", "open"]],
+    "the material row lands inside the envelope; the guidance row stays advisory, never a material unknown",
+  );
+});
+
+test("#1629 review: linked-metadata uncertainty retains the full envelope, receipt names it", async () => {
+  // #1648 independent review (P1): `linked_metadata_uncertain` is the
+  // classifier's honest statement that linked GitHub/Linear issue metadata
+  // could not be fully retrieved — the same signal that makes role-selection
+  // pick EVERY specialist role. A digest-only or clean lockfile triage behind
+  // uncertain metadata is not provably low-risk: the cap must not fire.
+  const write = (root: string, body: Record<string, unknown>): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    // Uncertain metadata on an otherwise-capped digest-only shape.
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: true, must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: 1 }],
+    // Uncertain metadata on an otherwise-capped low-risk lockfile shape.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: true, must_check: ["row one"], lockfile_only_refresh: { material: 0, low_risk: 4, parseable: true } },
+      { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: 1 }],
+    // MISSING metadata-completeness information: a classification that never
+    // asserts its metadata was fully retrieved is not provably complete —
+    // fail open, never silently assume false.
+    [{ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // Malformed metadata-completeness claims (string / null) are not a proof.
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: "false", must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: null, must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629 review: malformed must_check / pr_kind / empty material fail open", async () => {
+  // #1648 independent review (P1/P2): required classification fields are
+  // validated for the shape the cap depends on — a malformed checklist, a
+  // missing kind, or an empty-string material count never qualifies.
+  const write = (root: string, body: Record<string, unknown>): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    // MISSING must_check: never silently defaulted to "no obligations".
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+    // Malformed must_check (a bare string, not an array).
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: "verify only image digests changed", lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+    // MISSING pr_kind: no usable kind, no positive class proof.
+    [{ risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // Empty/whitespace pr_kind fails the role-selection usability rule too.
+    [{ pr_kind: "   ", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // material: "" — the review's named coercible case — is no triage.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: "", low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // A NEGATIVE material count is malformed, never a low-risk proof.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: -1, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629 review: derived material obligations widen the envelope or retain — never silently underfund", async () => {
+  // #1648 independent review: the enforced MATERIAL admission surface also
+  // includes the #1449 derived rows (DERIVED_OBLIGATIONS=true). The cap
+  // scales with the surface the loop must protect; a surface the clamped
+  // envelope's reservation window cannot cover retains the full budget.
+  const write = (root: string, classification: Record<string, unknown>, derived: unknown): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(classification));
+    if (derived !== undefined) {
+      fs.writeFileSync(path.join(root, "derived-obligations.json"), JSON.stringify(derived));
+    }
+  };
+  const digestOnly = {
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  };
+  const derivedArtifact = (count: number): Record<string, unknown> => ({
+    version: 1,
+    status: "ok",
+    error_kind: null,
+    error: null,
+    diff_source: "full",
+    diff_clipped: false,
+    input_complete: true,
+    method: "model",
+    obligations: Array.from({ length: count }, (_unused, index) => ({
+      obligation: `confirm the derived consumer of field ${index} still matches the change`,
+      change: "producer changed",
+      topology: "identity",
+      paths: [`src/billing/ledger-${index}.ts:settle`],
+      pathsTruncated: false,
+      basis: "the settle helper reads the field",
+    })),
+    truncated: false,
+    errors: [],
+    section_bytes: 512,
+  });
+
+  // (a) Two material derived rows ON TOP of the one must_check row: the
+  // envelope GROWS to 4 + 2 × 3 = 10 — the derived surface is funded, not
+  // silently squeezed under the six-call floor.
+  {
+    const { root, deps } = workspace();
+    write(root, digestOnly, derivedArtifact(2));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 10);
+    assert.equal(result.tool_budget_source, "low-risk-cap");
+    assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 3, cap: 10, derived_budget: 40 });
+  }
+
+  // (b) Seven material rows total (three checklist rows plus the four the
+  // derivation is allowed to emit): the clamped twelve-call envelope's
+  // reservation window (six protected requests) cannot give every row an
+  // opportunity — that is not the low-risk shape, retain the full budget.
+  {
+    const { root, deps } = workspace();
+    write(root, { ...digestOnly, must_check: [
+      "verify only image digests changed; repository and tag unchanged",
+      "confirm no functional changes beyond lockfile hashes",
+      "confirm the rollout annotations are untouched",
+    ] }, derivedArtifact(4));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 40);
+    assert.equal(result.tool_budget_source, "tier-default");
+    assert.deepEqual(result.low_risk_budget, { envelope: "retained", basis: "obligation-surface", mandatory_rows: 7 });
+  }
+
+  // (c) A genuinely simple digest-only update with the feature ON but an
+  // EMPTY derivation still gets the reduced envelope: derived rows that do
+  // not exist buy no envelope, and their absence costs nothing.
+  {
+    const { root, deps } = workspace();
+    write(root, digestOnly, derivedArtifact(0));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 6);
+    assert.equal(result.tool_budget_source, "low-risk-cap");
+    assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+  }
+});
+
+
+test("#1688: certified seven-file coverage completes optional investigation before budget", async () => {
+  const { root, deps } = workspace();
+  const files = Array.from({ length: 7 }, (_, i) => `src/file${i}.ts`);
+  const diff = files.map((file) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`).join("");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify(files.map((filename) => ({ filename, status: "modified" }))));
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "app_code", risk_flags: ["linked_priority_p1"] }));
+  fs.writeFileSync(path.join(root, "pr.diff"), diff);
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}\n# Specialist Review Leads\nSuite pending\n`);
+  fs.writeFileSync(path.join(root, "specialist-correctness.json"), specialistArtifact("correctness", [{ file: null, message: "Suite pending" }]));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({ injected: true, obligations: [{ id: "priority", source: "must_check", row_class: "attention", text: "priority attention" }] }));
+  const requests: unknown[] = [];
+  let turns = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "40", SYSTEM_PROMPT: "You are reviewer." },
+    transport: async (_url, _format, request) => { requests.push(request); return ++turns === 1 ? openAiCall("c1", "find_files", '{"pattern":"*.ts"}') : validVerdict(); },
+  }));
+  assert.equal(result.stop_reason, "investigation-complete");
+  assert.equal((result.tool_calls as unknown[]).length, 1);
+  assert.equal(turns, 2);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.partial_coverage, undefined);
+  assert.match(JSON.stringify(requests[1]), /Suite pending/);
+  assert.deepEqual(result.corpus_diff_covered_files, files);
+  assert.match(fs.readFileSync(path.join(root, "specialist-correctness.json"), "utf8"), /Suite pending/);
+});
+
+test("coverage completion fails closed on uncovered or truncated manifests", async () => {
+  for (const truncated of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+      { filename: "src/a.ts", status: "modified" },
+      truncated ? { note: "file list truncated" } : { filename: "src/uncovered.ts", status: "modified" },
+    ]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+    if (!truncated) assert.deepEqual(result.partial_coverage?.unread_files, ["src/uncovered.ts"]);
+  }
+});
+
+test("coverage completion requires certified deleted-file diffs", async () => {
+  for (const certified of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/deleted.ts b/src/deleted.ts\n--- a/src/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([{ filename: "src/deleted.ts", status: "removed" }]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), certified ? diff : "");
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, certified ? "investigation-complete" : "tool-call-budget-exhausted");
+  }
 });

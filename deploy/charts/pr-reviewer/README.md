@@ -31,6 +31,18 @@ common library templates at render time. Run
 `helm dependency build deploy/charts/pr-reviewer` locally before
 `helm template`/`install`.
 
+## Release version synchronization
+
+The chart's `appVersion` and the controller/worker image tags in
+`examples/*.yaml` track the application release in
+`.release-please-manifest.json`. Each version field carries an
+`x-release-please-version` annotation and its file is listed under
+`packages["."].extra-files` in `release-please-config.json`, so the standing
+release PR bumps all of them together. `tests-v3/deploy-packaging.test.ts`
+fails when a bound field and the manifest disagree, so a release PR cannot
+land with stale deployment artifacts. The chart's own `version` (`0.1.0`)
+is the independent Helm chart version and is never annotated.
+
 ## Values structure
 
 - `controller` — the daemon: chart-owned wiring keys

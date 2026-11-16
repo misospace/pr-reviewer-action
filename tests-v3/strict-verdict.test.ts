@@ -325,7 +325,7 @@ test("a fail-closed layer that only settles (never forces) does not hold the map
 
 test("a blocker re-emitted by thread settlement escalates: the mapping sees the final open set", () => {
   const a = artifact("approve", []);
-  a.thread_dispositions = [{ thread_id: "t1", disposition: "open", evidence: null }];
+  a.thread_dispositions = [{ thread_id: "t1", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }];
   // "strict" is not findings_severity_gated: settlement itself never
   // escalates — the strict mapping does, after settlement re-emits the
   // blocker into the open-findings set.

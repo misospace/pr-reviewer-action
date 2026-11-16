@@ -20,6 +20,13 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 const ROOT = resolve(__dirname, "..", "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "golden-replay");
 
+// #1660: fixture config keys that are really engine feature switches read
+// from the run's environment (production maps action inputs into env).
+const FIXTURE_ENV_KEYS: ReadonlyMap<string, string> = new Map([
+  ["requirement-trace", "REQUIREMENT_TRACE"],
+  ["publish-mode", "PUBLISH_MODE"],
+]);
+
 // #1238: the golden runtime must be able to reach the action's OWN source
 // tree, because the gate-absence witness reads the implementation that
 // actually runs. In production that tree is the action's install directory
@@ -100,6 +107,10 @@ interface GoldenExpect {
   supported_blocking_claims?: number;
   published_body_excludes?: string[];
   published_body_includes?: string[];
+  /** #1660: strings asserted against the bodies the publish seam SUBMITTED
+   * (the disposition render), where the recommendation line and the
+   * withheld-approval gap notice live — not the review-stage markdown. */
+  submitted_body_includes?: string[];
   /** #1095: the native review event the publish step submitted (APPROVE /
    * REQUEST_CHANGES / COMMENT) — the publication-path assertion for
    * requirement-trace replays. */
@@ -123,6 +134,13 @@ interface GoldenCase {
   pr: Record<string, unknown>;
   sourceFiles: Record<string, string>;
   recordedModelResponse?: Record<string, unknown> | undefined;
+  /** #1660: scripted model turns served BEFORE the recorded verdict response,
+   * in order (one per model request). Lets a replay record a native_loop
+   * evidence turn (`tool_calls`) followed by the closing turn, so the loop's
+   * stop reason is a real settlement instead of `no-tool-calls` — without it
+   * every trace-enforcing replay degrades on investigation and can never
+   * certify APPROVE, which is the very behavior under test. */
+  modelTurns?: unknown[] | undefined;
   enforcement?: Record<string, unknown> | undefined;
   config: Record<string, string>;
   priorBlockerId?: string | undefined;
@@ -185,6 +203,7 @@ function validateCase(raw: unknown): GoldenCase | { refusal: string } {
     pr,
     sourceFiles: (fx.source_files ?? {}) as Record<string, string>,
     recordedModelResponse: fx.recorded_model_response as Record<string, unknown> | undefined,
+    modelTurns: Array.isArray(fx.model_turns) ? (fx.model_turns as unknown[]) : undefined,
     enforcement: fx.enforcement as Record<string, unknown> | undefined,
     config: (fx.config ?? {}) as Record<string, string>,
     priorBlockerId: typeof fx.prior_blocker_id === "string" ? fx.prior_blocker_id : undefined,
@@ -245,7 +264,13 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
       number: 1, title: String(pr.title ?? "t"), body: String(pr.body ?? ""),
       state: "open",
       draft: false,
-      head: { sha: headSha, ref: "feature" }, base: { ref: "main" },
+      // #1660: same-repository identity. `deriveIsFork` treats a MISSING head
+      // repo fail-closed as fork, and the objective approval-scope gate then
+      // withholds native APPROVE (`approval_withheld`) from EVERY replay. The
+      // organic failures this suite replays are same-repo PRs, so the mock
+      // speaks the same identity; fork-specific goldens would override.
+      head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
+      base: { ref: "main", repo: { full_name: "o/r" } },
       user: { login: "someone" }, changed_files: files.length || 1,
       additions: 0, deletions: 0, html_url: "https://github.com/o/r/pull/1",
     }),
@@ -261,7 +286,10 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
-    authenticatedIdentity: () => Promise.resolve(null),
+    // #1663: the recorded fixtures' review threads are authored by the
+    // action's own login; trusted authorship metadata (not the body marker)
+    // is what lets their settlement re-evaluate them as bot findings.
+    authenticatedIdentity: () => Promise.resolve("ai-pr-review"),
     // #1238/#1240: the pinned-revision witness fetches the action's own
     // manifest and gate implementation at the exact pinned commit through
     // the contents-API seam (`repos/<slug>/contents/<path>?ref=<sha>`).
@@ -440,6 +468,13 @@ function scoreCase(
     for (const v of c.expect.published_body_includes ?? []) {
       if (!published.reviewBody.includes(v)) mismatches.push(`published_body_includes: ${JSON.stringify(v)} missing from review-body.md`);
     }
+    // #1660: the recommendation line and gap notices live in the body the
+    // publish seam SUBMITS (the disposition render), not the review-stage
+    // markdown. Agreement across both surfaces is part of what the 1660
+    // goldens pin, so fixtures may assert against submitted bodies too.
+    for (const v of c.expect.submitted_body_includes ?? []) {
+      if (!published.submitted.some((b) => b.includes(v))) mismatches.push(`submitted_body_includes: ${JSON.stringify(v)} missing from submitted bodies`);
+    }
   }
   if (c.expect.native_event !== undefined && published) {
     const events = (published as { submittedEvents?: string[] }).submittedEvents ?? [];
@@ -473,9 +508,21 @@ function scoreCase(
 
 async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
   const pr = c.pr;
-  const server = await startMockServer((_req, _body, res) => {
+  const turnQueue = [...(c.modelTurns ?? [])];
+  const server = await startMockServer((_req, body, res) => {
     res.setHeader("Content-Type", "application/json");
-    res.end(verdictBody(c.recordedModelResponse ?? {}));
+    // #1660: scripted turns belong to the native tool loop — the only request
+    // shape that carries tool schemas. Advisory lanes (specialists) share the
+    // endpoint and must never consume the loop's scripted turns; they get the
+    // recorded response body exactly as before.
+    let loopTurn = false;
+    try {
+      loopTurn = Array.isArray((JSON.parse(body) as { tools?: unknown }).tools);
+    } catch {
+      loopTurn = false;
+    }
+    const scripted = loopTurn ? turnQueue.shift() : undefined;
+    res.end(scripted !== undefined ? JSON.stringify(scripted) : verdictBody(c.recordedModelResponse ?? {}));
   });
   const runDir = mkdtempSync(join(tmpdir(), "golden-replay-"));
   // Precondition: a `git` binary on PATH is required to build the committed
@@ -521,8 +568,19 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "golden-replay-fixture"], { cwd: sourceDir });
     const actualHeadSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir }).toString("utf8").trim();
     pr.head_sha = actualHeadSha;
+    const fixtureEnv: Record<string, string> = {};
+    // #1660: the engine's feature switches read stage ENV (production maps the
+    // action's inputs into the run's environment). The replay passes the
+    // fixture's `config` as inputs; mirror the same input->env mapping for the
+    // switches the acceptance fixtures toggle. Without it, requirement-trace
+    // enforcement and native verdict publication silently stayed OFF in every
+    // replay, and no golden could exercise them.
+    for (const [key, value] of Object.entries(c.config ?? {})) {
+      const envKey = FIXTURE_ENV_KEYS.get(key);
+      if (envKey !== undefined && typeof value === "string") fixtureEnv[envKey] = value;
+    }
     const result = await runReview({
-      env: { GITHUB_OUTPUT: join(runDir, "o.txt"), GITHUB_STEP_SUMMARY: join(runDir, "s.md") },
+      env: { GITHUB_OUTPUT: join(runDir, "o.txt"), GITHUB_STEP_SUMMARY: join(runDir, "s.md"), ...fixtureEnv },
       inputs: {
         "github-token": "tok",
         repo: "o/r",

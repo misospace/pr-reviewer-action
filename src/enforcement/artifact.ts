@@ -34,6 +34,12 @@ export interface ArtifactFinding {
   /** Set only on findings re-emitted from unresolved review threads (#766):
    * the publish step skips inlining these — the thread already exists. */
   thread_id?: string;
+  /** #1663: every historical thread id that describes this one current
+   * concern (a duplicate thread re-reporting the same stable finding
+   * identity, or the thread ids a fresh current-head finding already
+   * covers). Provenance only; the publish step keys inline suppression off
+   * `thread_id`, so a fresh finding stays publishable. */
+  thread_ids?: string[];
   /** #1645: how the re-emitted thread reconciled against the authoritative
    * live thread listing at settlement time. Only `live_unresolved` threads
    * are ever re-emitted. */
@@ -137,24 +143,34 @@ export interface ReviewArtifact {
    * the artifact, so a future reader can tell a current-head finding from a
    * carried thread finding and why the latter was allowed to block. */
   thread_reconciliation?: {
-    /** About the CARRIED THREAD SET (#1645): "complete" iff every carried
-     * thread reconciled a proven state (live_unresolved, resolved, or
-     * absent); "incomplete" iff one or more reconciled unknown — the live
-     * listing could not establish a carried thread's state (an unreadable
-     * read, a listing that is not provably complete, or a listed row that
-     * could not be parsed). The same authority that renders the review's
-     * incomplete-reconciliation disclosure, so the artifact and the
-     * disclosure cannot disagree. The listing's own completeness flag gates
-     * EVERY carried thread's state, not only the unseen ones: an
-     * incomplete enumeration reconciles them all to `unknown`, so this
-     * field reads `incomplete` whenever the enumeration was not provably
-     * complete (#1645, maintainer review 5885372900). */
+    /** About the CARRIED THREAD SET: "complete" iff every carried thread
+     * reconciled a proven state (live_unresolved, resolved, or absent) AND
+     * no live historical bot blocking concern lacked a current-head
+     * re-evaluation; "incomplete" otherwise. #1645's half: one or more
+     * threads reconciled unknown — the live listing could not establish a
+     * carried thread's state (an unreadable read, a listing that is not
+     * provably complete, or a listed row that could not be parsed). #1663's
+     * half: a live bot-authored blocker/major settled unverified, counted in
+     * `unreassessed`. The same authority that renders the review's
+     * disclosure, so the artifact and the disclosure cannot disagree. The
+     * listing's own completeness flag gates EVERY carried thread's state,
+     * not only the unseen ones: an incomplete enumeration reconciles them
+     * all to `unknown`, so this field reads `incomplete` whenever the
+     * enumeration was not provably complete (#1645, maintainer review
+     * 5885372900). */
     state: "complete" | "incomplete";
     head_sha: string;
     live_unresolved: number;
     resolved: number;
     absent: number;
     unknown: number;
+    /** #1663: distinct live historical bot blocking concerns with no usable
+     * current-head re-evaluation (omitted disposition, evidence-free `open`,
+     * or an unsupported claim). Their original severity is withheld, so
+     * this count rides the authoritative disposition as a MATERIAL
+     * unverified-blocking-claim unknown (INCOMPLETE/COMMENT). Present only
+     * when non-zero, preserving pre-#1663 provenance bytes otherwise. */
+    unreassessed?: number;
   };
   /** #774: replaced with the settled records by human-review enforcement. */
   human_review_dispositions?: Array<ArtifactHumanReviewDisposition | Record<string, unknown>>;
