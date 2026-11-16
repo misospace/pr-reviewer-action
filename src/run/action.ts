@@ -206,7 +206,13 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
   const token = stage.GITHUB_TOKEN || env.GH_TOKEN || "";
   stage.GH_TOKEN = token;
   if ((stage.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
-    stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || env.FORGEJO_TOKEN || token;
+    // #1678: `GITEA_TOKEN` is the family resolver's alias, and this binding runs
+    // BEFORE any resolver sees the stage env. Binding it in the resolver's own
+    // order (`FORGEJO_TOKEN`, then `GITEA_TOKEN`, then the GitHub fallback) is
+    // what keeps the alias from being shadowed by the fallback: without it a
+    // Gitea deployment whose only credential is the alias would resolve the
+    // GitHub token here and read/publish with the wrong credential.
+    stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || env.FORGEJO_TOKEN || env.GITEA_TOKEN || token;
   }
   stage.REPO = stage.REPO || env.GITHUB_REPOSITORY || "";
   stage.PR_NUMBER = stage.PR_NUMBER || readEvent(env).prNumber || "";

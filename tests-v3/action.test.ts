@@ -95,6 +95,36 @@ test("action stage env keeps token fallback while integration mode selects OIDC"
   );
 });
 
+// #1678 alias, #1683 review: the stage binding must consult the alias BEFORE the
+// GitHub fallback, or a Gitea deployment whose only credential is GITEA_TOKEN
+// reads and publishes with the GitHub token.
+test("action stage env honors the GITEA_TOKEN alias ahead of the GitHub fallback", () => {
+  const base = {
+    "INPUT_AI-BASE-URL": "https://llm.example.invalid/v1",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_GITHUB-TOKEN": "runner",
+    GITHUB_TOKEN: "injected-github-token",
+    GITHUB_SERVER_URL: "https://gitea.example.invalid",
+  };
+  const aliasOnly = actionStageEnv({ ...base, GITEA_TOKEN: "gitea-pat" });
+  assert.equal(aliasOnly.FORGEJO_TOKEN, "gitea-pat");
+  assert.equal(forgejoTokenFromEnv(aliasOnly), "gitea-pat");
+
+  // The family's own name still wins, in the documented order.
+  const both = actionStageEnv({ ...base, GITEA_TOKEN: "gitea-pat", FORGEJO_TOKEN: "forgejo-pat" });
+  assert.equal(both.FORGEJO_TOKEN, "forgejo-pat");
+  assert.equal(forgejoTokenFromEnv(both), "forgejo-pat");
+
+  // Integration mode binds no token, alias included.
+  const integration = actionStageEnv({
+    ...base,
+    GITEA_TOKEN: "gitea-pat",
+    "INPUT_FORGEJO-AUTH-METHOD": "authorized_integration",
+    "INPUT_FORGEJO-AUTHORIZED-INTEGRATION-AUDIENCE": "aud",
+  });
+  assert.equal(integration.FORGEJO_TOKEN, "");
+});
+
 test("multiline outputs use a delimiter the value cannot forge", () => {
   const { dir, cleanup } = withDir();
   try {
