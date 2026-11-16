@@ -243,3 +243,125 @@ export function resolveToolMaxRequests(
     configured: null,
   };
 }
+
+// ── #1629: the deterministic low-risk evidence envelope ─────────────────
+//
+// A digest-only refresh or a provably all-low-risk lockfile-only refresh
+// (#1595/#1618) carries a tiny mandatory obligation surface and no risk
+// flags, yet the derived request budget still starts at the tier default
+// (40 on the primary route): the #12074 evidence — a no-risk image-digest PR
+// that spent 5 rounds / 7 calls exploring — is what a budget sized for a
+// real diff allows when nothing in it is at stake. The envelope below is
+// the deterministic counterpart of the #1618 scoped review: the budget
+// DECREASES only when the classification positively proves the low-risk
+// shape, and it scales with the mandatory obligation surface the run
+// actually has (the enforced must_check/guidance rows), never with the PR
+// title, the file extension, or an unconditional round/clock cap.
+
+/** Base allowance: corpus/digest verification, the closing verdict prep, and
+ * one spare read. */
+export const LOW_RISK_BUDGET_BASE_REQUESTS = 4;
+/** Extra requests per enforced mandatory obligation row — the rows still get
+ * their evidence; the envelope bounds the OPTIONAL archaeology around them. */
+export const LOW_RISK_BUDGET_REQUESTS_PER_ROW = 2;
+/** Floor: the mandatory evidence must stay reachable even at zero rows. */
+export const LOW_RISK_BUDGET_MIN_REQUESTS = 6;
+/** Ceiling: hard bound on the envelope — no per-package archaeology rides
+ * under a low-risk classification. */
+export const LOW_RISK_BUDGET_MAX_REQUESTS = 12;
+
+/** The digest-only kinds whose checklist is a single local verification row
+ * (KIND_CHECKS: `verify only image digests changed` / `verify no functional
+ * changes beyond lockfile hashes`) — deliberately NOT the
+ * renovate_image_update / image_update / chart_update families, whose
+ * #1379 upstream-evidence obligations (provenance, release delta,
+ * advisories) need real investigation budget. Exported for the harness
+ * reader's fail-open basis ladder. */
+export const LOW_RISK_BUDGET_KINDS: ReadonlySet<string> = new Set([
+  "renovate_digest_only",
+  "image_digest_only",
+]);
+
+/** The classification-artifact signal the envelope derives from — every
+ * field is a number, a boolean, or a bounded enum token from the trusted
+ * deterministic classifier (`classification.json`); no untrusted text. */
+export interface LowRiskBudgetSignal {
+  /** The classifier's `pr_kind` — the harness reader only passes a shaped
+   * (string, non-empty after trim) value, mirroring the role-selection
+   * artifact contract; "" means unshaped and never matches a class. */
+  prKind: string;
+  /** `risk_flags` length — any risk flag retains the full envelope. The
+   * harness reader counts a shaped array or retains outright. */
+  riskFlagCount: number;
+  /** `linked_metadata_uncertain` — the classifier's honest statement that
+   * linked GitHub/Linear issue metadata could not be fully retrieved. True
+   * retains the full envelope: role-selection (`classificationFromArtifact`)
+   * selects every specialist role in exactly this situation, because
+   * missing metadata may conceal security, audit, or priority signals; the
+   * harness reader passes a strict boolean or retains outright. */
+  linkedMetadataUncertain: boolean;
+  /** `lockfile_only_refresh.material` when the #1595 triage ran, else null.
+   * The harness reader only passes an actual non-negative integer — a
+   * coercible value (null / false / "" / "0") is no triage, never a zero. */
+  lockfileOnlyMaterial: number | null;
+  /** `lockfile_only_refresh.parseable` — an unparseable triage fails closed
+   * to material, never opens the envelope. */
+  lockfileOnlyParseable: boolean;
+  /** The enforced mandatory MATERIAL obligation surface: the must_check rows
+   * (after the `VALIDATE_REQUIRED_CHECKS` gate) plus the material derived
+   * admission rows (#1449, `DERIVED_OBLIGATIONS=true`) — the rows the loop's
+   * admission window enforces as material under #1659's vocabulary. Trusted-
+   * base guidance rows stay OUT: they are advisory in #1659's settlement
+   * vocabulary and can never hold a material unknown, and the reservation
+   * window (half the effective budget over ALL admission rows, guidance
+   * included) keeps them attemptable whatever the envelope says. */
+  mandatoryRows: number;
+}
+
+export type LowRiskBudgetBasis = "digest-only" | "low-risk-lockfile";
+
+/**
+ * The low-risk envelope for one signal, or null when the signal does not
+ * PROVE the low-risk shape — fail open to the #810 derived budget. Proof
+ * means: no risk flags at all (a single flag — security, priority, auth —
+ * retains the full envelope: risk escalation outranks proportionality);
+ * linked-issue metadata NOT uncertain (the same uncertainty
+ * `classificationFromArtifact` answers by selecting every specialist role —
+ * missing metadata may conceal risk signals the flags do not carry); and
+ * one of the two positively-verified classes: a digest-only kind, or a
+ * lockfile-only refresh whose triage parsed and found zero material bumps
+ * (the exact #1595 `isLowRiskLockfileOnlyRefresh` semantics). The cap
+ * scales with the enforced MATERIAL rows actually admitted (must_check plus
+ * derived admission rows) and clamps to
+ * [LOW_RISK_BUDGET_MIN_REQUESTS, LOW_RISK_BUDGET_MAX_REQUESTS]; a surface
+ * the clamped envelope's reservation window (floor(cap / 2)) can no longer
+ * cover one-opportunity-per-row is NOT the low-risk shape either —
+ * proportionality must never underfund the mandatory surface, so an
+ * over-wide surface retains the full derived budget.
+ */
+export function lowRiskToolBudgetCap(
+  signal: LowRiskBudgetSignal,
+): { cap: number; basis: LowRiskBudgetBasis; mandatoryRows: number } | null {
+  if (!Number.isInteger(signal.riskFlagCount) || signal.riskFlagCount < 0) return null;
+  if (signal.riskFlagCount > 0) return null;
+  if (typeof signal.linkedMetadataUncertain !== "boolean") return null;
+  if (signal.linkedMetadataUncertain) return null;
+  if (!Number.isInteger(signal.mandatoryRows) || signal.mandatoryRows < 0) return null;
+  const digestOnly = LOW_RISK_BUDGET_KINDS.has(signal.prKind);
+  const lockfileOnly =
+    signal.lockfileOnlyMaterial === 0 && signal.lockfileOnlyParseable;
+  if (!digestOnly && !lockfileOnly) return null;
+  const cap = Math.min(
+    LOW_RISK_BUDGET_MAX_REQUESTS,
+    Math.max(
+      LOW_RISK_BUDGET_MIN_REQUESTS,
+      LOW_RISK_BUDGET_BASE_REQUESTS + signal.mandatoryRows * LOW_RISK_BUDGET_REQUESTS_PER_ROW,
+    ),
+  );
+  // The reservation window inside the envelope is floor(cap / 2) requests —
+  // below the 12-ceiling the 4 + 2n formula guarantees floor(cap / 2) >= n;
+  // at the ceiling a surface wider than 6 rows would leave mandatory rows
+  // without a protected opportunity, so retain instead of underfunding.
+  if (signal.mandatoryRows > Math.floor(cap / 2)) return null;
+  return { cap, basis: digestOnly ? "digest-only" : "low-risk-lockfile", mandatoryRows: signal.mandatoryRows };
+}
