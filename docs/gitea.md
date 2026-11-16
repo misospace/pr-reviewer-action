@@ -74,21 +74,23 @@ that the signed body's own `action` already authorizes, and they can
 never rewrite one.
 
 The Gitea intake route is `/webhooks/gitea` (`GITEA_WEBHOOK_PATH`,
-`src/ingress/endpoints.ts`). Set a webhook secret on the instance and on
-the controller. An empty secret accepts nothing: the handler fails
-closed, and it verifies the signature over the raw body before parsing
-any JSON.
+`src/ingress/endpoints.ts`). The controller daemon reports that route in
+its startup summary, so you do not have to guess it. Set a webhook secret
+on the instance and on the controller. An empty secret accepts nothing:
+the handler fails closed, and it verifies the signature over the raw body
+before parsing any JSON.
 
 `createGiteaWebhookHandler` and `dispatchGiteaWebhookEvent` are served
 today by the Action runtime and by `createOperatorHost({ platform:
-"gitea" })`. The shipped controller daemon does not select them yet: its
-instance schema accepts only `kind: github` and `kind: forgejo`
-(`src/config/instance-config.ts`), and its webhook listener mounts one
-handler for every path. A Gitea instance behind the daemon must
-configure `kind: forgejo`, which means the deliveries run the Forgejo
-projection. Wiring `gitea` through the instance schema and the daemon
-intake is tracked separately; until it lands, do not set
-`kind: gitea` — validation rejects it.
+"gitea" })`. The shipped controller daemon selects them too: the instance
+schema accepts `kind: gitea`, and a Gitea instance runs the Gitea
+projection. That projection matters for pull request comments. Gitea
+sends the pull request link at `issue.pull_request` without a number,
+and the shared Forgejo projection leaves that link alone. The Gitea
+projection moves the richer top level pull request onto
+`issue.pull_request`, so the delivery takes the issue path that a
+follow-up needs. Without it, a pull request comment never schedules a
+follow-up.
 
 Subscribe the webhook to the events that schedule reviews:
 
@@ -118,8 +120,6 @@ and the two would never converge.
 
 ## Not covered by this change
 
-- The shipped controller daemon cannot select the Gitea intake. Its instance
-  forge `kind` still accepts only `github` and `forgejo`. See Webhooks above.
 - No new `gitea-*` action inputs. The shared `forgejo-*` settings stay.
 - No separate Gitea REST client class. The Forgejo client serves both.
 - No per-release Gitea version qualification. The shared family is not

@@ -42,6 +42,7 @@
 
 import { parse as parseYaml } from "yaml";
 import { parseRepoRef } from "../platform/repo-ref.js";
+import { forgeWireFamily, type ForgeId } from "../platform/resolve.js";
 import type { ActionContract } from "./contract.js";
 import type { AdoptionPolicy } from "./adoption.js";
 import { validateNamespacePolicies, type NamespacePolicy } from "./namespace-policy.js";
@@ -116,7 +117,7 @@ export interface ForgeIntegration {
    * forge-integration guards see `gitea`); the canonical forge platform of
    * every event, job, and durable record stays `forgejo`
    * (`forgeFamily`), so generations converge across webhooks and polls. */
-  readonly kind: "github" | "forgejo" | "gitea";
+  readonly kind: ForgeId;
   readonly endpoint: string;
   readonly credential: string;
 }
@@ -127,12 +128,13 @@ export interface ForgeIntegration {
  * `forgejo` there. A `gitea` integration belongs to the `forgejo` family
  * (Forgejo is a Gitea fork; the wire formats are the same), so `kind:
  * gitea` never re-keys a generation and never splits an instance's
- * webhook/poll convergence. ONE definition: every family-aware guard
- * compares through this function. */
+ * webhook/poll convergence. ONE definition: the platform seam owns it
+ * (`forgeWireFamily`, #1678), and every family-aware guard compares through
+ * this function. */
 export type ForgeFamily = "github" | "forgejo";
 
 export function forgeFamily(kind: ForgeIntegration["kind"]): ForgeFamily {
-  return kind === "github" ? "github" : "forgejo";
+  return forgeWireFamily(kind);
 }
 
 /** The `local` executor backend spec (#733): the fixed argv the executor

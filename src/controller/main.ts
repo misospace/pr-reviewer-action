@@ -42,10 +42,11 @@
  *   PEM): the GitHub App material when the instance serves `github`.
  *   `PR_REVIEWER_GITHUB_APP_INSTALLATION_ID` is additionally required when
  *   reconciliation is enabled.
- * - `FORGEJO_TOKEN` (the platform's own helper, `forgejoTokenFromEnv`):
+ * - `FORGEJO_TOKEN` (the platform seam's own helper, `forgeTokenFromEnv`):
  *   the Forgejo/Gitea token when the instance serves `forgejo` or `gitea`
- *   (#1682: one family, one token env; the helper's `authorized_integration`
- *   refusal applies to both).
+ *   (#1682: one family, one token env; the declared product decides the
+ *   refusal — a Gitea instance fails closed on the Forgejo-only
+ *   `authorized_integration` mode).
  * - `PR_REVIEWER_CREDENTIAL_<REF>`: the #735 credential material for each
  *   opaque reference the instance config names (model-profile credentials;
  *   the reference is uppercased with every non-alphanumeric character
@@ -73,7 +74,7 @@ import {
   type ModelProfile,
 } from "../config/instance-config.js";
 import type { ApiFormat } from "../config/types.js";
-import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
+import { forgeProductLabel, forgeTokenFromEnv } from "../platform/forge-identity.js";
 import type { FetchLike } from "../platform/http.js";
 import {
   buildWorkerCredentialPlan,
@@ -383,15 +384,21 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     }
   } else {
     // #1682: `forgejo` and `gitea` are one family — the token env contract
-    // is shared (FORGEJO_TOKEN), and `forgejoTokenFromEnv`'s
-    // `authorized_integration` refusal applies to BOTH: Gitea has no
-    // Forgejo "authorized integration", so a Gitea instance may never
-    // authenticate by that mode.
-    const token = forgejoTokenFromEnv(env);
+    // is shared (FORGEJO_TOKEN) — but the DECLARED product decides what the
+    // family refuses, and that difference lives in the platform seam
+    // (`forgeTokenFromEnv`): Gitea has no Forgejo "authorized integration",
+    // so a Gitea instance may never authenticate by that mode. The refusal
+    // is a misconfiguration, not a missing credential: it is reported as
+    // the startup refusal it is.
+    let token: string | undefined;
+    try {
+      token = forgeTokenFromEnv(platform, env);
+    } catch (error) {
+      throw new StartupRefusal(errorMessage(error), 2);
+    }
     if (token === undefined) {
-      const label = platform === "gitea" ? "Gitea" : "Forgejo";
       throw new StartupRefusal(
-        `the instance config serves ${platform} but no ${label} token is configured (FORGEJO_TOKEN)`,
+        `the instance config serves ${platform} but no ${forgeProductLabel(platform)} token is configured (FORGEJO_TOKEN)`,
         2,
       );
     }
@@ -1525,6 +1532,10 @@ export async function controllerMain(
     `controller: platform=${startup.platform} executors=${startup.instance.executorProfiles.length}` +
       ` models=${startup.instance.modelProfiles.length}` +
       ` webhook=${startup.webhook === null ? "off" : String(startup.webhook.port)}` +
+      // The canonical intake route (#1682): the path an operator points the
+      // forge webhook at. Empty when the platform has no route (the GitHub
+      // App intake is path-agnostic) — never a guess.
+      ` route=${daemon.intakeRoute}` +
       ` admin=${startup.admin === null ? "off" : String(startup.admin.port)}` +
       ` dashboard=${startup.admin !== null && startup.admin.dashboard ? "on" : "off"}` +
       ` reconcile=${startup.reconcile === null ? "off" : String(startup.reconcile.intervalMs)}\n`,

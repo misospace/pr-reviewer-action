@@ -206,7 +206,10 @@ and intake disagree.
   declares `forges[].kind: gitea` in the instance config (#1682) and uses
   that same token and the same native intake. The identity changes the
   capability composition and the diagnostics, but not the wire protocol.
-  The webhook trust boundary and ledger dedupe follow
+  Point the forge webhook at the canonical route that the controller
+  reports in its startup summary: `/webhooks/gitea` for a Gitea instance,
+  `/webhooks/forgejo` for a Forgejo instance. The webhook trust boundary and
+  ledger dedupe follow
   [`docs/architecture/self-hosted-forgejo-ingress.md`](architecture/self-hosted-forgejo-ingress.md).
 
 Model credentials reach workers only as opaque references (#735). The chart

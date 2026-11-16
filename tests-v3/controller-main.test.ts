@@ -437,8 +437,10 @@ test("a gitea-kind instance without FORGEJO_TOKEN refuses startup (#1682)", asyn
 });
 
 test("a gitea-kind instance with FORGEJO_AUTH_METHOD=authorized_integration is refused (#1682)", async () => {
-  // Gitea has no Forgejo "authorized integration": the shared
-  // `forgejoTokenFromEnv` refusal applies to the gitea identity unchanged.
+  // Gitea has no Forgejo "authorized integration": the DECLARED product
+  // decides the refusal, and the platform seam's Gitea token reader raises
+  // it (#1678's canonical message) before any token lookup. The refusal
+  // names the missing capability — not a missing credential.
   const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-oidc-"));
   const configPath = join(dir, "instance.yaml");
   writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
@@ -450,10 +452,38 @@ test("a gitea-kind instance with FORGEJO_AUTH_METHOD=authorized_integration is r
     stderr.attach();
     try {
       const code = await controllerMain([], env);
-      assert.notEqual(code, 0, "authorized integration is never accepted for gitea");
+      assert.equal(code, 2, "authorized integration is never accepted for gitea");
       assert.match(
         stderr.lines().join(""),
-        /FORGEJO_TOKEN cannot be set with FORGEJO_AUTH_METHOD=authorized_integration/,
+        /Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token/,
+      );
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("a gitea-kind instance with a bare authorized-integration audience is refused (#1682)", async () => {
+  // The audience alone forces integration mode on Forgejo, so refusing only
+  // the explicit method would let the configuration degrade silently into
+  // token mode on Gitea instead of naming the misconfiguration.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-audience-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE = "https://forgejo.example";
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2, "a bare authorized-integration audience is refused for gitea");
+      assert.match(
+        stderr.lines().join(""),
+        /Gitea does not support 'forgejo-authorized-integration-audience'/,
       );
     } finally {
       stderr.detach();

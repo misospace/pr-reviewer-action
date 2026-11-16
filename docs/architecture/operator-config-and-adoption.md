@@ -117,9 +117,12 @@ Gitea-labelled reconcile poll and the instance's webhook deliveries converge
 on one generation and one head never buys a second review. The daemon
 refuses a cross-family binding (integration, intake, or poll) at startup.
 
-The Gitea intake is the only webhook route on the operator host. The host
-runs one router, one follow-up consumer, and one durable Q&A budget, and it
-has no separate `/webhooks/gitea` path. See
+The Gitea intake answers on the canonical Gitea route `/webhooks/gitea`
+(`GITEA_WEBHOOK_PATH`, named by the ingress seam
+`selectIngressEndpoints`). The controller daemon reports that route in its
+startup summary. The host still runs one router, one follow-up consumer, and
+one durable Q&A budget, and it keeps answering every path it answered before,
+so an existing deployment's webhook URL does not break. See
 [controller-daemon.md](controller-daemon.md).
 
 `reviewer-defaults` keys must be `repo-configurable` contract inputs

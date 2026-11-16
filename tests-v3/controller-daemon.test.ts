@@ -3046,6 +3046,134 @@ test("a signed Gitea IssueCommentPayload (no top-level number) drives a follow_u
   assert.equal(minted[0]!.forgeIntegration, "git-primary");
 });
 
+test("the daemon serves the Gitea intake on the canonical Gitea route (#1682)", async (t) => {
+  // The route is NAMED by the ingress seam (`selectIngressEndpoints`), so the
+  // operator's webhook URL and the daemon's own surface cannot disagree: a
+  // Gitea instance's canonical intake route is `/webhooks/gitea`. The daemon
+  // reports it (the controller's startup summary carries it) and serves the
+  // intake there.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: giteaForges(),
+      } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  assert.equal(h.daemon.intakeRoute, "/webhooks/gitea");
+
+  const body = JSON.stringify({
+    action: "created",
+    issue: {
+      id: 12,
+      url: "https://gitea.example/owner/repo/issues/7",
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      pull_request: { url: "https://gitea.example/owner/repo/pulls/7", merged: false },
+    },
+    comment: { id: 556, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "alice" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/webhooks/gitea`, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "issue_comment",
+      "x-gitea-signature": computeForgejoWebhookSignature(GITEA_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "follow_up" });
+  await waitFor(() => minted.length === 1);
+  assert.equal(minted[0]!.platform, "forgejo", "the generation identity stays the forgejo family");
+});
+
+test("the canonical intake route follows the configured identity, and GitHub has none (#1682)", async (t) => {
+  // The route names the PRODUCT the operator declared: a Forgejo instance's
+  // canonical route is `/webhooks/forgejo`. The GitHub App intake is
+  // path-agnostic, so the seam names no route for it and the daemon reports
+  // none — it never guesses one.
+  const forgejo = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "forgejo-1", kind: "forgejo", endpoint: "https://forgejo.example/api/v1", credential: "f-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "forgejo",
+        port: 0,
+        secret: "forgejo-webhook-secret",
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await forgejo.daemon.stop().catch(() => undefined);
+    cleanup(forgejo);
+  });
+  assert.equal(forgejo.daemon.intakeRoute, "/webhooks/forgejo");
+
+  const github = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "github-1", kind: "github", endpoint: "https://api.github.com", credential: "g-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "github",
+        port: 0,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await github.daemon.stop().catch(() => undefined);
+    cleanup(github);
+  });
+  assert.equal(github.daemon.intakeRoute, "");
+});
+
 test("a gitea-kind integration refuses foreign-family bindings and accepts its own family (#1682)", async () => {
   // Bound kind `gitea` + GitHub App intake: cross-family — the intake would
   // stamp deliveries this capability cannot act on. Refuse at construction.

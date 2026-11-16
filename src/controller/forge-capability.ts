@@ -33,6 +33,8 @@ import { parsePlatformBaseUrl, GITHUB_API_BASE } from "../platform/urls.js";
 import { parseRepoRef, repoScopedUrl } from "../platform/repo-ref.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgeProductLabel } from "../platform/forge-identity.js";
+import { declaredFamilyForge } from "../platform/resolve.js";
 import {
   GitHubPublishApi,
   ForgejoPublishApi,
@@ -239,9 +241,8 @@ export function composeForgeCapability(input: ForgeCompositionInput): ComposedFo
     return composeGitHub(input);
   }
   if (input.forgejoToken === undefined) {
-    const label = input.platform === "gitea" ? "Gitea" : "Forgejo";
     throw new Error(
-      `the instance config serves ${input.platform} but no ${label} token is configured (FORGEJO_TOKEN)`,
+      `the instance config serves ${input.platform} but no ${forgeProductLabel(input.platform)} token is configured (FORGEJO_TOKEN)`,
     );
   }
   // #1682: `gitea` and `forgejo` are ONE family — the same adapters, client,
@@ -655,13 +656,19 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
     },
   };
 
+  // The CONFIGURED identity (#1682): the product the operator declared
+  // (`forgejo` or `gitea`). The seam owns that mapping
+  // (`declaredFamilyForge`), so the composition never branches on a product
+  // name of its own.
+  const identity = declaredFamilyForge(input.platform);
+
   return {
     // The CANONICAL platform stays the `forgejo` family: every canonical
     // record this composition feeds carries it, and the `gitea` identity
     // (#1682) never enters one. The identity rides in its own field.
     platform: "forgejo",
     // The identity is whatever was configured (`forgejo` or `gitea`, #1682).
-    identity: input.platform,
+    identity,
     capability,
     followUp,
     botLogin: async () => {
@@ -672,6 +679,6 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
     },
     listOpenPullRequests: (repo) => ingress.listOpenPullRequests(repo),
     pollInstallationId: "",
-    describe: () => `${input.platform === "gitea" ? "gitea" : "forgejo"} via ${ingress.endpoints.origin}`,
+    describe: () => `${identity} via ${ingress.endpoints.origin}`,
   };
 }

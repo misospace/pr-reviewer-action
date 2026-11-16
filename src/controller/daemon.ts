@@ -113,6 +113,7 @@ import {
 } from "../executor/index.js";
 import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
+import { selectIngressEndpoints } from "../ingress/endpoints.js";
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -391,6 +392,18 @@ export interface ControllerDaemon {
   readonly ledger: GenerationLedger;
   /** The operator host when `webhook` was configured. */
   readonly operatorHost: OperatorHost | undefined;
+  /** The CANONICAL route the served intake answers on (#1682) — the route
+   * the ingress seam names for this platform (`/webhooks/gitea` for a Gitea
+   * instance, `/webhooks/forgejo` for a Forgejo instance), or "" when the
+   * platform has no route in that seam (the GitHub App intake is
+   * path-agnostic) or the daemon serves no intake.
+   *
+   * It is the route an operator points the forge webhook at, so the daemon
+   * REPORTS it (the controller's startup summary) instead of leaving the
+   * operator to guess. The webhook port keeps answering every path it
+   * answered before the route existed, so a deployment's existing webhook
+   * URL never breaks. */
+  readonly intakeRoute: string;
   /** "" while every persisted queue mutation is durable; otherwise the
    * latched persistence-failure message (the daemon's health signal). */
   queuePersistenceError(): string;
@@ -1038,6 +1051,41 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
     throw new RangeError(
       `job names forge integration '${named}' but this daemon serves '${bound}'`,
     );
+  }
+}
+
+/** The CANONICAL route the daemon's intake answers on (#1682).
+ *
+ * The route is named by the INGRESS SEAM (`selectIngressEndpoints`), never by
+ * a literal here: the operator's webhook URL and the daemon's own surface
+ * can never disagree about where a Gitea delivery lands.
+ *
+ * - GitHub has no route in that seam (the App intake is path-agnostic), so
+ *   the daemon serves its whole webhook port, as it always did.
+ * - A Gitea-family intake routes by the identity it was configured with
+ *   (`gitea` → `/webhooks/gitea`, `forgejo` → `/webhooks/forgejo`): that
+ *   label is what selects the intake's own projection, so the route and the
+ *   projection always agree.
+ * - No endpoint to resolve against (no configured integration at all) means
+ *   no route: the seam resolves and validates the endpoint it names the
+ *   route from, and the daemon never guesses one.
+ */
+function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
+  const platform = options.webhook?.platform;
+  if (platform === undefined || platform === "github") return "";
+  const bound =
+    options.forgeIntegration === undefined
+      ? undefined
+      : options.instance.forges.find((entry) => entry.name === options.forgeIntegration);
+  const family = options.instance.forges.filter((entry) => forgeFamily(entry.kind) === "forgejo");
+  const endpoint = bound?.endpoint ?? (family.length === 1 ? family[0]!.endpoint : undefined);
+  if (endpoint === undefined) return "";
+  try {
+    return selectIngressEndpoints(platform, endpoint).webhookPath;
+  } catch {
+    // The seam refuses an endpoint it cannot validate. The daemon does not
+    // name a route it cannot prove; it never names a wrong one.
+    return "";
   }
 }
 
@@ -1760,6 +1808,9 @@ export async function startControllerDaemon(
   const daemon: ControllerDaemon = {
     ledger,
     operatorHost,
+    // The route an operator points the forge webhook at (#1682): named by
+    // the ingress seam, reported in the controller's startup summary.
+    intakeRoute: canonicalIntakeRoute(options),
     queuePersistenceError: () => (snapshotStore !== null ? snapshotStore.persistenceError() : ""),
     get stopped(): boolean {
       return stopped;

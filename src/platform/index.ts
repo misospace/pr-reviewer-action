@@ -17,6 +17,10 @@ export {
 } from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export {
+  forgeProductLabel,
+  forgeTokenFromEnv,
+} from "./forge-identity.js";
+export {
   GITEA_INTEGRATION_REFUSAL,
   declaredFamilyForge,
   declaredForgeId,
