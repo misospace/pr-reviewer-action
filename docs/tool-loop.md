@@ -100,29 +100,31 @@ overrides:
 | smart | 45 |
 | escalated (smart under post-review escalation) | 50 |
 
-These are the default floors when the operator leaves the route-specific
-inputs empty. `primary-tool-max-requests` / `smart-tool-max-requests` can
+These are fail-open defaults when the harness has no trustworthy PR-size
+signal. `primary-tool-max-requests` / `smart-tool-max-requests` can
 override their own route, while `tool-max-requests` overrides the derived
 tier budget when no route-specific value is set. The hard ceiling remains 50.
 
 Historically (pre-#1658), when primary requirement-trace was active, a post-verdict repair round
-also has a bounded four-request closure allowance. The published effective
-tool budget includes that allowance, so a default 40-call primary review with
-trace enabled could execute at most 44 read-only tool calls. #1658 removed the repair round and its dedicated allowance: the trace is non-certifying, so unresolved requirement rows are disclosed for the disposition layer instead of being repaired into acceptance.
+also had a bounded four-request closure allowance. #1658 removed the repair
+round and its dedicated allowance.
 
-When no explicit override wins, the default is further scaled by PR size
-(#810): one request per 4 changed files, one per 400 changed lines, and 2
-requests per specialist lead (each lead is a hypothesis that needs its own
-verification calls) — floored at the route's tier default (a small PR keeps
-exactly the pre-#810 budget) and capped at the hard ceiling of 50. Size
-signals come from `pr.json`/`pr-files.json` and the per-role specialist lead
-artifacts already in the harness workspace; a workspace without size signals
-just uses the tier default.
+When no explicit override wins and the harness has real PR-size data, the
+budget is derived from the review surface (#810/#1688): one request per 4
+changed files, one per 400 changed lines, and 2 requests per specialist lead,
+with modest route floors of **8 primary / 16 smart / 24 escalated** and the
+same hard ceiling of 50. The size-aware budget may therefore scale **down or
+up**. A seven-file, ~600-line PR with one specialist lead gets 8 primary tool
+calls, not the historical 40-call primary floor. Size signals come from
+`pr.json`/`pr-files.json` and the per-role specialist lead artifacts already
+in the harness workspace; a workspace with no usable size signal retains the
+historical tier default fail-open. Explicit operator budgets still win.
 
 #### Low-risk evidence envelope (#1629)
 
 A derived budget (tier-default or size-scaled source only) on the ordinary
-primary/fallback routes is additionally narrowed when the trusted
+primary/fallback routes is additionally narrowed for proven low-risk shapes
+when the trusted
 deterministic classification proves the low-risk shape: **no risk flags at
 all**, linked-issue metadata **not uncertain** (`linked_metadata_uncertain`
 exactly `false` — the same uncertainty that makes role-selection pick every
