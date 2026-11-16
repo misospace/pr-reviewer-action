@@ -2122,7 +2122,7 @@ function specialistArtifact(role: string, leads: Array<{ file: string | null; me
   });
 }
 
-test("#810: a small PR's harness budget matches today's tier default", async () => {
+test("#810/#1688: a small PR's harness budget scales down instead of inheriting 40 calls", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
     { filename: "a.ts", status: "modified", additions: 20, deletions: 10, changes: 30 },
@@ -2130,8 +2130,8 @@ test("#810: a small PR's harness budget matches today's tier default", async () 
   ]));
   const { result } = await runToolHarness(deps());
   assert.equal(result.planning_error, "Missing review-corpus.truncated.md");
-  assert.equal(result.tool_request_budget, 40);
-  assert.equal(result.tool_budget_source, "tier-default");
+  assert.equal(result.tool_request_budget, 8);
+  assert.equal(result.tool_budget_source, "size-scaled");
   assert.deepEqual(result.tool_budget_size, { changed_files: 2, changed_lines: 40, specialist_leads: 0 });
 });
 
