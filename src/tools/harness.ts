@@ -65,7 +65,7 @@ import {
   type ResolvedTier,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
-import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
+import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, lowRiskToolBudgetCap, LOW_RISK_BUDGET_KINDS, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
 import { settlementsToArtifact } from "../enforcement/settlement.js";
@@ -2176,6 +2176,10 @@ function telemetryBudgetProvenance(result: HarnessResult): Record<string, unknow
     configured_max_requests: result.tool_budget_configured ?? null,
   };
   if (result.tool_budget_size !== undefined) provenance.size = result.tool_budget_size;
+  // #1629: the low-risk envelope receipt rides the provenance when present
+  // (additive — runs without a classification artifact keep the pre-#1629
+  // telemetry shape byte-for-byte).
+  if (result.low_risk_budget !== undefined) provenance.low_risk_budget = result.low_risk_budget;
   return provenance;
 }
 
@@ -2183,6 +2187,190 @@ function preLoopFailureKind(result: HarnessResult): string | null {
   if (result.planning_error) return "missing-corpus";
   if (result.error) return "missing-config";
   return null;
+}
+
+/** #1629: the bounded low-risk envelope receipt. snake_case, closed
+ * vocabulary, numbers only: `envelope` says whether the derived budget was
+ * capped or retained, `basis` names the deterministic reason from the
+ * trusted classification artifact, `mandatory_rows` is the enforced
+ * obligation surface the envelope scaled with, and `cap` (capped only) is
+ * the effective request ceiling. No untrusted text rides anywhere. */
+export interface LowRiskBudgetReceipt {
+  envelope: "capped" | "retained";
+  basis: "digest-only" | "low-risk-lockfile" | "risk-flags" | "metadata-uncertain" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "obligation-surface" | "no-signal";
+  mandatory_rows: number;
+  cap?: number;
+  /** capped only: the DERIVED (#810) budget the envelope narrowed, so the
+   * operator sees original vs effective from the receipt alone. */
+  derived_budget?: number;
+}
+
+/**
+ * #1629: derive the low-risk envelope for one harness run from the
+ * trusted deterministic classification artifact, applied ONLY to the
+ * derived budget sources (tier-default / size-scaled) on the ordinary
+ * primary/fallback routes. Returns null when the run has no
+ * classification artifact at all (pre-classification fixtures keep
+ * byte-identical artifacts) or on a deep/override route — the receipt
+ * records the retained reason otherwise, so proportionality decisions
+ * stay explainable from the artifact alone.
+ *
+ * #1648 independent review: the reader validates the fields the CAP
+ * actually depends on, and every required field must be SHAPED — absence
+ * or a malformed value is never read as a low-risk signal:
+ * - `risk_flags` must be an array (absence of risk information is not
+ *   proof that risk flags are empty);
+ * - `linked_metadata_uncertain` must be an exact boolean — a classification
+ *   that cannot prove its linked-issue metadata was completely retrieved is
+ *   not provably low-risk (role-selection selects every specialist role on
+ *   exactly this uncertainty); `true` retains the full envelope;
+ * - `pr_kind` must be a non-empty string (the role-selection usability
+ *   rule);
+ * - `must_check` must be an array (never silently defaulted to empty);
+ * - `lockfile_only_refresh.material` must be an actual non-negative integer
+ *   (the `jqLockfileOnlyLowRisk` contract reads exact numeric zero; a
+ *   coercible value — `null`, `false`, `""`, `"0"` — is no triage).
+ *
+ * The mandatory-row count is the enforced MATERIAL admission surface: the
+ * `VALIDATE_REQUIRED_CHECKS`-gated must_check rows PLUS the material
+ * derived admission rows (#1449, `DERIVED_OBLIGATIONS=true`) — exactly the
+ * rows the harness builds into the enforced window, so the envelope scales
+ * with what the loop must actually protect. Trusted-base guidance rows
+ * deliberately do NOT count: they are ADVISORY in #1659's settlement
+ * vocabulary (never a material unknown), and the #1381 reservation covers
+ * them whatever the envelope says. A proven low-risk class whose enforced
+ * material surface the clamped envelope's reservation window can no longer
+ * cover one-opportunity-per-row retains the full budget
+ * (`obligation-surface`). An absent or unshaped classification fails open
+ * (retained, `no-signal`) — the envelope narrows only on positive proof.
+ */
+function resolveLowRiskBudgetEnvelope(
+  tier: string,
+  maxRequests: ReturnType<typeof resolveToolMaxRequests>,
+  readText: (name: string) => string | null,
+  env: EnvLike,
+): LowRiskBudgetReceipt | null {
+  if (tier === "smart") return null;
+  if (maxRequests.source === "primary-override" || maxRequests.source === "smart-override" || maxRequests.source === "explicit") {
+    return null;
+  }
+  const body = readText("classification.json");
+  if (body === null || body.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  // #1648 review (independent): `must_check` must be a real array, never
+  // silently defaulted to empty — an artifact that cannot show its enforced
+  // checklist cannot prove a small obligation surface. A trustworthy count
+  // exists only when the field is shaped; a malformed one reports 0.
+  const mustCheckValid = Array.isArray(record.must_check);
+  const mustCheck = Array.isArray(record.must_check)
+    ? record.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
+  // The enforced MATERIAL admission surface: gated must_check rows plus the
+  // material derived admission rows the SAME planner admits (#1449).
+  const gatedMustCheckRows = mustCheckObligationsEnabled(env.VALIDATE_REQUIRED_CHECKS) ? mustCheck.length : 0;
+  const derivedRows = derivedAdmissionRows(derivedEvidenceRows(
+    readText,
+    (env.DERIVED_OBLIGATIONS ?? "false").trim().toLowerCase() === "true",
+  )).length;
+  const mandatoryRows = gatedMustCheckRows + derivedRows;
+  // #1648 review: an ABSENT or present-but-malformed `risk_flags` is an
+  // unshaped classification — absence of risk information is NOT proof
+  // that risk flags are empty (the real classifier always writes the
+  // field).
+  if (!Array.isArray(record.risk_flags)) {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mustCheckValid ? mandatoryRows : 0 };
+  }
+  const riskFlags = record.risk_flags;
+  if (!mustCheckValid) {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: 0 };
+  }
+  // #1648 review (independent): metadata completeness must be an exact
+  // boolean. A classification that does not assert its linked-issue
+  // metadata was completely retrieved is not provably complete, and
+  // uncertainty is where concealed security/audit/priority signals live —
+  // the same reason `classificationFromArtifact` selects every specialist
+  // role when this flag is set.
+  if (typeof record.linked_metadata_uncertain !== "boolean") {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
+  }
+  const linkedMetadataUncertain = record.linked_metadata_uncertain;
+  // The role-selection usability rule: a classification without a usable
+  // pr_kind is not a shaped signal.
+  const prKind = typeof record.pr_kind === "string" ? record.pr_kind.trim() : "";
+  if (prKind === "") {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
+  }
+  const lockfileOnly =
+    record.lockfile_only_refresh !== null && typeof record.lockfile_only_refresh === "object" && !Array.isArray(record.lockfile_only_refresh)
+      ? record.lockfile_only_refresh as Record<string, unknown>
+      : null;
+  // #1648 review: the material count is a shaped integer signal or nothing —
+  // coercible values (`null`, "", false, "0") are NOT proof of zero material
+  // bumps and negatives are malformed; the same rule the risk_flags field
+  // follows above.
+  const material =
+    lockfileOnly !== null
+      && typeof lockfileOnly.material === "number"
+      && Number.isInteger(lockfileOnly.material)
+      && lockfileOnly.material >= 0
+      ? lockfileOnly.material
+      : null;
+  const parseable = lockfileOnly !== null && lockfileOnly.parseable === true;
+  const signal = {
+    prKind,
+    riskFlagCount: riskFlags.length,
+    linkedMetadataUncertain,
+    lockfileOnlyMaterial: material,
+    lockfileOnlyParseable: parseable,
+    mandatoryRows,
+  };
+  const cap = lowRiskToolBudgetCap(signal);
+  if (cap !== null) {
+    return {
+      envelope: "capped",
+      basis: cap.basis,
+      mandatory_rows: cap.mandatoryRows,
+      cap: cap.cap,
+      derived_budget: maxRequests.budget,
+    };
+  }
+  // Fail-open retained reasons, in precedence order: risk escalation
+  // outranks everything; then linked-metadata uncertainty (risk signals the
+  // flags cannot carry may hide behind unretrieved issue metadata); then
+  // the lockfile triage's own verdict (a parsed `parseable: false` names
+  // the unparseable triage; a shaped positive `material` names the material
+  // bumps); then the obligation-bearing kinds the envelope deliberately
+  // excludes; then a PROVEN low-risk class whose enforced material surface
+  // the clamped envelope's reservation window could not protect per row —
+  // proportionality never underfunds the mandatory evidence. A
+  // coercible/malformed triage field carries no information, so it falls
+  // through to `no-signal`.
+  if (signal.riskFlagCount > 0) {
+    return { envelope: "retained", basis: "risk-flags", mandatory_rows: mandatoryRows };
+  }
+  if (linkedMetadataUncertain) {
+    return { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: mandatoryRows };
+  }
+  if (lockfileOnly !== null && parseable === false) {
+    return { envelope: "retained", basis: "unparseable-triage", mandatory_rows: mandatoryRows };
+  }
+  if (material !== null && material > 0) {
+    return { envelope: "retained", basis: "material-lockfile", mandatory_rows: mandatoryRows };
+  }
+  if (prKind === "renovate_image_update" || prKind === "image_update" || prKind === "renovate_chart_update" || prKind === "chart_update") {
+    return { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: mandatoryRows };
+  }
+  if (LOW_RISK_BUDGET_KINDS.has(prKind) || (material === 0 && parseable)) {
+    return { envelope: "retained", basis: "obligation-surface", mandatory_rows: mandatoryRows };
+  }
+  return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
 }
 
 /** #1199: the closing in-conversation verdict turn's bounded latency/usage
@@ -2229,6 +2417,11 @@ export type HarnessResult = Record<string, unknown> & {
   tool_request_budget?: number;
   tool_budget_source?: string;
   tool_budget_configured?: number | null;
+  /** #1629: the deterministic low-risk evidence envelope receipt — present
+   * only when a classification artifact existed to read. `capped` means the
+   * derived budget was narrowed to `cap` (the `low-risk-cap` source);
+   * `retained` records the fail-open reason the full #810 budget stayed. */
+  low_risk_budget?: LowRiskBudgetReceipt;
   /** #810: the PR-size signal the scaled default was derived from (omitted
    * when every component was zero). */
   tool_budget_size?: { changed_files: number; changed_lines: number; specialist_leads: number };
@@ -4327,6 +4520,20 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // size signal at zero, which keeps the pre-#810 tier default.
   const budgetSize = toolBudgetSizeFromArtifacts(deps.readText);
   const maxRequests = resolveToolMaxRequests(tier, env, budgetSize);
+  // #1629: the deterministic low-risk evidence envelope — a digest-only
+  // refresh or a provably all-low-risk lockfile-only refresh (#1595/#1618)
+  // with zero risk flags caps the DERIVED budget (tier-default /
+  // size-scaled sources only; an explicit or tier-override number is an
+  // operator decision and always wins, and the deep smart/escalated routes
+  // are never narrowed) to an envelope scaled by the mandatory obligation
+  // surface this run actually enforces. Fail open: any risk flag, a
+  // material lockfile bump, an unparseable triage, or an absent/unshaped
+  // classification retains the full #810 budget. The receipt rides the
+  // artifact and the budget telemetry so the operator can see WHY the
+  // envelope applied or was retained.
+  const lowRisk = resolveLowRiskBudgetEnvelope(tier, maxRequests, deps.readText, env);
+  const lowRiskCap = lowRisk !== null && lowRisk.envelope === "capped" && typeof lowRisk.cap === "number" ? lowRisk.cap : null;
+  const effectiveMaxRequests = lowRiskCap !== null ? Math.min(maxRequests.budget, lowRiskCap) : maxRequests.budget;
   const requestTimeout = envIntBounded(env, "TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300);
 
   const allowedHostsRaw = env.ALLOWED_SOURCE_HOSTS ?? "github.com,api.github.com";
@@ -4345,10 +4552,15 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     deduplicated_request_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
-    tool_request_budget: maxRequests.budget,
-    tool_budget_source: maxRequests.source,
+    tool_request_budget: effectiveMaxRequests,
+    tool_budget_source: lowRisk !== null && lowRisk.envelope === "capped" ? "low-risk-cap" : maxRequests.source,
     tool_budget_configured: maxRequests.configured,
   };
+  // #1629: the envelope receipt rides the artifact whenever a classification
+  // artifact existed to read — capped or retained — so proportionality is
+  // explainable from the artifact alone. Runs without classification.json
+  // (pre-classification fixtures) keep byte-identical artifacts.
+  if (lowRisk !== null) result.low_risk_budget = lowRisk;
   if (budgetSize.changedFiles > 0 || budgetSize.changedLines > 0 || budgetSize.specialistLeads > 0) {
     result.tool_budget_size = {
       changed_files: budgetSize.changedFiles,
@@ -4443,10 +4655,15 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // classification artifact's must_check rows — a scoped artifact (the
   // #1595 lockfile-only refresh) reserves and tracks exactly the one
   // obligation it still names.
+  // #1629: the plan reserves against the EFFECTIVE (envelope-capped) budget,
+  // never the pre-cap number — a dependency-evidence PR whose run the
+  // low-risk envelope narrowed must still fit its reserved tail inside the
+  // envelope it actually gets, and the plan's no-lockout floor keeps the
+  // mandatory evidence reachable at any envelope the cap allows (>= 6).
   const dependencyPlan = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
     ? dependencyEvidencePlanFromClassification(
         () => deps.readText("classification.json"),
-        maxRequests.budget,
+        effectiveMaxRequests,
       )
     : { reserve: 0, obligations: [] as readonly DependencyEvidenceObligation[] };
   const dependencyReserve = dependencyPlan.reserve;
@@ -4524,9 +4741,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // resolutions, never their sum. Side by side, each held requests back near
   // the same ceiling, so a dependency-update PR had most of its remaining
   // budget reserved twice over by one loop.
+  // #1629: the reservations are a portion of the BUDGET THE LOOP WILL GET —
+  // the effective (envelope-capped) budget, never the pre-envelope number, or
+  // a capped low-risk run could reserve more than its whole envelope.
   const proseReserve = computeRequiredEvidenceReservation(
     requiredEvidence.filter((row) => row.obligation === undefined).length,
-    maxRequests.budget,
+    effectiveMaxRequests,
   );
   const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve);
   if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
@@ -4573,8 +4793,10 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     workspaceRoot,
     maxResponseBytes,
     requestTimeout,
-maxRequests: maxRequests.budget,
-reserveForRequiredEvidence,
+    // #1629: the loop sees the low-risk envelope's effective budget — the
+    // cap binds the loop's own gate, not just the artifact's telemetry.
+    maxRequests: effectiveMaxRequests,
+    reserveForRequiredEvidence,
 requiredEvidence,
 ...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
