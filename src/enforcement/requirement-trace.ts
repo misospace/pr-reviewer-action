@@ -73,14 +73,18 @@
  * confirmed-unmet rows, so the verdict relaxers can never relax past a
  * deterministic refutation.
  *
- * Additive to the existing `requirement_coverage` contract (#624): the model
- * emits the same `requirement_coverage` array, and each claim MAY carry
- * `enforcement`/`test` (arrays of `{file, line}`), a `reason`, and a
- * `disposition` (`met`|`unmet`|`not_applicable`|`unverifiable`) alongside the
- * existing `status`/`evidence` fields `normalizeRequirementCoverage` already
- * reads. This module reads those additive fields independently and never
- * mutates `requirement_coverage` normalization — the two folds are siblings
- * over the same untrusted payload.
+ * Consumes both claim vocabularies (#1660): the verdict WIRE shape —
+ * `status` (`satisfied`|`violated`|`unknown`) + `evidence[]`
+ * `{kind, ref, detail}`, the only shape the strict JSON schema can emit —
+ * and the additive fields (`enforcement`/`test` arrays of `{file, line}`, a
+ * `reason`, and a `disposition` (`met`|`unmet`|`not_applicable`|
+ * `unverifiable`) alongside the existing `status`/`evidence` fields
+ * `normalizeRequirementCoverage` already reads. A wire claim's location-
+ * bearing evidence refs (`file`/`test`/`diff`) become citations validated
+ * against the head checkout exactly like additive ones; `tool`/`ci` refs are
+ * acquisition disclosure, never citations (#1657). This module reads those
+ * claims independently and never mutates `requirement_coverage`
+ * normalization — the two folds are siblings over the same untrusted payload.
  *
 #1044/#1145/#1503 removal (#1658): the trace-only repair machinery — the
  * standalone repair pass, the in-loop gap probe and its trace-only
@@ -271,6 +275,7 @@ export const ARTIFACT_VERSION = 2;
 export const MAX_TRACE_FINAL_DIAGNOSTIC_ROWS = 8;
 const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
   "not-traced-by-reviewer", "disposition-invalid",
+  "coverage-status-mapped",
   "missing-reason", "non-code-reported-unmet", "out-of-scope-reported-unmet",
   "distributed-enforcement-group-uncovered",
   "distributed-topology-overflow",
@@ -2291,6 +2296,106 @@ interface RawClaim {
   enforcement?: unknown;
   test?: unknown;
   reason?: unknown;
+  // #1660: the #624 wire shape the verdict schema actually emits.
+  status?: unknown;
+  evidence?: unknown;
+}
+
+/**
+ * #1660: the verdict wire contract for one ledger row is the #624 shape —
+ * `status` (`satisfied` | `violated` | `unknown`) plus an `evidence[]` list
+ * of `{kind, ref, detail}` — and the strict JSON schema
+ * (`additionalProperties: false`) makes the additive #1658 fields
+ * (`disposition`/`enforcement`/`test`/`reason`) impossible for the model to
+ * emit. Reading only the additive fields turned EVERY wire-valid answer into
+ * a `disposition-invalid`/`missing-reason` or an absent claim, so an
+ * adequately investigated clean review was mechanically `unresolved_material`
+ * on every in-scope row and could never reach native APPROVE (#1676: 6/6
+ * unresolved under verdict approve + required_checks complete). The fold
+ * consumes the producer's vocabulary instead: the status maps onto the
+ * closed disposition ladder, and a location-bearing evidence ref (kind
+ * `file`/`test`/`diff`) becomes the same citation that is validated against
+ * the head checkout below. `kind: tool`/`ci` refs are acquisition
+ * disclosure, never location citations (#1657: a receipt proves what the
+ * loop fetched, never a semantic conclusion). Authority is unchanged: the
+ * reviewer's `status` is the semantic answer; the deterministic layer still
+ * validates only the objective provenance of the cited locations, and
+ * `unknown`/`violated` stay the reviewer's own gap claims (material).
+ */
+const COVERAGE_STATUS_DISPOSITION: ReadonlyMap<string, string> = new Map([
+  ["satisfied", "met"],
+  ["violated", "unmet"],
+  ["unknown", "unverifiable"],
+]);
+
+/** Map the wire `status` enum onto the fold's closed dispositions. Returns
+ * null when the claim carries no recognizable status — the claim then keeps
+ * the `disposition-invalid` degradation path. */
+function coverageStatusDisposition(claim: RawClaim): string | null {
+  if (typeof claim.status !== "string") return null;
+  return COVERAGE_STATUS_DISPOSITION.get(claim.status.trim().toLowerCase()) ?? null;
+}
+
+/** One evidence ref as a head-citable location: `path` or `path:line`
+ * (a `line-end` range suffix takes the first line). Anything that is not a
+ * path ref (`call-7`, a URL, free prose) yields null — it names no location
+ * the checkout validator can resolve. */
+function coverageRefLocation(ref: unknown): TraceLocation | null {
+  if (typeof ref !== "string") return null;
+  const trimmed = ref.trim();
+  if (trimmed === "") return null;
+  // #252 boundary: real paths never carry control characters, and a resolved
+  // location renders into the trace — so a hostile ref carrying a newline or
+  // terminal byte is rejected at the parse door, the same discipline
+  // `capReason` applies to evidence details. (The checkout validator would
+  // already refuse to credit it; this keeps the raw bytes out of the
+  // published rendering entirely.)
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) return null;
+  const match = /^([^\s:][^:]*?):(\d+)\b/.exec(trimmed);
+  if (match !== null) {
+    const line = Number(match[2]);
+    if (!Number.isSafeInteger(line) || line <= 0) return null;
+    return { file: match[1] as string, line };
+  }
+  // A bare path (no `:line`) is still a path-shaped ref; a token with any
+  // whitespace is prose, not a path.
+  if (/\s/.test(trimmed)) return null;
+  return { file: trimmed, line: 1 };
+}
+
+interface CoverageClaimEvidence {
+  enforcement: TraceLocation[];
+  test: TraceLocation[];
+  details: string[];
+}
+
+/** Parse the #624 `evidence[]` list into citable locations and disclosure
+ * details. `kind: test` citations join BOTH lists (a real test file is a
+ * location at head AND the test evidence a test-demanding row requires);
+ * `file`/`diff` citations join enforcement only. `tool`/`ci` citations are
+ * disclosure details, never locations. Bounded by the shared location cap. */
+function coverageClaimEvidence(claim: RawClaim): CoverageClaimEvidence {
+  const enforcement: TraceLocation[] = [];
+  const test: TraceLocation[] = [];
+  const details: string[] = [];
+  if (!Array.isArray(claim.evidence)) return { enforcement, test, details };
+  for (const item of claim.evidence) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const entry = item as { kind?: unknown; ref?: unknown; detail?: unknown };
+    const kind = typeof entry.kind === "string" ? entry.kind.trim().toLowerCase() : "";
+    const loc = coverageRefLocation(entry.ref);
+    if (kind === "test" && loc !== null && enforcement.length < MAX_TRACE_LOCATIONS) {
+      test.push(loc);
+      if (enforcement.length < MAX_TRACE_LOCATIONS) enforcement.push(loc);
+    } else if ((kind === "file" || kind === "diff") && loc !== null && enforcement.length < MAX_TRACE_LOCATIONS) {
+      enforcement.push(loc);
+    }
+    if (typeof entry.detail === "string" && details.length < MAX_TRACE_LOCATIONS) {
+      const detail = entry.detail.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+      if (detail !== "") details.push(detail);
+    }
+  }
+  return { enforcement, test, details };
 }
 
 /** Records an artifact-level parser/validation diagnostic. The final slot of
@@ -2435,8 +2540,21 @@ export function validateRequirementTrace(
       // well-formed `unmet` stays blocking, a positively-recorded documentation
       // literal in the trusted PR body is `met`, and anything not confirmable
       // from the domain's own source becomes a non-blocking `pending` advisory.
-      const modelDisposition = claim !== undefined && typeof claim.disposition === "string" ? claim.disposition.toLowerCase() : null;
-      const modelReason = claim !== undefined ? capReason(claim.reason) : "";
+      // #1660: the wire vocabulary is accepted here too: a `violated` claim
+      // is the reviewer's real gap on a non-code row (mirrors the additive
+      // `unmet`), `unknown`/`satisfied` stay non-forcing — a non-code row's
+      // positive confirmation remains the domain's own trusted source.
+      const wireModel = claim !== undefined ? coverageStatusDisposition(claim) : null;
+      const wireDetails = claim !== undefined ? coverageClaimEvidence(claim).details : [];
+      // An additive `disposition` outranks the wire status only when it is a
+      // valid ladder value — an invalid additive string must not silently
+      // shadow the reviewer's wire gap claim (#1660 review: same precedence
+      // rule as the in-scope branch).
+      const additiveModel = claim !== undefined && typeof claim.disposition === "string"
+        && TRACE_DISPOSITIONS.includes(claim.disposition.toLowerCase())
+        ? claim.disposition.toLowerCase() : null;
+      const modelDisposition = additiveModel ?? wireModel;
+      const modelReason = claim !== undefined ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(wireDetails.join("; "))) : "";
       enforcement = claim !== undefined ? parseLocations(claim.enforcement) : [];
       test = claim !== undefined ? parseLocations(claim.test) : [];
       reason = modelReason;
@@ -2460,11 +2578,26 @@ export function validateRequirementTrace(
       notes.push("not-traced-by-reviewer");
     } else {
       const rawDisposition = typeof claim.disposition === "string" ? claim.disposition.toLowerCase() : null;
-      disposition = rawDisposition !== null && TRACE_DISPOSITIONS.includes(rawDisposition) ? rawDisposition : "unverifiable";
-      if (rawDisposition === null || !TRACE_DISPOSITIONS.includes(rawDisposition)) notes.push("disposition-invalid");
+      const additiveValid = rawDisposition !== null && TRACE_DISPOSITIONS.includes(rawDisposition);
+      // #1660: a claim in the verdict's wire vocabulary (`status` +
+      // `evidence[]`) is a valid answer, not a malformed one. The additive
+      // fields stay accepted (tolerated shape, unchanged precedence); a
+      // wire-shaped claim maps here and its evidence refs flow into the SAME
+      // provenance validation below — an unevidenced or unresolvable
+      // `satisfied` still degrades exactly like an additive one.
+      const wireDisposition = additiveValid ? null : coverageStatusDisposition(claim);
+      disposition = additiveValid ? rawDisposition : wireDisposition !== null ? wireDisposition : "unverifiable";
+      if (wireDisposition !== null) notes.push("coverage-status-mapped");
+      if (!additiveValid && wireDisposition === null) notes.push("disposition-invalid");
+      const coverage = wireDisposition !== null ? coverageClaimEvidence(claim) : null;
       enforcement = parseLocations(claim.enforcement);
       test = parseLocations(claim.test);
+      if (coverage !== null) {
+        if (enforcement.length === 0) enforcement = coverage.enforcement;
+        if (test.length === 0) test = coverage.test;
+      }
       reason = capReason(claim.reason);
+      if (reason === "" && coverage !== null && coverage.details.length > 0) reason = capReason(coverage.details.join("; "));
 
       if (disposition === "not_applicable" || disposition === "unmet" || disposition === "unverifiable") {
         // Every disposition other than `met` is a claim the reviewer cannot
@@ -2614,10 +2747,24 @@ export function validateRequirementTrace(
   // claim).
   for (const { entry, reason } of outOfScope) {
     const claim = claimsById.get(entry.id);
-    const claimedUnmet = typeof claim?.disposition === "string" && claim.disposition.toLowerCase() === "unmet" && capReason(claim.reason) !== "";
+    const claimReason = claim !== undefined
+      ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(coverageClaimEvidence(claim).details.join("; ")))
+      : "";
+    // #1095/#1660: the reviewer's own gap claim, with a usable reason
+    // (additive `reason` or the wire evidence details). #1660 review: the
+    // SAME precedence rule as the in-scope and non-code branches — a VALID
+    // additive `disposition` answers the claim exclusively (an additive
+    // `met` is not overridden by a stray wire `violated`), and only a
+    // missing/malformed additive falls to the wire `status`.
+    const additiveClaim = typeof claim?.disposition === "string" && TRACE_DISPOSITIONS.includes(claim.disposition.toLowerCase())
+      ? claim.disposition.toLowerCase()
+      : null;
+    const claimedUnmet = claimReason !== "" && (additiveClaim !== null
+      ? additiveClaim === "unmet"
+      : claim !== undefined && coverageStatusDisposition(claim) === "unmet");
     if (claimedUnmet) {
       unmetClaimedIds.push(entry.id);
-      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
+      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: ["out-of-scope-reported-unmet"] });
     } else {
       rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
     }

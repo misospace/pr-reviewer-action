@@ -40,7 +40,7 @@ import { resolveDerivedObligations } from "../enforcement/derived-obligations.js
 import { resolveRiskObligations } from "../enforcement/risk-obligations.js";
 
 export const USER_MESSAGE_BASE =
-  "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.";
+  "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Answer satisfied only when your assessment of the relevant current-head evidence supports that the required behavior actually holds — a file or test citation identifies the evidence you relied on, but it does not establish semantic correctness by itself; answer violated when you have a supported counterexample or evidence that the requirement is not met; answer unknown when you cannot establish whether the requirement holds, including when you located a likely implementation or test but cannot establish its adequacy. One genuine observation may support several requirements; cite it for each.";
 
 const REQUIRED_CHECKS_PREAMBLE =
   "Required checks — disposition EACH of these review questions in the "
