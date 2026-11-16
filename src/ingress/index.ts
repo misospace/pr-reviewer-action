@@ -8,6 +8,8 @@
 //   github-app-auth.ts   - App JWT mint + short-lived repo-scoped installation-token broker
 //   github-app-client.ts - GitHub App read+write capability client over the typed transport
 //   forgejo-events.ts    - native Gitea/Forgejo event projection onto the #728 envelope
+//   gitea-events.ts      - Gitea-named ingress entry point (#1678) onto that same
+//                          shared projection: verifier, parse, non-HTTP dispatch, handler
 //   webhook-handler.ts   - Node http webhook ingress (verify before parse, fixed bodies)
 //   github-webhook-handler.ts - Node http GitHub App webhook ingress
 //                           (X-Hub-Signature-256 over the RAW body; the event-name
@@ -42,6 +44,19 @@ export {
   verifyGitHubWebhookSignature,
 } from "./github-app-signature.js";
 export { projectForgejoWebhookPayload } from "./forgejo-events.js";
+export type {
+  GiteaWebhookDelivery,
+  GiteaWebhookDispatchOptions,
+  GiteaWebhookDispatchOutcome,
+} from "./gitea-events.js";
+export {
+  computeGiteaWebhookSignature,
+  createGiteaWebhookHandler,
+  dispatchGiteaWebhookEvent,
+  parseGiteaWebhookEvent,
+  projectGiteaWebhookPayload,
+  verifyGiteaWebhookSignature,
+} from "./gitea-events.js";
 
 export type {
   AuthFailureClassification,
@@ -65,11 +80,21 @@ export type {
 } from "./github-app-client.js";
 export { GitHubAppCapabilityClient } from "./github-app-client.js";
 
-export type { ForgejoEndpoints, RepositoryEndpoints } from "./endpoints.js";
-export { resolveForgejoEndpoints, resolveRepositoryEndpoints } from "./endpoints.js";
+export type {
+  ForgejoEndpoints,
+  IngressEndpoints,
+  RepositoryEndpoints,
+} from "./endpoints.js";
+export {
+  FORGEJO_WEBHOOK_PATH,
+  GITEA_WEBHOOK_PATH,
+  resolveForgejoEndpoints,
+  resolveRepositoryEndpoints,
+  selectIngressEndpoints,
+} from "./endpoints.js";
 
 export type { ReadResult, ForgejoIngressClientOptions } from "./api-client.js";
-export { ForgejoIngressClient } from "./api-client.js";
+export { ForgejoIngressClient, createGiteaIngressClient } from "./api-client.js";
 
 export type { CloneCredential } from "./clone-credentials.js";
 export { buildCloneCredential } from "./clone-credentials.js";
@@ -83,6 +108,7 @@ export type {
 export {
   FORGEJO_CAPABILITIES,
   GITHUB_CAPABILITIES,
+  GITEA_CAPABILITIES,
   capabilitiesFor,
   requireCapability,
 } from "./capabilities.js";

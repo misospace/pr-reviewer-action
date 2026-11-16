@@ -108,7 +108,9 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   // implements it and the contract documents it), so the typed config
   // vocabulary must accept it — the resolver, not this enum, owns the
   // fail-closed TANGLED_REPO_DID requirement.
-  platform: ["auto", "forgejo", "github", "tangled"],
+  // #1678: 'gitea' is likewise resolvable — it selects the Forgejo/Gitea wire
+  // family with the Gitea identity, which is what refuses 'authorized_integration'.
+  platform: ["auto", "forgejo", "gitea", "github", "tangled"],
   "forgejo-auth-method": ["token", "authorized_integration"],
 });
 

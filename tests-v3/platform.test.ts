@@ -76,7 +76,10 @@ test("platform auto-detection mirrors the v2 seam", () => {
   assert.equal(resolvePlatform("auto", "", "https://git.example.com", ""), "forgejo");
   assert.equal(resolvePlatform("AUTO", "https://git.example.com", "", ""), "forgejo");
   assert.equal(resolvePlatform("forgejo", "", "", ""), "forgejo");
-  assert.throws(() => resolvePlatform("gitea", "", "", ""), /unsupported PLATFORM/);
+  // #1678: Gitea is admitted as an explicit declaration and resolves to the
+  // Forgejo/Gitea wire family; the identity itself is reported separately by
+  // `declaredForgeId`, and `auto` never selects it.
+  assert.equal(resolvePlatform("gitea", "", "", ""), "forgejo");
 });
 
 test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#583)", () => {
@@ -104,7 +107,7 @@ test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#58
   // The unsupported-value diagnostic lists every resolvable platform.
   assert.throws(
     () => resolvePlatform("gitlab", "", "", ""),
-    (e: unknown) => e instanceof Error && e.message === "unsupported PLATFORM 'gitlab' (expected github|forgejo|tangled|auto)",
+    (e: unknown) => e instanceof Error       && e.message === "unsupported PLATFORM 'gitlab' (expected github|forgejo|gitea|tangled|auto)",
   );
 });
 

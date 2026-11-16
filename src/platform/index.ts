@@ -1,6 +1,14 @@
 export { ForgejoAdapter, type ForgejoAdapterOptions } from "./forgejo.js";
 export { GitHubAdapter, nextLink, type GitHubAdapterOptions } from "./github.js";
 export {
+  createGiteaPlatform,
+  createGiteaPullRequestClient,
+  giteaAdapterFromEnv,
+  giteaTokenFromEnv,
+  type GiteaPlatformOptions,
+  type GiteaPullRequestClientOptions,
+} from "./gitea.js";
+export {
   DEFAULT_TEXT_RESPONSE_MAX_BYTES,
   PlatformRequestError,
   requestJson,
@@ -8,7 +16,14 @@ export {
   type FetchLike,
 } from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
-export { resolvePlatform, type ResolvedPlatform } from "./resolve.js";
+export {
+  declaredForgeId,
+  forgeWireFamily,
+  resolvePlatform,
+  type ForgeId,
+  type GiteaFamilyForge,
+  type ResolvedPlatform,
+} from "./resolve.js";
 export {
   TANGLED_NOT_IMPLEMENTED,
   TangledCapabilityError,

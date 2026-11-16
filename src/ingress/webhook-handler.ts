@@ -36,10 +36,24 @@ export interface ForgejoWebhookHandlerOptions {
   readonly maxBodyBytes?: number | undefined;
   readonly rereviewLabel?: string | undefined;
   readonly onEvent: (event: CanonicalForgeEvent) => void | Promise<void>;
-  /** The operator-mode event router. When present, a canonical `follow_up`
-   * delivery is handed to it (and never to `onEvent`); everything else is
-   * unchanged. Absent → the handler behaves exactly as it did before. */
+  /** operator-mode event router. When present, canonical `follow_up`
+   * delivery is handed to it (and never to `onEvent`); everything else
+   * unchanged. Absent → handler behaves exactly it did before. */
   readonly router?: OperatorEventRouter | undefined;
+  /** #1678: the native-vocabulary projection that runs before the #728
+   * normalizer. Defaults to the Forgejo projection; a Gitea intake passes
+   * `projectGiteaWebhookPayload`. The whole HTTP pipeline — raw-body-first
+   * verification, fixed response bodies, the size bound, the header shape
+   * guards, and the router seam — is shared, so a second forge cannot grow a
+   * second, weaker copy of it. */
+  readonly project?:
+    | ((
+        eventHeader: string,
+        eventTypeHeader: string,
+        payload: Record<string, unknown>,
+        normalizeOptions: { rereviewLabel?: string },
+      ) => Record<string, unknown>)
+    | undefined;
 }
 
 function send(res: ServerResponse, status: number, body: string): void {
@@ -166,7 +180,8 @@ export function createForgejoWebhookHandler(
       // non-array object) is passed through directly.
       const normalizeOptions =
         options.rereviewLabel === undefined ? {} : { rereviewLabel: options.rereviewLabel };
-      const payload = projectForgejoWebhookPayload(
+      const project = options.project ?? projectForgejoWebhookPayload;
+      const payload = project(
         eventHeader,
         eventTypeHeader,
         parsed as Record<string, unknown>,

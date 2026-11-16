@@ -125,6 +125,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/syntax-aware-context.md`](docs/architecture/syntax-aware-context.md) — #764 optional syntax-aware context stage: provider seam, budgets, provenance, measured recall/noise
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
 - [`docs/tangled.md`](docs/tangled.md) — #592 experimental Tangled support: setup, configuration, identity model, support matrix, guardrails
+[`docs/gitea.md`](docs/gitea.md) — upstream Gitea on the Forgejo wire family: instance config, webhook setup, and what the Gitea identity refuses
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint

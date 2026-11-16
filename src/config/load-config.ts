@@ -152,6 +152,14 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
     config[toCamelCase(input.id)] = SECRET_INPUTS.has(input.id) ? secretValue(text) : value;
   }
   if (config.forgejoAuthMethod === "authorized_integration") {
+    // #1678: Authorized OAuth Integrations are a Forgejo feature. Checking the
+    // declared platform here rejects the combination at the typed input boundary
+    // — before any token lookup or request — instead of surfacing it later as an
+    // authentication failure that no longer names the misconfiguration. The
+    // adapter and publish-API constructors repeat the guard for direct callers.
+    if (config.platform === "gitea") {
+      throw new Error("Input 'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'; Gitea supports only 'token' mode");
+    }
     if (typeof config.forgejoAuthorizedIntegrationAudience !== "string"
       || config.forgejoAuthorizedIntegrationAudience.trim() === "") {
       throw new Error("Input 'forgejo-authorized-integration-audience' is required when 'forgejo-auth-method' is 'authorized_integration'");

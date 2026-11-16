@@ -5,6 +5,7 @@ import {
   type RequestOptions,
 } from "../platform/http.js";
 import { resolveForgejoEndpoints, type ForgejoEndpoints } from "./endpoints.js";
+import type { GiteaFamilyForge } from "../platform/resolve.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 
 /** The one result shape for every read. `ok` discriminates success from the
@@ -17,6 +18,10 @@ export type ReadResult<T> =
 export interface ForgejoIngressClientOptions {
   readonly endpoint: string;
   readonly token: string;
+  /** #1678: which product the endpoint runs. It changes ONLY the fixed error
+   * text, never a route, a path, or the auth scheme — Gitea and Forgejo share
+   * `/api/v1` and `Authorization: token <value>`. Defaults to `"forgejo"`. */
+  readonly forge?: GiteaFamilyForge | undefined;
   readonly timeoutMs?: number | undefined;
   readonly fetchImpl?: FetchLike | undefined;
 }
@@ -37,6 +42,8 @@ export interface ForgejoIngressClientOptions {
  */
 export class ForgejoIngressClient {
   readonly endpoints: ForgejoEndpoints;
+  /** #1678: the product this client talks to. Diagnostics only — see the option. */
+  readonly forge: GiteaFamilyForge;
 
   #token: string;
   #timeoutMs: number | undefined;
@@ -47,6 +54,7 @@ export class ForgejoIngressClient {
     // credentials, non-http(s), empty) is refused before any credential is
     // even considered, so a token can never bind to an unvalidated origin.
     this.endpoints = resolveForgejoEndpoints(opts.endpoint);
+    this.forge = opts.forge ?? "forgejo";
     if (opts.token === "" || opts.token.includes("\r") || opts.token.includes("\n")) {
       throw new Error("invalid Forgejo ingress token");
     }
@@ -81,9 +89,9 @@ export class ForgejoIngressClient {
       // caller gets only the fixed string: no response internals and no token
       // are echoed.
       if (error instanceof PlatformRequestError) {
-        return { ok: false, error: "forgejo ingress request failed" };
+        return { ok: false, error: `${this.forge} ingress request failed` };
       }
-      return { ok: false, error: "forgejo ingress request failed" };
+      return { ok: false, error: `${this.forge} ingress request failed` };
     }
 
     if (result.status < 200 || result.status >= 300) {
@@ -148,6 +156,24 @@ export class ForgejoIngressClient {
 /** Pagination bounds for the open-PR reconciliation listing. */
 const RECONCILE_PAGE_SIZE = 50;
 const MAX_RECONCILE_PAGES = 20;
+
+/** The read-only ingress client for a Gitea instance (#1678).
+ *
+ * This is the Forgejo client with the Gitea identity, not a subclass: Gitea
+ * serves the same `/api/v1` routes and the same `Authorization: token <value>`
+ * scheme, so a second client would be a second place for the origin-binding,
+ * credential, and error-mapping invariants to drift.
+ *
+ * The reconciliation poll that consumes this client still declares
+ * `platform: "forgejo"` in `ReconcileOptions`: that field is part of the
+ * canonical event's identity, and Gitea events normalize through the same
+ * family, so a poll naming `gitea` would mint a DIFFERENT generation id from the
+ * webhook for the same head and the two would never converge. */
+export function createGiteaIngressClient(
+  options: Omit<ForgejoIngressClientOptions, "forge">,
+): ForgejoIngressClient {
+  return new ForgejoIngressClient({ ...options, forge: "gitea" });
+}
 
 /** The path-only representation of a URL (pathname + query) for diagnostics.
  * Never throws: falls back to the raw string if it is not a valid URL. */

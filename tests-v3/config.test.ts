@@ -34,6 +34,26 @@ test("Forgejo Authorized Integration requires an audience and refuses an explici
   assert.equal(loadConfig(contract, { ...base, "forgejo-auth-method": "token", "forgejo-token": "secret" }).forgejoAuthMethod, "token");
 });
 
+test("#1678: platform gitea refuses the Forgejo-only authorized_integration auth method", () => {
+  const base = {
+    "ai-base-url": "https://llm.example",
+    "ai-model": "m",
+    platform: "gitea",
+    "forgejo-auth-method": "authorized_integration",
+    "forgejo-authorized-integration-audience": "aud",
+  };
+  // Rejected at the typed input boundary — before any token lookup or request —
+  // rather than surfacing later as an authentication failure that no longer
+  // names the misconfiguration.
+  assert.throws(
+    () => loadConfig(contract, base),
+    /'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'/,
+  );
+  // The Gitea declaration itself is accepted, in token mode.
+  assert.equal(loadConfig(contract, { ...base, "forgejo-auth-method": "token" }).platform, "gitea");
+  assert.equal(loadConfig(contract, { ...base, platform: "forgejo" }).forgejoAuthMethod, "authorized_integration");
+});
+
 test("current canonical contract validates and maps every input once", () => {
   const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "test-value" : String(input.default)]));
   const config = loadConfig(contract, raw);
@@ -138,7 +158,7 @@ test("#1247: the typed platform enum accepts every documented platform value, an
   // The platform vocabulary the contract documents and `resolvePlatform`
   // implements. The typed enum is the vocabulary gate only: resolution (and
   // the Tangled identity requirement) belongs to the platform seam.
-  const supported = ["auto", "forgejo", "github", "tangled"];
+  const supported = ["auto", "forgejo", "gitea", "github", "tangled"];
   const platformInput = contract.inputs.find((input) => input.id === "platform");
   assert.ok(platformInput, "the contract declares the platform input");
   const documented = documentedPlatformValues(platformInput.description);
@@ -158,6 +178,9 @@ test("#1247: the typed platform enum accepts every documented platform value, an
   for (const [value, expected] of [
     ["auto", "github"],
     ["forgejo", "forgejo"],
+    // #1678: 'gitea' is accepted by the typed vocabulary and resolves to the
+    // Forgejo/Gitea wire family — the resolver, not the enum, owns that mapping.
+    ["gitea", "forgejo"],
     ["github", "github"],
     ["tangled", "tangled"],
   ] as const) {
