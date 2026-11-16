@@ -10,14 +10,21 @@
  * differently can be added without touching the acquisition module.
  */
 
-export type AcquisitionPlatform = "github" | "forgejo";
+export type AcquisitionPlatform = "github" | "forgejo" | "gitea";
 
 const PR_NUMBER_RE = /^[1-9]\d*$/;
+
+/** #1678: Gitea inherited `refs/pull/<n>/head` from the same codebase Forgejo
+ * did, so the family shares ONE ref form. Listing the members here (instead of a
+ * second branch returning the same string) keeps the naming definition single. */
+function isGiteaFamily(platform: AcquisitionPlatform): boolean {
+  return platform === "forgejo" || platform === "gitea";
+}
 
 export function pullRequestHeadRef(platform: AcquisitionPlatform, prNumber: number): string | null {
   if (typeof prNumber !== "number" || !Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
   if (!PR_NUMBER_RE.test(String(prNumber))) return null;
-  if (platform !== "github" && platform !== "forgejo") return null;
+  if (platform !== "github" && !isGiteaFamily(platform)) return null;
   return `refs/pull/${prNumber}/head`;
 }
 
@@ -26,6 +33,6 @@ export function pullRequestHeadRef(platform: AcquisitionPlatform, prNumber: numb
  * acquisition mirror composes its fetch refspecs from this seam — the
  * per-platform PR-ref naming lives here, nowhere else. */
 export function pullHeadRefspec(platform: AcquisitionPlatform): string | null {
-  if (platform !== "github" && platform !== "forgejo") return null;
+  if (platform !== "github" && !isGiteaFamily(platform)) return null;
   return "+refs/pull/*:refs/pull/*";
 }

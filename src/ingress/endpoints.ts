@@ -1,5 +1,6 @@
 import { parsePlatformBaseUrl } from "../platform/urls.js";
 import { parseRepoRef, repoScopedUrl, type RepoRef } from "../platform/repo-ref.js";
+import type { GiteaFamilyForge } from "../platform/resolve.js";
 
 export interface ForgejoEndpoints {
   readonly base: string;
@@ -45,5 +46,39 @@ export function resolveRepositoryEndpoints(endpoint: string, repo: string): Repo
     repoRef,
     repoApiUrl,
     cloneUrl: `${forgejo.webBase}/${repoRef.owner}/${repoRef.name}.git`,
+  };
+}
+
+/** The route each native intake is mounted on, and the route an operator points
+ * a forge webhook at. Gitea sends no path of its own, so this is the single
+ * place the route is named for both sides of the boundary. */
+export const FORGEJO_WEBHOOK_PATH = "/webhooks/forgejo";
+export const GITEA_WEBHOOK_PATH = "/webhooks/gitea";
+
+export interface IngressEndpoints {
+  readonly forge: GiteaFamilyForge;
+  readonly endpoints: ForgejoEndpoints;
+  readonly webhookPath: string;
+}
+
+/** Resolve the ingress surface for one Gitea-family forge (#1678).
+ *
+ * Gitea and Forgejo share the `/api/v1` REST base, so `resolveForgejoEndpoints`
+ * stays the one validator and the two forges can never drift on base-path
+ * handling. What differs is only the route the operator mounts, and naming the
+ * forge here means the mount point is derived from the configured forge instead
+ * of being spelled out at each call site.
+ *
+ * GitHub is deliberately absent: its ingress is the App intake
+ * (`github-webhook-handler.ts`) with its own signature scheme and no `/api/v1`
+ * base, so it must not be resolvable through this seam. */
+export function selectIngressEndpoints(
+  forge: GiteaFamilyForge,
+  endpoint: string,
+): IngressEndpoints {
+  return {
+    forge,
+    endpoints: resolveForgejoEndpoints(endpoint),
+    webhookPath: forge === "gitea" ? GITEA_WEBHOOK_PATH : FORGEJO_WEBHOOK_PATH,
   };
 }

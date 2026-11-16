@@ -1,10 +1,15 @@
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { resolvePlatform } from "../platform/resolve.js";
+import { declaredForgeId, forgeWireFamily, resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import {
+  createGiteaPlatform,
+  createGiteaPullRequestClient,
+  giteaTokenFromEnv,
+} from "../platform/gitea.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
@@ -63,6 +68,17 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
   if (platform === "forgejo") {
+    // #1678: an explicitly declared Gitea instance keeps the Forgejo-family
+    // adapter (one wire protocol) but carries the Gitea identity, which is what
+    // refuses the Forgejo-only `authorized_integration` mode.
+    if (declaredForgeId(env.PLATFORM, "forgejo") === "gitea") {
+      return createGiteaPlatform({
+        repo,
+        prNumber,
+        baseUrl: env.FORGEJO_API_URL ?? "",
+        token: giteaTokenFromEnv(env),
+      });
+    }
     return new ForgejoAdapter({
       repo,
       prNumber,
@@ -804,12 +820,17 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
     return { api, platform, diffProvider };
   }
   requireImplementedBackend(platform);
-  const token = platform === "forgejo" ? forgejoTokenFromEnv(env) : ghToken(env);
+  // #1678: the Gitea identity selects the Gitea factories for both the read and
+  // the publish side; `forgeWireFamily` keeps the token source and the publish
+  // API choice on the wire family, so the two can never disagree.
+  const forge = declaredForgeId(env.PLATFORM, platform);
+  const family = forgeWireFamily(forge);
+  const token = family === "forgejo" ? (forge === "gitea" ? giteaTokenFromEnv(env) : forgejoTokenFromEnv(env)) : ghToken(env);
   const apiOptions = {
     repo,
     prNumber,
-    ...(token ? { token: platform === "forgejo" ? token : `Bearer ${token}` } : {}),
-    ...(platform === "github" && env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
+    ...(token ? { token: family === "forgejo" ? token : `Bearer ${token}` } : {}),
+    ...(family === "github" && env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
   };
   const diffProvider = async (): Promise<string> =>
     // #1520: the Forgejo adapter's inline-position re-validation anchors
@@ -823,14 +844,20 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
     // construction; ambient `PR_REVIEWER_RUN_DIR` is never consulted here.
     // A caller that passes no run dir gets only the fresh-read fallback.
     reviewedDiffFromRunDir(runDir) ?? buildAdapter(env).getPrDiff();
-  const api: PublishPlatformApi = platform === "forgejo"
-    ? new ForgejoPublishApi({
-      ...apiOptions,
-      baseUrl: env.FORGEJO_API_URL ?? "",
-      authMethod: env.FORGEJO_AUTH_METHOD,
-      authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE,
-      diffProvider,
-    })
+  const api: PublishPlatformApi = family === "forgejo"
+    ? (forge === "gitea"
+        ? createGiteaPullRequestClient({
+            ...apiOptions,
+            baseUrl: env.FORGEJO_API_URL ?? "",
+            diffProvider,
+          })
+        : new ForgejoPublishApi({
+            ...apiOptions,
+            baseUrl: env.FORGEJO_API_URL ?? "",
+            authMethod: env.FORGEJO_AUTH_METHOD,
+            authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE,
+            diffProvider,
+          }))
     : new GitHubPublishApi(apiOptions);
   return { api, platform, diffProvider };
 }

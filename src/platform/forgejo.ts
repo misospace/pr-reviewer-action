@@ -20,6 +20,7 @@ import {
   type ExternalCheck,
 } from "./normalize.js";
 import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
+import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
 import type {
@@ -166,6 +167,10 @@ export interface ForgejoAdapterOptions {
   authMethod?: string | undefined;
   /** Audience for the authorized-integration OIDC JWT exchange. */
   authorizedIntegrationAudience?: string | undefined;
+  /** #1678: which product this endpoint actually runs. Defaults to `"forgejo"`;
+   * `"gitea"` keeps the shared wire protocol but refuses the Forgejo-only
+   * `authorized_integration` auth method at construction. */
+  forge?: GiteaFamilyForge | undefined;
   timeoutMs?: number | undefined;
   fetchImpl?: FetchLike | undefined;
 }
@@ -209,6 +214,10 @@ function parseRepo(repo: string): { owner: string; repo: string } {
  */
 export class ForgejoAdapter implements PlatformReadAdapter {
   readonly platform = "forgejo" as const;
+  /** #1678: the product this endpoint runs — `"forgejo"` (default) or `"gitea"`.
+   * The protocol is identical, so this never selects a different route; it is
+   * the identity a Forgejo-only capability is refused against. */
+  readonly forge: GiteaFamilyForge;
   readonly repo: string;
   readonly prNumber: string;
   private readonly baseUrl: string;
@@ -231,6 +240,16 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     this.token = options.token;
     this.authMethod = options.authMethod ?? "";
     this.audience = options.authorizedIntegrationAudience ?? "";
+    this.forge = options.forge ?? "forgejo";
+    // #1678: Authorized OAuth Integrations (an OIDC-asserted JWT exchanged for
+    // a short-lived API token) are a Forgejo feature; upstream Gitea has no
+    // such endpoint. Fail at construction rather than at the first exchange, so
+    // a misconfigured Gitea instance never starts review work it cannot
+    // authenticate — the same constructor-time refusal shape `resolvePlatform`
+    // uses for `tangled` without a DID.
+    if (this.forge === "gitea" && this.isAuthorizedIntegrationMode()) {
+      throw new Error(GITEA_INTEGRATION_REFUSAL);
+    }
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
