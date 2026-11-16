@@ -26,6 +26,24 @@ export function forgeProductLabel(forge: GiteaFamilyForge): "Forgejo" | "Gitea" 
   return forge === "gitea" ? "Gitea" : "Forgejo";
 }
 
+/** True when the declared identity refuses the given auth method.
+ *
+ * Authorized OAuth Integrations (an OIDC-asserted JWT exchanged for a
+ * short-lived API token) exist only on Forgejo, so `authorized_integration`
+ * is a Forgejo-only mode. The rule lives here so every boundary that
+ * applies it asks the seam: the token reader below, the read adapter, the
+ * publish client, and the typed input boundary.
+ */
+export function forgeRefusesAuthMethod(
+  forge: GiteaFamilyForge,
+  authMethod: string | undefined,
+): boolean {
+  return (
+    forge === "gitea" &&
+    (authMethod ?? "").trim().toLowerCase() === "authorized_integration"
+  );
+}
+
 /** The token reader for a declared Gitea-family identity.
  *
  * The family's own environment contract is shared (`FORGEJO_TOKEN`), so the

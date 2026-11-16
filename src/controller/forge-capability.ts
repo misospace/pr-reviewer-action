@@ -502,9 +502,21 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
 function composeForgejo(input: ForgeCompositionInput): ComposedForge {
   const endpoint = input.endpoint;
   const token = input.forgejoToken!;
+  // The CONFIGURED identity (#1682): the product the operator declared
+  // (`forgejo` or `gitea`). The seam owns that mapping
+  // (`declaredFamilyForge`), so the composition never branches on a product
+  // name of its own.
+  //
+  // The identity reaches the ADAPTERS, not only the diagnostics: they
+  // refuse what the declared product does not have (the Forgejo-only
+  // `authorized_integration` mode) and name the product in their own
+  // failures, so a direct caller cannot skip the guard the composition
+  // applied.
+  const identity = declaredFamilyForge(input.platform);
   const ingress = new ForgejoIngressClient({
     endpoint,
     token,
+    forge: identity,
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
   });
 
@@ -533,6 +545,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(job.prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const pr = await adapter.getPr();
@@ -551,13 +564,14 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(input_.job.prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const written = await api.upsertStickyComment(
         CONTROLLER_STICKY_MARKER,
         renderDurableResultBody(CONTROLLER_STICKY_MARKER, input_.resultPayload),
       );
-      if (!written.ok) throw new Error(`the Forgejo publication failed: ${written.error ?? "unknown error"}`);
+      if (!written.ok) throw new Error(`the ${identity} publication failed: ${written.error ?? "unknown error"}`);
       return { publicationId: `${FORGEJO_PUBLICATION_PREFIX}${written.commentId ?? "unknown"}` };
     },
   };
@@ -591,6 +605,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const listed = await adapter.listPrConversationComments();
@@ -603,6 +618,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       return derivePrStateReading(await adapter.getPr());
@@ -613,6 +629,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const posted = await api.postIssueComment(body);
@@ -624,6 +641,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const pr = await adapter.getPr();
@@ -640,6 +658,7 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         prNumber: String(prNumber),
         baseUrl: endpoint,
         token,
+        forge: identity,
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
       });
       const pr = await adapter.getPr();
@@ -655,12 +674,6 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
       };
     },
   };
-
-  // The CONFIGURED identity (#1682): the product the operator declared
-  // (`forgejo` or `gitea`). The seam owns that mapping
-  // (`declaredFamilyForge`), so the composition never branches on a product
-  // name of its own.
-  const identity = declaredFamilyForge(input.platform);
 
   return {
     // The CANONICAL platform stays the `forgejo` family: every canonical

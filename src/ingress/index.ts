@@ -88,6 +88,7 @@ export type {
 export {
   FORGEJO_WEBHOOK_PATH,
   GITEA_WEBHOOK_PATH,
+  ingressWebhookPath,
   resolveForgejoEndpoints,
   resolveRepositoryEndpoints,
   selectIngressEndpoints,

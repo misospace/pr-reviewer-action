@@ -113,7 +113,7 @@ import {
 } from "../executor/index.js";
 import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
-import { selectIngressEndpoints } from "../ingress/endpoints.js";
+import { ingressWebhookPath } from "../ingress/endpoints.js";
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -1056,9 +1056,10 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
 
 /** The CANONICAL route the daemon's intake answers on (#1682).
  *
- * The route is named by the INGRESS SEAM (`selectIngressEndpoints`), never by
- * a literal here: the operator's webhook URL and the daemon's own surface
- * can never disagree about where a Gitea delivery lands.
+ * The route is named by the INGRESS SEAM (`ingressWebhookPath`, the same
+ * route `selectIngressEndpoints` names), never by a literal here: the
+ * operator's webhook URL and the daemon's own surface can never disagree
+ * about where a Gitea delivery lands.
  *
  * - GitHub has no route in that seam (the App intake is path-agnostic), so
  *   the daemon serves its whole webhook port, as it always did.
@@ -1066,27 +1067,15 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
  *   (`gitea` → `/webhooks/gitea`, `forgejo` → `/webhooks/forgejo`): that
  *   label is what selects the intake's own projection, so the route and the
  *   projection always agree.
- * - No endpoint to resolve against (no configured integration at all) means
- *   no route: the seam resolves and validates the endpoint it names the
- *   route from, and the daemon never guesses one.
+ *
+ * The route is the DOCUMENTED mount, not a filter: the webhook port keeps
+ * answering every path it answered before, so an existing deployment's
+ * webhook URL never breaks.
  */
 function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
   const platform = options.webhook?.platform;
   if (platform === undefined || platform === "github") return "";
-  const bound =
-    options.forgeIntegration === undefined
-      ? undefined
-      : options.instance.forges.find((entry) => entry.name === options.forgeIntegration);
-  const family = options.instance.forges.filter((entry) => forgeFamily(entry.kind) === "forgejo");
-  const endpoint = bound?.endpoint ?? (family.length === 1 ? family[0]!.endpoint : undefined);
-  if (endpoint === undefined) return "";
-  try {
-    return selectIngressEndpoints(platform, endpoint).webhookPath;
-  } catch {
-    // The seam refuses an endpoint it cannot validate. The daemon does not
-    // name a route it cannot prove; it never names a wrong one.
-    return "";
-  }
+  return ingressWebhookPath(platform);
 }
 
 /** Start the controller daemon. Fails closed: every option is validated

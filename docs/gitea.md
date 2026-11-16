@@ -81,16 +81,19 @@ the handler fails closed, and it verifies the signature over the raw body
 before parsing any JSON.
 
 `createGiteaWebhookHandler` and `dispatchGiteaWebhookEvent` are served
-today by the Action runtime and by `createOperatorHost({ platform:
-"gitea" })`. The shipped controller daemon selects them too: the instance
-schema accepts `kind: gitea`, and a Gitea instance runs the Gitea
-projection. That projection matters for pull request comments. Gitea
-sends the pull request link at `issue.pull_request` without a number,
-and the shared Forgejo projection leaves that link alone. The Gitea
-projection moves the richer top level pull request onto
-`issue.pull_request`, so the delivery takes the issue path that a
-follow-up needs. Without it, a pull request comment never schedules a
-follow-up.
+by the operator host (`createOperatorHost({ platform: "gitea" })`) and by
+the shipped controller daemon. The instance schema accepts `kind: gitea`,
+and a Gitea instance runs the Gitea projection. That projection matters
+for pull request comments. Gitea sends the pull request link at
+`issue.pull_request` without a number, and the shared Forgejo projection
+leaves that link alone. The Gitea projection moves the richer top level
+pull request onto `issue.pull_request`, so the delivery takes the issue
+path that a follow-up needs. Without it, a pull request comment never
+schedules a follow-up.
+
+The Action runtime does not use this projection. It reads the event the
+forge sends to the runner and normalizes it with the shared normalizer, so
+the raw body projection has no place there.
 
 Subscribe the webhook to the events that schedule reviews:
 

@@ -2,6 +2,8 @@ import type { ActionContract } from "./contract.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, POSITIVE_INTEGER_INPUTS, SECRET_INPUTS } from "./schema.js";
 import { parseExtraHeaders } from "../transport/headers.js";
 import { isRuntimeConfig, isSecretValue, secretValue, type RuntimeConfig } from "./types.js";
+import { forgeRefusesAuthMethod } from "../platform/forge-identity.js";
+import { declaredFamilyForge, GITEA_INTEGRATION_REFUSAL } from "../platform/resolve.js";
 
 type MutableConfig = Record<string, string | number | boolean | ReturnType<typeof secretValue>>;
 export const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
@@ -151,14 +153,21 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
     if (allowed && text !== "" && !allowed.includes(text)) throw new Error(`Input '${input.id}' must be one of: ${allowed.join(", ")}`);
     config[toCamelCase(input.id)] = SECRET_INPUTS.has(input.id) ? secretValue(text) : value;
   }
-  if (config.forgejoAuthMethod === "authorized_integration") {
+  const authMethod = typeof config.forgejoAuthMethod === "string" ? config.forgejoAuthMethod : undefined;
+  const declaredPlatform = typeof config.platform === "string" ? config.platform : undefined;
+  if (authMethod === "authorized_integration") {
     // #1678: Authorized OAuth Integrations are a Forgejo feature. Checking the
     // declared platform here rejects the combination at the typed input boundary
     // — before any token lookup or request — instead of surfacing it later as an
     // authentication failure that no longer names the misconfiguration. The
     // adapter and publish-API constructors repeat the guard for direct callers.
-    if (config.platform === "gitea") {
-      throw new Error("Input 'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'; Gitea supports only 'token' mode");
+    // #1682: the RULE lives in the platform seam (`forgeRefusesAuthMethod`), so
+    // this boundary and the token reader cannot disagree about it, and the
+    // refusal quotes the seam's canonical message.
+    if (forgeRefusesAuthMethod(declaredFamilyForge(declaredPlatform), authMethod)) {
+      throw new Error(
+        `Input 'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'. ${GITEA_INTEGRATION_REFUSAL}`,
+      );
     }
     if (typeof config.forgejoAuthorizedIntegrationAudience !== "string"
       || config.forgejoAuthorizedIntegrationAudience.trim() === "") {

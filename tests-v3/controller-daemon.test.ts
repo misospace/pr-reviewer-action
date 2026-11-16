@@ -3015,6 +3015,24 @@ test("a signed Gitea IssueCommentPayload (no top-level number) drives a follow_u
 
   const body = JSON.stringify({
     action: "created",
+    // The REAL Gitea shape: the pull request rides at the top level with
+    // its number, and `issue.pull_request` carries the number-LESS
+    // `PullRequestMeta` Gitea sets on a pull request linked issue. The
+    // Gitea projection moves the top level pull request onto
+    // `issue.pull_request`, so the normalizer takes the issue path that a
+    // follow-up needs. Without that move the shared Forgejo projection
+    // leaves `issue.pull_request` alone, the normalizer prefers the top
+    // level pull request, and the delivery is NOT a follow_up. This payload
+    // therefore discriminates the two projections.
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
     issue: {
       id: 12,
       url: "https://gitea.example/owner/repo/issues/7",
@@ -3098,6 +3116,24 @@ test("the daemon serves the Gitea intake on the canonical Gitea route (#1682)", 
 
   const body = JSON.stringify({
     action: "created",
+    // The REAL Gitea shape: the pull request rides at the top level with
+    // its number, and `issue.pull_request` carries the number-LESS
+    // `PullRequestMeta` Gitea sets on a pull request linked issue. The
+    // Gitea projection moves the top level pull request onto
+    // `issue.pull_request`, so the normalizer takes the issue path that a
+    // follow-up needs. Without that move the shared Forgejo projection
+    // leaves `issue.pull_request` alone, the normalizer prefers the top
+    // level pull request, and the delivery is NOT a follow_up. This payload
+    // therefore discriminates the two projections.
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
     issue: {
       id: 12,
       url: "https://gitea.example/owner/repo/issues/7",
