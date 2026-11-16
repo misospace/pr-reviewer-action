@@ -4617,6 +4617,34 @@ test("#1629: the low-risk lockfile envelope caps to the scoped rows' sum", async
   assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "low-risk-lockfile", mandatory_rows: 3, cap: 10, derived_budget: 40 });
 });
 
+test("#1688: an already-tighter size budget keeps size-scaled provenance instead of claiming a low-risk cap", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "a.ts", status: "modified", additions: 20, deletions: 0 },
+    { filename: "b.ts", status: "modified", additions: 20, deletions: 0 },
+    { filename: "c.ts", status: "modified", additions: 20, deletions: 0 },
+  ]));
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["row one", "row two", "row three"],
+    lockfile_only_refresh: { material: 0, low_risk: 3, parseable: true },
+  }));
+  const { result } = await runToolHarness(deps({
+    transport: async () => openAiText("no tools needed"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 8);
+  assert.equal(result.tool_budget_source, "size-scaled");
+  assert.deepEqual(result.low_risk_budget, {
+    envelope: "retained",
+    basis: "already-bounded",
+    mandatory_rows: 3,
+  });
+});
+
 test("#1629: any risk flag, a material lockfile bump, or an unparseable triage retains the full envelope with a receipt", async () => {
   const write = (root: string, body: Record<string, unknown>) => {
     fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
