@@ -191,10 +191,10 @@ should keep two coupled settings in mind:
 
 ## Forge credentials
 
-One controller instance serves exactly one forge platform (the instance
+One controller instance serves exactly one forge platform. The instance
 config's `forges[].kind` selects the GitHub App intake or the native
-Gitea-header intake; the daemon refuses to start when its reconcile poll
-and intake disagree).
+Gitea-header intake. The daemon refuses to start when its reconcile poll
+and intake disagree.
 
 - **GitHub App**: set `forgeAuth.platform: github` with the App ID and the
   private key (mounted from a secret). The install token lifecycle, webhook
@@ -204,9 +204,9 @@ and intake disagree).
 - **Forgejo / Gitea**: set `forgeAuth.platform: forgejo` with the token from
   `forgeAuth.forgejo.existingSecret` (`FORGEJO_TOKEN`). A Gitea instance
   declares `forges[].kind: gitea` in the instance config (#1682) and uses
-  that same token and the same native intake — the identity changes the
-  capability composition and the diagnostics, never the wire protocol. The
-  webhook trust boundary and ledger dedupe follow
+  that same token and the same native intake. The identity changes the
+  capability composition and the diagnostics, but not the wire protocol.
+  The webhook trust boundary and ledger dedupe follow
   [`docs/architecture/self-hosted-forgejo-ingress.md`](architecture/self-hosted-forgejo-ingress.md).
 
 Model credentials reach workers only as opaque references (#735). The chart
