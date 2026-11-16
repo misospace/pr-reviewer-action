@@ -114,49 +114,74 @@ test("#810: the size signal loads from the artifacts the harness can see", () =>
 
 // ── #1629: the deterministic low-risk evidence envelope ──────────────────
 
+// Every signal below is fully shaped (the harness reader validates the
+// fields first); the unit under test is the cap decision itself.
+const shaped = { linkedMetadataUncertain: false } as const;
+
 test("#1629: a digest-only kind with no risk flags caps the envelope at the mandatory-row floor", () => {
   // The #12074 shape: one local verification row, no risk flags.
-  const cap = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 });
+  const cap = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 });
   assert.deepEqual(cap, { cap: LOW_RISK_BUDGET_MIN_REQUESTS, basis: "digest-only", mandatoryRows: 1 });
   assert.equal(cap!.cap, 6);
-  const renovate = lowRiskToolBudgetCap({ prKind: "renovate_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 0 });
+  const renovate = lowRiskToolBudgetCap({ prKind: "renovate_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 0 });
   assert.deepEqual(renovate, { cap: 6, basis: "digest-only", mandatoryRows: 0 });
 });
 
-test("#1629: the envelope scales with enforced mandatory rows and clamps at the ceiling", () => {
+test("#1629: the envelope scales with enforced mandatory rows up to the protection ceiling", () => {
   // The #1595/#1618 low-risk lockfile shape: three scoped rows.
-  const lockfile = lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 });
+  const lockfile = lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 });
   assert.deepEqual(lockfile, { cap: 10, basis: "low-risk-lockfile", mandatoryRows: 3 });
-  // Many rows never exceed the ceiling — no per-package archaeology rides
-  // under a low-risk classification.
-  const many = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 40 });
-  assert.equal(many!.cap, LOW_RISK_BUDGET_MAX_REQUESTS);
+  // Six rows still fit the clamped envelope's reservation window
+  // (floor(12 / 2) = 6 opportunities for six material rows).
+  const six = lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 6 });
+  assert.deepEqual(six, { cap: LOW_RISK_BUDGET_MAX_REQUESTS, basis: "digest-only", mandatoryRows: 6 });
+});
+
+test("#1629: a material surface the capped reservation cannot protect retains the full envelope", () => {
+  // #1648 independent review: proportionality never underfunds the
+  // mandatory surface. Seven material rows exceed the clamped envelope's
+  // six-opportunity window — that is not the low-risk shape, retain.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 7 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 40 }), null);
+});
+
+test("#1629: linked-metadata uncertainty retains the full envelope", () => {
+  // The same uncertainty role-selection answers by selecting EVERY
+  // specialist role: missing linked-issue metadata may conceal security,
+  // audit, or priority signals the risk_flags array cannot carry.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, linkedMetadataUncertain: true, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, linkedMetadataUncertain: true, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
+  // A non-boolean uncertainty claim is not a shaped completeness proof.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, linkedMetadataUncertain: "false" as never, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
 });
 
 test("#1629: any risk flag retains the full envelope — risk escalation outranks proportionality", () => {
   for (const flags of [1, 2, 5]) {
-    assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: flags, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
-    assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: flags, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
+    assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: flags, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+    assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: flags, ...shaped, lockfileOnlyMaterial: 0, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
   }
 });
 
 test("#1629: the lockfile envelope opens only on the #1595 positive proof", () => {
   // Material bump: full envelope.
-  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 1, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: 1, lockfileOnlyParseable: true, mandatoryRows: 3 }), null);
   // Unparseable triage fails closed to material.
-  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: 0, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: 0, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
   // No triage at all: the digest kinds are the only class left, and an
   // app_code/dependency kind without proof retains everything.
-  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
-  assert.equal(lowRiskToolBudgetCap({ prKind: "app_code", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 2 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "app_code", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 2 }), null);
   // The obligation-bearing image/chart families deliberately stay outside
   // the envelope: their #1379 upstream-evidence rows need real budget.
-  assert.equal(lowRiskToolBudgetCap({ prKind: "renovate_image_update", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 4 }), null);
-  assert.equal(lowRiskToolBudgetCap({ prKind: "image_update", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "renovate_image_update", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 4 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_update", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 3 }), null);
 });
 
 test("#1629: unshaped signals fail open — the envelope narrows only on positive proof", () => {
-  assert.equal(lowRiskToolBudgetCap({ prKind: "", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
-  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: -1, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
-  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: -3 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: -1, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: 1 }), null);
+  assert.equal(lowRiskToolBudgetCap({ prKind: "image_digest_only", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: null, lockfileOnlyParseable: false, mandatoryRows: -3 }), null);
+  // A negative material count is malformed, never a (coerced) low-risk
+  // proof — the harness reader pre-filters, and the cap defends too.
+  assert.equal(lowRiskToolBudgetCap({ prKind: "dependency_upgrade", riskFlagCount: 0, ...shaped, lockfileOnlyMaterial: -1, lockfileOnlyParseable: true, mandatoryRows: 1 }), null);
 });

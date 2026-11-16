@@ -4537,6 +4537,7 @@ test("#1629: a no-risk image-digest PR caps the derived budget to the mandatory-
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["verify only image digests changed; repository and tag unchanged"],
   }));
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -4599,6 +4600,7 @@ test("#1629: the low-risk lockfile envelope caps to the scoped rows' sum", async
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "dependency_upgrade",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: [
       "check for breaking API changes in updated dependencies",
       "run full test suite after upgrade",
@@ -4621,18 +4623,18 @@ test("#1629: any risk flag, a material lockfile bump, or an unparseable triage r
     fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
   };
   const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
-    [{ pr_kind: "image_digest_only", risk_flags: ["linked_priority_p1"], must_check: ["verify only image digests changed; repository and tag unchanged"] },
+    [{ pr_kind: "image_digest_only", risk_flags: ["linked_priority_p1"], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] },
       { envelope: "retained", basis: "risk-flags", mandatory_rows: 1 }],
-    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: 2, low_risk: 5, parseable: true } },
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: 2, low_risk: 5, parseable: true } },
       { envelope: "retained", basis: "material-lockfile", mandatory_rows: 1 }],
-    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: [], lockfile_only_refresh: { material: 0, low_risk: 0, parseable: false } },
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: [], lockfile_only_refresh: { material: 0, low_risk: 0, parseable: false } },
       { envelope: "retained", basis: "unparseable-triage", mandatory_rows: 0 }],
-    [{ pr_kind: "renovate_image_update", risk_flags: [], must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
+    [{ pr_kind: "renovate_image_update", risk_flags: [], linked_metadata_uncertain: false, must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
       { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: 1 }],
     // #1648 review: a PRESENT-but-malformed risk_flags is an unshaped
     // classification — fail open, never read as "no risk flags". The
     // enforced-surface count still rides the receipt (honest fail-open).
-    [{ pr_kind: "image_digest_only", risk_flags: "none", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
+    [{ pr_kind: "image_digest_only", risk_flags: "none", linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
       { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
     // #1648 review: an ABSENT risk_flags is equally unshaped — absence of
     // risk information is not proof that risk flags are empty.
@@ -4641,11 +4643,11 @@ test("#1629: any risk flag, a material lockfile bump, or an unparseable triage r
     // #1648 review: a coercible-to-zero `material` (null / "" / false / "0")
     // is NOT proof of zero material bumps — the same shaped-signal rule the
     // risk_flags field follows. A non-shaped triage field reads as no triage.
-    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: null, low_risk: 3, parseable: true } },
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: null, low_risk: 3, parseable: true } },
       { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
-    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: "0", low_risk: 3, parseable: true } },
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: "0", low_risk: 3, parseable: true } },
       { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
-    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: false, low_risk: 3, parseable: true } },
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: false, low_risk: 3, parseable: true } },
       { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
   ];
   for (const [classification, receipt] of cases) {
@@ -4683,7 +4685,7 @@ test("#1629: no classification artifact, an explicit override, or the smart tier
   // receipt (the envelope only shapes DERIVED budgets).
   const explicit = workspace();
   fs.writeFileSync(path.join(explicit.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
-  fs.writeFileSync(path.join(explicit.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  fs.writeFileSync(path.join(explicit.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] }));
   const explicitResult = await runToolHarness(explicit.deps({
     transport: async () => openAiText("no tools needed"),
     env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_REQUESTS: "20" },
@@ -4696,7 +4698,7 @@ test("#1629: no classification artifact, an explicit override, or the smart tier
   // contract at BOTH layers: zero enforced rows, floor envelope.
   const gated = workspace();
   fs.writeFileSync(path.join(gated.root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
-  fs.writeFileSync(path.join(gated.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] }));
+  fs.writeFileSync(path.join(gated.root, "classification.json"), JSON.stringify({ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: ["verify only image digests changed; repository and tag unchanged"] }));
   const gatedResult = await runToolHarness(gated.deps({
     transport: async () => openAiText("no tools needed"),
     env: { SYSTEM_PROMPT: "You are the reviewer.", VALIDATE_REQUIRED_CHECKS: "false" },
@@ -4715,6 +4717,7 @@ test("#1629: a capped low-risk run whose mandatory row settles stops on obligati
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
   }));
   fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
@@ -4762,6 +4765,7 @@ test("#1629: a capped run that stops with the material row unanswered is a named
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
   }));
   fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
@@ -4854,6 +4858,7 @@ test("#1629: mandatory security evidence stays reachable inside the capped envel
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["check the upstream advisory feed for the pinned image version before the digest refresh"],
   }));
   fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
@@ -4898,6 +4903,7 @@ test("#1629: the smart route keeps its full budget through an executing loop", a
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["verify only image digests changed; repository and tag unchanged"],
   }));
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -4956,6 +4962,7 @@ test("#1629: enforced obligation rows the envelope did not count are still reser
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
     pr_kind: "image_digest_only",
     risk_flags: [],
+    linked_metadata_uncertain: false,
     must_check: ["verify the changed digests against the release manifest and confirm only image digests changed"],
   }));
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -4988,4 +4995,177 @@ test("#1629: enforced obligation rows the envelope did not count are still reser
     [["obligation-1", "material", "acquired"], ["obligation-2", "advisory", "open"]],
     "the material row lands inside the envelope; the guidance row stays advisory, never a material unknown",
   );
+});
+
+test("#1629 review: linked-metadata uncertainty retains the full envelope, receipt names it", async () => {
+  // #1648 independent review (P1): `linked_metadata_uncertain` is the
+  // classifier's honest statement that linked GitHub/Linear issue metadata
+  // could not be fully retrieved — the same signal that makes role-selection
+  // pick EVERY specialist role. A digest-only or clean lockfile triage behind
+  // uncertain metadata is not provably low-risk: the cap must not fire.
+  const write = (root: string, body: Record<string, unknown>): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    // Uncertain metadata on an otherwise-capped digest-only shape.
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: true, must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: 1 }],
+    // Uncertain metadata on an otherwise-capped low-risk lockfile shape.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: true, must_check: ["row one"], lockfile_only_refresh: { material: 0, low_risk: 4, parseable: true } },
+      { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: 1 }],
+    // MISSING metadata-completeness information: a classification that never
+    // asserts its metadata was fully retrieved is not provably complete —
+    // fail open, never silently assume false.
+    [{ pr_kind: "image_digest_only", risk_flags: [], must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // Malformed metadata-completeness claims (string / null) are not a proof.
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: "false", must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: null, must_check: ["verify only image digests changed; repository and tag unchanged"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629 review: malformed must_check / pr_kind / empty material fail open", async () => {
+  // #1648 independent review (P1/P2): required classification fields are
+  // validated for the shape the cap depends on — a malformed checklist, a
+  // missing kind, or an empty-string material count never qualifies.
+  const write = (root: string, body: Record<string, unknown>): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(body));
+  };
+  const cases: Array<[Record<string, unknown>, { envelope: string; basis: string; mandatory_rows: number }]> = [
+    // MISSING must_check: never silently defaulted to "no obligations".
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+    // Malformed must_check (a bare string, not an array).
+    [{ pr_kind: "image_digest_only", risk_flags: [], linked_metadata_uncertain: false, must_check: "verify only image digests changed", lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+    // MISSING pr_kind: no usable kind, no positive class proof.
+    [{ risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // Empty/whitespace pr_kind fails the role-selection usability rule too.
+    [{ pr_kind: "   ", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"] },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // material: "" — the review's named coercible case — is no triage.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: "", low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // A NEGATIVE material count is malformed, never a low-risk proof.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], linked_metadata_uncertain: false, must_check: ["row one"], lockfile_only_refresh: { material: -1, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+  ];
+  for (const [classification, receipt] of cases) {
+    const { root, deps } = workspace();
+    write(root, classification);
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer." },
+    }));
+    assert.equal(result.tool_request_budget, 40, JSON.stringify(classification));
+    assert.equal(result.tool_budget_source, "tier-default", JSON.stringify(classification));
+    assert.deepEqual(result.low_risk_budget, receipt, JSON.stringify(classification));
+  }
+});
+
+test("#1629 review: derived material obligations widen the envelope or retain — never silently underfund", async () => {
+  // #1648 independent review: the enforced MATERIAL admission surface also
+  // includes the #1449 derived rows (DERIVED_OBLIGATIONS=true). The cap
+  // scales with the surface the loop must protect; a surface the clamped
+  // envelope's reservation window cannot cover retains the full budget.
+  const write = (root: string, classification: Record<string, unknown>, derived: unknown): void => {
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify(classification));
+    if (derived !== undefined) {
+      fs.writeFileSync(path.join(root, "derived-obligations.json"), JSON.stringify(derived));
+    }
+  };
+  const digestOnly = {
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    linked_metadata_uncertain: false,
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  };
+  const derivedArtifact = (count: number): Record<string, unknown> => ({
+    version: 1,
+    status: "ok",
+    error_kind: null,
+    error: null,
+    diff_source: "full",
+    diff_clipped: false,
+    input_complete: true,
+    method: "model",
+    obligations: Array.from({ length: count }, (_unused, index) => ({
+      obligation: `confirm the derived consumer of field ${index} still matches the change`,
+      change: "producer changed",
+      topology: "identity",
+      paths: [`src/billing/ledger-${index}.ts:settle`],
+      pathsTruncated: false,
+      basis: "the settle helper reads the field",
+    })),
+    truncated: false,
+    errors: [],
+    section_bytes: 512,
+  });
+
+  // (a) Two material derived rows ON TOP of the one must_check row: the
+  // envelope GROWS to 4 + 2 × 3 = 10 — the derived surface is funded, not
+  // silently squeezed under the six-call floor.
+  {
+    const { root, deps } = workspace();
+    write(root, digestOnly, derivedArtifact(2));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 10);
+    assert.equal(result.tool_budget_source, "low-risk-cap");
+    assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 3, cap: 10, derived_budget: 40 });
+  }
+
+  // (b) Seven material rows total (three checklist rows plus the four the
+  // derivation is allowed to emit): the clamped twelve-call envelope's
+  // reservation window (six protected requests) cannot give every row an
+  // opportunity — that is not the low-risk shape, retain the full budget.
+  {
+    const { root, deps } = workspace();
+    write(root, { ...digestOnly, must_check: [
+      "verify only image digests changed; repository and tag unchanged",
+      "confirm no functional changes beyond lockfile hashes",
+      "confirm the rollout annotations are untouched",
+    ] }, derivedArtifact(4));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 40);
+    assert.equal(result.tool_budget_source, "tier-default");
+    assert.deepEqual(result.low_risk_budget, { envelope: "retained", basis: "obligation-surface", mandatory_rows: 7 });
+  }
+
+  // (c) A genuinely simple digest-only update with the feature ON but an
+  // EMPTY derivation still gets the reduced envelope: derived rows that do
+  // not exist buy no envelope, and their absence costs nothing.
+  {
+    const { root, deps } = workspace();
+    write(root, digestOnly, derivedArtifact(0));
+    const { result } = await runToolHarness(deps({
+      transport: async () => openAiText("no tools needed"),
+      env: { SYSTEM_PROMPT: "You are reviewer.", DERIVED_OBLIGATIONS: "true" },
+    }));
+    assert.equal(result.tool_request_budget, 6);
+    assert.equal(result.tool_budget_source, "low-risk-cap");
+    assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+  }
 });

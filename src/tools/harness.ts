@@ -65,7 +65,7 @@ import {
   type ResolvedTier,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
-import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, lowRiskToolBudgetCap, type EnvLike } from "./budget.js";
+import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, lowRiskToolBudgetCap, LOW_RISK_BUDGET_KINDS, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import { checkEvidenceTagsFromArtifact, executedCallId, MAX_EXECUTED_CALL_INDEX, type DependencyScopeEntry, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
 import { settlementsToArtifact } from "../enforcement/settlement.js";
@@ -2197,7 +2197,7 @@ function preLoopFailureKind(result: HarnessResult): string | null {
  * the effective request ceiling. No untrusted text rides anywhere. */
 export interface LowRiskBudgetReceipt {
   envelope: "capped" | "retained";
-  basis: "digest-only" | "low-risk-lockfile" | "risk-flags" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "no-signal";
+  basis: "digest-only" | "low-risk-lockfile" | "risk-flags" | "metadata-uncertain" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "obligation-surface" | "no-signal";
   mandatory_rows: number;
   cap?: number;
   /** capped only: the DERIVED (#810) budget the envelope narrowed, so the
@@ -2215,16 +2215,34 @@ export interface LowRiskBudgetReceipt {
  * records the retained reason otherwise, so proportionality decisions
  * stay explainable from the artifact alone.
  *
- * The mandatory-row count uses the SAME gate the planning context uses
- * (`VALIDATE_REQUIRED_CHECKS`): rows the engine agreed not to enforce do
- * not buy envelope. Trusted-base guidance rows deliberately do NOT count:
- * they are ADVISORY in #1659's settlement vocabulary (never a material
- * unknown), and the #1381 reservation — half of the EFFECTIVE budget over
- * every admission row, guidance included — keeps them attemptable inside
- * any envelope (the cap's 4 + 2 × rows formula always leaves the
- * half-budget window ≥ the material row count). An absent or unshaped
- * classification fails open (retained, `no-signal`) — the envelope narrows
- * only on positive proof.
+ * #1648 independent review: the reader validates the fields the CAP
+ * actually depends on, and every required field must be SHAPED — absence
+ * or a malformed value is never read as a low-risk signal:
+ * - `risk_flags` must be an array (absence of risk information is not
+ *   proof that risk flags are empty);
+ * - `linked_metadata_uncertain` must be an exact boolean — a classification
+ *   that cannot prove its linked-issue metadata was completely retrieved is
+ *   not provably low-risk (role-selection selects every specialist role on
+ *   exactly this uncertainty); `true` retains the full envelope;
+ * - `pr_kind` must be a non-empty string (the role-selection usability
+ *   rule);
+ * - `must_check` must be an array (never silently defaulted to empty);
+ * - `lockfile_only_refresh.material` must be an actual non-negative integer
+ *   (the `jqLockfileOnlyLowRisk` contract reads exact numeric zero; a
+ *   coercible value — `null`, `false`, `""`, `"0"` — is no triage).
+ *
+ * The mandatory-row count is the enforced MATERIAL admission surface: the
+ * `VALIDATE_REQUIRED_CHECKS`-gated must_check rows PLUS the material
+ * derived admission rows (#1449, `DERIVED_OBLIGATIONS=true`) — exactly the
+ * rows the harness builds into the enforced window, so the envelope scales
+ * with what the loop must actually protect. Trusted-base guidance rows
+ * deliberately do NOT count: they are ADVISORY in #1659's settlement
+ * vocabulary (never a material unknown), and the #1381 reservation covers
+ * them whatever the envelope says. A proven low-risk class whose enforced
+ * material surface the clamped envelope's reservation window can no longer
+ * cover one-opportunity-per-row retains the full budget
+ * (`obligation-surface`). An absent or unshaped classification fails open
+ * (retained, `no-signal`) — the envelope narrows only on positive proof.
  */
 function resolveLowRiskBudgetEnvelope(
   tier: string,
@@ -2246,35 +2264,69 @@ function resolveLowRiskBudgetEnvelope(
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
+  // #1648 review (independent): `must_check` must be a real array, never
+  // silently defaulted to empty — an artifact that cannot show its enforced
+  // checklist cannot prove a small obligation surface. A trustworthy count
+  // exists only when the field is shaped; a malformed one reports 0.
+  const mustCheckValid = Array.isArray(record.must_check);
   const mustCheck = Array.isArray(record.must_check)
     ? record.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "")
     : [];
-  const mandatoryRows = mustCheckObligationsEnabled(env.VALIDATE_REQUIRED_CHECKS) ? mustCheck.length : 0;
+  // The enforced MATERIAL admission surface: gated must_check rows plus the
+  // material derived admission rows the SAME planner admits (#1449).
+  const gatedMustCheckRows = mustCheckObligationsEnabled(env.VALIDATE_REQUIRED_CHECKS) ? mustCheck.length : 0;
+  const derivedRows = derivedAdmissionRows(derivedEvidenceRows(
+    readText,
+    (env.DERIVED_OBLIGATIONS ?? "false").trim().toLowerCase() === "true",
+  )).length;
+  const mandatoryRows = gatedMustCheckRows + derivedRows;
   // #1648 review: an ABSENT or present-but-malformed `risk_flags` is an
-  // unshaped classification — absence of risk information is NOT proof that
-  // risk flags are empty (the real classifier always writes the field) —
-  // fail open (retain the full envelope). Only an array (possibly empty) is
-  // a shaped signal. The enforced-surface count rides the receipt even here
-  // so the fail-open stays explainable.
+  // unshaped classification — absence of risk information is NOT proof
+  // that risk flags are empty (the real classifier always writes the
+  // field).
   if (!Array.isArray(record.risk_flags)) {
-    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mustCheckValid ? mandatoryRows : 0 };
   }
   const riskFlags = record.risk_flags;
+  if (!mustCheckValid) {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: 0 };
+  }
+  // #1648 review (independent): metadata completeness must be an exact
+  // boolean. A classification that does not assert its linked-issue
+  // metadata was completely retrieved is not provably complete, and
+  // uncertainty is where concealed security/audit/priority signals live —
+  // the same reason `classificationFromArtifact` selects every specialist
+  // role when this flag is set.
+  if (typeof record.linked_metadata_uncertain !== "boolean") {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
+  }
+  const linkedMetadataUncertain = record.linked_metadata_uncertain;
+  // The role-selection usability rule: a classification without a usable
+  // pr_kind is not a shaped signal.
+  const prKind = typeof record.pr_kind === "string" ? record.pr_kind.trim() : "";
+  if (prKind === "") {
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
+  }
   const lockfileOnly =
     record.lockfile_only_refresh !== null && typeof record.lockfile_only_refresh === "object" && !Array.isArray(record.lockfile_only_refresh)
       ? record.lockfile_only_refresh as Record<string, unknown>
       : null;
   // #1648 review: the material count is a shaped integer signal or nothing —
   // coercible values (`null`, "", false, "0") are NOT proof of zero material
-  // bumps, the same rule the risk_flags field follows above.
+  // bumps and negatives are malformed; the same rule the risk_flags field
+  // follows above.
   const material =
-    lockfileOnly !== null && typeof lockfileOnly.material === "number" && Number.isInteger(lockfileOnly.material)
+    lockfileOnly !== null
+      && typeof lockfileOnly.material === "number"
+      && Number.isInteger(lockfileOnly.material)
+      && lockfileOnly.material >= 0
       ? lockfileOnly.material
       : null;
   const parseable = lockfileOnly !== null && lockfileOnly.parseable === true;
   const signal = {
-    prKind: typeof record.pr_kind === "string" ? record.pr_kind : "",
+    prKind,
     riskFlagCount: riskFlags.length,
+    linkedMetadataUncertain,
     lockfileOnlyMaterial: material,
     lockfileOnlyParseable: parseable,
     mandatoryRows,
@@ -2290,13 +2342,21 @@ function resolveLowRiskBudgetEnvelope(
     };
   }
   // Fail-open retained reasons, in precedence order: risk escalation
-  // outranks everything; then the lockfile triage's own verdict (a parsed
-  // `parseable: false` names the unparseable triage; a shaped positive
-  // `material` names the material bumps); then the obligation-bearing kinds
-  // the envelope deliberately excludes. A coercible/malformed triage field
-  // carries no information, so it falls through to `no-signal`.
+  // outranks everything; then linked-metadata uncertainty (risk signals the
+  // flags cannot carry may hide behind unretrieved issue metadata); then
+  // the lockfile triage's own verdict (a parsed `parseable: false` names
+  // the unparseable triage; a shaped positive `material` names the material
+  // bumps); then the obligation-bearing kinds the envelope deliberately
+  // excludes; then a PROVEN low-risk class whose enforced material surface
+  // the clamped envelope's reservation window could not protect per row —
+  // proportionality never underfunds the mandatory evidence. A
+  // coercible/malformed triage field carries no information, so it falls
+  // through to `no-signal`.
   if (signal.riskFlagCount > 0) {
     return { envelope: "retained", basis: "risk-flags", mandatory_rows: mandatoryRows };
+  }
+  if (linkedMetadataUncertain) {
+    return { envelope: "retained", basis: "metadata-uncertain", mandatory_rows: mandatoryRows };
   }
   if (lockfileOnly !== null && parseable === false) {
     return { envelope: "retained", basis: "unparseable-triage", mandatory_rows: mandatoryRows };
@@ -2304,8 +2364,11 @@ function resolveLowRiskBudgetEnvelope(
   if (material !== null && material > 0) {
     return { envelope: "retained", basis: "material-lockfile", mandatory_rows: mandatoryRows };
   }
-  if (record.pr_kind === "renovate_image_update" || record.pr_kind === "image_update" || record.pr_kind === "renovate_chart_update" || record.pr_kind === "chart_update") {
+  if (prKind === "renovate_image_update" || prKind === "image_update" || prKind === "renovate_chart_update" || prKind === "chart_update") {
     return { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: mandatoryRows };
+  }
+  if (LOW_RISK_BUDGET_KINDS.has(prKind) || (material === 0 && parseable)) {
+    return { envelope: "retained", basis: "obligation-surface", mandatory_rows: mandatoryRows };
   }
   return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
 }

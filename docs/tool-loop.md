@@ -124,37 +124,46 @@ just uses the tier default.
 A derived budget (tier-default or size-scaled source only) on the ordinary
 primary/fallback routes is additionally narrowed when the trusted
 deterministic classification proves the low-risk shape: **no risk flags at
-all**, and either a digest-only kind (`image_digest_only`,
-`renovate_digest_only` — a single local verification row, no upstream
-version range to evidence) or a lockfile-only refresh whose #1595 triage
-parsed and found **zero material bumps** (the exact #1618 scoped-review
-semantics). The envelope is `4 + 2 × mandatory obligation rows` requests,
-clamped to **6..12** — mandatory evidence stays reachable; the optional
-archaeology around it is what gets bounded. Any risk flag retains the full
-envelope (risk escalation outranks proportionality), as do the
-obligation-bearing image/chart families, a material lockfile bump, an
-unparseable triage, an explicit or route-override budget, the deep smart
-route, and an absent, unshaped, or malformed classification artifact — an
-absent `risk_flags` field is NOT proof that risk flags are empty (fail
-open). The required-evidence and dependency-evidence reservations are
-computed against the effective (capped) budget, so the reserved tail can
-never exceed the envelope. The per-row allowance keeps the admission window
-at or above the counted must_check surface whenever the counted rows fit
-below the envelope ceiling (before the 12-clamp, 4 + 2n always leaves
-floor(cap/2) ≥ n; the realistic low-risk shapes — one digest-verification
-row, three scoped lockfile rows — are well inside it); uncounted advisory
-guidance rows and heavier mixed surfaces stay attemptable within the
-reservation's patience, and anything genuinely left unsettled fails closed
-the canonical way — a material row becomes a named material unknown, never
-a clean settlement.
+all**, linked-issue metadata **not uncertain** (`linked_metadata_uncertain`
+exactly `false` — the same uncertainty that makes role-selection pick every
+specialist role, because unretrieved GitHub/Linear metadata may conceal
+security, audit, or priority signals), and either a digest-only kind
+(`image_digest_only`, `renovate_digest_only` — a single local verification
+row, no upstream version range to evidence) or a lockfile-only refresh whose
+#1595 triage parsed and found **zero material bumps** (the exact #1618
+scoped-review semantics; `material` must be an actual non-negative integer —
+a coercible `null`/`""`/`false`/`"0"` is no triage). The envelope is
+`4 + 2 × mandatory MATERIAL rows` requests — the gated must_check rows plus
+the derived admission rows the same planner enforces (#1449,
+`DERIVED_OBLIGATIONS=true`) — clamped to **6..12**: mandatory evidence stays
+reachable; the optional archaeology around it is what gets bounded. A
+surface the clamped envelope's reservation window (`floor(cap / 2)`) could
+no longer cover one protected opportunity per row is not the low-risk shape
+either and retains the full budget. Any risk flag retains the full envelope
+(risk escalation outranks proportionality), as do the obligation-bearing
+image/chart families, a material lockfile bump, an unparseable triage, an
+explicit or route-override budget, the deep smart route, and an absent,
+unshaped, or malformed classification artifact — absent or malformed
+`risk_flags`, `must_check`, `linked_metadata_uncertain`, or `pr_kind` is
+never proof of low risk (fail open). The required-evidence and
+dependency-evidence reservations are computed against the effective (capped)
+budget, so the reserved tail can never exceed the envelope. The per-row
+allowance keeps the admission window at or above the counted material
+surface whenever the counted rows fit below the envelope ceiling (before the
+12-clamp, 4 + 2n always leaves floor(cap/2) ≥ n; the retention rule above
+closes the ceiling gap); uncounted advisory guidance rows and heavier mixed
+surfaces stay attemptable within the reservation's patience, and anything
+genuinely left unsettled fails closed the canonical way — a material row
+becomes a named material unknown, never a clean settlement.
 
 The decision rides the artifact and the telemetry as `low_risk_budget`
 (`envelope`: `capped`/`retained`, closed `basis` vocabulary —
-`digest-only`, `low-risk-lockfile`, `risk-flags`, `material-lockfile`,
-`unparseable-triage`, `obligation-bearing-kind`, `no-signal` — plus
-`mandatory_rows`, the `cap`, and on a capped run the `derived_budget` it
-was narrowed from), and a capped run reports
-`tool_budget_source: low-risk-cap`. A capped run that stops with a MATERIAL
+`digest-only`, `low-risk-lockfile`, `risk-flags`, `metadata-uncertain`,
+`material-lockfile`, `unparseable-triage`, `obligation-bearing-kind`,
+`obligation-surface`, `no-signal` — plus `mandatory_rows`, the `cap`, and on
+a capped run the `derived_budget` it was narrowed from), and a capped run
+reports `tool_budget_source: low-risk-cap`. A capped run that stops with a
+MATERIAL
 question unsettled is recorded — through #1659's canonical settlement state,
 not any parallel completion notion — as a named material unknown
 (`investigation_unavailable`), which the authoritative `FinalDisposition`
