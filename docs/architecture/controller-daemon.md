@@ -37,7 +37,10 @@ a forge-specific CLI.
   capability is a single per-platform capability, so the intake it binds
   is platform-aware: `webhook.platform` selects the GitHub App intake
   (`X-Hub-Signature-256`, `X-GitHub-Event`) or the native Forgejo intake
-  (`X-Gitea-Signature`, `X-Gitea-Event`). Both are served by the same
+  (`X-Gitea-Signature`, `X-Gitea-Event`) — the `gitea` identity (#1682)
+  selects that same native intake, and its events mint the canonical
+  `forgejo`-family identity, so poll and webhook converge. Both are
+  served by the same
   operator host — one router, one follow-up consumer, one durable Q&A
   budget — so only the handler differs.
 - **The durable generation dedupe lives in the idempotency-key layer**

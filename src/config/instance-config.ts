@@ -109,9 +109,30 @@ export interface ModelProfile {
 
 export interface ForgeIntegration {
   readonly name: string;
-  readonly kind: "github" | "forgejo";
+  /** `gitea` (#1682): the Gitea wire family — native webhook
+   * (`X-Gitea-Signature`), REST `/api/v1`, and clone transport are the
+   * Forgejo-compatible ones the `forgejo` stack already speaks. It is an
+   * IDENTITY kind (capability composition, diagnostics, and the
+   * forge-integration guards see `gitea`); the canonical forge platform of
+   * every event, job, and durable record stays `forgejo`
+   * (`forgeFamily`), so generations converge across webhooks and polls. */
+  readonly kind: "github" | "forgejo" | "gitea";
   readonly endpoint: string;
   readonly credential: string;
+}
+
+/** The canonical forge platform family (#1682): the platform identity that
+ * flows through `CanonicalForgeEvent`, `ReviewJob`, the generation id, the
+ * queue/state records, and the execution envelope — closed at `github` |
+ * `forgejo` there. A `gitea` integration belongs to the `forgejo` family
+ * (Forgejo is a Gitea fork; the wire formats are the same), so `kind:
+ * gitea` never re-keys a generation and never splits an instance's
+ * webhook/poll convergence. ONE definition: every family-aware guard
+ * compares through this function. */
+export type ForgeFamily = "github" | "forgejo";
+
+export function forgeFamily(kind: ForgeIntegration["kind"]): ForgeFamily {
+  return kind === "github" ? "github" : "forgejo";
 }
 
 /** The `local` executor backend spec (#733): the fixed argv the executor
@@ -377,7 +398,9 @@ function validateForgeIntegration(value: unknown, path: string): ForgeIntegratio
   const item = objectAt(value, path);
   rejectUnknown(item, ["name", "kind", "endpoint", "credential"], path);
   const kind = item.kind;
-  if (kind !== "github" && kind !== "forgejo") fail(`${path}.kind`, "must be 'github' or 'forgejo'");
+  if (kind !== "github" && kind !== "forgejo" && kind !== "gitea") {
+    fail(`${path}.kind`, "must be 'github', 'forgejo', or 'gitea'");
+  }
   return Object.freeze({
     name: profileNameAt(item.name, `${path}.name`),
     kind,

@@ -588,3 +588,28 @@ test("queue and storage are bounded", () => {
   assert.equal(ok.storage.statePath, "/var/lib/pr-reviewer");
   assert.throws(() => validate({ ...baseInstance(), storage: { "state-path": "bad\u0000path" } }), /control characters/);
 });
+
+test("a gitea forge integration validates and carries its identity kind (#1682)", () => {
+  const ok = validate({
+    ...baseInstance(),
+    forges: [{ name: "lab", kind: "gitea", endpoint: "https://gitea.internal", credential: "gitea-ref" }],
+  });
+  assert.equal(ok.forges.length, 1);
+  assert.equal(ok.forges[0]!.name, "lab");
+  assert.equal(ok.forges[0]!.kind, "gitea");
+  assert.equal(ok.forges[0]!.endpoint, "https://gitea.internal");
+  assert.equal(ok.forges[0]!.credential, "gitea-ref");
+  // Frozen like every other validated structure.
+  assert.ok(Object.isFrozen(ok.forges));
+  assert.ok(Object.isFrozen(ok.forges[0]));
+  assert.throws(() => {
+    (ok.forges[0] as unknown as { kind: string }).kind = "github";
+  });
+});
+
+test("an unknown forge kind is rejected with the closed-set message (#1682)", () => {
+  expectError(
+    { ...baseInstance(), forges: [{ name: "lab", kind: "gitlab", endpoint: "https://gitlab.internal", credential: "ref" }] },
+    "must be 'github', 'forgejo', or 'gitea'",
+  );
+});

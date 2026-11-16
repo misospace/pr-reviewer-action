@@ -11,8 +11,11 @@
  *
  * ONE PLATFORM PER INSTANCE (the daemon's invariant): the instance config's
  * `forges` entries must describe exactly one platform, and this module
- * composes the capability for that platform only. A requested platform the
- * composition cannot serve (no GitHub App material, no Forgejo token) fails
+ * composes the capability for that platform only. `github` and the Gitea
+ * family (`forgejo`, and `gitea` under its own identity — #1682) are the
+ * served stacks; a Gitea-family composition is ONE adapter set, never a
+ * fork of it per identity. A requested platform the composition cannot
+ * serve (no GitHub App material, no Forgejo/Gitea token) fails
  * CLOSED at startup — the daemon never runs with a forge capability that
  * cannot act on its own intake.
  *
@@ -148,7 +151,13 @@ function repoRefOf(repoFullName: string): { readonly owner: string; readonly nam
 
 /** The composed forge surface for one platform. */
 export interface ComposedForge {
-  readonly platform: "github" | "forgejo";
+  /** The configured identity platform. `gitea` (#1682) composes the same
+   * Gitea-family adapters as `forgejo` — Forgejo is a Gitea fork, and the
+   * REST `/api/v1`, webhook, and clone surfaces the adapters use are the
+   * compatible ones — but the composition's identity (and startup
+   * diagnostics) carry `gitea`, while every canonical record it feeds
+   * stays in the `forgejo` family. */
+  readonly platform: "github" | "forgejo" | "gitea";
   readonly capability: ControllerForgeCapability;
   readonly followUp: FollowUpForgeAdapter;
   /** The reviewer's own authenticated identity probe (the follow-up
@@ -186,7 +195,10 @@ export interface ComposedForge {
 }
 
 export interface ForgeCompositionInput {
-  readonly platform: "github" | "forgejo";
+  /** The configured identity platform. `gitea` composes the `forgejo`
+   * adapters under the `gitea` identity (#1682): one Gitea-family stack,
+   * never a Gitea fork of the adapter code. */
+  readonly platform: "github" | "forgejo" | "gitea";
   /** The forge integration endpoint from the instance config (validated:
    * absolute http(s), no embedded credentials). */
   readonly endpoint: string;
@@ -198,8 +210,10 @@ export interface ForgeCompositionInput {
   /** The installation id the reconciliation poll authenticates as
    * (required when platform is `github` and reconciliation is enabled). */
   readonly githubPollInstallationId?: string;
-  /** The Forgejo token (required when platform is `forgejo`); resolved
-   * by the caller from the environment (`forgejoTokenFromEnv`). */
+  /** The Forgejo/Gitea token (required when platform is `forgejo` or
+   * `gitea`); resolved by the caller from the environment
+   * (`forgejoTokenFromEnv`, whose `authorized_integration` rejection applies
+   * to both #1682 — Gitea has no Forgejo "authorized integration"). */
   readonly forgejoToken?: string;
   readonly fetchImpl?: FetchLike;
 }
@@ -217,10 +231,15 @@ export function composeForgeCapability(input: ForgeCompositionInput): ComposedFo
     return composeGitHub(input);
   }
   if (input.forgejoToken === undefined) {
+    const label = input.platform === "gitea" ? "Gitea" : "Forgejo";
     throw new Error(
-      "the instance config serves forgejo but no Forgejo token is configured (FORGEJO_TOKEN)",
+      `the instance config serves ${input.platform} but no ${label} token is configured (FORGEJO_TOKEN)`,
     );
   }
+  // #1682: `gitea` and `forgejo` are ONE family — the same adapters, client,
+  // publish API, and clone transport. The identity (`gitea` vs `forgejo`)
+  // only reaches `describe()`; the canonical records this composition feeds
+  // are `forgejo`-family either way.
   return composeForgejo(input);
 }
 
@@ -468,7 +487,7 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
   };
 }
 
-// ── Forgejo ──────────────────────────────────────────────────────────────
+// ── Forgejo / Gitea (one family, #1682) ─────────────────────────────────
 
 function composeForgejo(input: ForgeCompositionInput): ComposedForge {
   const endpoint = input.endpoint;
@@ -628,7 +647,9 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
   };
 
   return {
-    platform: "forgejo",
+    // The identity is whatever was configured (`forgejo` or `gitea`, #1682);
+    // every canonical record this composition feeds stays `forgejo` family.
+    platform: input.platform,
     capability,
     followUp,
     botLogin: async () => {
@@ -639,6 +660,6 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
     },
     listOpenPullRequests: (repo) => ingress.listOpenPullRequests(repo),
     pollInstallationId: "",
-    describe: () => `forgejo via ${ingress.endpoints.origin}`,
+    describe: () => `${input.platform === "gitea" ? "gitea" : "forgejo"} via ${ingress.endpoints.origin}`,
   };
 }

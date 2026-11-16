@@ -47,8 +47,10 @@
  * capability, so a host that served both platforms would accept a delivery
  * for a platform the instance cannot act on. `platform` selects the intake
  * the host binds: `github` the GitHub App intake (`X-Hub-Signature-256`,
- * `X-GitHub-Event`) or `forgejo` the native Forgejo intake
- * (`X-Gitea-Signature`, `X-Gitea-Event`); absent → `forgejo`. The
+ * `X-GitHub-Event`) or `forgejo`/`gitea` the native Gitea-header intake
+ * (`X-Gitea-Signature`, `X-Gitea-Event`) — the same handler serves both
+ * (#1682: Forgejo is a Gitea fork; `gitea` is the identity, the verified
+ * intake is shared); absent → `forgejo`. The
  * SELECTION is the only thing that changes: the router, the follow-up
  * consumer and the ONE durable rate-limit store are unchanged, so there is
  * still exactly one of each per host.
@@ -194,12 +196,15 @@ function createDurableRateLimitStore(
 /** Configuration for {@link createOperatorHost}. */
 export interface OperatorHostOptions {
   /** The forge platform this host's INTAKE serves: `github` binds the GitHub
-   * App intake (`X-Hub-Signature-256`), `forgejo` the native Forgejo intake
-   * (`X-Gitea-Signature`). One platform per host: the operator's forge
-   * capability is a single per-platform capability, so an intake that served
-   * both would accept deliveries for a platform the instance cannot act on.
-   * Absent → `forgejo`. */
-  readonly platform?: "github" | "forgejo" | undefined;
+   * App intake (`X-Hub-Signature-256`), `forgejo` and `gitea` (#1682) bind
+   * the native Gitea-header intake (`X-Gitea-Signature`, `X-Gitea-Event`) —
+   * ONE handler for both: Forgejo is a Gitea fork and signs deliveries with
+   * the same headers over the same raw body, so the `gitea` identity selects
+   * the same verified intake, not a second one. One platform per host: the
+   * operator's forge capability is a single per-platform capability, so an
+   * intake that served both families would accept deliveries for a platform
+   * the instance cannot act on. Absent → `forgejo`. */
+  readonly platform?: "github" | "forgejo" | "gitea" | undefined;
   /** The webhook HMAC-SHA256 secret; the signature is verified over the raw
    * body before anything else (the handler's fail-closed boundary). */
   readonly secret: string;
