@@ -13,7 +13,7 @@ import {
   resolvePlatform,
 } from "../src/platform/resolve.js";
 import { pullHeadRefspec, pullRequestHeadRef } from "../src/platform/head-ref.js";
-import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
+import { bindForgejoToken, forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import { GITEA_WEBHOOK_PATH, FORGEJO_WEBHOOK_PATH, selectIngressEndpoints } from "../src/ingress/endpoints.js";
 import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/api-client.js";
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
@@ -114,6 +114,35 @@ test("giteaTokenFromEnv uses the family chain, with GITEA_TOKEN as an alias", ()
   assert.equal(giteaTokenFromEnv({ GITHUB_TOKEN: "ght" }), "ght");
   assert.equal(giteaTokenFromEnv({}), undefined);
   assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "" }), undefined);
+});
+
+test("bindForgejoToken binds the family's chain in the resolver's own order", () => {
+  // The binding is the resolver's chain, bound where the resolver reads it
+  // first: a `FORGEJO_TOKEN` already in the target (the config-projected
+  // secret) wins, then the ambient family's own name, then the ambient
+  // `GITEA_TOKEN` alias, then the runner's GitHub credential.
+  const bind = (
+    target: Record<string, string | undefined>,
+    ambient: Record<string, string | undefined>,
+    githubToken = "gh",
+  ): string | undefined => {
+    bindForgejoToken(target, ambient, githubToken);
+    return target.FORGEJO_TOKEN;
+  };
+
+  assert.equal(bind({}, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }), "family-pat");
+  assert.equal(bind({}, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  assert.equal(bind({}, {}), "gh");
+  assert.equal(bind({ FORGEJO_TOKEN: "projected-pat" }, { FORGEJO_TOKEN: "family-pat" }), "projected-pat");
+  // An empty value is no value: the chain moves on to the next candidate.
+  assert.equal(bind({ FORGEJO_TOKEN: "" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+
+  // Authorized Integration binds NO token: the OIDC exchange supplies the
+  // credential, and a bound token would be a second, wrong one.
+  assert.equal(
+    bind({ FORGEJO_AUTH_METHOD: "authorized_integration" }, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }),
+    undefined,
+  );
 });
 
 test("giteaTokenFromEnv refuses authorized_integration instead of returning no token", () => {

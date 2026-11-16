@@ -1,6 +1,7 @@
 import type { ActionContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
 import { runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { bindForgejoToken } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { stageEnvFromConfig } from "../run/env.js";
 import type { ReviewRequest } from "./types.js";
@@ -43,12 +44,11 @@ export function admissionStageEnv(
   // adapter the review stages use from this env.
   const token = env.GITHUB_TOKEN || ambient.GH_TOKEN || "";
   env.GH_TOKEN = token;
-  if ((env.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
-    // The `GITEA_TOKEN` alias (#1678) is bound here in exactly the order
-    // `actionStageEnv` binds it, so the two paths hand the resolver the same
-    // credential and the fingerprint inputs stay byte-identical.
-    env.FORGEJO_TOKEN = env.FORGEJO_TOKEN || ambient.FORGEJO_TOKEN || ambient.GITEA_TOKEN || token;
-  }
+  // #1678/#1683: the same seam binding the Action stage env calls
+  // (`bindForgejoToken`) — one definition of the family chain, so the two
+  // lanes hand the resolver the same credential and the fingerprint inputs
+  // stay byte-identical.
+  bindForgejoToken(env, ambient, token);
   env.REPO = env.REPO || request.repository || ambient.GITHUB_REPOSITORY || "";
   env.PR_NUMBER = env.PR_NUMBER || request.prNumber;
   const server = ambient.GITHUB_SERVER_URL ?? "";

@@ -14,3 +14,32 @@ export function forgejoTokenFromEnv(env: Readonly<Record<string, string | undefi
   }
   return env.FORGEJO_TOKEN || env.GITEA_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || undefined;
 }
+
+/** Bind the family's API token into a stage env, in the resolver's own order.
+ *
+ * {@link forgejoTokenFromEnv} reads `FORGEJO_TOKEN` FIRST, so a stage that
+ * bound the GitHub fallback under that name BEFORE any resolver saw the env
+ * would shadow the `GITEA_TOKEN` alias: a Gitea deployment whose only
+ * credential is the alias would read and publish with the wrong credential.
+ * Both stage envs that run ahead of a resolver — the Action stage env
+ * (src/run/action.ts) and the engine's admission stage env
+ * (src/engine/admission.ts) — therefore bind the family token HERE, through
+ * ONE definition of the chain, so an alias or precedence change cannot drift
+ * between the two lanes.
+ *
+ * The chain is the resolver's order, bound in the order the resolver reads it:
+ * a `FORGEJO_TOKEN` already in `target` (the config-projected secret) wins,
+ * then the ambient family's own name, then the ambient `GITEA_TOKEN` alias,
+ * then the runner's GitHub credential (`githubToken`, the caller's own GitHub
+ * binding).
+ *
+ * `authorized_integration` binds NO token: the OIDC exchange supplies the
+ * credential, and a bound token would be a second, wrong one. */
+export function bindForgejoToken(
+  target: Record<string, string | undefined>,
+  ambient: Readonly<Record<string, string | undefined>>,
+  githubToken: string,
+): void {
+  if ((target.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() === "authorized_integration") return;
+  target.FORGEJO_TOKEN = target.FORGEJO_TOKEN || ambient.FORGEJO_TOKEN || ambient.GITEA_TOKEN || githubToken;
+}
