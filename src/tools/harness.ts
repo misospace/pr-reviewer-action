@@ -110,6 +110,7 @@ import {
   COVERAGE_NOTICE_MAX_ITEMS,
   computePartialCoverage,
   corpusDiffCoveredFiles,
+  coverageGaps,
   isIncompleteInvestigationStopReason,
   loadChangedFilePaths,
   loadRemovedFilePaths,
@@ -3849,6 +3850,26 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const loopExecuteFn = (toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown> =>
     executeFn(toolName, args, explorationDeadline);
 
+  // Only a parseable manifest can authorize deterministic completion.
+  const manifestBody = deps.readText("pr-files.json");
+  let manifestValid = false;
+  try {
+    const manifest = JSON.parse(manifestBody ?? "null") as unknown;
+    const entries = Array.isArray(manifest) ? manifest : manifest !== null && typeof manifest === "object"
+      ? (manifest as Record<string, unknown>).files : null;
+    manifestValid = Array.isArray(entries) && entries.length > 0 && entries.every((entry: unknown) =>
+      entry !== null && typeof entry === "object" && !Array.isArray(entry)
+      && typeof (entry as Record<string, unknown>).filename === "string"
+      && ((entry as Record<string, unknown>).filename as string).trim() !== ""
+      && (entry as Record<string, unknown>).note === undefined);
+  } catch { /* Missing or malformed manifest cannot certify coverage. */ }
+  const completionFiles = loadChangedFilePaths(deps.readText);
+  const completionLeads = loadSpecialistLeadRefs(deps.readText);
+  const completionRemoved = loadRemovedFilePaths(deps.readText);
+  const completionDiffName = input.tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT
+    : input.tier === "fallback" ? CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT;
+  const completionCorpus = corpusDiffCoveredFiles(deps.readText(completionDiffName) ?? "", deps.readText("pr.diff"),
+    [...completionFiles, ...completionRemoved]);
   const outcome = await driveToolLoop(
     conversation,
     loopPostFn,
@@ -3857,6 +3878,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       apiFormat: input.apiFormat,
       model: input.model,
       budgets,
+      coverageComplete: (state) => manifestValid && completionRemoved.every((file) => completionCorpus.has(file)) && coverageGaps(state, { changedFiles: completionFiles, leads: completionLeads, corpusDiffCoveredFiles: completionCorpus }) === null,
       ...(input.reserveForRequiredEvidence !== undefined ? { reserveForRequiredEvidence: input.reserveForRequiredEvidence } : {}),
       ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
       // #1595 (review): the scoped plan's first claim — see
@@ -3887,6 +3909,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       },
     },
   );
+
+  if (outcome.stopReason === "investigation-complete" && completionCorpus.size > 0) {
+    input.result.corpus_diff_covered_files = [...completionCorpus].sort();
+  }
 
   // #1338: a request-error stop AT the run's wall-clock deadline is the deadline
   // stopping the loop through the transport seam (the postFn wrapper throws

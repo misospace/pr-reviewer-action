@@ -144,7 +144,7 @@ test("git_grep marks a file covered via a file-scoped path or a match line, neve
   assert.deepEqual(coverage.unread_files, ["src/other.ts"]);
 });
 
-test("a lead resolves when its file was read; a lead without a file never resolves on a budget stop", () => {
+test("only file-bound leads participate in deterministic coverage", () => {
   const coverage = computePartialCoverage(outcome({
     executed: [okCall("read_file", { path: "src/fixed.ts" })],
   }), {
@@ -160,7 +160,6 @@ test("a lead resolves when its file was read; a lead without a file never resolv
   assert.deepEqual(coverage.unresolved_leads, [
     { role: "security", file: "src/broken.ts", excerpt: "unvalidated input" },
     { role: "security", file: "src/missing.ts", excerpt: "phantom path" },
-    { role: "tests", file: null, excerpt: "no coverage for the new flag" },
   ]);
   assert.equal(coverage.leads_total, 4);
 });
@@ -375,4 +374,11 @@ test("#921: without a corpus-credit set the accounting is the strict tool-read r
     }),
     null,
   );
+});
+
+
+test("no-file advisory lead does not create a budget coverage gap", () => {
+  assert.equal(computePartialCoverage(outcome({ executed: [okCall("read_file", { path: "src/a.ts" })] }), {
+    changedFiles: ["src/a.ts"], leads: leads([["correctness", null, "suite pending"]]),
+  }), null);
 });

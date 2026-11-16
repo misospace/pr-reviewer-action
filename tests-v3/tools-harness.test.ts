@@ -1482,11 +1482,11 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
       return openAiCall("c1", "read_file", '{"path":"src.ts"}');
     },
   }));
-  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.stop_reason, "investigation-complete");
   assert.equal(result.partial_coverage, undefined);
   assert.equal(result.native_loop_verdict_status, "fallback");
   const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
-  assert.match(markdown, /Investigation interrupted/);
+  assert.doesNotMatch(markdown, /Investigation interrupted/);
   assert.ok(!markdown.includes("Outstanding evidence"));
   // The other half of the issue's acceptance: a timeout AFTER all the
   // required evidence was collected stays clean-eligible â€” no blanket
@@ -2193,7 +2193,6 @@ test("#810: a budget-exhausted loop records the exact unread files and leads and
   assert.equal(coverage.leads_total, 2);
   assert.deepEqual(coverage.unresolved_leads, [
     { role: "security", file: "src/c.ts", excerpt: "unvalidated input" },
-    { role: "tests", file: null, excerpt: "new flag untested" },
   ]);
   // Persisted (redacted) in the harness artifact for the publish layer.
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
@@ -5500,5 +5499,53 @@ test("#1629 review: derived material obligations widen the envelope or retain â€
     assert.equal(result.tool_request_budget, 6);
     assert.equal(result.tool_budget_source, "low-risk-cap");
     assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+  }
+});
+
+
+test("#1688: certified seven-file coverage completes optional investigation before budget", async () => {
+  const { root, deps } = workspace();
+  const files = Array.from({ length: 7 }, (_, i) => `src/file${i}.ts`);
+  const diff = files.map((file) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`).join("");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify(files.map((filename) => ({ filename, status: "modified" }))));
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "app_code", risk_flags: ["linked_priority_p1"] }));
+  fs.writeFileSync(path.join(root, "pr.diff"), diff);
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}\n# Specialist Review Leads\nSuite pending\n`);
+  fs.writeFileSync(path.join(root, "specialist-correctness.json"), specialistArtifact("correctness", [{ file: null, message: "Suite pending" }]));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({ injected: true, obligations: [{ id: "priority", source: "must_check", row_class: "attention", text: "priority attention" }] }));
+  const requests: unknown[] = [];
+  let turns = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "40", SYSTEM_PROMPT: "You are reviewer." },
+    transport: async (_url, _format, request) => { requests.push(request); return ++turns === 1 ? openAiCall("c1", "find_files", '{"pattern":"*.ts"}') : validVerdict(); },
+  }));
+  assert.equal(result.stop_reason, "investigation-complete");
+  assert.equal((result.tool_calls as unknown[]).length, 1);
+  assert.equal(turns, 2);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.partial_coverage, undefined);
+  assert.match(JSON.stringify(requests[1]), /Suite pending/);
+  assert.deepEqual(result.corpus_diff_covered_files, files);
+  assert.match(fs.readFileSync(path.join(root, "specialist-correctness.json"), "utf8"), /Suite pending/);
+});
+
+test("coverage completion fails closed on uncovered or truncated manifests", async () => {
+  for (const truncated of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+      { filename: "src/a.ts", status: "modified" },
+      truncated ? { note: "file list truncated" } : { filename: "src/uncovered.ts", status: "modified" },
+    ]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+    if (!truncated) assert.deepEqual(result.partial_coverage?.unread_files, ["src/uncovered.ts"]);
   }
 });

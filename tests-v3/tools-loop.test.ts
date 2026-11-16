@@ -3313,3 +3313,37 @@ test("#1627: a run with no obligation surface never fires the settled stop", asy
   assert.equal(outcome.requiredEvidenceSettledStop, false);
   assert.equal(outcome.requiredEvidenceRequired, 0);
 });
+
+test("coverage completion preempts last-call budget, but not gaps or failed tools", async () => {
+  for (const scenario of [
+    { covered: true, status: "ok", reason: "investigation-complete" },
+    { covered: false, status: "ok", reason: STOP_BUDGET },
+    { covered: true, status: "error", reason: STOP_BUDGET },
+  ]) {
+    const conversation = new Conversation();
+    conversation.addUser("corpus");
+    const outcome = await driveToolLoop(conversation,
+      async () => openAiCall("c", "read_file", '{"path":"src/a.ts"}'),
+      async () => ({ tool: "read_file", status: scenario.status, result: {} }),
+      { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(4, 1, 120), timeFn: () => 0,
+        coverageComplete: () => scenario.covered },
+    );
+    assert.equal(outcome.stopReason, scenario.reason);
+    assert.equal(outcome.executed.length, 1);
+  }
+});
+
+test("coverage completion leaves material evidence outstanding but not advisory attention", async () => {
+  for (const [rowClass, expected] of [["attention", "investigation-complete"], [undefined, STOP_BUDGET]] as const) {
+    const conversation = new Conversation();
+    conversation.addUser("corpus");
+    const outcome = await driveToolLoop(conversation,
+      async () => openAiCall("c", "read_file", '{"path":"optional.ts"}'),
+      async () => ({ tool: "read_file", status: "ok", result: {} }),
+      { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(4, 1, 120), timeFn: () => 0,
+        reserveForRequiredEvidence: 0, requiredEvidence: [{ id: "p1", tokens: ["mandatory"], ...(rowClass ? { rowClass } : {}) }],
+        coverageComplete: () => true },
+    );
+    assert.equal(outcome.stopReason, expected);
+  }
+});

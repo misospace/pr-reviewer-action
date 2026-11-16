@@ -65,6 +65,8 @@ export const STOP_BUDGET = "tool-call-budget-exhausted";
 export const STOP_WALL_CLOCK = "wall-clock-exceeded";
 export const STOP_WALL_CLOCK_RESERVE = "wall-clock-verdict-reserve";
 export const STOP_REQUEST_ERROR = "request-error";
+/** Successful coverage-based completion after a round. */
+export const STOP_INVESTIGATION_COMPLETE = "investigation-complete";
 /**
  * #1627: the deterministic early stop. When the run carried an obligation
  * surface that was ACTIVE at some point and every tracked row has since
@@ -1022,6 +1024,8 @@ export interface DriveToolLoopOptions {
    *   to repeat the obligation's prose.
    * A row drops out of gating once an admitted call attempted it. */
   requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
+  /** Certified changed-file and file-bound lead coverage at the end of a round. */
+  coverageComplete?: (outcome: LoopOutcome) => boolean;
   /**
    * #1379 (blocker 5728634290); #1396: row ids already discharged by an
    * earlier loop over the SAME conversation — the #1145 trace-gap repair
@@ -1954,6 +1958,19 @@ export async function driveToolLoop(
       extensionRounds++;
     }
 
+    // Do not conflate cap-release or a failed attempt with acquired material evidence.
+    const materialPending = (options.requiredEvidence ?? []).some((row) =>
+      row.rowClass !== "attention" && row.rowClass !== "review-prompt"
+      && (row.tools !== undefined || row.obligation !== undefined || row.source !== "trusted_base_guidance")
+      && (!discharged.has(row.id) || (!seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id))),
+    );
+    if (!materialPending && roundExecuted > 0
+      && [...resultsByIdx.values()].every((result) => result.status === "ok")
+      && options.coverageComplete?.(outcome) === true) {
+      outcome.stopReason = STOP_INVESTIGATION_COMPLETE;
+      broke = true;
+      break loop;
+    }
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;
       broke = true;
@@ -1971,9 +1988,8 @@ export async function driveToolLoop(
     // admission/refusal decisions are pending; the surface flag only sets
     // when a row was actually active, so surface-less and fully-seeded
     // continuations never fire it. A budget exhausted in the SAME round that
-    // settled the rows keeps the pre-existing `STOP_BUDGET` classification
-    // above — the settled stop only ever preempts rounds that would be
-    // spent on optional work.
+    // settled the rows reports `STOP_BUDGET` unless coverage completion
+    // already preempted it above.
     //
     // #1627 (M1): the stranding guard. A row settled by attempts that never
     // saw a SUCCESSFUL execution cannot back the fold's citation gate (which
