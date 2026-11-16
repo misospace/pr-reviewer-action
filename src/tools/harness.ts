@@ -2197,7 +2197,7 @@ function preLoopFailureKind(result: HarnessResult): string | null {
  * the effective request ceiling. No untrusted text rides anywhere. */
 export interface LowRiskBudgetReceipt {
   envelope: "capped" | "retained";
-  basis: "digest-only" | "low-risk-lockfile" | "risk-flags" | "metadata-uncertain" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "obligation-surface" | "no-signal";
+  basis: "digest-only" | "low-risk-lockfile" | "already-bounded" | "risk-flags" | "metadata-uncertain" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "obligation-surface" | "no-signal";
   mandatory_rows: number;
   cap?: number;
   /** capped only: the DERIVED (#810) budget the envelope narrowed, so the
@@ -2333,6 +2333,16 @@ function resolveLowRiskBudgetEnvelope(
   };
   const cap = lowRiskToolBudgetCap(signal);
   if (cap !== null) {
+    // #1688: the general size-aware budget may already be tighter than the
+    // low-risk envelope. In that case the envelope did not narrow anything:
+    // keep the real size-scaled provenance instead of claiming low-risk-cap.
+    if (cap.cap >= maxRequests.budget) {
+      return {
+        envelope: "retained",
+        basis: "already-bounded",
+        mandatory_rows: cap.mandatoryRows,
+      };
+    }
     return {
       envelope: "capped",
       basis: cap.basis,
