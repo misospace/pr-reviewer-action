@@ -3112,6 +3112,39 @@ test("a gitea-kind integration refuses foreign-family bindings and accepts its o
       }),
     /reconcile\.platform must be 'github', 'forgejo', or 'gitea'/,
   );
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          webhook: {
+            platform: "giteax" as unknown as "github",
+            port: 0,
+            secret: GITEA_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+        },
+      }),
+    /webhook\.platform must be 'github', 'forgejo', or 'gitea'/,
+  );
+  // The closed-set check runs BEFORE the family comparisons: an unknown
+  // intake label bound to a same-family integration must surface as the
+  // unknown label it is, not as a misleading family mismatch.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+          webhook: {
+            platform: "giteax" as unknown as "github",
+            port: 0,
+            secret: GITEA_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+          forgeIntegration: "git-1",
+        },
+      }),
+    /webhook\.platform must be 'github', 'forgejo', or 'gitea'/,
+  );
   // `gitea` intake + `forgejo` poll (and either label bound to a `gitea`
   // integration) is ONE family — both mint the canonical `forgejo`-family
   // identity — so construction succeeds and shuts down cleanly.

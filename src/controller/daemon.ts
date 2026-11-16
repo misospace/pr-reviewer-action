@@ -1092,6 +1092,30 @@ export async function startControllerDaemon(
       );
     }
   }
+  // The platform labels are a CLOSED set (#1682): `forgeFamily` maps every
+  // non-github label to the forgejo family, so an unrecognized label (only
+  // reachable past the types, from a JS caller of this exported seam) must
+  // not silently join that family and mint generations under it. BOTH
+  // labels are validated here, BEFORE the family comparisons below, so an
+  // unknown label surfaces as an unknown label instead of a misleading
+  // family-mismatch message against a correctly labelled integration.
+  const forgePlatformLabels = ["github", "forgejo", "gitea"];
+  if (
+    options.webhook !== undefined &&
+    !forgePlatformLabels.includes(options.webhook.platform)
+  ) {
+    throw new TypeError(
+      "ControllerDaemonOptions.webhook.platform must be 'github', 'forgejo', or 'gitea'",
+    );
+  }
+  if (
+    options.reconcile?.platform !== undefined &&
+    !forgePlatformLabels.includes(options.reconcile.platform)
+  ) {
+    throw new TypeError(
+      "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'",
+    );
+  }
   // When the daemon binds an integration name, the name must name exactly
   // one configured integration, and that integration's platform kind must
   // agree with the intake(s) this daemon serves — the identity the intake
@@ -1150,19 +1174,6 @@ export async function startControllerDaemon(
   }
   const drainMs = options.drainMs ?? DEFAULT_DRAIN_MS;
   const claimTtlMs = options.generationClaimTtlMs ?? DEFAULT_GENERATION_CLAIM_TTL_MS;
-  // The platform labels are a CLOSED set (#1682): `forgeFamily` maps every
-  // non-github label to the forgejo family, so an unrecognized label (only
-  // reachable past the types, from a JS caller of this exported seam) must
-  // not silently join that family and mint generations under it.
-  const forgePlatformLabels = ["github", "forgejo", "gitea"];
-  if (
-    options.reconcile?.platform !== undefined &&
-    !forgePlatformLabels.includes(options.reconcile.platform)
-  ) {
-    throw new TypeError(
-      "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'",
-    );
-  }
   // The poll's platform must agree with the intake's platform IN FAMILY
   // (#1682): the canonical platform is part of the generation identity, and
   // `gitea`/`forgejo` mint the SAME `forgejo`-family identity, so a Gitea
