@@ -1479,14 +1479,17 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
     timeFn,
     transport: async () => {
       transportCalls++;
-      return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+      return { choices: [{ message: { content: null, tool_calls: [
+        { id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"src.ts"}' } },
+        { id: "bad", type: "function", function: { name: "read_file", arguments: '{"path":' } },
+      ] } }] };
     },
   }));
-  assert.equal(result.stop_reason, "investigation-complete");
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
   assert.equal(result.partial_coverage, undefined);
   assert.equal(result.native_loop_verdict_status, "fallback");
   const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
-  assert.doesNotMatch(markdown, /Investigation interrupted/);
+  assert.match(markdown, /Investigation interrupted/);
   assert.ok(!markdown.includes("Outstanding evidence"));
   // The other half of the issue's acceptance: a timeout AFTER all the
   // required evidence was collected stays clean-eligible — no blanket
@@ -5547,5 +5550,21 @@ test("coverage completion fails closed on uncovered or truncated manifests", asy
     }));
     assert.equal(result.stop_reason, "tool-call-budget-exhausted");
     if (!truncated) assert.deepEqual(result.partial_coverage?.unread_files, ["src/uncovered.ts"]);
+  }
+});
+
+test("coverage completion requires certified deleted-file diffs", async () => {
+  for (const certified of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/deleted.ts b/src/deleted.ts\n--- a/src/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([{ filename: "src/deleted.ts", status: "removed" }]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), certified ? diff : "");
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, certified ? "investigation-complete" : "tool-call-budget-exhausted");
   }
 });

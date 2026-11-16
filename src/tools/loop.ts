@@ -1964,7 +1964,7 @@ export async function driveToolLoop(
       && (row.tools !== undefined || row.obligation !== undefined || row.source !== "trusted_base_guidance")
       && (!discharged.has(row.id) || (!seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id))),
     );
-    if (!materialPending && roundExecuted > 0
+    if (!materialPending && roundExecuted > 0 && roundRefused === 0
       && [...resultsByIdx.values()].every((result) => result.status === "ok")
       && options.coverageComplete?.(outcome) === true) {
       outcome.stopReason = STOP_INVESTIGATION_COMPLETE;
