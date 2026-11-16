@@ -1354,6 +1354,27 @@ test("#1663: a fresh current-head finding proves the concern, so it is not an un
   assert.equal(finalKind(a), "request_changes", "and it blocks on its own authority");
 });
 
+test("#1663: the fresh-finding exemption is authorship-independent — it also covers an unproven row", () => {
+  // Identity is keyed on the thread's historical severity, so a fresh
+  // current-head finding proves the same concern under ANY provenance,
+  // including ambiguous `unproven` (the review already re-evaluated it).
+  const a = artifact({
+    verdict: "approve",
+    findings: [{
+      severity: "major",
+      category: "bug",
+      file: "src/a.ts",
+      line: 3,
+      message: "old defect",
+    }],
+    thread_dispositions: [],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t", { authorship: "unproven" })], "strict", liveListing("t"));
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined, "the fresh finding closes the gap, not the marker");
+  assert.equal(a.thread_reconciliation?.state, "complete");
+  assert.equal(finalKind(a), "request_changes", "the fresh finding blocks on its own authority");
+});
+
 test("#1663: a blocking `open` re-affirmation WITHOUT a reason is unverified, not re-emitted", () => {
   for (const evidence of [null, "", "   "]) {
     const a = artifact({

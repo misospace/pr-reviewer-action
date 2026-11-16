@@ -139,3 +139,30 @@ test("#812: comments older than the PR's last edit are labeled superseded; fresh
   const badStamp = [{ id: 3, user: "carol", created_at: "garbage", updated_at: "", body: "x" }];
   assert.ok(!renderPrThread(badStamp, undefined, undefined, 50000, cutoff).includes("earlier discussion"));
 });
+
+// #1663: the forge-reported actor type is authorship metadata, so the
+// extraction variants and their malformed forms get adversarial pins.
+test("#1663: normalizeComment carries the reported actor type from every real spelling", async () => {
+  const { normalizeComment } = await import("../src/context/pr-thread.js");
+  const comment = (user: unknown, flat?: unknown): Record<string, unknown> => ({
+    id: 1, user, created_at: "2026-10-01T00:00:00Z", updated_at: "", body: "x",
+    ...(flat === undefined ? {} : { user_type: flat }),
+  });
+  // Nested `type` (raw forges) and nested `user_type`, plus the flat
+  // projection the platform normalizers emit.
+  assert.equal(normalizeComment(comment({ login: "a", type: "Bot" }))!.userType, "Bot");
+  assert.equal(normalizeComment(comment({ login: "a", user_type: "User" }))!.userType, "User");
+  assert.equal(normalizeComment(comment({ login: "a" }, "Bot"))!.userType, "Bot");
+  // The adversarial edge: a cosmetic miss (empty or malformed sibling)
+  // must not drop a valid type the forge reported.
+  assert.equal(normalizeComment(comment({ login: "a", type: "", user_type: "Bot" }))!.userType, "Bot",
+    "an empty `type` never shadows a sibling `user_type`");
+  assert.equal(normalizeComment(comment({ login: "a", type: 42, user_type: "User" }))!.userType, "User");
+  assert.equal(normalizeComment(comment({ login: "a", type: {} }, "Bot"))!.userType, "Bot",
+    "a malformed nested type falls through to the flat projection");
+  // Nothing usable anywhere: the field stays absent (unproven), never
+  // coerced or guessed.
+  assert.equal(normalizeComment(comment({ login: "a" }))!.userType, undefined);
+  assert.equal(normalizeComment(comment({ login: "a", type: 7, user_type: [] }, 9))!.userType, undefined);
+  assert.equal(normalizeComment("not an object"), null);
+});

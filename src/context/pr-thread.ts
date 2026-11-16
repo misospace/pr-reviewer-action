@@ -96,18 +96,25 @@ export function normalizeComment(raw: unknown): PrThreadComment | null {
     name = "";
   }
   const body = rec.body;
-  const nestedType = typeof user === "object" && user !== null && !Array.isArray(user)
-    ? (user as Record<string, unknown>).type ?? (user as Record<string, unknown>).user_type
-    : undefined;
-  // #1663: the actor type may arrive nested in the user object (raw forges)
-  // or beside it (the platform normalizers' flat projection).
-  const reportedType = typeof nestedType === "string" && nestedType.trim() !== "" ? nestedType : rec.user_type;
+  // #1663: the actor type may arrive nested in the user object (raw forges,
+  // under either `type` or `user_type`) or beside it (the platform
+  // normalizers' flat projection). Take the first USABLE candidate: an
+  // empty or malformed `type` must not shadow a valid sibling `user_type`
+  // (a proven automation author may only degrade to unproven, never
+  // silently — the fallback direction is conservative either way, but the
+  // forge did report the type and we must not drop it on a cosmetic miss).
+  const nested = typeof user === "object" && user !== null && !Array.isArray(user)
+    ? user as Record<string, unknown>
+    : null;
+  const usableType = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() !== "" ? value : undefined;
+  const reportedType = usableType(nested?.type)
+    ?? usableType(nested?.user_type)
+    ?? usableType(rec.user_type);
   return {
     id: rec.id ?? null,
     user: headerField(name) || "unknown",
-    ...(typeof reportedType === "string" && reportedType.trim() !== ""
-      ? { userType: headerField(reportedType) }
-      : {}),
+    ...(reportedType !== undefined ? { userType: headerField(reportedType) } : {}),
     createdAt: headerField(rec.created_at),
     updatedAt: headerField(rec.updated_at),
     body: typeof body === "string" ? body : "",
