@@ -1936,14 +1936,14 @@ test("#969: native_loop + smart_review_requested escalates through a working sma
       assert.match(result.outputs.reviewMarkdown, /Escalated review\./);
       assert.ok(existsSync(join(runDir, "review-corpus.smart.truncated.md")), "the smart corpus must exist before the smart harness plans from it");
       const smartHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.smart.json"), "utf8")) as { executed_request_count?: number; stop_reason?: string; native_loop_verdict_status?: string; tool_results?: Array<{ result?: { content?: string } }> };
-      assert.equal(smartHarness.stop_reason, "model-stopped");
+      assert.equal(smartHarness.stop_reason, "investigation-complete");
       assert.equal(smartHarness.native_loop_verdict_status, "accepted", "the smart harness must produce a reusable verdict");
       assert.ok((smartHarness.executed_request_count ?? 0) >= 1, "the smart harness must run its tool turn");
       assert.ok(
         (smartHarness.tool_results ?? []).some((call) => (call.result?.content ?? "").includes("SMART-CORPUS-969 evidence marker")),
         "the smart harness must actually have read the changed file",
       );
-      assert.equal(primaryServer.requests.length, 3, "the primary review's own native loop runs on the primary endpoint (tool turn + verdict turns); escalation calls land on the smart endpoint");
+      assert.equal(primaryServer.requests.length, 2, "the primary endpoint serves the investigation and closing verdict");
       assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
       assert.ok(smartServer.requests.length >= 2);
       assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
@@ -3393,7 +3393,7 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
     // primary-profile corpus into the first-pass slot.
     assert.equal(result.outputs.reviewRoute, "primary");
     assert.ok(existsSync(join(runDir, "pr.diff.truncated")), "the primary-profile build must have run");
-    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(harness.stop_reason, "investigation-complete");
     assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
 assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
 // #1381's must_check obligation rows are undisposed by the scripted verdict;
@@ -3405,7 +3405,7 @@ assert.equal(result.outputs.verdict, "approve");
     // gap) but is now visible in the marker through `tool_stop_reason` — the
     // case that made budget-exhaustion rates unmeasurable from telemetry.
     assert.doesNotMatch(result.marker, /"coverage":/);
-    assert.match(result.marker, /"tool_stop_reason":"tool-call-budget-exhausted"/);
+    assert.match(result.marker, /"tool_stop_reason":"investigation-complete"/);
   } finally {
     await server.close();
     cleanup();
@@ -4047,7 +4047,7 @@ test("#824: every tool loop turn clamps the same way and the review still publis
     // turn and the verdict turn alike.
     assert.deepEqual(requested, [16384, 8192, 16384, 8192]);
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { stop_reason: string; tool_results: Array<{ tool: string; status: string }> };
-    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(harness.stop_reason, "investigation-complete");
     assert.equal(harness.tool_results[0]!.tool, "read_file");
     assert.equal(harness.tool_results[0]!.status, "ok");
   } finally {
@@ -6393,4 +6393,39 @@ test("#726: harnessTransportAdapter binds the run's cancellation signal to every
   } finally {
     await server.close();
   }
+});
+
+test("#1688: covered app-code investigation reaches a native approval", async () => {
+  const files = Array.from({ length: 7 }, (_, i) => `src/file${i}.ts`);
+  const diff = files.map((file) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`).join("");
+  let calls = 0;
+  const server = await startMockServer((_req, body, res) => {
+    calls++;
+    res.setHeader("Content-Type", "application/json");
+    const parsed = JSON.parse(String(body)) as { tools?: unknown[] };
+    if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+      res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "find_files", arguments: '{"pattern":"*.ts"}' } }] } }] }));
+    } else res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"));
+    for (const file of files) writeFileSync(join(runDir, file), "new\n");
+    gitInit(runDir);
+    const result = await runReview({ env: { IS_FORK_PR: "false" }, inputs: {
+      "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url,
+      "ai-model": "m", "ai-stream": "false", "ai-api-key": "k", "tool-mode": "native_loop",
+      "tool-max-requests": "40", "deep-review": "false", "ci-status-check": "false", "publish-mode": "review_verdict",
+    }, runDir, workspace: runDir, platformAdapter: mockPlatform({ title: "Update implementation", diff,
+      files: files.map((filename) => ({ filename, status: "modified", additions: 1, deletions: 1, changes: 2 })) }),
+      persistArtifacts: true, quiet: true });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8"));
+    assert.equal(harness.stop_reason, "investigation-complete");
+    assert.equal(harness.executed_request_count, 1);
+    assert.equal(harness.native_loop_verdict_produced, true);
+    assert.equal(harness.partial_coverage, undefined);
+    assert.equal(calls, 2, "investigation plus warm verdict, without a separate review call");
+    const api = await publishRunHandoff(result);
+    assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify({ disposition: result.finalDisposition, body: api.submitted[0]!.body }));
+  } finally { await server.close(); cleanup(); }
 });

@@ -42,7 +42,7 @@ Every key below is the literal JSON key in the marker.
 | `verdict_reserve_sec` | number, omitted | The wall-clock slice the native loop reserved for the closing in-conversation verdict this run (`verdictWallClockReserveSec`'s deterministic result — see [`docs/tool-loop.md`](tool-loop.md#verdict-wall-clock-reserve)). `0` when the reserve is off; omitted when no tool harness ran. |
 | `context_budget` | number, omitted | The loop's conversation budget in approximate tokens: past it, older tool results are compacted. 24,000 unless a context window is declared or `tool-max-conversation-tokens` is set (see [Context limits](tool-loop.md#context-limits)). Omitted when no loop ran. |
 | `context_peak` | number, omitted | The largest conversation the loop reached (approximate tokens). Close to `context_budget` means compaction was in play. Omitted alongside `context_budget`. |
-| `tool_stop_reason` | string, omitted | The tool loop's own stop reason for the route the marker was built from — one of the values in [`docs/tool-loop.md`](tool-loop.md#stop-reasons-and-partial-coverage) (`model-stopped`, `no-tool-calls`, `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, `wall-clock-verdict-reserve`, `request-error`, `obligations-settled`), or `harness-abort` when the harness aborted before the loop ran. Recorded on every harness run: unlike `coverage_stop_reason` (only on a confirmed coverage gap), a budget stop with complete coverage is recorded too, so budget-exhaustion rates are measurable per `tool_budget_source`. Omitted when no tool harness reported one. |
+| `tool_stop_reason` | string, omitted | The tool loop's own stop reason for the route the marker was built from — one of the values in [`docs/tool-loop.md`](tool-loop.md#stop-reasons-and-partial-coverage) (`model-stopped`, `no-tool-calls`, `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, `wall-clock-verdict-reserve`, `request-error`, `obligations-settled`, `investigation-complete`), or `harness-abort` when the harness aborted before the loop ran. Recorded on every harness run: unlike `coverage_stop_reason` (only on a confirmed coverage gap), a budget stop with complete coverage is recorded too, so budget-exhaustion rates are measurable per `tool_budget_source`. Omitted when no tool harness reported one. |
 | `confidence_status` | string, omitted | The independent verifier's status: `scored` or `unscored`. Omitted when the verifier did not run. |
 | `confidence_score` | number, omitted | The independent verifier's score, `0` to `5`. Omitted unless the status is `scored`. |
 | `confidence_cause` | string, omitted | Why the verifier did not score: an action-owned token such as `timeout`, `http_429`, or `incomplete_review`. Omitted for a scored run and when the verifier did not run. |
@@ -182,7 +182,7 @@ credentials.
 | `cached_tokens` | The prompt tokens the provider served from its cache. |
 | `cache_write_tokens` | The prompt tokens the provider wrote into its cache. |
 | `uncached_prompt_tokens` | The prompt tokens the provider did not serve from its cache. |
-| `attempts` | The number of model calls the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value is 2 when a streamed answer was unusable and the turn called the provider again without streaming. |
+| `attempts` | The number of model calls the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value is 2 when a streamed answer was unusable and the turn called the provider again without streaming, or (#1687, verdict record only) when an initial non-streamed closing verdict retried a proven transient transport failure. |
 | `wire_calls` | The number of HTTP requests the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value counts the retries that the transport made. |
 | `finish_reason` | The provider's stop reason for the accepted attempt. The value is reduced to a short token, so a provider cannot put free text in the artifact. |
 | `streamed_fallback` | True when a streamed answer was unusable and the turn called the provider again without streaming. |
@@ -203,6 +203,19 @@ The verdict record's token counts are the billed sums over the turn's
 attempts. Every attempt of the turn is added into them. Its timing fields
 (`ttft_sec`, `first_event_sec`, `decode_tokens_per_sec`) describe the
 accepted attempt only. A duration belongs to one attempt.
+
+When the initial NON-streamed closing verdict died on a proven transient
+transport failure and the harness retried it once (#1687), the harness
+artifact carries one extra field: `native_loop_verdict_transport_retry`. It
+is the discarded first attempt's record, in the same bounded content-free
+shape as a round's `stream_failure` — a closed reason token
+(`connection_closed` or `transport_timeout`), the HTTP status when the
+failure carried one, the attempt's own elapsed seconds, the wire instants as
+observed, the retry's own elapsed seconds (null when the retry was refused
+and never sent), and the route. A refused retry counts as no attempt
+anywhere. The verdict record's `streamed_fallback` keeps its exact streamed
+meaning and stays false for this retry; the step summary's `retry:` token
+(`transport`) names the same distinction.
 
 ### Cache accounting on the Anthropic wire
 

@@ -105,6 +105,51 @@ test("the step summary carries no fragment of an endpoint URL that holds interna
   }
 });
 
+test("#1687: the Native verdict row says WHICH recovery `retried` reports", () => {
+  const { dir, cleanup } = withDir();
+  try {
+    const harness = {
+      native_loop_verdict_status: "accepted",
+      native_loop_verdict_transport: "non-streamed-transport-retry",
+      native_loop_verdict_attempts: 2,
+      native_loop_verdict_retried: true,
+      native_loop_verdict_retry_kind: "transport",
+    };
+    const path = join(dir, "retry.md");
+    writeStepSummary(path, baseInput({ primaryHarness: harness as never }));
+    const summary = readFileSync(path, "utf8");
+    assert.ok(summary.includes("via non-streamed-transport-retry"), "the success transport token renders");
+    assert.ok(summary.includes("retried: true, retry: transport"), "the retry kind distinguishes #1687 from the #637 stream fallback");
+
+    const failed = join(dir, "failed.md");
+    writeStepSummary(failed, baseInput({
+      primaryHarness: {
+        native_loop_verdict_status: "fallback",
+        native_loop_verdict_attempts: 2,
+        native_loop_verdict_retried: true,
+        native_loop_verdict_retry_kind: "transport",
+        native_loop_verdict_reason: "transport",
+      } as never,
+    }));
+    assert.ok(readFileSync(failed, "utf8").includes("retry: transport"), "the kind survives the failed-retry row too");
+
+    const foreign = join(dir, "foreign.md");
+    writeStepSummary(foreign, baseInput({
+      primaryHarness: {
+        native_loop_verdict_status: "accepted",
+        native_loop_verdict_attempts: 1,
+        native_loop_verdict_retried: false,
+        native_loop_verdict_retry_kind: "anything else forges prose",
+      } as never,
+    }));
+    const rendered = readFileSync(foreign, "utf8");
+    assert.ok(!rendered.includes("retry:"), "a closed-set token: a foreign artifact value renders nothing");
+    assert.ok(!rendered.includes("forges"), "no foreign prose reaches the summary");
+  } finally {
+    cleanup();
+  }
+});
+
 test("#1003: the triage row renders only when triage ran", () => {
   const { dir, cleanup } = withDir();
   try {
