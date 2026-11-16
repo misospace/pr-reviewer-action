@@ -51,6 +51,63 @@ test("chart appVersion tracks the release manifest version", () => {
   assert.equal(chart.appVersion, manifest["."]);
 });
 
+/** Deployment files whose version fields release-please must bump in the
+ * release PR, and the number of annotated fields each one carries. The
+ * chart's own `version` is intentionally excluded: it is the independent
+ * Helm chart version, not the application release. */
+const VERSION_BOUND_DEPLOY_FILES = new Map<string, number>([
+  ["deploy/charts/pr-reviewer/Chart.yaml", 1],
+  ["deploy/charts/pr-reviewer/examples/values-controller-only.yaml", 1],
+  ["deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml", 2],
+]);
+
+interface ReleasePleaseExtraFile {
+  type?: string;
+  path?: string;
+}
+
+function releasePleaseExtraFiles(): ReleasePleaseExtraFile[] {
+  const config = JSON.parse(read("release-please-config.json")) as {
+    packages: Record<string, { "extra-files"?: (string | ReleasePleaseExtraFile)[] }>;
+  };
+  return (config.packages["."]?.["extra-files"] ?? []).map((entry) =>
+    typeof entry === "string" ? { path: entry } : entry,
+  );
+}
+
+test("release-please synchronizes every version-bound deployment file", () => {
+  const manifest = JSON.parse(read(".release-please-manifest.json")) as Record<string, string>;
+  const version = manifest["."];
+  assert.match(
+    version ?? "",
+    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/,
+    "the manifest must carry a plain semver release version",
+  );
+
+  const extraFiles = releasePleaseExtraFiles();
+  for (const [path, annotatedFields] of VERSION_BOUND_DEPLOY_FILES) {
+    const entry = extraFiles.find((candidate) => candidate.path === path);
+    assert.ok(entry, `${path} must be declared in release-please-config.json extra-files`);
+    // The annotated generic updater rewrites just the version token on the
+    // marked line, preserving comments and formatting. The yaml/jsonpath
+    // updater would re-serialize the whole file and strip its comments.
+    assert.equal(entry.type, "generic", `${path} must use the annotated generic updater`);
+
+    const annotated = read(path)
+      .split("\n")
+      .filter((line) => line.includes("x-release-please-version"))
+      .map((line) => /\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/.exec(line)?.[1]);
+    assert.equal(
+      annotated.length,
+      annotatedFields,
+      `${path} must annotate exactly ${annotatedFields} release-version field(s)`,
+    );
+    for (const value of annotated) {
+      assert.equal(value, version, `${path}'s annotated version must track the release manifest`);
+    }
+  }
+});
+
 test("chart default values parse with hardened security defaults", () => {
   const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as Record<string, unknown>;
   const controller = values.controller as Record<string, unknown>;
