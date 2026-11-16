@@ -9,12 +9,17 @@
  * the current-head review must still establish whether its finding is valid.
  *
  * Authorship comes from forge metadata, never from comment bodies
- * (`ThreadAuthorship` in `src/context/review-threads.ts`): `action` (this
- * run's own login), `other_bot` (a forge-reported automation author under a
- * different login — a rotated publisher stays a bot finding), `human` (a
- * forge-reported `User`), and `unproven` (nothing usable). A login mismatch
- * alone never converts a historical bot finding into a human one, and a
- * managed marker in a human's body never buys bot authority.
+ * (`ThreadAuthorship` in `src/context/review-threads.ts`): `action` (the
+ * forge reports an AUTOMATION author whose login is this run's identity),
+ * `other_bot` (a forge-reported automation author under a different login —
+ * a rotated publisher stays a bot finding), `human` (a forge-reported
+ * `User` account carrying no action publication metadata), and `unproven`
+ * (everything else). Account identity is not comment provenance: a matching
+ * login under a shared PAT never grants dismissal authority over a human's
+ * comment, and a historical finding the action published under a human
+ * account's PAT never silently becomes a human minor — a marker on a
+ * human-typed (or untyped) account is AMBIGUOUS provenance, settled as the
+ * material unknown, never as a confident classification in either direction.
  *
  * A live historical bot finding (`action` or `other_bot`) re-emits at its
  * original severity only on a SUPPORTED re-affirmation: `open` plus what the

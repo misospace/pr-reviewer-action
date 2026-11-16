@@ -232,14 +232,15 @@ export async function buildReviewThreadsSection(ws: RunWorkspace, adapter: Platf
   ws.write("review-threads.raw.json", pyJsonDumps(fetched.data));
   try {
     // #1663: thread origin is decided from the forge's authorship metadata,
-    // never from comment-body wording. The login this token authenticates as
-    // marks the action's own roots; the forge-reported actor type (`Bot` /
-    // `User` from GitHub's `author { __typename }`, `user.type` where a
-    // Forgejo deployment reports one) decides everyone else: a reported
-    // automation author under a different login stays a bot finding (a
-    // rotated publisher never becomes a human minor), a reported User is
-    // human even when its body forges the managed marker, and neither type
-    // plus no identity match is `unproven` — closed by no bot disposition,
+    // never from comment-body wording. The forge's actor type (`Bot` from
+    // GitHub's `author { __typename }`, `user.type` where a Forgejo
+    // deployment reports one) decides everything: only an AUTOMATION-typed
+    // author under this run's authenticated login is the action's own
+    // finding, another automation identity stays a bot finding (a rotated
+    // publisher never becomes a human minor), a `User`-typed root with no
+    // action publication metadata is human even under the run's own shared
+    // PAT identity, and a marker-bearing root on a human-typed or untyped
+    // account is ambiguous provenance — dismissible by no bot disposition,
     // never re-emitting a blocking severity, the gap riding the material
     // `unverified_blocking_claim` instead (#1663 review).
     let botIdentity: string | null = null;

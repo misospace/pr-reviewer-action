@@ -53,28 +53,46 @@ export interface ReviewThreadComment extends PrThreadComment {
   own: boolean;
 }
 
-/** #1663: what the forge metadata proves about who wrote the thread root.
+/** #1663: what the forge metadata proves about who WROTE the thread root.
  *
- * - `action` — the root carries this run's own authenticated login. The
- *   action's own historical finding; the current-head review must
- *   re-evaluate it.
- * - `other_bot` — the forge reports the author as an automation actor
- *   (`__typename: Bot`) that is NOT this run's login. A previous publisher
- *   identity, a renamed App, or a different bot: definitively not a human,
- *   and definitively not proven to be this action. It keeps the
- *   re-evaluation contract; a login mismatch never converts it to human.
- * - `human` — the forge reports a `User`-typed author that is not this run's
- *   login. Only then may the human-thread contract apply.
- * - `unproven` — the forge gave no usable actor type and the login does not
- *   match this run's identity. Ownership cannot be established, so neither
- *   bot authority (which could re-emit the old severity) nor human authority
- *   (which a bot disposition must not dismiss) may be asserted.
+ * Account identity is not comment provenance. The forge proves only two
+ * things: whether the authoring ACCOUNT is an automation account (`Bot` /
+ * `Automation` actor type), and which login posted. The action's publication
+ * metadata (managed marker, finding trailer, finding-id digest) is a CLAIM
+ * about the body, never proof of who posted it — a human can copy it, and a
+ * human writing by hand and the action running under that human's PAT look
+ * identical to the forge (both are the same `User`-typed login). So:
+ *
+ * - `action` — the forge reports an AUTOMATION author whose login IS this
+ *   run's authenticated identity. Automation-ness plus identity is the only
+ *   combination that establishes the action's authority over the finding.
+ * - `other_bot` — the forge reports an automation author under a different
+ *   login (rotated App, renamed bot, second automation account). Authorship
+ *   by automation is proven; the connection to this run's identity is not,
+ *   which is why it keeps the re-evaluation contract but a login mismatch
+ *   never converts it to human.
+ * - `human` — the forge reports a `User` account AND the body carries no
+ *   action publication metadata. The action only ever posts review-thread
+ *   findings wrapped in that metadata, so an unmarked root on a human account
+ *   is human-authored for every practical purpose; identity matching is not
+ *   part of this reading (a human's comment under the run's own shared PAT is
+ *   still human).
+ * - `unproven` — everything else, deliberately. Most importantly a root that
+ *   CLAIMS action publication (marker/trailer) on an account the forge does
+ *   not report as automation: it may be a genuine historical finding the
+ *   action published under a human's PAT (this run's or a predecessor's) or a
+ *   human who copied the marker — the forge cannot tell these apart, and a
+ *   body is not self-authenticating. Uncertain provenance may assert neither
+ *   authority: no bot disposition dismisses a possibly-human thread, the
+ *   historical severity is never resurrected, and a marker-bearing blocking
+ *   concern is retained as the material `unverified_blocking_claim`
+ *   (INCOMPLETE/COMMENT) instead of being silently settled either way.
  *
  * GitHub reports the actor type through GraphQL (`author { __typename }`).
- * Forgejo's review-comment user object has no documented bot flag, so on
- * that forge every non-matching root is `unproven` unless the deployment
- * reports a type — the conservative reading, deliberately chosen over
- * asserting a human author the forge never identified. */
+ * Forgejo's review-comment user object has no documented bot flag, so there
+ * automation authors cannot be proven and marked roots land in `unproven` —
+ * the conservative reading, chosen over fabricating certainty the forge
+ * never supplied. */
 export type ThreadAuthorship = "action" | "other_bot" | "human" | "unproven";
 
 export interface ReviewThread {
@@ -141,33 +159,56 @@ const AUTOMATION_AUTHOR_TYPES: ReadonlySet<string> = new Set(["bot", "automation
 /** The forge-reported actor type that proves a human account. */
 const HUMAN_AUTHOR_TYPES: ReadonlySet<string> = new Set(["user"]);
 
-/** #1663: decide what the forge metadata proves about the thread root.
+/** #1663: decide what the forge metadata proves about who WROTE the root —
+ * never what the body claims about itself.
  *
- * The current run's authenticated login is authoritative ONLY for identity:
- * a root that carries it is this action's own finding. A root that does not
- * carry it is NOT therefore human — a renamed App, a rotated publisher, or a
- * second automation account all mismatch. Only the forge's actor type can
- * tell those apart, so when the type is missing the authorship stays
- * `unproven` rather than silently becoming human authority. */
+ * The two failure modes this must refuse:
+ * - A human's comment under a SHARED PAT identity: the run authenticates as
+ *   `alice`, Alice wrote the root by hand, and login-matching alone would
+ *   classify it `action` and let a model disposition dismiss her thread.
+ *   A matching login therefore only carries weight when the forge also
+ *   reports the author account as AUTOMATION.
+ * - A historical action finding published under a PREDECESSOR's PAT: the old
+ *   root is `User`-typed `alice` carrying this action's marker. The `User`
+ *   type would classify it human and drop a real Major to a silent minor;
+ *   the marker alone cannot prove authorship either. Neither inference is
+ *   sound, so the provenance stays `unproven`: material unknown, never a
+ *   confident classification. */
 function classifyAuthorship(root: ReviewThreadComment, botIdentity: string | null): ThreadAuthorship {
   const identity = normalizeLogin(botIdentity);
   const author = normalizeLogin(root.user);
-  if (identity !== null && author !== null && author === identity) {
-    return "action";
-  }
   const actorType = typeof root.userType === "string" ? root.userType.trim().toLowerCase() : "";
   if (AUTOMATION_AUTHOR_TYPES.has(actorType)) {
-    // A proven automation author under a different login: still a bot
-    // finding, still bound by the current-head re-evaluation contract.
-    return "other_bot";
+    // The forge PROVES an automation author. Under this run's login it is
+    // this publisher's own finding; under any other login it is another
+    // automation identity — still a bot finding under the current-head
+    // re-evaluation contract, never a human one.
+    return identity !== null && author !== null && author === identity ? "action" : "other_bot";
+  }
+  if (root.own) {
+    // The body carries this action's publication metadata on an account the
+    // forge does not report as automation (a `User` type, or no type at
+    // all). That combination is ambiguous by construction: it may be the
+    // action's own finding published under a human account's PAT — this
+    // run's or a predecessor's — or a human quoting/copying the marker.
+    // Publication metadata is not self-authenticating and the forge cannot
+    // distinguish the two, so NEITHER authority may be asserted: no bot
+    // disposition dismisses it, its historical severity is never
+    // resurrected, and a blocking concern is retained as the material
+    // unknown instead of silently settling.
+    return "unproven";
   }
   if (HUMAN_AUTHOR_TYPES.has(actorType)) {
+    // A human account with no action publication metadata on it: the action
+    // only ever posts marked review-thread findings, so this is
+    // human-authored — including under the run's own shared PAT identity,
+    // which is exactly why the identity check above required automation.
     return "human";
   }
-  // No usable type and no identity match. The managed marker says the body
-  // CLAIMS to be this action's finding; that keeps the concern visible and
-  // material, but it buys no blocking authority, and the thread is never
-  // read as human either.
+  // No usable type, no marker: nothing the forge reported identifies the
+  // author. Conservative by default; settlement treats it like a human
+  // thread (unclosable by a bot disposition) without making it material —
+  // an ordinary unmarked comment is not a blocking claim of this reviewer's.
   return "unproven";
 }
 

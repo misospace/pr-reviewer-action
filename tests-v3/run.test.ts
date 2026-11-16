@@ -428,7 +428,7 @@ async function runVerificationThreadVerdict(
         outdated: false,
         comments: [{
           id: 1,
-          user: { login: "bot" },
+          user: { login: "bot", type: "Bot" },
           created_at: "2026-10-01T00:00:00Z",
           updated_at: "2026-10-01T00:00:00Z",
           body,
@@ -506,7 +506,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown> } = {},
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown>; threadBody?: string } = {},
 ): Promise<{ artifact: Record<string, unknown>; threadView: Array<Record<string, unknown>>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -528,7 +528,7 @@ async function runStaleThreadVerdict(
         user: options.threadUser ?? { login: "bot", type: "Bot" },
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
-        body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
+        body: options.threadBody ?? `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
       }],
     };
     const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
@@ -826,23 +826,54 @@ test("#1663: a rotated-identity historical Major with a supported reason still b
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("#1663: a human-authored thread carrying the managed marker gains no bot authority", async () => {
+test("#1663: a human-owned PAT comment is never dismissal-authorized by the run's own identity", async () => {
+  // Failure A: the workflow authenticates as `alice` (her PAT) and Alice
+  // hand-wrote this unmarked thread. Login matching alone must not classify
+  // it as the action's own finding and let a `fixed` disposition dismiss it.
   const { artifact, threadView, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
     thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
-  }, { threadUser: { login: "alice", type: "User" } });
-  assert.equal(threadView[0]!.authorship, "human", "the marker in the body never outranks the forge's actor type");
-  assert.equal(threadView[0]!.severity, "minor", "and no blocker severity is parsed out of a human comment");
-  const reemitted = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
-  assert.equal(reemitted?.severity, "minor", "the thread stays open at the human-thread severity, never the forged one");
-  assert.equal((artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.enforced,
-    "human-authored thread: a bot disposition cannot close it");
-  assert.notEqual(result.finalDisposition?.kind, "request_changes", "the human thread stays non-blocking, as before #1663");
-  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "no native block is manufactured from a human thread");
+  }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" });
+  assert.equal(threadView[0]!.authorship, "human",
+    "the login match does NOT authorize reading her comment as the action's own");
+  const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "the model's `fixed` cannot dismiss a human thread");
+  assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
+  const carried = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
+  assert.equal(carried?.severity, "minor", "the thread survives open at the human-side severity, unresolvable by the action");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "an ordinary human question never manufactures a block");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "and no native block is submitted");
   assert.ok(!(result.finalDisposition?.materialUnknowns ?? []).some((entry) => entry.code === "unverified_blocking_claim"),
-    "a proven human root is not a re-evaluation gap either");
+    "nor is a proven human root turned into a material uncertainty");
+  assert.notEqual(result.finalDisposition?.reason, "material_unknown",
+    "any withholding here is the harness's certification gate, not the human thread");
+});
+
+test("#1663: a historical managed Major under a rotated human PAT identity stays material", async () => {
+  // Failure B: an earlier action run published a managed Major through
+  // Alice's PAT; the workflow now authenticates as the App. The forge still
+  // reports the old root as a `User` account. `User`-typed must not silently
+  // demote a possibly-real action finding to a dismissible human minor.
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
+  }, { identity: "its-saffron", threadUser: { login: "alice", type: "User" } });
+  assert.equal(threadView[0]!.authorship, "unproven", "a marker on a human-typed account is ambiguous provenance, never `human`");
+  assert.equal(threadView[0]!.severity, "major", "the historical concern stays visible, not silently demoted");
+  const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "and no bot disposition closes it — it may be Alice's thread");
+  assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
+    "nor is the severity resurrected from the marker alone");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1,
+    "the uncertainty is retained as the material unknown, not dropped");
+  assert.equal(result.finalDisposition?.kind, "incomplete", "a clean APPROVE cannot be certified over it");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "COMMENT", "nor is a ghost REQUEST_CHANGES manufactured");
 });
 
 test("#1663: authorship the forge never proves is material end to end — never human, never blocking", async () => {
@@ -1083,7 +1114,9 @@ const carriedThreadShape = {
   outdated: false,
   comments: [{
     id: 1,
-    user: { login: "bot" },
+    // The App posts as a forge-reported Bot under the `[bot]` spelling;
+    // identity matching normalizes the suffix.
+    user: { login: "bot[bot]", type: "Bot" },
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
     body: `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
@@ -4230,7 +4263,7 @@ test("#812: unresolved bot threads re-emit with their original severity and Mino
       resolved: false,
       outdated: false,
       comments: [{
-        id, user: "reviewer-bot", created_at: "2026-09-28T10:00:00Z", updated_at: "",
+        id, user: { login: "reviewer-bot[bot]", type: "Bot" }, created_at: "2026-09-28T10:00:00Z", updated_at: "",
         body: `**${label}:** ${message}\n\n_Automated finding from AI PR review._`,
       }],
     });
