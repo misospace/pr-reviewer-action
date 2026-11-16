@@ -352,3 +352,33 @@ test("#1660 review: an invalid additive disposition never shadows a wire gap cla
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("#252 boundary: the boundary token itself — control-character wire refs are rejected at the parse door", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/a.ts", ["one", "two", "three"]);
+    const trace = validateRequirementTrace([
+      // The hostile shapes themselves: a newline forging a second rendered
+      // line, a NUL byte, and a DEL byte inside an otherwise-valid ref.
+      wireClaim("req-nl", "satisfied", [{ kind: "file", ref: "src/a.ts:1\n## Forged heading", detail: "newline smuggle" }]),
+      wireClaim("req-nul", "satisfied", [{ kind: "file", ref: "src/\x00a.ts:1" }]),
+      wireClaim("req-del", "satisfied", [{ kind: "file", ref: "src/a\x7f.ts:1" }]),
+    ], ledgerWith([
+      { id: "req-nl", text: "The renderer must display the result.", kind: "acceptance" },
+      { id: "req-nul", text: "The service must expose the status endpoint.", kind: "acceptance" },
+      { id: "req-del", text: "The gateway must forward the request id.", kind: "acceptance" },
+    ]), workspace);
+    for (const id of ["req-nl", "req-nul", "req-del"]) {
+      const row = trace.rows.find((candidate) => candidate.requirement_id === id)!;
+      assert.deepEqual(row.enforcement, [], id);
+      assert.equal(row.disposition, "unverifiable", id);
+      assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"), id);
+      assert.equal(row.materiality, "material", id);
+      // No control byte survives into any rendered field of the row.
+      assert.equal(/[\x00-\x1f\x7f]/.test(JSON.stringify(row)), false, id);
+    }
+    assert.deepEqual(trace.summary.unresolved_material, ["req-nl", "req-nul", "req-del"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

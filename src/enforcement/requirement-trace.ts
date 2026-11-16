@@ -2344,6 +2344,13 @@ function coverageRefLocation(ref: unknown): TraceLocation | null {
   if (typeof ref !== "string") return null;
   const trimmed = ref.trim();
   if (trimmed === "") return null;
+  // #252 boundary: real paths never carry control characters, and a resolved
+  // location renders into the trace — so a hostile ref carrying a newline or
+  // terminal byte is rejected at the parse door, the same discipline
+  // `capReason` applies to evidence details. (The checkout validator would
+  // already refuse to credit it; this keeps the raw bytes out of the
+  // published rendering entirely.)
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) return null;
   const match = /^([^\s:][^:]*?):(\d+)\b/.exec(trimmed);
   if (match !== null) {
     const line = Number(match[2]);
