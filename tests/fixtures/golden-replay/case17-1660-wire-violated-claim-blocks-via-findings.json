@@ -1,0 +1,171 @@
+{
+ "contract": "golden-replay/v1",
+ "status": "active",
+ "provenance": {
+  "source_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "origin": "Issue #1660 deterministic acceptance replay.",
+  "evidence_transform": "raw",
+  "model_response": {
+   "requirement_coverage": [
+    {
+     "requirement_id": "req-b60526cb7f5d",
+     "status": "violated",
+     "evidence": [
+      {
+       "kind": "file",
+       "ref": "src/enforcement/threads.ts:2",
+       "detail": "The implementation does not reject invalid input."
+      }
+     ]
+    }
+   ],
+   "findings": [
+    {
+     "id": "f1",
+     "severity": "major",
+     "category": "bug",
+     "file": "src/enforcement/threads.ts",
+     "line": 2,
+     "message": "The implementation must validate the input before processing; it currently accepts invalid input."
+    }
+   ]
+  }
+ },
+ "engine": "run-review",
+ "pr": {
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "title": "Fix #1660: restore clean native approvals",
+  "body": "Closes #1660\n\nA scoped validation and compatibility update.",
+  "diff": "diff --git a/src/enforcement/threads.ts b/src/enforcement/threads.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/enforcement/threads.ts\n@@ -0,0 +1,3 @@\n+export function validateInput(value: unknown): boolean {\n+  return typeof value === \"string\";\n+}\n",
+  "files": [
+   {
+    "filename": "src/enforcement/threads.ts",
+    "status": "added",
+    "additions": 3,
+    "deletions": 0,
+    "changes": 3
+   }
+  ],
+  "linkedIssues": [
+   {
+    "number": 1660,
+    "title": "Restore native APPROVE for clean reviews",
+    "state": "OPEN",
+    "html_url": "https://github.com/o/r/issues/1660",
+    "labels": [],
+    "body": "## Acceptance criteria\n- src/enforcement/threads.ts must reject non-string input in validateInput.\n- src/enforcement/threads.ts must expose validateInput as a boolean validator.\n- The changed validateInput implementation must preserve the boolean response contract."
+   }
+  ]
+ },
+ "source_files": {
+  "src/enforcement/threads.ts": "export function validateInput(value: unknown): boolean {\n  return typeof value === \"string\";\n}\n"
+ },
+ "secrets": [],
+ "config": {
+  "requirement-trace": "true",
+  "publish-mode": "review_verdict"
+ },
+ "recorded_model_response": {
+  "verdict": "approve",
+  "review_markdown": "Automated recommendation: APPROVE\n\nAll scoped requirements are addressed.\n",
+  "smart_review_requested": false,
+  "smart_review_reason": null,
+  "findings": [
+   {
+    "id": "f1",
+    "severity": "major",
+    "category": "bug",
+    "file": "src/enforcement/threads.ts",
+    "line": 2,
+    "message": "The implementation must validate the input before processing; it currently accepts invalid input."
+   }
+  ],
+  "requirement_coverage": [
+   {
+    "requirement_id": "req-23e40f07bf13",
+    "status": "violated",
+    "evidence": [
+     {
+      "kind": "file",
+      "ref": "src/enforcement/threads.ts:2",
+      "detail": "The validator accepts non-string input; the requirement is not enforced."
+     }
+    ]
+   },
+   {
+    "requirement_id": "req-9d250a1c2459",
+    "status": "satisfied",
+    "evidence": [
+     {
+      "kind": "file",
+      "ref": "src/enforcement/threads.ts:1",
+      "detail": "The function is exported and returns booleans."
+     }
+    ]
+   },
+   {
+    "requirement_id": "req-e3917ae18b62",
+    "status": "satisfied",
+    "evidence": [
+     {
+      "kind": "file",
+      "ref": "src/enforcement/threads.ts:1",
+      "detail": "The boolean response contract is preserved."
+     }
+    ]
+   }
+  ]
+ },
+ "name": "1660-wire-violated-claim-blocks-via-findings",
+ "expect": {
+  "verdict": "request_changes",
+  "blocking_finding_ids": [
+   "f1"
+  ],
+  "native_event": "REQUEST_CHANGES",
+  "published_body_includes": [
+   "Requirement trace"
+  ],
+  "submitted_body_includes": [
+   "Automated recommendation: REQUEST CHANGES",
+   "validate the input"
+  ],
+  "published_body_excludes": [
+   "the reviewer reported no trace"
+  ]
+ },
+ "model_turns": [
+  {
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+       {
+        "id": "c1",
+        "type": "function",
+        "function": {
+         "name": "list_tree",
+         "arguments": "{}"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "inspected the repository tree"
+     }
+    }
+   ]
+  }
+ ]
+}
