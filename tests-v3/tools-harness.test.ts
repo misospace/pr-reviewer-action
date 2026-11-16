@@ -12,6 +12,8 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
+import { applyRequirementTraceEnforcement, unresolvedTraceRequirementIds, validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
 import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
 import { TransportFailure } from "../src/transport/http.js";
@@ -3365,7 +3367,7 @@ test("#1687: a verdict body the verifier rejects is never transport-retried", as
   assert.equal(outcome.transportRetry, undefined);
 });
 
-test("#1687: an expired deadline refuses the retry before any wire call", async () => {
+test("#1687: an expired deadline refuses the retry before any wire call, counted as nothing", async () => {
   let calls = 0;
   const outcome = await produceNativeVerdict(verdictInput(async () => {
     calls += 1;
@@ -3374,8 +3376,10 @@ test("#1687: an expired deadline refuses the retry before any wire call", async 
   assert.equal(outcome.ok, false);
   assert.equal(calls, 1, "the retry must never open a request past the absolute deadline");
   assert.equal(outcome.detail, "tool-loop wall-clock budget exhausted");
+  assert.equal(outcome.attempts, 1, "a retry that was never opened is not a model call — the record must claim one attempt, not two");
+  assert.equal(outcome.timing.attempts, 1, "the transport-call count says the same");
   const rec = outcome.transportRetry!;
-  assert.ok(rec.retry_elapsed_sec !== null, "the refused retry still rides the record (with its ~0 time)");
+  assert.equal(rec.retry_elapsed_sec, null, "no retry was fired; the discarded attempt still gets its record");
 });
 
 test("#1687: a streamed-first verdict keeps the #637 single fallback — never a third attempt", async () => {
@@ -3480,6 +3484,103 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
   assert.ok(inside.has(lines.findIndex((line) => line === "+# PR Classification")), "the forged heading stays inert");
   assert.ok(!inside.has(lines.findIndex((line) => line === "# Planning Notes")), "the notes heading stays live");
 });
+
+// ---------------------------------------------------------------------------
+// #1258: the diff-head excerpt's fence adapts to embedded backticks.
+// ---------------------------------------------------------------------------
+
+test("#1687: a failed transport retry keeps the corpus-only fallback — no verdict is produced", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      n += 1;
+      if (n <= 2) return n === 1 ? openAiCall("c1", "read_file", '{"path":"src.ts"}') : openAiText("evidence gathered");
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(n, 4, "two loop turns, the failed verdict attempt, and exactly one retry — then give up");
+  // The engine consumes exactly these fields: `native_loop_verdict_produced`
+  // unset means producePrimaryReview() makes the separate corpus-only
+  // standard review call (engine/review.ts), and #1673's INCOMPLETE
+  // enforcement downstream is untouched.
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "transport");
+  assert.equal(result.native_loop_verdict_retry_kind, "transport");
+  const rec = result.native_loop_verdict_transport_retry as Record<string, unknown>;
+  assert.equal(rec.reason, "connection_closed");
+  assert.ok(rec.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("transport retry failed") && l.includes("no further retry")));
+  assert.ok(logs.some((l) => l.includes("no reusable in-conversation verdict")));
+});
+
+test("#1687: a recovered transport never relaxes missing structured requirement coverage", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  const scripted: unknown[] = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    transport: async () => {
+      const body = scripted[Math.min(n, scripted.length - 1)];
+      if (n === 2) {
+        n += 1;
+        throw new TransportFailure("network", "model request failed (ECONNRESET)");
+      }
+      n += 1;
+      return body;
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true, "the transport recovered in-conversation");
+
+  // #1673's exact shape: the recovered verdict says `approve` but carries NO
+  // structured `requirement_coverage` for an in-scope requirement. The
+  // recovery must change nothing about the completeness enforcement — the
+  // trace records the missing claim as a material unknown, never a met one.
+  const envelope = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  const parsed = parseVerdictResponse(envelope, ["k"]);
+  assert.equal(parsed.verdict, "approve");
+  const coverage = Array.isArray(parsed.requirementCoverage) ? parsed.requirementCoverage : [];
+  assert.equal(coverage.length, 0, "the recovered body genuinely lacks the structured claim");
+
+  const ledger = { requirements: [{ id: "req-join", text: "The join must use the `[[ ... ]]` conditional command.", kind: "acceptance" }] };
+  const trace = validateRequirementTrace(coverage, ledger, root);
+  assert.equal(trace.rows.length, 1);
+  assert.equal(trace.rows[0]!.disposition, "unverifiable");
+  assert.equal(trace.rows[0]!.resolution, "unresolved");
+  assert.equal(trace.rows[0]!.materiality, "material");
+  assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+  assert.deepEqual(trace.summary.unresolved_material, ["req-join"]);
+  // The disposition's unresolved set (what withholds the native APPROVE as
+  // INCOMPLETE/COMMENT — the engine-side mapping #1673 showed in production)
+  // sees the gap with the recovered transport in place.
+  assert.deepEqual(unresolvedTraceRequirementIds(trace).ids, ["req-join"]);
+
+  // Enforcement applies over the recovered artifact without synthesizing a
+  // satisfied claim or flipping the model's verdict itself.
+  const art = {
+    verdict: parsed.verdict,
+    required_checks: "none",
+    review_markdown: parsed.reviewMarkdown,
+    findings: parsed.findings,
+  } as unknown as ReviewArtifact;
+  const enforced = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace: root });
+  assert.equal(enforced.applied, true);
+  assert.equal((art as unknown as Record<string, unknown>).requirement_coverage, undefined, "no coverage claim is synthesized");
+  assert.equal(art.findings.length, 0, "the trace never synthesizes findings");
+});
+
 
 // ── #1379: dependency-evidence budget reserve from the classification ─────
 

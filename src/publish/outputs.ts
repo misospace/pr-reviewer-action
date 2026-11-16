@@ -642,6 +642,10 @@ export interface StepSummaryTelemetry {
     transport?: string;
     attempts: number;
     retried: boolean;
+    /** #1687: WHICH recovery `retried` says — "stream" (#637) or
+     * "transport" (#1687). Absent renders no token; the summary builder
+     * closed-sets it, so a foreign artifact value never renders. */
+    retryKind?: string;
     reason?: string;
     /** #1047: bounded failure-shape line (content-free) for a verdict turn
      * that produced no usable body — `class=… profile=… …`. */
@@ -720,6 +724,9 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
       row += ` via ${telemetry.nativeVerdict.transport}`;
     }
     row += ` (attempts: ${telemetry.nativeVerdict.attempts}, retried: ${telemetry.nativeVerdict.retried}`;
+    if (telemetry.nativeVerdict.retryKind) {
+      row += `, retry: ${telemetry.nativeVerdict.retryKind}`;
+    }
     if (telemetry.nativeVerdict.reason) {
       row += `, reason: ${telemetry.nativeVerdict.reason}`;
     }

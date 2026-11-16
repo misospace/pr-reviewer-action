@@ -1217,6 +1217,16 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         ok = false;
         reason = "transport";
         detail = "non-streamed transport retry payload carries no messages — not sent";
+      } else if (input.deadline - timeFn() <= 0) {
+        // Same discipline: a retry the absolute deadline refuses was NEVER
+        // opened, so it counts as no attempt and pushes no transport probe —
+        // the `attempts`/`wire_calls` record must not claim a model call that
+        // never happened. The discarded attempt still gets its record with a
+        // null retry time (#1628's shape).
+        transportRetry = recordFor(null);
+        ok = false;
+        reason = "transport";
+        detail = "tool-loop wall-clock budget exhausted";
       } else {
         // #1628's terminal rule, mirrored: a PROVEN wire death
         // (connection_closed) may not restart a full turn wait — the pair
@@ -4276,6 +4286,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         input.result.native_loop_verdict_attempts = verdict.attempts;
         input.result.native_loop_verdict_retried = verdict.retried;
+        // #1687: the summary consumer must tell the two recoveries apart —
+        // a bounded closed-set token only.
+        if (verdict.retryKind !== "") {
+          input.result.native_loop_verdict_retry_kind = verdict.retryKind;
+        }
         if (verdict.retryKind === "stream") {
           input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
         }

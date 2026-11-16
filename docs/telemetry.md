@@ -204,6 +204,19 @@ attempts. Every attempt of the turn is added into them. Its timing fields
 (`ttft_sec`, `first_event_sec`, `decode_tokens_per_sec`) describe the
 accepted attempt only. A duration belongs to one attempt.
 
+When the initial NON-streamed closing verdict died on a proven transient
+transport failure and the harness retried it once (#1687), the harness
+artifact carries one extra field: `native_loop_verdict_transport_retry`. It
+is the discarded first attempt's record, in the same bounded content-free
+shape as a round's `stream_failure` — a closed reason token
+(`connection_closed` or `transport_timeout`), the HTTP status when the
+failure carried one, the attempt's own elapsed seconds, the wire instants as
+observed, the retry's own elapsed seconds (null when the retry was refused
+and never sent), and the route. A refused retry counts as no attempt
+anywhere. The verdict record's `streamed_fallback` keeps its exact streamed
+meaning and stays false for this retry; the step summary's `retry:` token
+(`transport`) names the same distinction.
+
 ### Cache accounting on the Anthropic wire
 
 The Anthropic wire format reports the cache counters beside the input
