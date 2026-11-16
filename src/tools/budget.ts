@@ -38,10 +38,9 @@ export type ToolBudgetTier = "primary" | "smart" | "escalated";
 /**
  * Where the effective ceiling came from (#702 budget provenance). The
  * telemetry contract is primary-override / smart-override > explicit >
- * tier-default, matching resolve_tool_budget in
- * scripts/run_tool_harness.py. `size-scaled` (#810) replaces `tier-default`
- * only when the PR-size derivation strictly exceeds the tier default; when
- * the floor binds, the tier default is what won and the source says so.
+ * derived/default. With a trustworthy PR-size signal, `size-scaled`
+ * (#810/#1688) is authoritative whether it narrows or widens the historical
+ * route default. `tier-default` now means the fail-open no-size path.
  */
 export type ToolBudgetSource = "primary-override" | "smart-override" | "explicit" | "tier-default" | "size-scaled";
 
@@ -227,11 +226,10 @@ export function toolBudgetRoute(tier: string, env: EnvLike): ToolBudgetTier {
  * Resolve the effective native-loop request budget for one harness run.
  * Precedence: PRIMARY_TOOL_MAX_REQUESTS (primary only) or
  * SMART_TOOL_MAX_REQUESTS (smart/escalated only) >
- * TOOL_MAX_REQUESTS > the #810 size-scaled default (floored at the route's
- * tier default; without a `size` signal this is exactly the tier default).
- * The `source` reports which input won and `configured` echoes the winning
- * explicit integer (null for the derived defaults) — the #702 provenance
- * fields the loop telemetry carries, kept in lockstep with resolve_tool_budget.
+ * TOOL_MAX_REQUESTS > the #810/#1688 size-aware default when a real size
+ * signal exists > the historical tier default when it does not. The
+ * `source` reports which input won and `configured` echoes the winning
+ * explicit integer (null for derived/default budgets).
  */
 export function resolveToolMaxRequests(
   tier: string,
