@@ -2539,7 +2539,14 @@ export function validateRequirementTrace(
       // positive confirmation remains the domain's own trusted source.
       const wireModel = claim !== undefined ? coverageStatusDisposition(claim) : null;
       const wireDetails = claim !== undefined ? coverageClaimEvidence(claim).details : [];
-      const modelDisposition = claim !== undefined && typeof claim.disposition === "string" ? claim.disposition.toLowerCase() : wireModel;
+      // An additive `disposition` outranks the wire status only when it is a
+      // valid ladder value — an invalid additive string must not silently
+      // shadow the reviewer's wire gap claim (#1660 review: same precedence
+      // rule as the in-scope branch).
+      const additiveModel = claim !== undefined && typeof claim.disposition === "string"
+        && TRACE_DISPOSITIONS.includes(claim.disposition.toLowerCase())
+        ? claim.disposition.toLowerCase() : null;
+      const modelDisposition = additiveModel ?? wireModel;
       const modelReason = claim !== undefined ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(wireDetails.join("; "))) : "";
       enforcement = claim !== undefined ? parseLocations(claim.enforcement) : [];
       test = claim !== undefined ? parseLocations(claim.test) : [];

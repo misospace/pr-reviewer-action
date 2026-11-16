@@ -14,7 +14,7 @@ function writeFile(workspace: string, relPath: string, lines: readonly string[])
   writeFileSync(join(workspace, relPath), `${lines.join("\n")}\n`);
 }
 
-function ledgerWith(entries: Array<{ id: string; text: string; kind: string }>): unknown {
+function ledgerWith(entries: Array<{ id: string; text: string; kind: string; provenance?: Array<{ source: string }> }>): unknown {
   return { requirements: entries };
 }
 
@@ -261,6 +261,93 @@ test("three satisfied acceptance rows leave no material gaps; absent coverage re
     assert.equal(uncovered.rows.length, 3);
     assert.ok(uncovered.rows.every((row) => row.notes.includes("not-traced-by-reviewer")));
     assert.equal(uncovered.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1660 review: an out-of-scope wire claim keeps the reported-unmet contract in both reason shapes", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/unrelated/widget.ts", ["export const widget = () => 1;"]);
+    const ledger = ledgerWith([
+      { id: "req-posting", text: "The changelog must be posted to the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+      { id: "req-banner", text: "The banner must be announced in the release discussion after merge.", kind: "acceptance", provenance: [{ source: "linked_issues" }] },
+    ]);
+    const scope = {
+      paths: ["src/unrelated/widget.ts"],
+      fileLines: [{ path: "src/unrelated/widget.ts", lines: ["+ export const widget = () => 1;"] }],
+    };
+    const trace = validateRequirementTrace([
+      wireClaim("req-posting", "violated", [{ kind: "file", ref: "src/unrelated/widget.ts:1", detail: "no changelog posting exists yet" }]),
+      wireClaim("req-banner", "violated", []),
+    ], ledger, workspace, "+ export const widget = () => 1;", scope);
+    const posted = trace.rows.find((row) => row.requirement_id === "req-posting");
+    const banner = trace.rows.find((row) => row.requirement_id === "req-banner");
+    // A wire gap claim WITH a detail is the reviewer's disclosed gap on a
+    // scope-settled row: material unmet_claimed + the trusted disclosure note.
+    assert.equal(posted?.disposition, "unmet");
+    assert.equal(posted?.resolution, "unmet_claimed");
+    assert.equal(posted?.materiality, "material");
+    assert.ok(posted?.notes.includes("out-of-scope-reported-unmet"));
+    assert.equal(posted?.reason, "no changelog posting exists yet");
+    // A reason-less wire `violated` is NOT a gap claim: advisory not_applicable,
+    // exactly like a reason-less additive `unmet`.
+    assert.equal(banner?.disposition, "not_applicable");
+    assert.equal(banner?.resolution, "not_applicable");
+    assert.equal(banner?.materiality, "advisory");
+    assert.ok(banner?.notes.includes("out-of-scope"));
+    // Both stay OUT of the seam: the scope marker keeps the disposition clear.
+    assert.deepEqual(trace.summary.unmet_claimed, ["req-posting"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1660 review #252: traversal and absolute-path wire refs are rejected at the fold, never read", () => {
+  const parent = mkdempOrThrow();
+  try {
+    const workspace = join(parent, "ws");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(parent, "secret.txt"), "do not cite me\n");
+    const trace = validateRequirementTrace([
+      wireClaim("req-trav", "satisfied", [{ kind: "file", ref: "../secret.txt:1" }]),
+      wireClaim("req-abs", "satisfied", [{ kind: "file", ref: `${join(parent, "secret.txt")}:1` }]),
+    ], ledgerWith([
+      { id: "req-trav", text: "The renderer must display the result.", kind: "acceptance" },
+      { id: "req-abs", text: "The service must expose the status endpoint.", kind: "acceptance" },
+    ]), workspace);
+    // Both degrade to material rows — the citation never resolves, and the
+    // out-of-workspace content is never credited (shared workspaceRegularFile
+    // containment, #805, enforced at validation time).
+    for (const id of ["req-trav", "req-abs"]) {
+      const row = trace.rows.find((candidate) => candidate.requirement_id === id)!;
+      assert.equal(row.disposition, "unverifiable", id);
+      assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"), id);
+      assert.equal(row.materiality, "material", id);
+    }
+    assert.deepEqual(trace.summary.unresolved_material, ["req-trav", "req-abs"]);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+function mkdempOrThrow(): string {
+  return mkdtempSync(join(tmpdir(), "trace-wire-out-"));
+}
+
+test("#1660 review: an invalid additive disposition never shadows a wire gap claim on a non-code row", () => {
+  const workspace = makeWorkspace();
+  try {
+    const trace = validateRequirementTrace([
+      { requirement_id: "req-external", status: "violated", disposition: "bogus", evidence: [{ kind: "tool", ref: "check-1", detail: "External workflow is not green." }] },
+    ], ledgerWith([
+      { id: "req-external", text: "Whether the unrelated pull request #42 will merge successfully after this change.", kind: "acceptance" },
+    ]), workspace);
+    // The invalid additive string carries no authority; the wire `violated`
+    // stays the reviewer's reported gap on the non-code row.
+    assert.equal(trace.rows[0]?.disposition, "unmet");
+    assert.ok(trace.rows[0]?.notes.includes("non-code-reported-unmet"));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
