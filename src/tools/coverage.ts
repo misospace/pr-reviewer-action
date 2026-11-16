@@ -39,10 +39,14 @@
  * complete coverage and emits no gap record, and the audit must survive
  * that.
  *
- * A specialist lead is resolved when its own file (if it names one) was
- * read by the rules above. A lead without a file path cannot be tied to any
- * read, so on a budget stop it always reports as unresolved — the loop has
- * no evidence showing it was investigated.
+ * A specialist lead is mechanically unresolved only when it names a concrete
+ * changed file that the reviewer never received through either the corpus or
+ * an accepted workspace read. A lead without a file path is a semantic
+ * hypothesis, not an objectively checkable file-coverage obligation. Treating
+ * every pathless lead as unresolved made stale pre-CI observations immortal
+ * on any budget stop (#1688), even after stronger finalized evidence entered
+ * the rebuilt corpus. Pathless leads remain review context, but deterministic
+ * coverage must not manufacture incompleteness from their lack of a pathname.
  */
 
 import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
@@ -359,7 +363,7 @@ export function computePartialCoverage(
   const corpus = inputs.corpusDiffCoveredFiles ?? new Set<string>();
   const unreadFiles = inputs.changedFiles.filter((path) => !touched.has(path) && !corpus.has(path));
   const unresolvedLeads = inputs.leads.filter(
-    (lead) => lead.file === null || (!touched.has(lead.file) && !corpus.has(lead.file)),
+    (lead) => lead.file !== null && !touched.has(lead.file) && !corpus.has(lead.file),
   );
   if (unreadFiles.length === 0 && unresolvedLeads.length === 0) return null;
   return {
