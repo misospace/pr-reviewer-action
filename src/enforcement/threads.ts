@@ -270,7 +270,7 @@ export function applyReviewThreadEnforcement(
       });
       continue;
     }
-    const severity = reemittedSeverity(thread.severity);
+    const baseSeverity = reemittedSeverity(thread.severity);
     // #1663: what the forge proves about the root author. A legacy caller
     // that supplied no authorship keeps the historical reading in which the
     // enforcement view is the action's own listing.
@@ -279,7 +279,7 @@ export function applyReviewThreadEnforcement(
     // worth a material unknown when its body actually claims to be one of
     // this action's findings; a stranger's marker-less comment is not a
     // blocking claim this reviewer has to settle.
-    const blocking = isBlockingSeverity(severity) && !isAlwaysNonBlockingCategory(thread.category);
+    const blocking = isBlockingSeverity(baseSeverity) && !isAlwaysNonBlockingCategory(thread.category);
     const materialIfUnverified = blocking && (authorship !== "unproven" || thread.own_finding);
     let disposition = entry.disposition as string | undefined;
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
@@ -388,9 +388,12 @@ export function applyReviewThreadEnforcement(
     if (disposition === "withdrawn") settledWithdrawn += 1;
     if (reassessment === "invalid") invalidated += 1;
 
+    // Identity (dedup + the fresh-finding exemption) stays keyed on the
+    // thread's historical severity even for human/unproven roots, so a
+    // fresh same-concern finding still vouches for it.
     const identity = findingIdentity({
       path: thread.path ?? "",
-      severity,
+      severity: baseSeverity,
       category: thread.category ?? "",
       message: thread.message || "Unresolved review thread",
     });
@@ -432,6 +435,16 @@ export function applyReviewThreadEnforcement(
       existing.thread_ids = ids;
       continue;
     }
+    // #1663: the pass never re-emits a blocking severity for a root the
+    // forge does not attribute to an automation author. `enforcementView`
+    // already caps human roots at minor and withholds unproven blocking
+    // severity as the material unknown, so the shipped pipeline cannot
+    // reach here with a blocking human/unproven row — the cap makes that
+    // invariant local, so a hand-supplied view (unit callers) cannot
+    // smuggle blocking authority past the settlement boundary.
+    const severity = authorship === "human" || authorship === "unproven"
+      ? (isBlockingSeverity(baseSeverity) ? "minor" : baseSeverity)
+      : baseSeverity;
     const finding: ArtifactFinding = {
       severity,
       // #977: carry the non-blocking marker forward so a verification ask
@@ -460,8 +473,13 @@ export function applyReviewThreadEnforcement(
   // `absent` rule in reconcileThreadState, not for this field.
   // The engine supplies a reconciliation input whenever it supplies carried
   // threads (a failed read still arrives as `available: false`), so the
-  // material count below is not lost on the production path; a legacy unit
-  // caller without one keeps the pre-#1663 settlement exactly.
+  // material count below is not lost on the production path. A legacy unit
+  // caller WITHOUT one keeps the pre-#1663 record shape — but not the old
+  // severity: a blocking bare-open row is still withheld from the finding
+  // set, and with no reconciliation there is no `unreassessed` provenance,
+  // so the gap appears only in the settled records and the disclosed
+  // markdown. Callers that need the material unknown must supply the
+  // reconciliation input, as the pipeline always does.
   if (reconciliation !== null && reconciliation !== undefined) {
     artifact.thread_reconciliation = {
       state: counts.unknown > 0 || unreassessed.size > 0 ? "incomplete" : "complete",

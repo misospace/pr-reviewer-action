@@ -1354,6 +1354,90 @@ test("#1663: a fresh current-head finding proves the concern, so it is not an un
   assert.equal(finalKind(a), "request_changes", "and it blocks on its own authority");
 });
 
+test("#1663: a blocking `open` re-affirmation WITHOUT a reason is unverified, not re-emitted", () => {
+  for (const evidence of [null, "", "   "]) {
+    const a = artifact({
+      verdict: "approve",
+      findings: [],
+      thread_dispositions: [{ thread_id: "t", disposition: "open", evidence }],
+    });
+    applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"));
+    const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+    assert.equal(record.disposition, "open", "the claim is kept on the record");
+    assert.equal(record.enforced, "open without a current-head reason", `bare evidence ${JSON.stringify(evidence)}`);
+    assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "a bare `open` never re-emits the historical severity");
+    assert.equal(a.thread_reconciliation?.unreassessed, 1, "the unsupported claim is the material unknown");
+    assert.equal(finalKind(a), "incomplete", "neither a block nor a clean approval is certified");
+  }
+});
+
+test("#1663: a rotated-identity bot finding settles on current-head evidence, bare or cited", () => {
+  // A forge-proven automation author under another login keeps the full
+  // bot contract: bare `open` withholds severity as the material unknown...
+  const bare = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+  });
+  applyReviewThreadEnforcement(bare, [botMajor("t", { authorship: "other_bot" })], "strict", liveListing("t"));
+  assert.equal((bare.thread_dispositions as Array<Record<string, unknown>>)[0]!.enforced, "open without a current-head reason");
+  assert.equal(bare.findings.some((item) => item.thread_id === "t"), false);
+  assert.equal(bare.thread_reconciliation?.unreassessed, 1);
+  // ...a supported `open` re-affirms it at the historical severity...
+  const affirmed = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: "still present at this head: the defect the thread points at is unchanged" }],
+  });
+  applyReviewThreadEnforcement(affirmed, [botMajor("t", { authorship: "other_bot" })], "strict", liveListing("t"));
+  assert.equal(affirmed.findings.find((item) => item.thread_id === "t")?.severity, "major",
+    "the publisher mismatch never erases a supported current-head claim");
+  assert.equal(finalKind(affirmed), "request_changes");
+  // ...and a code-citing `fixed` CLOSES it: closure rides the current-head
+  // evidence, not the author's login. This pins the deliberate reading that
+  // an `other_bot` root is still inside the bot settlement contract.
+  const fixed = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence: "src/a.ts:9 now guards the path" }],
+  });
+  applyReviewThreadEnforcement(fixed, [botMajor("t", { authorship: "other_bot" })], "strict", liveListing("t"));
+  assert.equal(fixed.findings.some((item) => item.thread_id === "t"), false, "a cited fix settles the thread");
+  assert.equal(fixed.thread_reconciliation?.unreassessed, undefined, "with no material unknown left");
+  // A reasoned `disputed` settles it the same way.
+  const disputed = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "t", disposition: "disputed", evidence: "the original finding assumed a lock the module never claims to hold" }],
+  });
+  applyReviewThreadEnforcement(disputed, [botMajor("t", { authorship: "other_bot" })], "strict", liveListing("t"));
+  assert.equal(disputed.findings.some((item) => item.thread_id === "t"), false);
+  assert.equal(disputed.thread_reconciliation?.unreassessed, undefined);
+});
+
+test("#1663: the settlement pass itself caps a hand-supplied blocking human/unproven row", () => {
+  // `enforcementView` never emits a blocking human/unproven severity; the
+  // cap makes the invariant local to this pass, so a synthesized row
+  // cannot smuggle blocking authority through the settlement boundary.
+  const human = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "h", disposition: "open", evidence: "still present at this head: the question is unanswered" }],
+  });
+  applyReviewThreadEnforcement(human, [botMajor("h", { authorship: "human", severity: "blocker", own_finding: false, message: "Should this handle None?" })], "strict", liveListing("h"));
+  assert.equal(human.findings.find((item) => item.thread_id === "h")?.severity, "minor",
+    "a human root never carries blocking authority, whatever the row claims");
+  const unproven = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{ thread_id: "u", disposition: "open", evidence: "still present at this head" }],
+  });
+  applyReviewThreadEnforcement(unproven, [botMajor("u", { authorship: "unproven", severity: "major", own_finding: false, category: null })], "strict", liveListing("u"));
+  assert.equal(unproven.findings.find((item) => item.thread_id === "u")?.severity, "minor",
+    "and neither does an unproven one");
+  assert.equal(unproven.thread_reconciliation?.unreassessed, undefined, "a marker-less unproven row is no blocking claim of ours");
+});
+
 test("#1663: an unreadable listing keeps #1654's advisory-only unknown semantics", () => {
   const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
   applyReviewThreadEnforcement(a, [botMajor("t")], "strict", { ...liveListing(), available: false });

@@ -727,17 +727,20 @@ test("#1663: a live historical bot major with no current-head re-evaluation is I
   assert.match(api.submitted[0]!.body, /INCOMPLETE/);
 });
 
-test("#1663: an unprovable identity never demotes a marker-bearing bot blocker to a human minor", async () => {
-  const { artifact, result } = await runStaleThreadVerdict({
+test("#1663: an unresolvable token identity keeps a forge-proven automation finding inside the contract", async () => {
+  // The forge reports the root's actor type (`Bot`), so the finding stays a
+  // bot finding even though this run cannot resolve its own identity.
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
   }, { identity: null });
+  assert.equal(threadView[0]!.authorship, "other_bot", "the forge-reported type outranks the unresolvable token identity");
   assert.equal(artifact.verdict, "approve", "the old severity does not force the verdict");
   assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
-    "an unprovable root author must not be re-emitted as a non-blocking human thread");
+    "the unevaluated concern is not re-emitted on stale authority");
   assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1,
-    "the managed marker keeps the carried finding bot-authored, so the gap stays material");
+    "and the unevaluated concern stays material instead of vanishing");
   assert.equal(result.finalDisposition?.kind, "incomplete");
   assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
 });
@@ -842,19 +845,30 @@ test("#1663: a human-authored thread carrying the managed marker gains no bot au
     "a proven human root is not a re-evaluation gap either");
 });
 
-test("#1663: an unresolvable forge identity keeps a carried Major material instead of dropping it", async () => {
-  const { artifact, result } = await runStaleThreadVerdict({
+test("#1663: authorship the forge never proves is material end to end — never human, never blocking", async () => {
+  // A foreign login AND no forge-reported actor type: `unproven`. Neither
+  // authority may be asserted — not even a supported `open` re-affirmation
+  // restores the severity; the concern rides the material unknown.
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
-  }, { identity: null });
-  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1);
+    thread_dispositions: [{
+      thread_id: "PRRT_stale1",
+      disposition: "open",
+      evidence: "still present at this head: nothing in the diff changes what the thread points at",
+    }],
+  }, { threadUser: { login: "previous-runner" } });
+  assert.equal(threadView[0]!.authorship, "unproven", "no type plus no identity match proves nothing");
+  assert.equal((artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open",
+    "the reviewer's claim is kept on the record");
   assert.ok(!(artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"),
-    "unproven authority never restores the historical severity either");
+    "but unproven authority never re-emits the historical severity");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, 1);
   assert.equal(result.finalDisposition?.kind, "incomplete");
   const api = await publishRunHandoff(result);
   assertDispositionAgreement(result, api);
-  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.equal(api.submitted[0]!.event, "COMMENT", "and the published surfaces agree on COMMENT");
 });
 
 test("#1645: a capped settlement-time listing never proves absence — the unseen carried thread fails open, disclosed", async () => {
