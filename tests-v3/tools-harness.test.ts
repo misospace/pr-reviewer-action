@@ -3486,7 +3486,7 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
 });
 
 // ---------------------------------------------------------------------------
-// #1258: the diff-head excerpt's fence adapts to embedded backticks.
+// #1687 (cont.): the fallback and completeness surfaces, end to end.
 // ---------------------------------------------------------------------------
 
 test("#1687: a failed transport retry keeps the corpus-only fallback — no verdict is produced", async () => {
