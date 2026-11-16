@@ -144,7 +144,7 @@ test("git_grep marks a file covered via a file-scoped path or a match line, neve
   assert.deepEqual(coverage.unread_files, ["src/other.ts"]);
 });
 
-test("a lead resolves when its file was read; a lead without a file never resolves on a budget stop", () => {
+test("#1688: only file-scoped specialist leads participate in deterministic partial coverage", () => {
   const coverage = computePartialCoverage(outcome({
     executed: [okCall("read_file", { path: "src/fixed.ts" })],
   }), {
@@ -160,9 +160,17 @@ test("a lead resolves when its file was read; a lead without a file never resolv
   assert.deepEqual(coverage.unresolved_leads, [
     { role: "security", file: "src/broken.ts", excerpt: "unvalidated input" },
     { role: "security", file: "src/missing.ts", excerpt: "phantom path" },
-    { role: "tests", file: null, excerpt: "no coverage for the new flag" },
   ]);
-  assert.equal(coverage.leads_total, 4);
+  assert.equal(coverage.leads_total, 4, "pathless leads remain visible in the accounting denominator");
+});
+
+test("#1688: a budget stop with complete file coverage is not poisoned by a stale pathless lead", () => {
+  const coverage = computePartialCoverage(outcome({ executed: [] }), {
+    changedFiles: ["src/a.ts", "src/b.ts"],
+    leads: leads([["correctness", null, "full suite has not completed yet"]]),
+    corpusDiffCoveredFiles: new Set(["src/a.ts", "src/b.ts"]),
+  });
+  assert.equal(coverage, null, "pathless specialist prose is review context, not a deterministic unread-file obligation");
 });
 
 test("max-rounds and wall-clock stops produce coverage too; a model-chosen stop does not", () => {
