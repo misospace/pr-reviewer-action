@@ -76,9 +76,15 @@ export function createGiteaPlatform(options: GiteaPlatformOptions): ForgejoAdapt
   return new ForgejoAdapter({ ...options, forge: "gitea" });
 }
 
-/** The Gitea read adapter built from the run environment. `baseUrl` is the
- * instance's API base (`FORGEJO_API_URL` is the family's configured variable and
- * stays authoritative for a Gitea instance too). */
+/** The Gitea read adapter built from the run environment — the canonical
+ * direct-env construction for the Gitea identity, used by both `buildAdapter`
+ * and `buildPlatformReadAdapter`. Its first act is `giteaTokenFromEnv(env)`,
+ * which fails closed on the Forgejo-only auth settings (declared
+ * `authorized_integration` method OR a set audience) BEFORE any adapter is
+ * built, so an omitted method/audience in the options is structurally a
+ * refusal, never a downgrade to token mode. `baseUrl` is the instance's API
+ * base (`FORGEJO_API_URL` is the family's configured variable and stays
+ * authoritative for a Gitea instance too). */
 export function giteaAdapterFromEnv(
   env: Readonly<Record<string, string | undefined>>,
   repo: string,

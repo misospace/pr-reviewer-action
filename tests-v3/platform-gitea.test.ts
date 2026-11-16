@@ -19,6 +19,7 @@ import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/a
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
 import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
 import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
+import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
@@ -331,6 +332,48 @@ test("#1678: the env-built lanes carry the Gitea identity on a token-mode config
   // The publish lane resolves the same identity, so the read and write sides
   // cannot disagree about which product's capabilities apply.
   assert.equal(buildPublishApi(env).platform, "forgejo");
+});
+
+test("#1681 review: the orchestrator read lane refuses integration config before construction", () => {
+  // `buildPlatformReadAdapter` is the adapter every context producer reads
+  // through; it must fail closed on the Forgejo-only auth settings exactly
+  // like `buildAdapter`, not silently construct a token-mode adapter.
+  const integration = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTH_METHOD: "authorized_integration",
+  } as never;
+  assert.throws(
+    () => buildPlatformReadAdapter(integration),
+    /Gitea does not support auth method 'authorized_integration'/,
+  );
+  const audienceOnly = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: "https://gitea.test",
+  } as never;
+  assert.throws(
+    () => buildPlatformReadAdapter(audienceOnly),
+    /forgejo-authorized-integration-audience/,
+  );
+  // Positive lane: a token-mode config still yields the family adapter with
+  // the Gitea identity; the refused settings above are exactly what excluded.
+  const tokenMode = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    GITEA_TOKEN: "gt",
+  } as never;
+  const adapter = buildPlatformReadAdapter(tokenMode);
+  assert.equal(adapter.platform, "forgejo");
+  assert.equal((adapter as ForgejoAdapter).forge, "gitea");
 });
 
 test("#1678: the CI-wait gate and ancillary writes thread the identity too", async () => {

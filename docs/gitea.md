@@ -50,7 +50,10 @@ Forgejo. On Gitea every way of selecting that mode is refused:
   method would let that configuration degrade silently into token mode.
 - The read adapter and the publish client repeat the refusal at construction,
   so a direct caller that skips config validation cannot bypass it. The
-  construction refusal says:
+  direct-environment read lanes (`buildAdapter`, `buildPlatformReadAdapter`)
+  construct through `giteaAdapterFromEnv`, which resolves the token via
+  `giteaTokenFromEnv` and therefore refuses before any adapter object exists.
+  The construction refusal says:
 
 ```text
 Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token

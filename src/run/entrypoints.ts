@@ -6,8 +6,8 @@ import { requireImplementedBackend } from "../platform/tangled.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import {
-  createGiteaPlatform,
   createGiteaPullRequestClient,
+  giteaAdapterFromEnv,
   giteaTokenFromEnv,
 } from "../platform/gitea.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
@@ -68,16 +68,18 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
   if (platform === "forgejo") {
-    // #1678: an explicitly declared Gitea instance keeps the Forgejo-family
-    // adapter (one wire protocol) but carries the Gitea identity, which is what
-    // refuses the Forgejo-only `authorized_integration` mode.
+    // #1678/#1681 review: an explicitly declared Gitea instance keeps the
+    // Forgejo-family adapter (one wire protocol) but carries the Gitea
+    // identity, which is what refuses the Forgejo-only auth settings. The
+    // construction goes through `giteaAdapterFromEnv`, whose first act is
+    // `giteaTokenFromEnv(env)`: a declared `FORGEJO_AUTH_METHOD=authorized_integration`
+    // OR a set `FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE` throws there, before
+    // any adapter exists — so the method/audience omitted from the options are
+    // never a silent downgrade to token mode, they are a refusal. The
+    // `ForgejoAdapter` constructor guard under the Gitea identity repeats the
+    // refusal for any direct caller that bypasses the env resolver.
     if (declaredForgeId(env.PLATFORM, "forgejo") === "gitea") {
-      return createGiteaPlatform({
-        repo,
-        prNumber,
-        baseUrl: env.FORGEJO_API_URL ?? "",
-        token: giteaTokenFromEnv(env),
-      });
+      return giteaAdapterFromEnv(env, repo, prNumber);
     }
     return new ForgejoAdapter({
       repo,
