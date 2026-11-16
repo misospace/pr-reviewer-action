@@ -27,11 +27,14 @@ export function forgejoTokenFromEnv(env: Readonly<Record<string, string | undefi
  * ONE definition of the chain, so an alias or precedence change cannot drift
  * between the two lanes.
  *
- * The chain is the resolver's order, bound in the order the resolver reads it:
- * a `FORGEJO_TOKEN` already in `target` (the config-projected secret) wins,
- * then the ambient family's own name, then the ambient `GITEA_TOKEN` alias,
- * then the runner's GitHub credential (`githubToken`, the caller's own GitHub
- * binding).
+ * The chain runs THROUGH {@link forgejoTokenFromEnv} itself, over a merged
+ * view of the two records: a `FORGEJO_TOKEN` already in `target` (the
+ * config-projected secret) wins, then the ambient family's own name, then the
+ * ambient `GITEA_TOKEN` alias, then the runner's GitHub credential
+ * (`githubToken`, standing in for the resolver's `GITHUB_TOKEN`/`GH_TOKEN`
+ * legs, which both callers already fold into it). Restating the rest of the
+ * list here would be a second definition that drifts the moment the resolver
+ * gains an alias or reorders.
  *
  * `authorized_integration` binds NO token: the OIDC exchange supplies the
  * credential, and a bound token would be a second, wrong one. */
@@ -41,5 +44,9 @@ export function bindForgejoToken(
   githubToken: string,
 ): void {
   if ((target.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() === "authorized_integration") return;
-  target.FORGEJO_TOKEN = target.FORGEJO_TOKEN || ambient.FORGEJO_TOKEN || ambient.GITEA_TOKEN || githubToken;
+  target.FORGEJO_TOKEN = forgejoTokenFromEnv({
+    FORGEJO_TOKEN: target.FORGEJO_TOKEN || ambient.FORGEJO_TOKEN,
+    GITEA_TOKEN: ambient.GITEA_TOKEN,
+    GITHUB_TOKEN: githubToken,
+  });
 }

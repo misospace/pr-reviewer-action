@@ -136,6 +136,9 @@ test("bindForgejoToken binds the family's chain in the resolver's own order", ()
   assert.equal(bind({ FORGEJO_TOKEN: "projected-pat" }, { FORGEJO_TOKEN: "family-pat" }), "projected-pat");
   // An empty value is no value: the chain moves on to the next candidate.
   assert.equal(bind({ FORGEJO_TOKEN: "" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // No credential anywhere binds NOTHING — undefined, not "": absent is the
+  // honest unset every stage sweep and resolver-side `||` already treats so.
+  assert.equal(bind({}, {}, ""), undefined);
 
   // Authorized Integration binds NO token: the OIDC exchange supplies the
   // credential, and a bound token would be a second, wrong one.

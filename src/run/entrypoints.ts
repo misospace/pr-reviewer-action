@@ -69,8 +69,12 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   requireImplementedBackend(platform);
   if (platform === "forgejo") {
     // #1678: an explicitly declared Gitea instance keeps the Forgejo-family
-    // adapter (one wire protocol) but carries the Gitea identity, which is what
-    // refuses the Forgejo-only `authorized_integration` mode.
+    // adapter (one wire protocol) but carries the Gitea identity. The factory
+    // takes NO auth method or audience because the Gitea reader below refuses
+    // both — explicitly AND audience-only, the configuration that on Forgejo
+    // alone forces integration mode — BEFORE any token lookup, so nothing can
+    // degrade silently into token mode; the identity's constructor guard is
+    // the repeat refusal for lanes that thread the settings in directly.
     if (declaredForgeId(env.PLATFORM, "forgejo") === "gitea") {
       return createGiteaPlatform({
         repo,
