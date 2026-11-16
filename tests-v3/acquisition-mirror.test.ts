@@ -39,6 +39,52 @@ test("mirrorDirName: stable digest keyed by coordinates, repo text never in the 
   assert.throws(() => mirrorDirName("gitlab", "org/repo"));
 });
 
+// #1682: the acquisition seam accepts the DECLARED platform vocabulary, so
+// its consumer accepts what the seam advertises. The declared id also keys the
+// mirror directory: one controller can host a `forgejo` AND a `gitea`
+// integration on the same cache root, and both may carry the same
+// `owner/repo` name — a shared mirror would hand one product the other
+// product's repository content.
+test("mirrorDirName: the declared Gitea identity is a first-class platform with its own mirror", () => {
+  const gitea = mirrorDirName("gitea", "org/repo");
+  const forgejo = mirrorDirName("forgejo", "org/repo");
+  assert.notEqual(gitea, forgejo, "a Gitea mirror is never the Forgejo family's mirror");
+  assert.match(gitea, /^[0-9a-f]{64}\.git$/);
+  assert.throws(() => mirrorDirName("gitlab", "org/repo"), AcquisitionError);
+});
+
+test("a Gitea-declared mirror acquires the family's PR refs and records the family, not the product", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "gitea/repo");
+    const prHead = await fixture.commit("gitea/repo", "pr.txt", "pr-only\n", "pr head commit", "refs/pull/7/head");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "gitea",
+        repoFullName: "gitea/repo",
+        cloneUrl: `${fixture.baseUrl}/gitea/repo.git`,
+      });
+      assert.equal(cache.platform, "gitea", "the mirror carries the declared identity");
+      const info = await cache.ensureMirror();
+      assert.equal(git(info.mirrorPath, ["cat-file", "-t", prHead]).trim(), "commit");
+      const handle = await createReviewWorkspace(cache, { headSha: prHead });
+      try {
+        // The workspace info is a DURABLE record (it rides the execution
+        // envelope), so it carries the wire family, never the product id.
+        assert.equal(handle.info.platform, "forgejo");
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("ensureMirror: init + full fetch, warm ensure is incremental (no rebuild, no reclone)", async () => {
   const fixture = await startGitHttpFixture();
   try {

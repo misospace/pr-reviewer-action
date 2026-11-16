@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { composeForgeCapability } from "../src/controller/forge-capability.js";
+import type { ReviewJob } from "../src/jobs/types.js";
 
 test("a gitea composition serves the forgejo-family adapters under the gitea identity (#1682)", () => {
   const composed = composeForgeCapability({
@@ -66,4 +67,32 @@ test("a forgejo composition keeps the forgejo identity (#1682 regression pin)", 
   assert.equal(composed.platform, "forgejo");
   assert.equal(composed.identity, "forgejo");
   assert.match(composed.describe(), /^forgejo via /);
+});
+
+// #1682: one controller can host a `forgejo` AND a `gitea` integration (they
+// share the wire protocol, so they share this cache root), and both may carry
+// the same `owner/repo` name. The mirror directory is keyed by the DECLARED
+// identity, so one product never reviews the other product's mirror content.
+test("a gitea composition's mirror never shares the forgejo family's mirror directory (#1682)", async () => {
+  const gitea = composeForgeCapability({
+    platform: "gitea",
+    endpoint: "https://gitea.example/api/v1",
+    workspaceCacheRoot: "/tmp/unused-cache",
+    forgejoToken: "t",
+  });
+  const forgejo = composeForgeCapability({
+    platform: "forgejo",
+    endpoint: "https://forgejo.example/api/v1",
+    workspaceCacheRoot: "/tmp/unused-cache",
+    forgejoToken: "t",
+  });
+  const job = { repoFullName: "acme/widgets", installationId: "" } as unknown as ReviewJob;
+  const giteaMirror = await gitea.capability.mirrorFor(job);
+  const forgejoMirror = await forgejo.capability.mirrorFor(job);
+  assert.equal(giteaMirror.platform, "gitea", "the mirror carries the declared identity");
+  assert.notEqual(
+    giteaMirror.path,
+    forgejoMirror.path,
+    "one product's mirror is never the other product's mirror",
+  );
 });

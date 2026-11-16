@@ -25,6 +25,7 @@ export {
   declaredFamilyForge,
   declaredForgeId,
   forgeWireFamily,
+  isForgeId,
   resolvePlatform,
   type ForgeId,
   type GiteaFamilyForge,

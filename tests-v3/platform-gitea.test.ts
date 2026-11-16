@@ -19,6 +19,9 @@ import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/a
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
 import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
 import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
+import { actionStageEnv } from "../src/run/action.js";
+import { buildChildEnv } from "../src/runtime/env.js";
+import { CI_GATE_ENV_KEYS } from "../src/gates/env.js";
 import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
@@ -349,6 +352,44 @@ test("#1678: the CI-wait gate and ancillary writes thread the identity too", asy
   await assert.rejects(
     () => forgejoAncillaryWrite(env, `${INSTANCE}/api/v1/repos/acme/widgets/issues/7/labels`, "POST"),
     /Gitea does not support auth method 'authorized_integration'/);
+});
+
+// #1682 review: the CI-wait gate child gets its environment from the
+// allowlisted slice of the Action stage env (`request.ambient`), and that env
+// carries the operator's DECLARED platform, because the `platform` contract
+// input is projected verbatim. A child carrying the RESOLVED `forgejo` family
+// would apply the Forgejo-only auth mode on a Gitea instance, and the guard
+// threaded into `ciAdapterFromEnv` could never fire in that lane. This test
+// pins that lane's environment, so the declaration cannot be flattened there
+// later.
+test("the CI-gate child env carries the declared Gitea identity, so that lane's guard is armed", () => {
+  const stage = actionStageEnv({
+    "INPUT_GITHUB-TOKEN": "gh",
+    "INPUT_REPO": "acme/widgets",
+    "INPUT_PR-NUMBER": "7",
+    "INPUT_AI-BASE-URL": "https://model.invalid",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_PLATFORM": "gitea",
+    "INPUT_FORGEJO-API-URL": INSTANCE,
+    "INPUT_FORGEJO-TOKEN": "gitea-pat",
+    GITHUB_REPOSITORY: "acme/widgets",
+    GITHUB_SERVER_URL: INSTANCE,
+  } as NodeJS.ProcessEnv);
+  assert.equal(stage.PLATFORM, "gitea", "the stage env carries the declaration");
+  const child = buildChildEnv(CI_GATE_ENV_KEYS, stage as NodeJS.ProcessEnv);
+  assert.equal(child.PLATFORM, "gitea", "the CI-gate child carries the declaration, not the resolved family");
+  assert.equal(child.FORGEJO_API_URL, INSTANCE);
+  // The lane's adapter is built from that child env, so it carries the
+  // Gitea identity too — the identity the guard below is keyed on.
+  const adapter = ciAdapterFromEnv(child, "acme/widgets", "7", "gitea-pat");
+  assert.equal((adapter as ForgejoAdapter).forge, "gitea");
+  // The typed input boundary refuses this mode for a Gitea instance before
+  // the run starts; the lane's own guard is the defense in depth behind it,
+  // and it fires exactly because the child carries the declared identity.
+  assert.throws(
+    () => ciAdapterFromEnv({ ...child, FORGEJO_TOKEN: "", FORGEJO_AUTH_METHOD: "authorized_integration" }, "acme/widgets", "7", "gitea-pat"),
+    /Gitea does not support auth method 'authorized_integration'/,
+  );
 });
 
 test("#1678: every refusal boundary quotes the same text", () => {

@@ -533,7 +533,11 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
       }
       return new MirrorCache({
         rootDir: input.workspaceCacheRoot,
-        platform: "forgejo",
+        // The DECLARED identity keys the mirror directory (#1682): one
+        // controller can host a `forgejo` AND a `gitea` integration, and
+        // both may carry the same `owner/repo` name — keying the wire
+        // family would hand one product the other product's mirror.
+        platform: identity,
         repoFullName: job.repoFullName,
         cloneUrl: credentials.cloneUrl,
         credentials,

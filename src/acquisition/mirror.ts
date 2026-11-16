@@ -35,7 +35,8 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseRepoRef } from "../platform/repo-ref.js";
-import { pullHeadRefspec } from "../platform/head-ref.js";
+import { pullHeadRefspec, type AcquisitionPlatform } from "../platform/head-ref.js";
+import { isForgeId } from "../platform/resolve.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
 import { AcquisitionError, type AcquisitionFailureCode, type FetchCredentials, type MirrorInfo } from "./types.js";
@@ -93,7 +94,7 @@ const BRANCH_REFSPEC = "+refs/heads/*:refs/heads/*";
 /** Compose the fetch refspecs from the platform seam: branches plus the
  * canonical per-PR head namespace (`pullHeadRefspec`), so fork PR heads are
  * acquired without trusting contributor branch coordinates. */
-function fetchRefspecs(platform: "github" | "forgejo"): string[] {
+function fetchRefspecs(platform: AcquisitionPlatform): string[] {
   const pullRefspec = pullHeadRefspec(platform);
   if (pullRefspec === null) {
     throw new AcquisitionError("invalid_config", `no pull refspec for platform ${platform}`);
@@ -119,10 +120,16 @@ export function withMirrorLock<T>(mirrorPath: string, fn: () => Promise<T>): Pro
 }
 
 /** Stable, repo-independent mirror directory name: `sha256(...).git` under
- * the cache root. Coordinates are validated before hashing. */
+ * the cache root. Coordinates are validated before hashing.
+ *
+ * The digest keys the DECLARED platform, not the wire family (#1682): one
+ * controller can host a `forgejo` AND a `gitea` integration (they share the
+ * wire protocol, so they share this cache root), and both may carry the same
+ * `owner/repo` name. Keying the family would hand one product the other
+ * product's mirror — a repository's content fetched from the wrong forge. */
 export function mirrorDirName(platform: string, repoFullName: string): string {
   const ref = parseRepoRef(repoFullName);
-  if (ref === null || (platform !== "github" && platform !== "forgejo")) {
+  if (ref === null || !isForgeId(platform)) {
     throw new AcquisitionError("invalid_config", "invalid platform or repoFullName");
   }
   const digest = createHash("sha256").update(`${platform}\n${ref.owner}/${ref.name}\n`).digest("hex");
@@ -135,7 +142,10 @@ export interface MirrorOptions {
    * any symlinked or non-directory component, a root writable by
    * group/other, or a root not owned by the controller uid is refused. */
   readonly rootDir: string;
-  readonly platform: "github" | "forgejo";
+  /** The DECLARED platform whose mirror this is (#1682): the seam's own
+   * vocabulary, so `gitea` is a first-class acquisition platform and never
+   * shares a mirror directory with the `forgejo` family member. */
+  readonly platform: AcquisitionPlatform;
   readonly repoFullName: string;
   /** http(s) clone URL without embedded credentials (validated). */
   readonly cloneUrl: string;
@@ -313,7 +323,7 @@ export class MirrorCache {
     return this.mirrorPath;
   }
 
-  get platform(): "github" | "forgejo" {
+  get platform(): AcquisitionPlatform {
     return this.options.platform;
   }
 

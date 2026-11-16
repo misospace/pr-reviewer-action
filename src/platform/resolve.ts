@@ -19,6 +19,13 @@ export type ForgeId = "github" | "forgejo" | "gitea";
 /** The two products that speak the Forgejo/Gitea wire protocol (#1678). */
 export type GiteaFamilyForge = Extract<ForgeId, "forgejo" | "gitea">;
 
+/** The declared forge ids as a CLOSED set: the one membership test every
+ * boundary that accepts a declared id from an untyped caller uses, so the
+ * vocabulary cannot be spelled two ways (#1682). */
+export function isForgeId(value: string): value is ForgeId {
+  return value === "github" || value === "forgejo" || value === "gitea";
+}
+
 /** The single refusal text for a Forgejo-only auth configuration on Gitea
  * (#1678). Authorized OAuth Integrations — an OIDC-asserted JWT exchanged for a
  * short-lived API token — exist only on Forgejo. Every boundary that raises it
