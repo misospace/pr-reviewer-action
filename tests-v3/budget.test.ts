@@ -9,6 +9,7 @@ import {
   LOW_RISK_BUDGET_MAX_REQUESTS,
   TOOL_REQUEST_HARD_MAX,
   TOOL_REQUEST_TIER_DEFAULTS,
+  TOOL_REQUEST_SIZE_FLOORS,
 } from "../src/tools/budget.js";
 
 test("primary override wins on the primary route only and reports its source", () => {
@@ -36,21 +37,21 @@ test("without a size signal the resolver keeps the pre-#810 tier defaults", () =
   assert.equal(resolveToolMaxRequests("smart", {}, null).source, "tier-default");
 });
 
-test("#810: a large PR scales the budget above the smart tier default but under the ceiling", () => {
+test("#810/#1688: a large PR scales from its real surface rather than a 40-call floor", () => {
   // The #806 shape from the issue: 54 files, +4346/-181, several leads.
   const size = { changedFiles: 54, changedLines: 4346 + 181, specialistLeads: 10 };
+  const expected = 14 + 12 + 20; // ceil(54/4) + ceil(4527/400) + 10*2
   const smart = resolveToolMaxRequests("smart", {}, size);
-  assert.equal(smart.budget, 14 + 12 + 20); // ceil(54/4) + ceil(4527/400) + 10*2
+  assert.equal(smart.budget, expected);
   assert.equal(smart.source, "size-scaled");
   assert.equal(smart.configured, null);
-  assert.ok(smart.budget > 45, "scaled budget must exceed the smart tier default");
   assert.ok(smart.budget < TOOL_REQUEST_HARD_MAX, "scaled budget must stay under the hard ceiling");
-  // The floor is per-route: the same PR on the primary route also scales above 40.
   const primary = resolveToolMaxRequests("primary", {}, size);
-  assert.equal(primary.budget, 46);
+  assert.equal(primary.budget, expected);
   assert.equal(primary.source, "size-scaled");
-  // Escalated route floors at 50; the derivation does not shrink it.
-  assert.equal(resolveToolMaxRequests("smart", { TOOL_ESCALATION: "true" }, size).budget, 50);
+  const escalated = resolveToolMaxRequests("smart", { TOOL_ESCALATION: "true" }, size);
+  assert.equal(escalated.budget, expected, "the escalated floor is headroom, not an unconditional 50-call grant");
+  assert.equal(escalated.source, "size-scaled");
 });
 
 test("#810: a huge PR clamps at the hard ceiling", () => {
@@ -60,15 +61,27 @@ test("#810: a huge PR clamps at the hard ceiling", () => {
   assert.equal(resolveToolMaxRequests("primary", {}, size).source, "size-scaled");
 });
 
-test("#810: a small PR's budget matches today's tier default via the floor", () => {
+test("#1688: a small PR gets a bounded size-aware budget instead of inheriting 40 calls", () => {
   const small = { changedFiles: 3, changedLines: 120, specialistLeads: 0 };
-  assert.equal(resolveToolMaxRequests("primary", {}, small).budget, TOOL_REQUEST_TIER_DEFAULTS.primary);
-  assert.equal(resolveToolMaxRequests("primary", {}, small).source, "tier-default");
-  assert.equal(resolveToolMaxRequests("smart", {}, small).budget, TOOL_REQUEST_TIER_DEFAULTS.smart);
-  // Exactly at a tier default: the floor binds, the source stays tier-default.
-  const exact = { changedFiles: 0, changedLines: 0, specialistLeads: 20 };
-  assert.equal(resolveToolMaxRequests("primary", {}, exact).budget, 40);
-  assert.equal(resolveToolMaxRequests("primary", {}, exact).source, "tier-default");
+  assert.deepEqual(
+    resolveToolMaxRequests("primary", {}, small),
+    { route: "primary", budget: TOOL_REQUEST_SIZE_FLOORS.primary, source: "size-scaled", configured: null },
+  );
+  assert.equal(resolveToolMaxRequests("smart", {}, small).budget, TOOL_REQUEST_SIZE_FLOORS.smart);
+  assert.equal(resolveToolMaxRequests("smart", { TOOL_ESCALATION: "true" }, small).budget, TOOL_REQUEST_SIZE_FLOORS.escalated);
+
+  // Organic #1688 shape: seven changed files, ~600 changed lines and one
+  // correctness lead. The old resolver granted 40; this is intentionally 8.
+  const organic = { changedFiles: 7, changedLines: 581 + 16, specialistLeads: 1 };
+  const resolved = resolveToolMaxRequests("primary", {}, organic);
+  assert.equal(resolved.budget, TOOL_REQUEST_SIZE_FLOORS.primary);
+  assert.equal(resolved.source, "size-scaled");
+
+  // A real size signal can naturally land on 40; its provenance is still
+  // size-scaled rather than pretending the no-signal tier default won.
+  const forty = { changedFiles: 0, changedLines: 0, specialistLeads: 20 };
+  assert.equal(resolveToolMaxRequests("primary", {}, forty).budget, 40);
+  assert.equal(resolveToolMaxRequests("primary", {}, forty).source, "size-scaled");
 });
 
 test("#810: explicit overrides and tier overrides still beat the scaled default", () => {
@@ -78,8 +91,8 @@ test("#810: explicit overrides and tier overrides still beat the scaled default"
   assert.deepEqual(resolveToolMaxRequests("primary", { PRIMARY_TOOL_MAX_REQUESTS: "12" }, size), { route: "primary", budget: 12, source: "primary-override", configured: 12 });
 });
 
-test("#810: junk size components degrade to zero, never widen the budget", () => {
-  const junk = { changedFiles: Number.NaN, changedLines: -5, specialistLeads: 1.9 };
+test("#810/#1688: unusable size components fail open to the historical tier default", () => {
+  const junk = { changedFiles: Number.NaN, changedLines: -5, specialistLeads: Number.NaN };
   assert.equal(resolveToolMaxRequests("primary", {}, junk).budget, TOOL_REQUEST_TIER_DEFAULTS.primary);
   assert.equal(resolveToolMaxRequests("primary", {}, junk).source, "tier-default");
 });
