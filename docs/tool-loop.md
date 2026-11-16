@@ -160,11 +160,11 @@ becomes a named material unknown, never a clean settlement.
 
 The decision rides the artifact and the telemetry as `low_risk_budget`
 (`envelope`: `capped`/`retained`, closed `basis` vocabulary —
-`digest-only`, `low-risk-lockfile`, `risk-flags`, `metadata-uncertain`,
+`digest-only`, `low-risk-lockfile`, `already-bounded`, `risk-flags`, `metadata-uncertain`,
 `material-lockfile`, `unparseable-triage`, `obligation-bearing-kind`,
 `obligation-surface`, `no-signal` — plus `mandatory_rows`, the `cap`, and on
 a capped run the `derived_budget` it was narrowed from), and a capped run
-reports `tool_budget_source: low-risk-cap`. A capped run that stops with a
+reports `tool_budget_source: low-risk-cap`; when the normal size-aware budget is already tighter than the low-risk cap, the receipt says `retained/already-bounded` and keeps `tool_budget_source: size-scaled`. A capped run that stops with a
 MATERIAL
 question unsettled is recorded — through #1659's canonical settlement state,
 not any parallel completion notion — as a named material unknown
