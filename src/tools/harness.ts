@@ -2200,6 +2200,9 @@ export interface LowRiskBudgetReceipt {
   basis: "digest-only" | "low-risk-lockfile" | "risk-flags" | "material-lockfile" | "unparseable-triage" | "obligation-bearing-kind" | "no-signal";
   mandatory_rows: number;
   cap?: number;
+  /** capped only: the DERIVED (#810) budget the envelope narrowed, so the
+   * operator sees original vs effective from the receipt alone. */
+  derived_budget?: number;
 }
 
 /**
@@ -2214,9 +2217,14 @@ export interface LowRiskBudgetReceipt {
  *
  * The mandatory-row count uses the SAME gate the planning context uses
  * (`VALIDATE_REQUIRED_CHECKS`): rows the engine agreed not to enforce do
- * not buy envelope, and guidance rows count as the enforced surface they
- * are. An absent or unshaped classification fails open (retained,
- * `no-signal`) — the envelope narrows only on positive proof.
+ * not buy envelope. Trusted-base guidance rows deliberately do NOT count:
+ * they are ADVISORY in #1659's settlement vocabulary (never a material
+ * unknown), and the #1381 reservation — half of the EFFECTIVE budget over
+ * every admission row, guidance included — keeps them attemptable inside
+ * any envelope (the cap's 4 + 2 × rows formula always leaves the
+ * half-budget window ≥ the material row count). An absent or unshaped
+ * classification fails open (retained, `no-signal`) — the envelope narrows
+ * only on positive proof.
  */
 function resolveLowRiskBudgetEnvelope(
   tier: string,
@@ -2238,13 +2246,15 @@ function resolveLowRiskBudgetEnvelope(
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
-  // #1648 review: a PRESENT-but-malformed `risk_flags` is an unshaped
-  // classification — fail open (retain the full envelope), never read as
-  // "no risk flags". Only an array (possibly empty) is a shaped signal.
-  if ("risk_flags" in record && !Array.isArray(record.risk_flags)) {
+  // #1648 review: an ABSENT or present-but-malformed `risk_flags` is an
+  // unshaped classification — absence of risk information is NOT proof that
+  // risk flags are empty (the real classifier always writes the field) —
+  // fail open (retain the full envelope). Only an array (possibly empty) is
+  // a shaped signal.
+  if (!Array.isArray(record.risk_flags)) {
     return { envelope: "retained", basis: "no-signal", mandatory_rows: 0 };
   }
-  const riskFlags = Array.isArray(record.risk_flags) ? record.risk_flags : [];
+  const riskFlags = record.risk_flags;
   const lockfileOnly =
     record.lockfile_only_refresh !== null && typeof record.lockfile_only_refresh === "object" && !Array.isArray(record.lockfile_only_refresh)
       ? record.lockfile_only_refresh as Record<string, unknown>
@@ -2264,7 +2274,13 @@ function resolveLowRiskBudgetEnvelope(
   };
   const cap = lowRiskToolBudgetCap(signal);
   if (cap !== null) {
-    return { envelope: "capped", basis: cap.basis, mandatory_rows: cap.mandatoryRows, cap: cap.cap };
+    return {
+      envelope: "capped",
+      basis: cap.basis,
+      mandatory_rows: cap.mandatoryRows,
+      cap: cap.cap,
+      derived_budget: maxRequests.budget,
+    };
   }
   // Fail-open retained reasons, in precedence order: risk escalation
   // outranks everything; then the lockfile triage's own verdict; then the
@@ -4566,10 +4582,15 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // classification artifact's must_check rows — a scoped artifact (the
   // #1595 lockfile-only refresh) reserves and tracks exactly the one
   // obligation it still names.
+  // #1629: the plan reserves against the EFFECTIVE (envelope-capped) budget,
+  // never the pre-cap number — a dependency-evidence PR whose run the
+  // low-risk envelope narrowed must still fit its reserved tail inside the
+  // envelope it actually gets, and the plan's no-lockout floor keeps the
+  // mandatory evidence reachable at any envelope the cap allows (>= 6).
   const dependencyPlan = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
     ? dependencyEvidencePlanFromClassification(
         () => deps.readText("classification.json"),
-        maxRequests.budget,
+        effectiveMaxRequests,
       )
     : { reserve: 0, obligations: [] as readonly DependencyEvidenceObligation[] };
   const dependencyReserve = dependencyPlan.reserve;

@@ -295,8 +295,12 @@ export interface LowRiskBudgetSignal {
    * to material, never opens the envelope. */
   lockfileOnlyParseable: boolean;
   /** The enforced mandatory obligation surface: the must_check rows (after
-   * the `VALIDATE_REQUIRED_CHECKS` gate) plus trusted-base guidance rows —
-   * the same candidate list the planning context enforces. */
+   * the `VALIDATE_REQUIRED_CHECKS` gate) — the material rows the loop's
+   * admission window enforces. Trusted-base guidance rows stay OUT: they are
+   * advisory in #1659's settlement vocabulary and can never hold a material
+   * unknown, and the reservation window (half the effective budget over ALL
+   * admission rows, guidance included) keeps them attemptable whatever the
+   * envelope says. */
   mandatoryRows: number;
 }
 

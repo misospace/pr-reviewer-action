@@ -134,16 +134,24 @@ archaeology around it is what gets bounded. Any risk flag retains the full
 envelope (risk escalation outranks proportionality), as do the
 obligation-bearing image/chart families, a material lockfile bump, an
 unparseable triage, an explicit or route-override budget, the deep smart
-route, and an absent classification artifact (fail open). The required
-evidence reservations are computed against the effective (capped) budget, so
-the reserved tail can never exceed the envelope.
+route, and an absent, unshaped, or malformed classification artifact — an
+absent `risk_flags` field is NOT proof that risk flags are empty (fail
+open). The required-evidence and dependency-evidence reservations are
+computed against the effective (capped) budget, so the reserved tail can
+never exceed the envelope, and the envelope's per-row allowance can never
+starve the enforced surface below its own row count.
 
 The decision rides the artifact and the telemetry as `low_risk_budget`
 (`envelope`: `capped`/`retained`, closed `basis` vocabulary —
 `digest-only`, `low-risk-lockfile`, `risk-flags`, `material-lockfile`,
 `unparseable-triage`, `obligation-bearing-kind`, `no-signal` — plus
-`mandatory_rows` and the `cap`), and a capped run reports
-`tool_budget_source: low-risk-cap`. The generic
+`mandatory_rows`, the `cap`, and on a capped run the `derived_budget` it
+was narrowed from), and a capped run reports
+`tool_budget_source: low-risk-cap`. A capped run that stops with a MATERIAL
+question unsettled is recorded — through #1659's canonical settlement state,
+not any parallel completion notion — as a named material unknown
+(`investigation_unavailable`), which the authoritative `FinalDisposition`
+publishes as INCOMPLETE/COMMENT, never as a clean attestation. The generic
 `obligations-settled` early stop (#1627) is the completion-aware
 counterpart: once every mandatory row has settled with budget left, the
 loop stops exploring instead of spending the envelope on optional work.

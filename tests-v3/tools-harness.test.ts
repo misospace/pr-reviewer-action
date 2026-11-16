@@ -23,7 +23,10 @@ import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
 import { toolBudgetRoute } from "../src/tools/budget.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
-import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
+import { resolvePartialCoverage, toolBudgetTelemetryOf, persistedLoopSettlements } from "../src/engine/review.js";
+import { reconcileSettlements } from "../src/enforcement/settlement.js";
+import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
+import { computeFinalDisposition } from "../src/disposition/final.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
 import { linesInsideCodeFences, startMockServer } from "./helpers.js";
 
@@ -4566,14 +4569,14 @@ test("#1629: a no-risk image-digest PR caps the derived budget to the mandatory-
   }));
   assert.equal(result.tool_request_budget, 6);
   assert.equal(result.tool_budget_source, "low-risk-cap");
-  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6 });
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
   assert.equal(result.stop_reason, "tool-call-budget-exhausted");
   assert.equal(result.executed_request_count, 6, "the loop must stop at the capped budget: the 4th batch is never executed");
   // The receipt rides the budget telemetry provenance (the artifact's
   // tool_loop_telemetry, already folded by writeOutputs).
   const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
   assert.equal(budget.source, "low-risk-cap");
-  assert.deepEqual(budget.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6 });
+  assert.deepEqual(budget.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
 
   // The same explorer trace without the envelope (explicit operator budget)
   // executes the whole 8-call exploration and closes with its verdict — the
@@ -4609,7 +4612,7 @@ test("#1629: the low-risk lockfile envelope caps to the scoped rows' sum", async
   }));
   assert.equal(result.tool_request_budget, 10);
   assert.equal(result.tool_budget_source, "low-risk-cap");
-  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "low-risk-lockfile", mandatory_rows: 3, cap: 10 });
+  assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "low-risk-lockfile", mandatory_rows: 3, cap: 10, derived_budget: 40 });
 });
 
 test("#1629: any risk flag, a material lockfile bump, or an unparseable triage retains the full envelope with a receipt", async () => {
@@ -4629,6 +4632,10 @@ test("#1629: any risk flag, a material lockfile bump, or an unparseable triage r
     // #1648 review: a PRESENT-but-malformed risk_flags is an unshaped
     // classification — fail open, never read as "no risk flags".
     [{ pr_kind: "image_digest_only", risk_flags: "none", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+    // #1648 review: an ABSENT risk_flags is equally unshaped — absence of
+    // risk information is not proof that risk flags are empty.
+    [{ pr_kind: "image_digest_only", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
       { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
   ];
   for (const [classification, receipt] of cases) {
@@ -4685,5 +4692,238 @@ test("#1629: no classification artifact, an explicit override, or the smart tier
     env: { SYSTEM_PROMPT: "You are the reviewer.", VALIDATE_REQUIRED_CHECKS: "false" },
   }));
   assert.equal(gatedResult.result.tool_request_budget, 6);
-  assert.deepEqual(gatedResult.result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 0, cap: 6 });
+  assert.deepEqual(gatedResult.result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 0, cap: 6, derived_budget: 40 });
+});
+
+test("#1629: a capped low-risk run whose mandatory row settles stops on obligations, not the envelope", async () => {
+  // The completion-aware half of the envelope: once the enforced obligation
+  // surface is discharged with a successful in-window-capable attempt, the
+  // #1627 `obligations-settled` stop preempts the remaining envelope — the
+  // cap bounds optional archaeology, it never forces it to be spent.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "verify the changed digests against the release notes and confirm only image digests changed",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs/upstream-release-notes.md"), "digest refresh, no functional change\n");
+  const responses = [
+    openAiCall("c1", "read_file", JSON.stringify({ path: "docs/upstream-release-notes.md" })),
+    validVerdict(),
+  ];
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.tool_budget_source, "low-risk-cap");
+  assert.equal(result.stop_reason, "obligations-settled");
+  assert.equal(result.executed_request_count, 1, "the settled stop must preempt the remaining envelope");
+  assert.equal(result.native_loop_verdict_produced, true);
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(
+    { id: rows[0]!.id, materiality: rows[0]!.materiality, evidence_state: rows[0]!.evidence_state, acquisition: rows[0]!.acquisition },
+    { id: "obligation-1", materiality: "material", evidence_state: "acquired", acquisition: "available" },
+  );
+});
+
+test("#1629: a capped run that stops with the material row unanswered is a named material unknown, never an APPROVE", async () => {
+  // The envelope must never manufacture certainty: the model explores only
+  // unrelated files, the reserved tail protects the mandatory row, the loop
+  // stops with the row UNSETTLED, and the model still says approve. The
+  // #1659 canonical record — read back through the REAL artifact — turns
+  // that into a material unknown, and the authoritative disposition withholds
+  // (INCOMPLETE/COMMENT). No parallel completion notion is consulted.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["verify the changed digests against the release notes and confirm only image digests changed"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "verify the changed digests against the release notes and confirm only image digests changed",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  const responses: unknown[] = [];
+  for (let round = 0; round < 4; round++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * round, 2 * round + 1].map((offset) => ({
+            id: `c${offset}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: `src/other-${offset}.ts` }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict("approve"));
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict("approve"),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.executed_request_count, 5, "the reserved tail survives the unrelated exploration");
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  // The whole canonical path over the run's REAL artifact: reader -> reconcile
+  // (no fold owns the question) -> disposition evidence -> final disposition.
+  const { settlements, dropped } = persistedLoopSettlements(result);
+  assert.equal(dropped, 0);
+  assert.equal(settlements.length, 1);
+  assert.deepEqual(
+    { materiality: settlements[0]!.materiality, evidence_state: settlements[0]!.evidenceState, acquisition: settlements[0]!.acquisition },
+    { materiality: "material", evidence_state: "open", acquisition: "unavailable" },
+  );
+  const finalRows = reconcileSettlements(settlements, []);
+  assert.equal(finalRows[0]!.semantic, "unknown", "a budget stop is not semantic completion");
+  const build = buildDispositionEvidence({
+    completenessChecks: [],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+    finalSettlements: finalRows,
+  });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [["investigation_unavailable", "material"]]);
+  const disposition = computeFinalDisposition({
+    reviewProduced: true,
+    validVerdict: true,
+    verdict: "approve",
+    degraded: false,
+    exactHead: true,
+    publicationHeadBound: true,
+    blockingFindingOpen: false,
+    evidenceProviderBlocker: false,
+    provenUnmetRequirement: build.provenUnmetRequirement,
+    verdictBearing: true,
+    approvalScopeAllowed: true,
+    evidence: build.evidence,
+  });
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
+test("#1629: mandatory security evidence stays reachable inside the capped envelope", async () => {
+  // The cap never starves the enforced surface: five unrelated explorations
+  // spend everything but the reserved final request, and the sixth — the one
+  // naming the obligation vocabulary — is admitted, executed, and settles the
+  // row inside the envelope.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["check the upstream advisory feed for the pinned image version before the digest refresh"],
+  }));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({
+    injected: true,
+    obligations: [{
+      id: "obligation-1",
+      source: "must_check",
+      text: "check the upstream advisory feed for the pinned image version before the digest refresh",
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  fs.writeFileSync(path.join(root, "docs/security-advisory-notes.md"), "no open advisories for the pinned version\n");
+  const responses: unknown[] = [];
+  for (let i = 0; i < 5; i++) responses.push(openAiCall(`c${i}`, "read_file", JSON.stringify({ path: `src/other-${i}.ts` })));
+  responses.push(openAiCall("c9", "read_file", JSON.stringify({ path: "docs/security-advisory-notes.md" })));
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6);
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.executed_request_count, 6, "the reserved final request pays for the mandatory evidence");
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(
+    { materiality: rows[0]!.materiality, evidence_state: rows[0]!.evidence_state, acquisition: rows[0]!.acquisition, successful_attempt: rows[0]!.successful_attempt },
+    { materiality: "material", evidence_state: "acquired", acquisition: "available", successful_attempt: true },
+  );
+});
+
+test("#1629: the smart route keeps its full budget through an executing loop", async () => {
+  // Exemption proven by EXECUTION, not just the artifact value: the same
+  // batch-heavy trace the capped primary run cuts at six calls runs all
+  // eight rounds-deep under the smart tier's default, untouched.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["verify only image digests changed; repository and tag unchanged"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const files = ["src/a1.ts", "src/a2.ts", "src/a3.ts", "src/a4.ts", "src/a5.ts", "src/a6.ts", "src/a7.ts", "src/a8.ts"];
+  for (const file of files) fs.writeFileSync(path.join(root, file), "export const a = 1;\n");
+  const responses: unknown[] = [];
+  for (let batch = 0; batch < 4; batch++) {
+    responses.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [2 * batch, 2 * batch + 1].map((offset) => ({
+            id: `c${offset}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: files[offset] }) },
+          })),
+        },
+      }],
+    });
+  }
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: {
+      SYSTEM_PROMPT: "You are the reviewer.",
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart-m",
+      SMART_API_KEY: "smart-k",
+    },
+  }));
+  assert.equal(result.tier, "smart");
+  assert.equal(result.tool_request_budget, 45);
+  assert.equal(result.tool_budget_source, "tier-default");
+  assert.equal(result.low_risk_budget, undefined, "the deep smart route is never narrowed");
+  assert.equal(result.executed_request_count, 8, "the whole exploration the primary envelope cuts runs free on the smart tier");
+  assert.equal(result.native_loop_verdict_produced, true);
 });
