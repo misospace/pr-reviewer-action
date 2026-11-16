@@ -151,13 +151,21 @@ function repoRefOf(repoFullName: string): { readonly owner: string; readonly nam
 
 /** The composed forge surface for one platform. */
 export interface ComposedForge {
-  /** The configured identity platform. `gitea` (#1682) composes the same
+  /** The CANONICAL forge platform this composition serves: `github` or
+   * `forgejo`. It is the value every canonical record carries (the
+   * generation id, the job, the durable state), so it never carries the
+   * `gitea` identity: a `gitea` composition (#1682) serves the same
    * Gitea-family adapters as `forgejo` — Forgejo is a Gitea fork, and the
    * REST `/api/v1`, webhook, and clone surfaces the adapters use are the
-   * compatible ones — but the composition's identity (and startup
-   * diagnostics) carry `gitea`, while every canonical record it feeds
-   * stays in the `forgejo` family. */
-  readonly platform: "github" | "forgejo" | "gitea";
+   * compatible ones — and reports the `forgejo` family here, exactly as
+   * before #1682. */
+  readonly platform: "github" | "forgejo";
+  /** The CONFIGURED identity (#1682): `gitea` for a Gitea instance, whose
+   * composition serves the Forgejo-compatible adapters under its own
+   * identity. Diagnostics, labels, and operator-facing descriptions read
+   * this field. It is never a canonical platform, so a consumer of this
+   * type cannot write it into a canonical record. */
+  readonly identity: "github" | "forgejo" | "gitea";
   readonly capability: ControllerForgeCapability;
   readonly followUp: FollowUpForgeAdapter;
   /** The reviewer's own authenticated identity probe (the follow-up
@@ -453,6 +461,7 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
 
   return {
     platform: "github",
+    identity: "github",
     capability,
     followUp,
     botLogin: () => authenticator.appIdentity(),
@@ -647,9 +656,12 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
   };
 
   return {
-    // The identity is whatever was configured (`forgejo` or `gitea`, #1682);
-    // every canonical record this composition feeds stays `forgejo` family.
-    platform: input.platform,
+    // The CANONICAL platform stays the `forgejo` family: every canonical
+    // record this composition feeds carries it, and the `gitea` identity
+    // (#1682) never enters one. The identity rides in its own field.
+    platform: "forgejo",
+    // The identity is whatever was configured (`forgejo` or `gitea`, #1682).
+    identity: input.platform,
     capability,
     followUp,
     botLogin: async () => {
