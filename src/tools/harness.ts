@@ -2246,25 +2246,32 @@ function resolveLowRiskBudgetEnvelope(
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
+  const mustCheck = Array.isArray(record.must_check)
+    ? record.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
+  const mandatoryRows = mustCheckObligationsEnabled(env.VALIDATE_REQUIRED_CHECKS) ? mustCheck.length : 0;
   // #1648 review: an ABSENT or present-but-malformed `risk_flags` is an
   // unshaped classification — absence of risk information is NOT proof that
   // risk flags are empty (the real classifier always writes the field) —
   // fail open (retain the full envelope). Only an array (possibly empty) is
-  // a shaped signal.
+  // a shaped signal. The enforced-surface count rides the receipt even here
+  // so the fail-open stays explainable.
   if (!Array.isArray(record.risk_flags)) {
-    return { envelope: "retained", basis: "no-signal", mandatory_rows: 0 };
+    return { envelope: "retained", basis: "no-signal", mandatory_rows: mandatoryRows };
   }
   const riskFlags = record.risk_flags;
   const lockfileOnly =
     record.lockfile_only_refresh !== null && typeof record.lockfile_only_refresh === "object" && !Array.isArray(record.lockfile_only_refresh)
       ? record.lockfile_only_refresh as Record<string, unknown>
       : null;
-  const material = lockfileOnly !== null && Number.isFinite(Number(lockfileOnly.material)) ? Number(lockfileOnly.material) : null;
+  // #1648 review: the material count is a shaped integer signal or nothing —
+  // coercible values (`null`, "", false, "0") are NOT proof of zero material
+  // bumps, the same rule the risk_flags field follows above.
+  const material =
+    lockfileOnly !== null && typeof lockfileOnly.material === "number" && Number.isInteger(lockfileOnly.material)
+      ? lockfileOnly.material
+      : null;
   const parseable = lockfileOnly !== null && lockfileOnly.parseable === true;
-  const mustCheck = Array.isArray(record.must_check)
-    ? record.must_check.filter((item): item is string => typeof item === "string" && item.trim() !== "")
-    : [];
-  const mandatoryRows = mustCheckObligationsEnabled(env.VALIDATE_REQUIRED_CHECKS) ? mustCheck.length : 0;
   const signal = {
     prKind: typeof record.pr_kind === "string" ? record.pr_kind : "",
     riskFlagCount: riskFlags.length,
@@ -2283,12 +2290,15 @@ function resolveLowRiskBudgetEnvelope(
     };
   }
   // Fail-open retained reasons, in precedence order: risk escalation
-  // outranks everything; then the lockfile triage's own verdict; then the
-  // obligation-bearing kinds the envelope deliberately excludes.
+  // outranks everything; then the lockfile triage's own verdict (a parsed
+  // `parseable: false` names the unparseable triage; a shaped positive
+  // `material` names the material bumps); then the obligation-bearing kinds
+  // the envelope deliberately excludes. A coercible/malformed triage field
+  // carries no information, so it falls through to `no-signal`.
   if (signal.riskFlagCount > 0) {
     return { envelope: "retained", basis: "risk-flags", mandatory_rows: mandatoryRows };
   }
-  if (material !== null && !parseable) {
+  if (lockfileOnly !== null && parseable === false) {
     return { envelope: "retained", basis: "unparseable-triage", mandatory_rows: mandatoryRows };
   }
   if (material !== null && material > 0) {

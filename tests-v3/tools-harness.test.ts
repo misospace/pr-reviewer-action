@@ -4630,13 +4630,23 @@ test("#1629: any risk flag, a material lockfile bump, or an unparseable triage r
     [{ pr_kind: "renovate_image_update", risk_flags: [], must_check: ["establish upstream provenance for the updated image: publisher and canonical source repository"], lockfile_only_refresh: null },
       { envelope: "retained", basis: "obligation-bearing-kind", mandatory_rows: 1 }],
     // #1648 review: a PRESENT-but-malformed risk_flags is an unshaped
-    // classification — fail open, never read as "no risk flags".
+    // classification — fail open, never read as "no risk flags". The
+    // enforced-surface count still rides the receipt (honest fail-open).
     [{ pr_kind: "image_digest_only", risk_flags: "none", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
-      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
     // #1648 review: an ABSENT risk_flags is equally unshaped — absence of
     // risk information is not proof that risk flags are empty.
     [{ pr_kind: "image_digest_only", must_check: ["verify only image digests changed; repository and tag unchanged"], lockfile_only_refresh: null },
-      { envelope: "retained", basis: "no-signal", mandatory_rows: 0 }],
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    // #1648 review: a coercible-to-zero `material` (null / "" / false / "0")
+    // is NOT proof of zero material bumps — the same shaped-signal rule the
+    // risk_flags field follows. A non-shaped triage field reads as no triage.
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: null, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: "0", low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
+    [{ pr_kind: "dependency_upgrade", risk_flags: [], must_check: ["row one"], lockfile_only_refresh: { material: false, low_risk: 3, parseable: true } },
+      { envelope: "retained", basis: "no-signal", mandatory_rows: 1 }],
   ];
   for (const [classification, receipt] of cases) {
     const { root, deps } = workspace();
@@ -4926,4 +4936,56 @@ test("#1629: the smart route keeps its full budget through an executing loop", a
   assert.equal(result.low_risk_budget, undefined, "the deep smart route is never narrowed");
   assert.equal(result.executed_request_count, 8, "the whole exploration the primary envelope cuts runs free on the smart tier");
   assert.equal(result.native_loop_verdict_produced, true);
+});
+
+test("#1629: enforced obligation rows the envelope did not count are still reservation-protected under the cap", async () => {
+  // The envelope scales with the classification's must_check surface; the
+  // ENFORCED admission surface also includes trusted-base guidance rows the
+  // cap does not count. The cap must never under-protect that surface: the
+  // reservation is computed over the ACTUAL rows against the EFFECTIVE
+  // budget, and a guidance row left unresolved stays ADVISORY in the
+  // canonical record — it never becomes a material unknown either.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), [
+    "# Repository Standards and Conventions",
+    "## Evidence required before approval",
+    "Verify the registry mirror configuration file for the base image source.",
+    "# Changed Manifest Context",
+    "+ change",
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_digest_only",
+    risk_flags: [],
+    must_check: ["verify the changed digests against the release manifest and confirm only image digests changed"],
+  }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(root, `src/other-${i}.ts`), "export const a = 1;\n");
+  fs.writeFileSync(path.join(root, "docs/upstream-release-notes.md"), "digest refresh, matrix unchanged\n");
+  const responses: unknown[] = [];
+  for (let i = 0; i < 5; i++) responses.push(openAiCall(`c${i}`, "read_file", JSON.stringify({ path: `src/other-${i}.ts` })));
+  responses.push(openAiCall("c9", "read_file", JSON.stringify({ path: "docs/upstream-release-notes.md" })));
+  responses.push(validVerdict());
+  let turn = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.tool_request_budget, 6, "the cap scales with the one must_check row, not the guidance row");
+  // Reservation: min(2 rows, floor(6 / 2)) = 2 held requests. The first
+  // three unrelated explorations run free; the fourth (three left) is
+  // refused; the reserved tail admits the call that names the obligation
+  // vocabulary, and the model then closes with its verdict (one request to
+  // spare — the envelope bounds optional work, it does not force it).
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.executed_request_count, 5);
+  assert.equal(result.refused_request_count, 1);
+  const budget = (result.tool_loop_telemetry as Record<string, unknown>).budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2, "the uncounted guidance row is tracked in the canonical record too");
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.materiality, row.evidence_state]),
+    [["obligation-1", "material", "acquired"], ["obligation-2", "advisory", "open"]],
+    "the material row lands inside the envelope; the guidance row stays advisory, never a material unknown",
+  );
 });

@@ -138,8 +138,14 @@ route, and an absent, unshaped, or malformed classification artifact — an
 absent `risk_flags` field is NOT proof that risk flags are empty (fail
 open). The required-evidence and dependency-evidence reservations are
 computed against the effective (capped) budget, so the reserved tail can
-never exceed the envelope, and the envelope's per-row allowance can never
-starve the enforced surface below its own row count.
+never exceed the envelope. The per-row allowance keeps the admission window
+at or above the counted must_check surface (the 4 + 2n envelope always
+leaves floor(cap/2) ≥ n, and the realistic low-risk shapes — one
+digest-verification row, three scoped lockfile rows — well inside it);
+uncounted advisory guidance rows and heavier mixed surfaces stay
+attemptable within the reservation's patience, and anything genuinely left
+unsettled fails closed the canonical way — a material row becomes a named
+material unknown, never a clean settlement.
 
 The decision rides the artifact and the telemetry as `low_risk_budget`
 (`envelope`: `capped`/`retained`, closed `basis` vocabulary —
