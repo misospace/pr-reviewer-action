@@ -100,6 +100,7 @@ import {
   formatStreamedAttemptFailure,
   TERMINAL_STREAMED_FAILURE_REASONS,
   type StreamedAttemptClassification,
+  type StreamedAttemptFailureReason,
   type StreamedAttemptFailureRecord,
 } from "./stream-attempt.js";
 import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
@@ -897,11 +898,22 @@ export interface NativeVerdictOutcome {
   ok: boolean;
   attempts: number;
   retried: boolean;
-  transport: "streamed" | "non-streamed" | "non-streamed-retry" | "";
+  transport: "streamed" | "non-streamed" | "non-streamed-retry" | "non-streamed-transport-retry" | "";
   reason: "accepted" | "transport" | "parse" | "empty" | "";
   detail: string;
   streamFailureKind: NativeVerdictOutcome["reason"];
   streamFailureDetail: string;
+  /** #1687: WHICH recovery this turn spent ("" when none): "stream" is the
+   * #637 streamed→non-streamed one, "transport" the #1687 retry of an
+   * initial NON-streamed attempt that died on a proven transient transport
+   * error. `retried` alone no longer says which — a transport retry must
+   * never be read as a streamed fallback. */
+  retryKind: "" | "stream" | "transport";
+  /** #1687: present when retryKind === "transport" — the #1628 discarded-
+   * attempt record (bounded, content-free: enum reason, status, times) for
+   * the discarded initial non-streamed attempt; `retry_elapsed_sec` is the
+   * retry's own time (null when the retry failed closed unsent). */
+  transportRetry?: StreamedAttemptFailureRecord;
   /** #1199: the verdict turn's provider-reported usage folded over EVERY
    * attempt (a streamed→non-streamed retry included, each folded at the same
    * sites the aggregate `usageAcc` folds them): per-field the sum of the
@@ -962,10 +974,34 @@ export interface ProduceVerdictInput {
  * rejects — retry once non-streamed. #1047: that single retry raises its
  * completion budget when the streamed body's own shape shows the token cap
  * destroyed the verdict (token-cap stop reason, or the whole budget spent on
-  * reasoning before any text); no additional call is ever spent. Never
- * throws: transport errors are classified, not propagated. Every returned
- * body is folded into usageAcc.
-  */
+  * reasoning before any text); no additional call is ever spent. #1687: an
+ * initial NON-streamed verdict gets one retry of its own when — and only
+ * when — the attempt died on a PROVEN transient transport error (see
+ * VERDICT_TRANSIENT_RETRY_REASONS): the same payload, the same absolute
+ * deadline, and never a third attempt after the #637 streamed fallback.
+ * Never throws: transport errors are classified, not propagated. Every
+ * returned body is folded into usageAcc.
+ */
+
+/**
+ * #1687: the transient classes that justify retrying an initial NON-streamed
+ * closing verdict once. The wire transport's own backoff covers only 429/5xx
+ * `http_status` responses (RETRYABLE_HTTP_STATUSES), so a socket death like
+ * ECONNRESET surfaces after exactly ONE wire call — and with `attemptedStream`
+ * false the #637 fallback never fired, dropping the turn straight to the
+ * separate corpus-only review call. Only these PROVEN transient classes from
+ * the #1628 classifier retry: `connection_closed` (the network died mid-call)
+ * and `transport_timeout` (connect/whole-request deadline). Everything else
+ * fails closed WITHOUT a retry: `http_status` arrives here only after the
+ * transport's backoff already spent itself (auth, config, and format
+ * rejections stay rejections), `cancelled` is the run's own cancellation, the
+ * byte-cap tear is deterministic, and `unknown` is an UNtyped throw — a
+ * transient status is never inferred from untrusted response prose.
+ */
+const VERDICT_TRANSIENT_RETRY_REASONS: ReadonlySet<StreamedAttemptFailureReason> = new Set<StreamedAttemptFailureReason>([
+  "connection_closed", "transport_timeout",
+]);
+
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
   // #1037: one known-secret list for every response surface of this verdict
@@ -973,23 +1009,35 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   // `ai-response.<tier>.json` body below).
   const knownSecrets = callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl));
 
-  const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
+  const request = async (
+    payload: Record<string, unknown>,
+    // #1628's terminal cap for the #1687 retry: the caller may lower the
+    // per-attempt timeout, but the absolute deadline below stays the same
+    // authority for BOTH attempts (and clamps this cap too).
+    timeoutCapSec?: number,
+  ): Promise<{ response: unknown; transportError: string | null; thrown: unknown }> => {
     try {
       const remaining = input.deadline - timeFn();
       if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
-      const timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
+      const budget = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
+      const timeout = timeoutCapSec === undefined
+        ? budget
+        : Math.min(budget, Math.max(1, Math.trunc(timeoutCapSec)));
       const response = await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout);
       // #1466: the transport probe of THIS attempt, read off the body the
       // transport returned. One entry per attempt, in call order — the last
       // one is the accepted attempt's (see `summarizeTransportProbes`).
       attemptProbes.push(readTransportTiming(response));
-      return { response, transportError: null };
+      return { response, transportError: null, thrown: null };
     } catch (exc) {
       // #1466: the attempt reached the wire and produced no body, so it has
       // no timing to report — but it WAS a transport call, and the attempt
       // count must include it.
+      // #1687: the raw throw rides along so the transient classifier below
+      // reads the TYPED TransportFailure (kind/status/wire observation), never
+      // a prose match on the described message.
       attemptProbes.push(null);
-      return { response: null, transportError: exc instanceof Error ? exc.message : String(exc) };
+      return { response: null, transportError: exc instanceof Error ? exc.message : String(exc), thrown: exc };
     }
   };
 
@@ -998,6 +1046,8 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 
   let attempts = 0;
   let retried = false;
+  let retryKind: NativeVerdictOutcome["retryKind"] = "";
+  let transportRetry: StreamedAttemptFailureRecord | undefined;
   let streamFailureKind: NativeVerdictOutcome["reason"] = "";
   let streamFailureDetail = "";
   let response: unknown;
@@ -1043,6 +1093,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     }
   };
 
+  const firstAttemptMs = performance.now();
   const firstAttempt = await request(first);
   attempts += 1;
   response = firstAttempt.response;
@@ -1060,6 +1111,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 
   if (!ok && attemptedStream) {
     retried = true;
+    retryKind = "stream";
     streamFailureKind = reason;
     streamFailureDetail = detail;
     // #1047: evidence-gated completion-budget raise for the single
@@ -1125,6 +1177,75 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     }
   }
 
+  // #1687: an initial NON-streamed closing verdict that died on a PROVEN
+  // transient transport error gets ONE retry of its own — inside the full
+  // investigation conversation, before the engine spends a separate
+  // corpus-only review call. Same complete payload (same messages, same
+  // tool results, same model/format, no new tool execution), same absolute
+  // deadline (request() clamps and refuses past it), no completion-budget
+  // raise (a transport failure carries no token-cap evidence), and never a
+  // third attempt: this branch cannot run when the #637 streamed fallback
+  // already spent the turn's one retry (`retried`).
+  if (!ok && !attemptedStream && response === null && !retried && firstAttempt.thrown !== null) {
+    const classification = classifyThrownStreamedAttempt(firstAttempt.thrown);
+    if (VERDICT_TRANSIENT_RETRY_REASONS.has(classification.reason)) {
+      retried = true;
+      retryKind = "transport";
+      const failedElapsed = (performance.now() - firstAttemptMs) / 1000;
+      const routeToken = /^[a-z][a-z0-9_-]{0,31}$/.test(input.tier ?? "primary")
+        ? (input.tier ?? "primary")
+        : "unknown";
+      const recordFor = (retryElapsedSec: number | null): StreamedAttemptFailureRecord => ({
+        reason: classification.reason,
+        status: classification.status,
+        elapsed_sec: roundSeconds(failedElapsed),
+        first_byte_sec: classification.first_byte_sec === null ? null : roundSeconds(classification.first_byte_sec),
+        first_sse_event_sec: classification.first_sse_event_sec === null ? null : roundSeconds(classification.first_sse_event_sec),
+        first_content_sec: classification.first_content_sec === null ? null : roundSeconds(classification.first_content_sec),
+        retry_elapsed_sec: retryElapsedSec === null ? null : roundSeconds(retryElapsedSec),
+        route: routeToken,
+      });
+      const retryPayload: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(first)) {
+        if (k !== "stream_options") retryPayload[k] = v;
+      }
+      retryPayload.stream = false;
+      if (!Array.isArray(retryPayload.messages) || (retryPayload.messages as unknown[]).length === 0) {
+        // #1464's fail-closed boundary, mirrored: a payload that lost its
+        // `messages` never goes on the wire, and no attempt is counted.
+        transportRetry = recordFor(null);
+        ok = false;
+        reason = "transport";
+        detail = "non-streamed transport retry payload carries no messages — not sent";
+      } else {
+        // #1628's terminal rule, mirrored: a PROVEN wire death
+        // (connection_closed) may not restart a full turn wait — the pair
+        // stays bounded by one turn timeout plus the 1s floor; the
+        // ambiguous timeout keeps the configured authority. The absolute
+        // deadline clamps both attempts either way.
+        const timeoutCap = TERMINAL_STREAMED_FAILURE_REASONS.has(classification.reason)
+          ? Math.max(1, Math.trunc(input.turnTimeout - failedElapsed))
+          : undefined;
+        const retryStartMs = performance.now();
+        const retry = await request(retryPayload, timeoutCap);
+        attempts += 1;
+        transportRetry = recordFor((performance.now() - retryStartMs) / 1000);
+        response = retry.response;
+        if (response !== null) {
+          foldAttemptUsage(response);
+          const evaluation = evaluateNativeVerdict(response, knownSecrets);
+          ok = evaluation.ok;
+          reason = evaluation.reason;
+          detail = evaluation.detail;
+        } else {
+          ok = false;
+          reason = "transport";
+          detail = retry.transportError ?? "request failed";
+        }
+      }
+    }
+  }
+
   const finalDiagnostics = ok
     ? null
     : describeUnusableResponse({
@@ -1170,11 +1291,17 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     ok,
     attempts,
     retried,
-    transport: ok ? (!attemptedStream ? "non-streamed" : retried ? "non-streamed-retry" : "streamed") : "",
+    transport: ok
+      ? (!attemptedStream
+        ? (retryKind === "transport" ? "non-streamed-transport-retry" : "non-streamed")
+        : retried ? "non-streamed-retry" : "streamed")
+      : "",
     reason: ok ? "accepted" : reason,
     detail: ok ? "" : detail,
     streamFailureKind,
     streamFailureDetail,
+    retryKind,
+    ...(transportRetry !== undefined ? { transportRetry } : {}),
     usageTotals,
     knownSecrets,
     timing,
@@ -4129,7 +4256,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             cached_tokens: verdict.usageTotals.cachedTokens,
             uncached_prompt_tokens: verdict.usageTotals.uncachedPromptTokens ?? null,
             cache_write_tokens: verdict.usageTotals.cacheWriteTokens ?? null,
-            streamed_fallback: verdict.retried,
+            streamed_fallback: verdict.retryKind === "stream",
             // #1466: the ACCEPTED attempt's transport measurements — when the
             // provider answered, how fast it decoded, how many transport calls
             // (and HTTP attempts) the verdict turn needed, and its sanitized
@@ -4149,8 +4276,20 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         input.result.native_loop_verdict_attempts = verdict.attempts;
         input.result.native_loop_verdict_retried = verdict.retried;
-        if (verdict.retried) {
+        if (verdict.retryKind === "stream") {
           input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
+        }
+        // #1687: the initial non-streamed verdict's transient transport
+        // retry is its OWN bounded surface — never the streamed-fallback
+        // field above, and content-free by construction (the #1628 record:
+        // enum reason, status, times, route; no response prose).
+        if (verdict.retryKind === "transport" && verdict.transportRetry !== undefined) {
+          input.result.native_loop_verdict_transport_retry = verdict.transportRetry;
+          log(
+            verdict.ok
+              ? ` native_loop: closing non-streamed verdict attempt failed (${formatStreamedAttemptFailure(verdict.transportRetry)}); retried once non-streamed and recovered`
+              : ` native_loop: closing non-streamed verdict transport retry failed (${formatStreamedAttemptFailure(verdict.transportRetry)}) — no further retry`,
+          );
         }        // #1047: the bounded failure-shape record (and the budget raise, when
         // the single non-streamed retry used one) — content-free counts and
         // reasons only, so the harness artifact can say WHY the verdict turn
@@ -4198,7 +4337,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           input.result.native_loop_verdict_transport = verdict.transport;
           log(
             "  native_loop: in-conversation verdict produced" +
-              (verdict.transport === "non-streamed-retry" ? " via non-streamed retry" : ""),
+              (verdict.transport === "non-streamed-retry"
+                ? " via non-streamed retry"
+                : verdict.transport === "non-streamed-transport-retry"
+                  ? " via non-streamed transport retry (#1687)"
+                  : ""),
           );
           return verdict.response;
         }

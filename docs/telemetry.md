@@ -182,7 +182,7 @@ credentials.
 | `cached_tokens` | The prompt tokens the provider served from its cache. |
 | `cache_write_tokens` | The prompt tokens the provider wrote into its cache. |
 | `uncached_prompt_tokens` | The prompt tokens the provider did not serve from its cache. |
-| `attempts` | The number of model calls the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value is 2 when a streamed answer was unusable and the turn called the provider again without streaming. |
+| `attempts` | The number of model calls the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value is 2 when a streamed answer was unusable and the turn called the provider again without streaming, or (#1687, verdict record only) when an initial non-streamed closing verdict retried a proven transient transport failure. |
 | `wire_calls` | The number of HTTP requests the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value counts the retries that the transport made. |
 | `finish_reason` | The provider's stop reason for the accepted attempt. The value is reduced to a short token, so a provider cannot put free text in the artifact. |
 | `streamed_fallback` | True when a streamed answer was unusable and the turn called the provider again without streaming. |
