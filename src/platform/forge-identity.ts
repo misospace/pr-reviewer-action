@@ -9,17 +9,20 @@
  * code is a forge-specific decision outside the adapters, and this module is
  * where it belongs.
  *
- * Today exactly two behaviors differ, and both are refusals:
+ * Today exactly three behaviors differ:
  * - the PRODUCT NAME an operator reads in a diagnostic;
  * - the TOKEN READER, because Authorized OAuth Integrations (an
  *   OIDC-asserted JWT exchanged for a short-lived API token) exist only on
  *   Forgejo. A Gitea instance configured for that mode is refused by the
- *   Gitea token reader, never by the Forgejo one.
+ *   Gitea token reader, never by the Forgejo one;
+ * - the WEBHOOK INTAKE MOUNT: a Gitea intake is mounted exactly on its
+ *   canonical route, while the pre-existing Forgejo intake keeps its
+ *   historical path-agnostic surface (#1683).
  */
 
 import { forgejoTokenFromEnv } from "./forgejo-auth.js";
 import { giteaTokenFromEnv } from "./gitea.js";
-import type { GiteaFamilyForge } from "./resolve.js";
+import type { ForgeId, GiteaFamilyForge } from "./resolve.js";
 
 /** The product name an operator reads in a diagnostic. */
 export function forgeProductLabel(forge: GiteaFamilyForge): "Forgejo" | "Gitea" {
@@ -42,6 +45,22 @@ export function forgeRefusesAuthMethod(
     forge === "gitea" &&
     (authMethod ?? "").trim().toLowerCase() === "authorized_integration"
   );
+}
+
+/** True when the declared forge mounts its webhook intake EXACTLY on the
+ * canonical route named by the ingress seam (`ingressWebhookPath`).
+ *
+ * The decision is the DECLARED PRODUCT's, not the controller's (#1683): a
+ * Gitea intake — introduced by #1682 with the canonical route as its only
+ * mount — answers nowhere else, so a signed payload cannot drive a review
+ * through a path the operator never mounted. The Forgejo intake predates
+ * the route and keeps its historical path-agnostic surface (its canonical
+ * route is REPORTED, not enforced), and GitHub's App intake is
+ * path-agnostic by design. Every consumer that serves an intake asks THIS
+ * rule; nothing outside the seam branches on the product name to decide
+ * it. */
+export function forgeEnforcesWebhookRoute(forge: ForgeId): boolean {
+  return forge === "gitea";
 }
 
 /** The token reader for a declared Gitea-family identity.

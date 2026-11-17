@@ -114,6 +114,7 @@ import {
 import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
 import { ingressWebhookPath } from "../ingress/endpoints.js";
+import { forgeEnforcesWebhookRoute } from "../platform/forge-identity.js";
 import { isForgeId } from "../platform/resolve.js";
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
@@ -1908,15 +1909,16 @@ export async function startControllerDaemon(
   };
 
   if (operatorHost !== undefined) {
-    // The exact-route filter applies to the `gitea` identity ONLY (#1683
-    // final ruling): a Gitea daemon answers the intake only on the route the
-    // ingress seam names for it, and every other path is a fixed 404 that
-    // never reaches the webhook processing. Forgejo keeps its historical
-    // path-agnostic port (its canonical route is REPORTED, not enforced),
-    // and GitHub keeps its path-agnostic App intake (the seam names no
-    // route for it, so `canonicalIntakeRoute` reports "").
-    const enforcedRoute =
-      options.webhook!.platform === "gitea" ? canonicalIntakeRoute(options) : "";
+    // Whether the configured intake enforces its canonical route is the
+    // PLATFORM SEAM's product decision (#1683) — never a product branch in
+    // controller policy: a gitea intake answers only on the route the
+    // ingress seam names for it (every other path is a fixed 404 that never
+    // reaches the webhook processing), while forgejo keeps its historical
+    // path-agnostic port (canonical route REPORTED, not enforced) and
+    // GitHub keeps its path-agnostic App intake.
+    const enforcedRoute = forgeEnforcesWebhookRoute(options.webhook!.platform)
+      ? canonicalIntakeRoute(options)
+      : "";
     server = createServer(
       enforcedRoute === ""
         ? operatorHost.handler

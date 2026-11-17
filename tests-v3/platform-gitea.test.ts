@@ -18,6 +18,7 @@ import { GITEA_WEBHOOK_PATH, FORGEJO_WEBHOOK_PATH, selectIngressEndpoints } from
 import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/api-client.js";
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
 import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
+import { forgeEnforcesWebhookRoute } from "../src/platform/forge-identity.js";
 import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { actionStageEnv } from "../src/run/action.js";
@@ -156,6 +157,16 @@ test("bindForgejoToken binds the family's chain in the resolver's own order", ()
     bind({ FORGEJO_AUTH_METHOD: "authorized_integration" }, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }),
     undefined,
   );
+});
+
+test("forgeEnforcesWebhookRoute is the seam's mount rule, not the controller's (#1683)", () => {
+  // The per-product webhook-mount decision lives in the identity seam; the
+  // daemon only asks it. Gitea (introduced with the canonical route as its
+  // only mount) enforces; Forgejo keeps its historical path-agnostic port;
+  // GitHub's App intake never had a route to enforce.
+  assert.equal(forgeEnforcesWebhookRoute("gitea"), true);
+  assert.equal(forgeEnforcesWebhookRoute("forgejo"), false);
+  assert.equal(forgeEnforcesWebhookRoute("github"), false);
 });
 
 test("giteaTokenFromEnv refuses authorized_integration instead of returning no token", () => {

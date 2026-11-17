@@ -17,6 +17,7 @@ export {
 } from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export {
+  forgeEnforcesWebhookRoute,
   forgeProductLabel,
   forgeTokenFromEnv,
 } from "./forge-identity.js";
