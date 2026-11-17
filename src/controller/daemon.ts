@@ -401,10 +401,10 @@ export interface ControllerDaemon {
    *
    * It is the route an operator points the forge webhook at, so the daemon
    * REPORTS it (the controller's startup summary) instead of leaving the
-   * operator to guess. A Gitea-family daemon ENFORCES it: a delivery
-   * addressed to any other path is refused with a fixed 404 and never
-   * reaches the webhook processing, so a URL the operator never mounted
-   * cannot drive a review. */
+   * operator to guess. A `gitea` daemon ENFORCES it: a delivery addressed
+   * to any other path is refused with a fixed 404 and never reaches the
+   * webhook processing. A `forgejo` daemon reports the canonical route but
+   * stays path-agnostic — existing webhook URLs keep working (#1683). */
   readonly intakeRoute: string;
   /** "" while every persisted queue mutation is durable; otherwise the
    * latched persistence-failure message (the daemon's health signal). */
@@ -1070,12 +1070,17 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
  *   label is what selects the intake's own projection, so the route and the
  *   projection always agree.
  *
- * The route is the ENFORCED mount: the daemon's listener answers the intake
- * ONLY on it, and a request addressed anywhere else gets a fixed 404 before
- * the handler reads a byte — a correctly signed payload can never drive a
- * review through a path the operator never mounted. The low-level handler
- * stays path-agnostic (the mount point belongs to the daemon boundary, and
- * the reusable intake stays composable wherever its embedder mounts it).
+ * The route is the DOCUMENTED canonical mount. It is ENFORCED only for the
+ * newly introduced `gitea` identity (#1683 final ruling): a Gitea daemon
+ * answers the intake ONLY on `/webhooks/gitea`, and a request addressed
+ * anywhere else gets a fixed 404 before the handler reads a byte — a
+ * correctly signed payload can never drive a review through a path the
+ * operator never mounted. A `forgejo` daemon REPORTS its canonical route
+ * but stays path-agnostic exactly as it was before Gitea joined the family:
+ * an existing Forgejo deployment's webhook URL never breaks, and narrowing
+ * it is out of #1682's scope. The low-level handler stays path-agnostic for
+ * every identity (the mount point belongs to the daemon boundary, and the
+ * reusable intake stays composable wherever its embedder mounts it).
  */
 function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
   const platform = options.webhook?.platform;
@@ -1903,18 +1908,21 @@ export async function startControllerDaemon(
   };
 
   if (operatorHost !== undefined) {
-    // The canonical route is the ENFORCED mount (#1683 review): the intake
-    // answers ONLY on the route the ingress seam names for the configured
-    // identity; every other path is a fixed 404 that never reaches the
-    // webhook processing. GitHub keeps its path-agnostic App intake (the
-    // seam names no route for it, so `canonicalIntakeRoute` reports "").
-    const intakeRoute = canonicalIntakeRoute(options);
+    // The exact-route filter applies to the `gitea` identity ONLY (#1683
+    // final ruling): a Gitea daemon answers the intake only on the route the
+    // ingress seam names for it, and every other path is a fixed 404 that
+    // never reaches the webhook processing. Forgejo keeps its historical
+    // path-agnostic port (its canonical route is REPORTED, not enforced),
+    // and GitHub keeps its path-agnostic App intake (the seam names no
+    // route for it, so `canonicalIntakeRoute` reports "").
+    const enforcedRoute =
+      options.webhook!.platform === "gitea" ? canonicalIntakeRoute(options) : "";
     server = createServer(
-      intakeRoute === ""
+      enforcedRoute === ""
         ? operatorHost.handler
         : (req, res) => {
             const path = (req.url ?? "").split(/[?#]/, 1)[0];
-            if (path !== intakeRoute) {
+            if (path !== enforcedRoute) {
               res.statusCode = 404;
               res.setHeader("content-type", "application/json");
               res.end('{"status":"not found"}');

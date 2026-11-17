@@ -3210,6 +3210,67 @@ test("the canonical intake route follows the configured identity, and GitHub has
   assert.equal(github.daemon.intakeRoute, "");
 });
 
+test("a Forgejo daemon stays PATH-AGNOSTIC: a signed legacy-path delivery still schedules (#1683)", async (t) => {
+  // #1683 final ruling: the exact-route filter applies to the `gitea`
+  // identity ONLY. An existing Forgejo deployment keeps whatever webhook
+  // URL it configured before Gitea joined the family — the canonical
+  // `/webhooks/forgejo` is REPORTED, never ENFORCED — so a valid signed
+  // delivery on the legacy root path still reaches intake and schedules
+  // exactly one generation. (The Gitea daemon's 404s on the same paths
+  // are pinned by the enforcement test below.)
+  const port = await freePort();
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "forgejo-1", kind: "forgejo", endpoint: "https://forgejo.example/api/v1", credential: "f-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "forgejo",
+        port,
+        secret: "forgejo-webhook-secret",
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  // The route is still REPORTED (the startup summary tells the operator
+  // where NEW webhooks should go)…
+  assert.equal(h.daemon.intakeRoute, "/webhooks/forgejo");
+
+  // …but a delivery addressed to the LEGACY root path is served as before.
+  const body = JSON.stringify({
+    action: "synchronized",
+    repository: { full_name: "owner/repo" },
+    sender: { login: "contributor" },
+    pull_request: {
+      number: 7,
+      head: { sha: HEAD },
+      base: { repo: { full_name: "owner/repo" } },
+    },
+  });
+  const legacy = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "pull_request",
+      "x-gitea-signature": computeForgejoWebhookSignature("forgejo-webhook-secret", body),
+    },
+    body,
+  });
+  assert.equal(legacy.status, 202, "the legacy Forgejo webhook path is still served");
+  assert.deepEqual(JSON.parse(await legacy.text()), { status: "accepted", kind: "synchronize" });
+  // The delivery reached intake and scheduled exactly one generation.
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1, "the legacy-path delivery scheduled one generation");
+  assert.equal(h.fake.started[0]!.headSha, HEAD);
+});
+
 test("a Gitea-family daemon ENFORCES its canonical intake route (#1683)", async (t) => {
   // The canonical route is the ENFORCED mount, not just documentation: a
   // signed delivery addressed anywhere but `/webhooks/gitea` gets a fixed

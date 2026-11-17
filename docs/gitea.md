@@ -44,7 +44,6 @@ clients) resolves through that one resolver with the run's declared identity,
 so one run can never authenticate the review with one credential and the CI
 lane with another.
 
-
 ## Refused: authorized_integration
 
 Authorized OAuth Integrations, an OIDC-asserted JWT exchange, exist only on
@@ -61,7 +60,6 @@ Forgejo. On Gitea every way of selecting that mode is refused:
   construct through `giteaAdapterFromEnv`, which resolves the token via
   `giteaTokenFromEnv` and therefore refuses before any adapter object exists.
   The construction refusal says:
-
 
 ```text
 Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token
@@ -86,13 +84,15 @@ never rewrite one.
 
 The Gitea intake route is `/webhooks/gitea` (`GITEA_WEBHOOK_PATH`,
 `src/ingress/endpoints.ts`). The controller daemon reports that route in
-its startup summary, so you do not have to guess it, and it enforces it:
-a Gitea-family daemon answers the intake only on that exact path, and a
-delivery addressed anywhere else gets a fixed 404 before the signature is
-ever checked. Set a webhook secret
-on the instance and on the controller. An empty secret accepts nothing:
-the handler fails closed, and it verifies the signature over the raw body
-before parsing any JSON.
+its startup summary, so you do not have to guess it, and it enforces it for
+a `gitea` instance: the daemon answers the intake only on that exact path,
+and a delivery addressed anywhere else gets a fixed 404 before the
+signature is ever checked. A `forgejo` instance keeps its historical
+path-agnostic intake — its canonical `/webhooks/forgejo` is reported, not
+enforced, so an existing Forgejo webhook URL keeps working (#1683). Set a
+webhook secret on the instance and on the controller. An empty secret accepts
+nothing: the handler fails closed, and it verifies the signature over the
+raw body before parsing any JSON.
 
 `createGiteaWebhookHandler` and `dispatchGiteaWebhookEvent` are served
 by the operator host (`createOperatorHost({ platform: "gitea" })`) and by
@@ -108,7 +108,6 @@ schedules a follow-up.
 The Action runtime does not use this projection. It reads the event the
 forge sends to the runner and normalizes it with the shared normalizer, so
 the raw body projection has no place there.
-
 
 Subscribe the webhook to the events that schedule reviews:
 
@@ -137,7 +136,6 @@ mint a different generation than the webhook delivery for the same head,
 and the two would never converge.
 
 ## Not covered by this change
-
 
 - No new `gitea-*` action inputs. The shared `forgejo-*` settings stay.
 - No separate Gitea REST client class. The Forgejo client serves both.

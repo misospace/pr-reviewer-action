@@ -49,12 +49,13 @@ a forge-specific CLI.
   `/webhooks/gitea` for a Gitea instance, `/webhooks/forgejo` for a
   Forgejo instance, and none for GitHub (the App intake is
   path-agnostic). The controller's startup summary carries the route, so
-  the operator never has to guess where a delivery lands. The route is the
-  ENFORCED mount: a Gitea-family daemon answers the intake only on that
-  exact path, and a request addressed anywhere else gets a fixed 404
-  before the webhook processing, so a URL the operator never mounted
-  cannot drive a review. A Gitea-family operator therefore mounts the
-  forge webhook at the reported route.
+  the operator never has to guess where a delivery lands. Enforcement is
+  per-identity: a `gitea` daemon mounts the intake on that EXACT path and a
+  request addressed anywhere else gets a fixed 404 before the webhook
+  processing, so a URL the operator never mounted cannot drive a review. A
+  `forgejo` daemon REPORTS its canonical route but stays path-agnostic
+  exactly as before Gitea joined the family — an existing Forgejo
+  deployment's webhook URL never breaks (#1683).
 - **The durable generation dedupe lives in the idempotency-key layer**
   (#736), with an in-process fast path. The claim horizon (default 7
   days) must never be shorter than the deployment's compaction retention
