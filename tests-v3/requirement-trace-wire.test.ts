@@ -163,10 +163,10 @@ test("wire refs parse line ranges, reject whitespace prose, and reject URL-shape
       assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
     }
     assert.deepEqual(trace.rows[1]?.enforcement, []);
-    // URL-shaped refs are not recognized as `path:line` and therefore
-    // fail checkout validation as a nonexistent file (though they are
-    // retained as a bare-path candidate by the current parser).
-    assert.deepEqual(trace.rows[2]?.enforcement, [{ file: "https://x/y:80", line: 1 }]);
+    // #1681 r6: URL-shaped refs name no repository location and are rejected
+    // at the parse door of the one citation grammar — they are not even
+    // retained as a bare-path candidate anymore.
+    assert.deepEqual(trace.rows[2]?.enforcement, []);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -443,5 +443,88 @@ test("#1660 review: the coverage instruction demands semantic adequacy, never ci
     assert.equal(text.includes("located the enforcing implementation"), false, name);
     // The vocabulary itself is unchanged: the fold consumes exactly these.
     for (const status of ["satisfied", "violated", "unknown"]) assert.ok(text.includes(status), `${name}:${status}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #1681 r6: ONE citation grammar across the corpus and every validator. The
+// reviewer sees the corpus PR-Diff section's hunk anchors (`path:+START-END`,
+// new-side numbering IS head numbering) and may cite the evidence exactly as
+// acquired; the deterministic layer normalizes that grammar into a head
+// location BEFORE provenance validation, so a legitimately acquired citation
+// never downgrades for syntax alone. Nonexistent and out-of-range anchors
+// still fail exactly like a fake plain ref.
+// ---------------------------------------------------------------------------
+
+test("#1681 r6: a satisfied row citing the corpus diff-anchor form stays met/evidenced", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/enforcement/threads.ts", Array.from({ length: 640 }, (_, i) => `line ${i + 1}`));
+    const trace = validateRequirementTrace(
+      [wireClaim("req-anchor", "satisfied", [
+        { kind: "diff", ref: "src/enforcement/threads.ts:+206-232:1", detail: null },
+      ])],
+      ledgerWith([{ id: "req-anchor", text: "The settlement must ground fixed claims at head.", kind: "acceptance" }]),
+      workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.deepEqual(row.enforcement, [{ file: "src/enforcement/threads.ts", line: 206 }], "the anchor normalizes to the first head-side line");
+    assert.equal(row.disposition, "met", "no downgraded-no-valid-enforcement-location for a resolvable anchor");
+    assert.equal(row.resolution, "evidenced");
+    assert.equal(row.materiality, "advisory");
+    assert.ok(!row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.deepEqual(trace.summary.unresolved_material, [], "a cited anchor never enters unresolved_material");
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1681 r6: plain range refs keep an ordinal suffix parsed as the entry index, not a path", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/model/request.ts", Array.from({ length: 200 }, (_, i) => `line ${i + 1}`));
+    const trace = validateRequirementTrace(
+      [wireClaim("req-ordinal", "satisfied", [
+        { kind: "file", ref: "src/model/request.ts:120-126:2", detail: null },
+      ])],
+      ledgerWith([{ id: "req-ordinal", text: "The schema pins exact N per run.", kind: "acceptance" }]),
+      workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.deepEqual(row.enforcement, [{ file: "src/model/request.ts", line: 120 }]);
+    assert.equal(row.disposition, "met");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1681 r6: anchor refs to nonexistent files and out-of-range lines still fail provenance", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/enforcement/threads.ts", ["one", "two", "three"]);
+    const trace = validateRequirementTrace(
+      [
+        wireClaim("req-ghost-anchor", "satisfied", [{ kind: "diff", ref: "src/does-not-exist.ts:+206-232:1", detail: null }]),
+        wireClaim("req-past-eof", "satisfied", [{ kind: "diff", ref: "src/enforcement/threads.ts:+206-232:1", detail: null }]),
+        wireClaim("req-reversed", "satisfied", [{ kind: "diff", ref: "src/enforcement/threads.ts:+232-206:1", detail: null }]),
+      ],
+      ledgerWith([
+        { id: "req-ghost-anchor", text: "The settlement must ground fixed claims at head.", kind: "acceptance" },
+        { id: "req-past-eof", text: "The settlement must ground fixed claims at head.", kind: "acceptance" },
+        { id: "req-reversed", text: "The settlement must ground fixed claims at head.", kind: "acceptance" },
+      ]),
+      workspace,
+    );
+    for (const id of ["req-ghost-anchor", "req-past-eof", "req-reversed"]) {
+      const row = trace.rows.find((r) => r.requirement_id === id)!;
+      assert.equal(row.disposition, "unverifiable", `${id}: a broken anchor never survives on syntax alone`);
+      assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"), id);
+      assert.equal(row.materiality, "material", id);
+    }
+    assert.deepEqual(trace.summary.unresolved_material, ["req-ghost-anchor", "req-past-eof", "req-reversed"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
   }
 });

@@ -504,8 +504,8 @@ test("human reviews settle conservatively, render exact context, and never chang
   assert.equal(a.verdict, "approve");
   assert.deepEqual((a.human_review_dispositions as any[]).map((r) => r.disposition), ["addressed", "not_addressed", "not_addressed"]);
   assert.ok(a.review_markdown.includes("- @alice's change request (1234567, head moved since) judged addressed at this head: `src/fix.ts:12`"));
-  assert.ok(a.review_markdown.includes("- @bob's change request (abcdef0, head unchanged since) is not shown addressed at this head; it needs the reviewer's own re-review."));
-  assert.ok(a.review_markdown.includes("- @c's change request (unknown commit) is not shown addressed at this head; it needs the reviewer's own re-review."));
+  assert.ok(a.review_markdown.includes("- @bob's change request (abcdef0, head unchanged since) is not shown addressed at this head; it stays unresolved until proven at the reviewed head."));
+  assert.ok(a.review_markdown.includes("- @c's change request (unknown commit) is not shown addressed at this head; it stays unresolved until proven at the reviewed head."));
   assert.ok(a.review_markdown.includes("## Outstanding Human Change Requests"));
 });
 
@@ -1703,4 +1703,108 @@ test("#1248: supersede rewrites only the exact action-authored note lines (#252 
     assert.ok(midLine.review_markdown.includes(line), `line-initial model prose was rewritten: ${line}`);
   }
   assert.ok(!midLine.review_markdown.includes("superseded"), "nothing to supersede in imitation prose");
+});
+
+// ---------------------------------------------------------------------------
+// #1681 r6: the settlement channels consume the ONE citation grammar AND the
+// engine's exact-head grounding. A `fixed`/`addressed` claim settles only on
+// a cited location that RESOLVES at the reviewed head; a fake path or an
+// out-of-range line proves nothing. A historical BOT `fixed` additionally
+// settles on this run's head-bound acquisition of the thread's file when the
+// evidence names no citation candidate (PhAd convergence) — never when an
+// attempted citation resolves nowhere.
+// ---------------------------------------------------------------------------
+
+/** Grounding over a synthetic head: `src/a.ts` has 100 lines and nothing
+ * else exists; `acquired` lists the files this run read at head-bound. */
+function headGrounding(acquired?: readonly string[]): {
+  resolveLocation: (file: string, line: number) => boolean;
+  acquiredPaths: ReadonlySet<string>;
+} {
+  return {
+    resolveLocation: (file, line) => file === "src/a.ts" && line >= 1 && line <= 100,
+    acquiredPaths: new Set(acquired ?? []),
+  };
+}
+
+test("#1681 r6: a human `fixed` settles only on a citation that resolves at head", () => {
+  const human = botMajor("h", { severity: "minor", category: null, own_finding: false, authorship: "human", message: "Should this handle None?" });
+  const cases: Array<[string, string]> = [
+    ["src/a.ts:9 shows the guard now", "fixed"],
+    ["src/a.ts:+10-12:1 the anchor from the diff resolves", "fixed"],
+    ["src/does-not-exist.ts:999999 fixed it", "open"],
+    ["src/a.ts:999999 fixed it", "open"],
+    ["fixed now, trust me", "open"],
+  ];
+  for (const [evidence, expected] of cases) {
+    const a = artifact({
+      verdict: "approve",
+      findings: [],
+      thread_dispositions: [{ thread_id: "h", disposition: "fixed", evidence }],
+    });
+    applyReviewThreadEnforcement(a, [human], "strict", liveListing("h"), headGrounding(["src/a.ts"]));
+    const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+    assert.equal(record.disposition, expected, evidence);
+    if (expected === "fixed") {
+      assert.equal(a.findings.some((item) => item.thread_id === "h"), false);
+      assert.equal(a.thread_reconciliation?.unreassessed, undefined);
+    } else {
+      const carried = a.findings.find((item) => item.thread_id === "h");
+      assert.equal(carried?.severity, "minor", "the unproven concern keeps the human-side severity");
+    }
+  }
+});
+
+test("#1681 r6: a historical bot blocker reassessed on head-acquired content is not unverified", () => {
+  // The PhAd shape: the review read the relevant file at this head and
+  // concluded the boundary is correct, without restating a `path:line`
+  // citation in the disposition field. That is a genuine re-evaluation.
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [{
+      thread_id: "t",
+      disposition: "fixed",
+      evidence: "I re-read the ledger rendering at this head: hostile derived text now rides the inline code escape before the closing instruction, so the injection boundary holds",
+    }],
+  });
+  applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"), headGrounding(["src/a.ts"]));
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "fixed", "the semantic judgment stands on the run's own head-bound acquisition");
+  assert.equal(a.findings.some((item) => item.thread_id === "t"), false, "no re-emitted finding");
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined, "NOT an unverified_blocking_claim");
+  assert.equal(a.thread_reconciliation?.state, "complete");
+  assert.equal(finalKind(a), "approve", "the reassessed blocker cannot withhold approval");
+});
+
+test("#1681 r6: the inverse holds — no acquisition and no citation fails closed as unverified", () => {
+  for (const evidence of [
+    "the boundary looks correct to me",
+    "see src/does-not-exist.ts:999999",
+  ]) {
+    const a = artifact({
+      verdict: "approve",
+      findings: [],
+      thread_dispositions: [{ thread_id: "t", disposition: "fixed", evidence }],
+    });
+    applyReviewThreadEnforcement(a, [botMajor("t")], "strict", liveListing("t"), headGrounding());
+    const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+    assert.equal(record.disposition, "open", evidence);
+    assert.equal(a.thread_reconciliation?.unreassessed, 1, `${evidence}: a genuinely unreassessed blocker stays material`);
+    assert.equal(finalKind(a), "incomplete");
+  }
+});
+
+test("#1681 r6: a human change request `addressed` requires a resolving citation", () => {
+  const review = { review_id: "5931073237", login: "joryirving", commit_id: "a".repeat(40), head_moved: false, submitted_at: null };
+  const run = (evidence: string): ReviewArtifact => {
+    const a = artifact({ verdict: "approve", human_review_dispositions: [{ review_id: "5931073237", disposition: "addressed", evidence }] });
+    applyHumanReviewEnforcement(a, [review], headGrounding());
+    return a;
+  };
+  const settled = (a: ReviewArtifact): string => (a.human_review_dispositions as Array<{ disposition: string }>)[0]!.disposition;
+  assert.equal(settled(run("all three concerns are closed; src/a.ts:+60-70:2 covers the seam")), "addressed");
+  assert.equal(settled(run("src/does-not-exist.ts:1 closes it")), "not_addressed", "a fake path cannot discharge the request");
+  assert.equal(settled(run("src/a.ts:999999 closes it")), "not_addressed", "an out-of-range line cannot either");
+  assert.equal(settled(run("the prose says it is addressed")), "not_addressed");
 });

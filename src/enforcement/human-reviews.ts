@@ -11,6 +11,7 @@
  */
 import type { ReviewArtifact } from "./artifact.js";
 import { evidenceCitesCode } from "./threads.js";
+import { extractCitationLocations, type EvidenceGrounding } from "./citations.js";
 
 export const HUMAN_REVIEW_DISPOSITIONS: readonly string[] = ["addressed", "not_addressed"];
 
@@ -55,13 +56,22 @@ export interface HumanReviewEnforcementResult {
 /**
  * Settle every outstanding human change request against the model's
  * dispositions, in place. Dispositions other than the two literal words (or
- * `addressed` without code-citing evidence) downgrade to `not_addressed`.
- * Always returns applied:false — this pass never counts as enforcement and
- * never produces a banner reason; the human remains the merge gate.
+ * `addressed` whose evidence cites current-head code) downgrade to
+ * `not_addressed`. #1681 r6: with engine grounding the `addressed` claim
+ * must carry at least one citation that RESOLVES at the exact reviewed head
+ * — the same grammar and validator the requirement trace and thread
+ * settlement use — so the report cannot simultaneously call a request
+ * addressed (the reviewer's re-review prose) and ungrounded (a citation
+ * format mismatch in this parallel channel). Without grounding (legacy
+ * unit callers) the historical lexical reading stands. Always returns
+ * applied:false — this pass never counts as enforcement and never produces
+ * a banner reason; the human remains the merge gate, and physical
+ * conversation state is provenance/UI only, never this settlement's input.
  */
 export function applyHumanReviewEnforcement(
   artifact: ReviewArtifact,
   reviews: readonly EnforcementHumanReview[] | null,
+  grounding?: EvidenceGrounding | null,
 ): HumanReviewEnforcementResult {
   if (!Array.isArray(reviews) || reviews.length === 0) {
     return { applied: false, reason: "" };
@@ -91,8 +101,11 @@ export function applyHumanReviewEnforcement(
     const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
     if (disposition === undefined || !HUMAN_REVIEW_DISPOSITIONS.includes(disposition)) {
       disposition = "not_addressed";
-    } else if (disposition === "addressed" && !evidenceCitesCode(evidence, null)) {
-      disposition = "not_addressed";
+    } else if (disposition === "addressed") {
+      const grounded = grounding === null || grounding === undefined
+        ? evidenceCitesCode(evidence, null)
+        : extractCitationLocations(evidence).some((loc) => grounding.resolveLocation(loc.file, loc.line));
+      if (!grounded) disposition = "not_addressed";
     }
     settled.push({ review_id: reviewId, disposition, evidence });
   }
@@ -117,7 +130,7 @@ export function applyHumanReviewEnforcement(
     if (record.disposition === "addressed") {
       lines.push(`- ${who}'s change request (${where}) judged addressed at this head: ${inlineCode(record.evidence)}`);
     } else {
-      lines.push(`- ${who}'s change request (${where}) is not shown addressed at this head; it needs the reviewer's own re-review.`);
+      lines.push(`- ${who}'s change request (${where}) is not shown addressed at this head; it stays unresolved until proven at the reviewed head.`);
     }
   }
   artifact.review_markdown = (artifact.review_markdown || "") + lines.join("\n");

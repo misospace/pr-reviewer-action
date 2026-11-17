@@ -33,10 +33,16 @@
  * in both directions: no bot disposition closes it, and its severity is never
  * re-emitted. A `human` thread is closed on GitHub only by the forge's
  * resolved state (#1663) — the action never mutates a human's conversation —
- * but that physical state is not semantic authority (#1681): a code-citing
- * `fixed` settles the thread's FINDING as addressed (disclosed with its open
- * physical state, not re-emitted, never blocking), while any weaker claim
- * keeps the fail-closed open reading at the human-side non-blocking severity.
+ * but that physical state is not semantic authority (#1681): a `fixed`
+ * whose citation RESOLVES at the exact reviewed head settles the thread's
+ * FINDING as addressed (disclosed with its open physical state, not
+ * re-emitted, never blocking), while any weaker claim — including a
+ * code-citing string whose cited location does not exist at head (#1681
+ * r6) — keeps the fail-closed open reading at the human-side non-blocking
+ * severity. A bot `fixed` additionally settles on this run's head-bound
+ * acquisition of the thread's file when the evidence names no citation
+ * candidate (PhAd convergence: one evidence representation across the
+ * review's parallel proof channels).
  *
  * Re-emitted findings carry `thread_id` (the publish step skips those inline
  * — the thread already exists) plus `thread_ids` provenance. Duplicate
@@ -58,6 +64,7 @@
 import { markRelaxationNotesSuperseded, type ArtifactFinding, type ReviewArtifact } from "./artifact.js";
 import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
 import { findingIdentity, findingIdentityFromRecord } from "../outcomes/identity.js";
+import { extractCitationLocations, type EvidenceGrounding } from "./citations.js";
 import type { ThreadAuthorship } from "../context/review-threads.js";
 
 export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
@@ -94,6 +101,54 @@ export function evidenceCitesCode(evidence: string | null | undefined, path: str
   if (!text) return false;
   if (path && text.includes(path)) return true;
   return EVIDENCE_LOCATION_RE.test(text);
+}
+
+/** Citation candidates for one settlement: the canonical citations extracted
+ * from the evidence text. When grounding is ABSENT (legacy lexical reading)
+ * the historical rule also fires — the thread's own path merely mentioned in
+ * the evidence is no longer a resolvable candidate here, so callers fall
+ * back to `evidenceCitesCode` before ever consulting this list. */
+function citationCandidates(evidence: string | null | undefined): Array<{ file: string; line: number }> {
+  return extractCitationLocations(evidence);
+}
+
+/** #1681 r6: a `fixed` disposition is grounded when at least one cited
+ * location RESOLVES at the exact reviewed head — a plausible but fake
+ * `src/does-not-exist.ts:999999` proves nothing. Without engine grounding
+ * (legacy unit callers, replay) the settlement keeps the historical lexical
+ * reading; the production pipeline always supplies the resolver. */
+function fixedCitationResolves(
+  evidence: string | null | undefined,
+  path: string | null | undefined,
+  grounding: EvidenceGrounding | null | undefined,
+): boolean {
+  if (grounding === null || grounding === undefined) return evidenceCitesCode(evidence, path);
+  return citationCandidates(evidence).some((loc) => grounding.resolveLocation(loc.file, loc.line));
+}
+
+/** #1681 r6 (PhAd convergence): a historical BOT finding's `fixed` settles
+ * on a resolving citation, OR — when the evidence names no citation
+ * candidate at all — on this run's own head-bound acquisition of the
+ * thread's file (tool read or certified corpus diff). The reviewer's
+ * semantic judgment may rest on current-head content the run genuinely
+ * holds; it is not made to restate the same evidence in a second parallel
+ * proof channel. A citation that was ATTEMPTED but resolves nowhere is a
+ * broken claim, never rescued by acquisition; without grounding the
+ * historical lexical reading stands. */
+function botFixedSettled(
+  evidence: string | null | undefined,
+  path: string | null | undefined,
+  grounding: EvidenceGrounding | null | undefined,
+): boolean {
+  if (grounding === null || grounding === undefined) return evidenceCitesCode(evidence, path);
+  const candidates = citationCandidates(evidence);
+  if (candidates.length === 0) {
+    return (evidence ?? "").trim() !== ""
+      && grounding.acquiredPaths !== undefined
+      && path !== null && path !== undefined && path !== ""
+      && grounding.acquiredPaths.has(path);
+  }
+  return candidates.some((loc) => grounding.resolveLocation(loc.file, loc.line));
 }
 
 /** One thread from the enforcement view (`review-threads.json`). */
@@ -203,6 +258,7 @@ export function applyReviewThreadEnforcement(
   threads: readonly EnforcementThread[] | null,
   verdictPolicy: string,
   reconciliation?: ThreadReconciliationInput | null,
+  grounding?: EvidenceGrounding | null,
 ): ThreadEnforcementResult {
   if (!Array.isArray(threads) || threads.length === 0) {
     return { applied: false, reason: "" };
@@ -333,7 +389,7 @@ export function applyReviewThreadEnforcement(
       // missing disposition — does NOT prove the defect gone and keeps
       // the historical fail-closed reading: recorded open and re-emitted
       // at the human-side non-blocking severity.
-      if (disposition === "fixed" && evidenceCitesCode(evidence, thread.path)) {
+      if (disposition === "fixed" && fixedCitationResolves(evidence, thread.path, grounding)) {
         note = "human-authored thread stays open on the forge — a bot disposition cannot close it; the current-head evidence establishes the concern is addressed, so it is not carried as a current finding";
       } else if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
         disposition = "open";
@@ -346,7 +402,7 @@ export function applyReviewThreadEnforcement(
       disposition = "open";
       note = "no disposition given";
       if (materialIfUnverified) reassessment = "unverified";
-    } else if (disposition === "fixed" && !evidenceCitesCode(evidence, thread.path)) {
+    } else if (disposition === "fixed" && !botFixedSettled(evidence, thread.path, grounding)) {
       disposition = "open";
       note = "fixed without evidence citing current code";
       if (materialIfUnverified) reassessment = "unverified";

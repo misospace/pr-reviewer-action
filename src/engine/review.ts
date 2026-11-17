@@ -134,7 +134,7 @@ import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2564,6 +2564,27 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       context.headSha || String(pr.headRefOid ?? ""),
     );
   }
+  // #1681 r6: one citation provenance contract across the settlement
+  // channels. Thread `fixed` and human-review `addressed` settle against the
+  // SAME exact-head checkout the requirement trace validates, and the same
+  // head-bound acquisition record (#1657 receipts: successful tool reads plus
+  // assembler-certified corpus-diff payloads) the obligation folds use — a
+  // reviewer's re-evaluation of a historical concern is proven by evidence
+  // this run actually holds, never by restating a citation in a private
+  // per-channel syntax.
+  enforcementInputs.citationGrounding = {
+    resolveLocation: createHeadLocationValidator(workspace),
+    acquiredPaths: riskEvidenceReadPaths({
+      harness: enforcementInputs.toolHarness,
+      rawDiff: ws.readText("pr.diff"),
+      certifiedDiffPayloads: [
+        ws.readText(CORPUS_DIFF_SECTION_ARTIFACT),
+        ws.readText(CORPUS_DIFF_SECTION_SMART_ARTIFACT),
+        ws.readText(CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT),
+      ].filter((payload): payload is string => payload !== null && payload !== ""),
+      candidatePaths: loadChangedFilePaths((name) => ws.readText(name)),
+    }),
+  };
   // #1381: the folded review-owned obligation rows ride the enforcement
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.
