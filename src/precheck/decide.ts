@@ -394,9 +394,12 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // drive a GitHub/Forgejo backend) is now enforced at the factory: the only
   // forge-specific write below (the Forgejo permission preflight) is gated on
   // `resolvedPlatform === "forgejo"`, and no GitHub URL or client is ever
-  // assembled here. Every adapter method Tangled has not implemented yet
-  // (`getPrDiff`, comment/review reads, …) still fails closed inside the
-  // adapter — routing through the capability weakens none of them. GitHub and
+  // assembled here. The diff read is served by the #586 round-diff chain
+  // through the adapter (#1690); the comment/review reads answer empty (a
+  // Tangled pull has no GitHub issue comments or native reviews, so nothing
+  // stale is ever carried forward); every other adapter method Tangled has
+  // not implemented yet still fails closed inside the adapter — routing
+  // through the capability weakens none of them. GitHub and
   // Forgejo resolution are untouched: the guard only ever threw for `tangled`.
   const effectiveForgejoApiUrl = resolvedPlatform === "forgejo" ? env.FORGEJO_API_URL ?? "" : "";
 

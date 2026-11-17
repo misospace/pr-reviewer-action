@@ -56,7 +56,7 @@ export function requireImplementedBackend(
 export class TangledCapabilityError extends TangledNotImplementedError {
   constructor(capability: string) {
     super();
-    this.message = `tangled ${capability} is not implemented yet (#585 wires metadata reads only)`;
+    this.message = `tangled ${capability} is not implemented yet (#564 wires metadata and round-diff reads)`;
     this.name = "TangledCapabilityError";
   }
 }

@@ -35,16 +35,16 @@ import { rawInputsFromEnv, runReview } from "./review.js";
  * through the platform read adapter and every write through the publish API
  * the seam selects.
  *
-  * The Tangled MVP deliberately leaves CI-waiting unsupported (no real Tangled
-  * pipeline-status seam exists): the CI gate is forced off here rather than
-  * spawning a child the platform guard would refuse, exactly as the issue
-  * permits. A real Tangled pull cannot be reviewed end-to-end today: the read
-  * capability fails closed at the diff read (#586 wires metadata reads only),
-  * so the run throws before publication; and even once diff reads land,
-  * publication stays fail-closed at the #451 current-head re-check until a
-  * trustworthy current-head read ships (#1165). Both are propagated as a
-  * non-zero outcome — a review that cannot prove the pull has not advanced is
-  * never published.
+   * The Tangled MVP deliberately leaves CI-waiting unsupported (no real Tangled
+   * pipeline-status seam exists): the CI gate is forced off here rather than
+   * spawning a child the platform guard would refuse, exactly as the issue
+   * permits. A real Tangled pull is reviewed and published end-to-end: the
+   * read adapter serves the latest round's diff and files through the #586
+   * chain (#1690), and the publication-boundary re-check reads the trusted
+   * current head from the knot's `org.tangled.review.patch` records (#1165).
+   * An unknown, malformed, or ambiguous head still fails closed — a review
+   * that cannot prove the pull has not advanced is never published, and
+   * either stop propagates as a non-zero outcome.
  */
 
 /** Optional host seams. A Spindle operator wires the real Tangled adapters

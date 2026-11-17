@@ -130,8 +130,8 @@ The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is e
 
 | Feature | GitHub | Forgejo | Tangled (experimental) |
 |---|---|---|---|
-| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ⚠️ Degraded — the metadata read works, the diff read stops the run |
-| Managed sticky comment | ✅ Full | ✅ Full | ⚠️ Degraded — one managed AT-Proto review record, published after the diff read and the current-head proof land |
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ⚠️ Degraded — metadata plus the latest round's diff and files, read from Bobbin and the pull author's PDS |
+| Managed sticky comment | ✅ Full | ✅ Full | ⚠️ Degraded — one managed AT-Proto review record, updated in place on re-review, published only after the knot's patch records prove the pull did not advance |
 | Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors | ❌ Unsupported — Tangled has no inline review object |
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST | ❌ Unsupported — Tangled has no native verdict object |
 | Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST | ❌ Unsupported — the verdict stays in the review body |
@@ -140,7 +140,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is e
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) | ❌ Unsupported — the runner turns the CI gate off |
 | Evidence providers | ✅ Full | ✅ Full | ⚠️ Degraded — the provider commands read the checkout. A provider that calls the GitHub API does not work |
 | Tool harness | ✅ Full | ✅ Full | ⚠️ Degraded — the `gh_api` and `repo_contents` tools fail |
-| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ⚠️ Degraded — the engine path is shared, but a Tangled run reaches no verdict |
+| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ✅ Full — the engine path is shared, and a Tangled run reaches a verdict |
 
 Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
 
@@ -148,7 +148,7 @@ Forgejo Authorized Integrations can reuse managed sticky comments with repositor
 
 Tangled is not GitHub Actions, so `action.yml` is not the Tangled entry point. A Tangled review runs on the host-neutral runner, `node dist/index.js tangled`, in one plain Node process. The runner pins the platform to `tangled` and refuses a `github` or `forgejo` platform instead of falling back to another forge.
 
-A Tangled run does not complete today. The metadata read works, and the run stops at the diff read. After that, the publication step fails closed until a trustworthy current-head read exists ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)), because a review that cannot prove the pull did not advance is never published.
+A Tangled review runs end to end: the runner resolves the pull, reads the latest round's diff, runs the engine, and publishes or updates one managed review record. The publication step's exact-head re-check reads the knot's `org.tangled.review.patch` records (#1165), so it needs `TANGLED_REPO_KNOT`; when the current head is unknown, malformed, or ambiguous, the run refuses to publish because it cannot prove the pull did not advance.
 
 Read [Tangled (experimental)](docs/tangled.md) for the setup, the configuration, the identity model and the full support matrix. The copyable Spindle workflow example is [`examples/tangled-workflow.yml`](examples/tangled-workflow.yml).
 

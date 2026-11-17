@@ -1,17 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { TangledCapabilityError, TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledPatchError } from "../src/platform/tangled-patch.js";
+import { TangledBlobError } from "../src/platform/tangled-blob.js";
+import type { Resolver } from "../src/platform/safe-fetch.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import { deriveDraftState, deriveIsFork, normalizePrIdentity } from "../src/platform/pr.js";
 
 /**
- * Tangled read adapter (#585): the first Tangled backend, read-only and
- * metadata-only. Exercised through an injected mock Bobbin transport — no
- * network. The resolver (`resolveTangledPull`) is #584's done work; this file
- * pins the projection of the resolved pull into the GitHub-REST pull shape
- * and the fail-closed behavior of every unimplemented capability.
+ * Tangled read adapter (#585): the first Tangled backend, read-only.
+ * Exercised through an injected mock Bobbin transport — no network. The
+ * resolver (`resolveTangledPull`) is #584's done work; this file pins the
+ * projection of the resolved pull into the GitHub-REST pull shape, the
+ * #586 round-diff chain wired into `getPrDiff`/`listPrFiles` (#1690), and
+ * the fail-closed behavior of every read Tangled cannot serve.
  */
 
 /** One XRPC call captured by the mock transport. */
@@ -232,27 +237,15 @@ test("a record missing optional fields projects empty/null values, never guesses
 
 // ── unimplemented capabilities ───────────────────────────────────────────
 
-test("every non-metadata read fails closed with a capability-scoped error", async () => {
+test("every unreadable read fails closed with a capability-scoped answer", async () => {
   const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl: makeFetch(() => json(listOne())).fetchImpl });
   assert.equal(adapter.platform, "tangled");
 
-  // Throwing reads name the capability and stay in the TangledNotImplementedError family.
-  await assert.rejects(
-    () => adapter.getPrDiff(),
-    (e: unknown) =>
-      e instanceof TangledCapabilityError &&
-      e instanceof TangledNotImplementedError &&
-      /diff/.test(e.message) && /#585 wires metadata reads only/.test(e.message),
-    "getPrDiff must reject with the diff capability",
-  );
-  await assert.rejects(
-    () => adapter.listIssueComments(),
-    (e: unknown) => e instanceof TangledNotImplementedError && /issue comment/.test(e.message),
-  );
-  await assert.rejects(
-    () => adapter.listPrReviews(),
-    (e: unknown) => e instanceof TangledNotImplementedError && /PR review/.test(e.message),
-  );
+  // Tangled has no GitHub issue comments or native reviews: the reads answer
+  // empty (the managed review is an AT-Proto record, not a comment), so
+  // precheck never carries a stale fingerprint or verdict forward.
+  assert.deepEqual(await adapter.listIssueComments(), []);
+  assert.deepEqual(await adapter.listPrReviews(), []);
   // ghApi never throws; it reports the error in-band.
   const gh = await adapter.ghApi("/repos/o/r");
   assert.ok(gh.error !== undefined && /gh_api/.test(gh.error), "gh_api reports its capability error in-band");
@@ -261,7 +254,6 @@ test("every non-metadata read fails closed with a capability-scoped error", asyn
   assert.equal(await adapter.repoPermission(), "unknown");
   // ReadResult-shaped reads return { ok: false, error }.
   const reads = [
-    adapter.listPrFiles(),
     adapter.getIssue("o/r", "9"),
     adapter.listPrConversationComments(),
     adapter.listReviewThreads(),
@@ -276,8 +268,176 @@ test("every non-metadata read fails closed with a capability-scoped error", asyn
   // and a permanently-missing capability must not masquerade as a retryable read.
   await assert.rejects(
     () => adapter.externalChecks("deadbeef"),
-    (e: unknown) => e instanceof TangledNotImplementedError && /external check/.test(e.message),
+    (e: unknown) =>
+      e instanceof TangledCapabilityError &&
+      e instanceof TangledNotImplementedError &&
+      /external check/.test(e.message),
   );
+});
+
+// ── round-diff reads (#586 chain wired by #1690) ───────────────────────
+
+const BLOB_CID = "bafyreiblobcid00000000000000000000000000000000000000000000";
+
+/** One `git format-patch` envelope — the round patch blob the mock author's
+ * PDS serves, gzipped exactly like a real Tangled round. */
+function formatPatchText(): string {
+  return [
+    `From ${"0123456789abcdef0123456789abcdef01234567"} Mon Sep 17 00:00:00 1997 +0000`,
+    "From: Ada <ada@example.com>",
+    "Date: Mon, 17 Sep 2026 10:00:00 +0000",
+    "Subject: [PATCH] Add a greeting",
+    "",
+    "Body.",
+    "",
+    "diff --git a/module.py b/module.py",
+    "index 1111111..2222222 100644",
+    "--- a/module.py",
+    "+++ b/module.py",
+    "@@ -1 +1,2 @@",
+    " hello",
+    "+print(\"world\")",
+    "-- ",
+    "2.47.0",
+    "",
+  ].join("\n");
+}
+
+/** A pull record value with one round whose patch blob is `BLOB_CID`. */
+function withRound(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return matchValue({
+    ...over,
+    rounds: [
+      { createdAt: "2026-01-02T03:05:00Z", patchBlob: { $link: BLOB_CID, mimeType: "application/gzip", size: 128 } },
+    ],
+  });
+}
+
+const publicResolver: Resolver = async () => ["93.184.216.34"];
+
+/** The whole mocked diff world: Bobbin (pull with one round), the PLC
+ * directory (author PDS endpoint), and the PDS `getBlob` (the gzipped patch).
+ * `blobStatus` poisons the blob read; `plcStatus` poisons the DID document;
+ * counters pin how often each hop is hit. */
+function diffWorld(options: {
+  value?: Record<string, unknown>;
+  blobStatus?: number;
+  plcStatus?: number;
+} = {}): { fetchImpl: FetchLike; blobReads: () => number; plcReads: () => number } {
+  const patchBytes = gzipSync(Buffer.from(formatPatchText(), "utf8"));
+  let blobReads = 0;
+  let plcReads = 0;
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (url.hostname === "bobbin.test" && url.pathname === "/xrpc/sh.tangled.repo.listPulls") {
+      return json({ items: [listItem(options.value ?? withRound(), "open")], cursor: null });
+    }
+    if (url.hostname === "plc.directory") {
+      plcReads += 1;
+      if (options.plcStatus !== undefined) return json({ error: "down" }, options.plcStatus);
+      return json({
+        id: "did:plc:author",
+        service: [
+          { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds.test" },
+        ],
+      });
+    }
+    if (url.hostname === "pds.test" && url.pathname === "/xrpc/com.atproto.sync.getBlob") {
+      blobReads += 1;
+      if (options.blobStatus !== undefined) return json({ error: "down" }, options.blobStatus);
+      return new Response(new Uint8Array(patchBytes), {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
+    }
+    return json({ error: "unmocked host" }, 500);
+  };
+  return { fetchImpl, blobReads: () => blobReads, plcReads: () => plcReads };
+}
+
+function diffAdapter(world: { fetchImpl: FetchLike }): TangledAdapter {
+  return new TangledAdapter({ context: makeCtx(), fetchImpl: world.fetchImpl, resolver: publicResolver });
+}
+
+test("getPrDiff serves the latest round's normalized diff through the chain", async () => {
+  const world = diffWorld();
+  const diff = await diffAdapter(world).getPrDiff();
+  assert.match(diff, /diff --git a\/module\.py b\/module\.py/);
+  assert.match(diff, /\+print\("world"\)/);
+});
+
+test("listPrFiles reports the round's changed files", async () => {
+  const world = diffWorld();
+  const files = await diffAdapter(world).listPrFiles();
+  assert.equal(files.ok, true);
+  if (files.ok) {
+    const rows = files.data as Array<{ filename: string }>;
+    assert.deepEqual(rows.map((row) => row.filename), ["module.py"]);
+  }
+});
+
+test("getPrDiff and listPrFiles share one resolution and one blob read", async () => {
+  const world = diffWorld();
+  const adapter = diffAdapter(world);
+  const [diff, files] = await Promise.all([adapter.getPrDiff(), adapter.listPrFiles()]);
+  assert.match(diff, /module\.py/);
+  assert.equal(files.ok, true);
+  assert.equal(world.plcReads(), 1, "the round is fetched exactly once");
+  assert.equal(world.blobReads(), 1, "the round is fetched exactly once");
+});
+
+test("a record with no rounds fails closed as no-round before any blob read", async () => {
+  const world = diffWorld({ value: matchValue() });
+  const adapter = diffAdapter(world);
+  await assert.rejects(
+    () => adapter.getPrDiff(),
+    (e: unknown) => e instanceof TangledPatchError && e.kind === "no-round",
+  );
+  const files = await adapter.listPrFiles();
+  assert.equal(files.ok, false, "listPrFiles reports the same failure in band");
+  assert.equal(world.plcReads(), 0, "round selection throws before the network");
+  assert.equal(world.blobReads(), 0, "round selection throws before the network");
+});
+
+test("blob-read failures propagate typed: getPrDiff throws, listPrFiles reports in band", async () => {
+  const world = diffWorld({ plcStatus: 404 });
+  const adapter = diffAdapter(world);
+  await assert.rejects(
+    () => adapter.getPrDiff(),
+    (e: unknown) => e instanceof TangledBlobError && e.kind === "pds-resolution-failed",
+  );
+  const files = await adapter.listPrFiles();
+  assert.equal(files.ok, false);
+  if (!files.ok) assert.match(files.error, /pds|PDS|DID/);
+});
+
+test("a failed round read is not cached: a later call retries and succeeds", async () => {
+  let failing = true;
+  const patchBytes = gzipSync(Buffer.from(formatPatchText(), "utf8"));
+  let blobReads = 0;
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (url.hostname === "bobbin.test") return json({ items: [listItem(withRound(), "open")], cursor: null });
+    if (url.hostname === "plc.directory") {
+      return json({
+        id: "did:plc:author",
+        service: [
+          { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds.test" },
+        ],
+      });
+    }
+    blobReads += 1;
+    if (failing) {
+      failing = false;
+      return json({ error: "transient" }, 500);
+    }
+    return new Response(new Uint8Array(patchBytes), { status: 200, headers: { "content-type": "application/octet-stream" } });
+  };
+  const adapter = diffAdapter({ fetchImpl });
+  await assert.rejects(() => adapter.getPrDiff(), (e: unknown) => e instanceof TangledBlobError && e.kind === "read-failed");
+  const diff = await adapter.getPrDiff();
+  assert.match(diff, /module\.py/, "the retry succeeds");
+  assert.equal(blobReads, 2, "one failed attempt plus one successful retry");
 });
 
 // ── identity retention ───────────────────────────────────────────────────
