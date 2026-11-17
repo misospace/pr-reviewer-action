@@ -66,9 +66,10 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  *
  * Production wiring: `TangledAdapter.getPrDiff`/`listPrFiles` (#1690) are the
  * only review-pipeline callers — the host-neutral runner reads the pull's
- * latest round through them. The adapter passes only its transport/timeout
- * options (plus the documented test seams); production keeps
- * `systemResolver` + `isPublicAddress`.
+ * latest round through them. Production passes NO transport (the blob read's
+ * pinned SSRF-safe `safeFetchLike` default stays in force) and keeps
+ * `systemResolver` + `isPublicAddress`; only tests inject `fetchImpl` plus
+ * the documented `resolver` seam.
  */
 
 export interface TangledRoundDiffOptions {

@@ -126,10 +126,10 @@ const json = (body: unknown, status = 200): Response =>
 
 /** The knot's two bounded `listRecords` reads (#1165), answered at the wire:
  * one open ticket for `main`, and the newest patch revision for that ticket
- * whose trusted `head.oid` is the reviewed head, source-branch correlated.
- * A wrong collection or repo is refused, never answered empty — the same
- * discipline the mock PDS applies to the managed collection. */
-function knotListRecords(url: URL): Response {
+ * whose trusted `head.oid` is `knot.head`, source-branch correlated. A wrong
+ * collection or repo is refused, never answered empty — the same discipline
+ * the mock PDS applies to the managed collection. */
+function knotListRecords(url: URL, knot: { hits: number; head: string }): Response {
   if (url.pathname !== "/xrpc/com.atproto.repo.listRecords") {
     return json({ error: "Unknown XRPC" }, 404);
   }
@@ -153,7 +153,7 @@ function knotListRecords(url: URL): Response {
           ticket: TICKET_RKEY,
           createdAt: "2026-10-01T09:59:00.000Z",
           source: { branch: "feature" },
-          head: { oid: HEAD },
+          head: { oid: knot.head },
         },
       }],
     });
@@ -173,14 +173,14 @@ function knotListRecords(url: URL): Response {
  * `hosts` records only the blob chain's intercepted hostnames, pinning its
  * two network targets; `knot.hits` counts the head-read requests.
  */
-function makeWorldFetch(patchBytes: Buffer, knot: { hits: number }): { fetchImpl: FetchLike; hosts: string[] } {
+function makeWorldFetch(patchBytes: Buffer, knot: { hits: number; head: string }): { fetchImpl: FetchLike; hosts: string[] } {
   const hosts: string[] = [];
   const realFetch = globalThis.fetch;
   const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
     if (url.origin === KNOT_ORIGIN) {
       knot.hits += 1;
-      return knotListRecords(url);
+      return knotListRecords(url, knot);
     }
     if (url.hostname === "plc.directory") {
       hosts.push(url.hostname);
@@ -298,13 +298,13 @@ interface TangledWorld {
   runsRoot: string;
   worldFetch: FetchLike;
   blobHosts: string[];
-  knot: { hits: number };
+  knot: { hits: number; head: string };
   close(): Promise<void>;
 }
 
 async function startTangledWorld(): Promise<TangledWorld> {
   const patchBytes = gzipSync(Buffer.from(formatPatchText(), "utf8"));
-  const knot = { hits: 0 };
+  const knot = { hits: 0, head: HEAD };
   const transport = makeWorldFetch(patchBytes, knot);
   const markdown = { current: "First review: looks fine.\n" };
 
@@ -440,7 +440,11 @@ async function runTangledSmokeRound(
   globalThis.fetch = world.worldFetch as unknown as typeof fetch;
   try {
     return await platformActionMain(env, {
-      platformAdapter: new TangledAdapter({ context: smokeContext(world), resolver: publicResolver }),
+      platformAdapter: new TangledAdapter({
+        context: smokeContext(world),
+        fetchImpl: world.worldFetch,
+        resolver: publicResolver,
+      }),
       runDir,
     });
   } finally {
@@ -469,7 +473,7 @@ test("one offline round drives the runner from pull resolution to a created mana
     assert.ok(world.model.requests.length >= 1, "the model was consulted");
     const prompt = world.model.requests[0]?.body ?? "";
     assert.match(prompt, /Tangled pull under review/, "the pull metadata reached the prompt");
-    assert.match(prompt, /README\.md/, "the changed file reached the prompt");
+    assert.match(prompt, /diff --git a\/README\.md b\/README\.md/, "the round diff reached the prompt");
     assert.match(prompt, /\+world/, "the round patch reached the prompt");
 
     // The managed record is the production buildPublishApi's output, and the
@@ -515,6 +519,30 @@ test("a re-review updates the existing managed review instead of duplicating it"
     assert.doesNotMatch(String(second.value.body), /First review: looks fine\./,
       "the superseded body no longer stays visible");
   } finally {
+    await world.close();
+  }
+});
+
+test("a newer push at the knot supersedes the review instead of publishing it", async () => {
+  const world = await startTangledWorld();
+  const stdout: string[] = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
+    stdout.push(typeof chunk === "string" ? chunk : String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    // The knot's newest patch revision now names a head the run did not
+    // review: the trusted current-head read must disagree with the reviewed
+    // SHA and the publication boundary must withhold the review.
+    world.knot.head = "b".repeat(40);
+    const code = await runTangledSmokeRound(world, "run-superseded");
+    assert.equal(code, 0, "a superseded review is not a failed publication");
+    assert.ok(world.knot.hits >= 2, "the publication head re-check consulted the knot records");
+    assert.equal(world.pds.records.size, 0, "the stale review was never published");
+    assert.match(stdout.join(""), /supersed/i, "the run reports the superseded head");
+  } finally {
+    process.stdout.write = originalWrite;
     await world.close();
   }
 });

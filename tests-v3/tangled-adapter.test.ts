@@ -323,17 +323,20 @@ function diffWorld(options: {
   value?: Record<string, unknown>;
   blobStatus?: number;
   plcStatus?: number;
-} = {}): { fetchImpl: FetchLike; blobReads: () => number; plcReads: () => number } {
+} = {}): { fetchImpl: FetchLike; blobReads: () => number; plcReads: () => number; auth: Record<string, Array<string | null>> } {
   const patchBytes = gzipSync(Buffer.from(formatPatchText(), "utf8"));
   let blobReads = 0;
   let plcReads = 0;
-  const fetchImpl: FetchLike = async (input) => {
+  const auth: Record<string, Array<string | null>> = { "bobbin.test": [], "plc.directory": [], "pds.test": [] };
+  const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === "bobbin.test" && url.pathname === "/xrpc/sh.tangled.repo.listPulls") {
+      auth["bobbin.test"]?.push(new Headers(init?.headers).get("authorization"));
       return json({ items: [listItem(options.value ?? withRound(), "open")], cursor: null });
     }
     if (url.hostname === "plc.directory") {
       plcReads += 1;
+      auth["plc.directory"]?.push(new Headers(init?.headers).get("authorization"));
       if (options.plcStatus !== undefined) return json({ error: "down" }, options.plcStatus);
       return json({
         id: "did:plc:author",
@@ -344,6 +347,7 @@ function diffWorld(options: {
     }
     if (url.hostname === "pds.test" && url.pathname === "/xrpc/com.atproto.sync.getBlob") {
       blobReads += 1;
+      auth["pds.test"]?.push(new Headers(init?.headers).get("authorization"));
       if (options.blobStatus !== undefined) return json({ error: "down" }, options.blobStatus);
       return new Response(new Uint8Array(patchBytes), {
         status: 200,
@@ -352,7 +356,7 @@ function diffWorld(options: {
     }
     return json({ error: "unmocked host" }, 500);
   };
-  return { fetchImpl, blobReads: () => blobReads, plcReads: () => plcReads };
+  return { fetchImpl, blobReads: () => blobReads, plcReads: () => plcReads, auth };
 }
 
 function diffAdapter(world: { fetchImpl: FetchLike }): TangledAdapter {
@@ -409,6 +413,21 @@ test("blob-read failures propagate typed: getPrDiff throws, listPrFiles reports 
   const files = await adapter.listPrFiles();
   assert.equal(files.ok, false);
   if (!files.ok) assert.match(files.error, /pds|PDS|DID/);
+});
+
+test("the round-diff hops never carry the run credential", async () => {
+  const world = diffWorld();
+  const adapter = new TangledAdapter({
+    context: makeCtx(),
+    fetchImpl: world.fetchImpl,
+    token: "Bearer s3cr3t-diff-token",
+    resolver: publicResolver,
+  });
+  const diff = await adapter.getPrDiff();
+  assert.match(diff, /module\.py/);
+  assert.deepEqual(world.auth["bobbin.test"], ["Bearer s3cr3t-diff-token"], "the token reaches only the Bobbin origin");
+  assert.deepEqual(world.auth["plc.directory"], [null], "the DID-document hop is unauthenticated");
+  assert.deepEqual(world.auth["pds.test"], [null], "the author-PDS hop is unauthenticated");
 });
 
 test("a failed round read is not cached: a later call retries and succeeds", async () => {

@@ -52,7 +52,11 @@ import type {
 export interface TangledAdapterOptions {
   /** The Spindle runtime context (owner/repo DID, branch tuple, Bobbin URL). */
   context: TangledContext;
-  /** Transport override for tests; defaults to the global `fetch`. */
+  /** Transport override for tests; defaults to the transport each read
+   * selects itself — plain `fetch` for the Bobbin metadata read, and the
+   * pinned SSRF-safe transport for the round-diff blob read. Production
+   * leaves it unset: an injected transport replaces the blob read's
+   * socket-pinned default (see `tangled-blob.ts`). */
   fetchImpl?: FetchLike | undefined;
   /** Optional credential, sent only as the Authorization header to the
    * validated Bobbin origin (never in the URL, argv, or diagnostics). */
@@ -71,7 +75,7 @@ export interface TangledAdapterOptions {
 export class TangledAdapter implements PlatformReadAdapter {
   readonly platform = "tangled" as const;
   private readonly context: TangledContext;
-  private readonly fetchImpl: FetchLike;
+  private readonly fetchImpl: FetchLike | undefined;
   private readonly token: string | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly resolver: Resolver | undefined;
@@ -92,7 +96,10 @@ export class TangledAdapter implements PlatformReadAdapter {
 
   constructor(options: TangledAdapterOptions) {
     this.context = options.context;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    // Deliberately NOT defaulted: an injected transport replaces the
+    // round-diff blob read's pinned SSRF-safe default (`safeFetchLike`), so
+    // production must keep this undefined and let each read pick its own.
+    this.fetchImpl = options.fetchImpl;
     this.token = options.token;
     this.timeoutMs = options.timeoutMs;
     this.resolver = options.resolver;
@@ -195,17 +202,22 @@ export class TangledAdapter implements PlatformReadAdapter {
    * list), then run the #586 chain (round selection → author-PDS blob →
    * gunzip → `normalizeGitFormatPatch`). Concurrency-safe and cached like the
    * identity: concurrent callers share one blob read; a failure clears the
-   * slot so a later call retries. Every failure propagates as the chain's
-   * typed error (`TangledPatchError` / `TangledBlobError`) — the fail-closed
-   * no-round / undecodable / over-cap mapping is the chain's, and this
-   * adapter adds no empty-success path of its own. */
+   * slot so a later call retries. Every chain failure propagates as the
+   * chain's typed error (`TangledPatchError` / `TangledBlobError`) — the
+   * fail-closed no-round / undecodable / over-cap mapping is the chain's,
+   * and this adapter adds no empty-success path of its own. A pull that
+   * resolved to no identity fails closed with its own clear error before
+   * any blob read. */
   private roundDiff(): Promise<TangledPullRoundDiff> {
     this.roundPending ??= (async () => {
       try {
         await this.getPr();
         const identity = this.identity;
         if (identity === null) {
-          throw new Error("Tangled pull resolution failed before the round-diff read");
+          throw new Error(
+            "tangled round-diff read failed closed: the canonical pull did not resolve"
+            + " (no matching open pull, or the Bobbin read failed)",
+          );
         }
         return await fetchTangledPullRoundDiff(identity, {
           fetchImpl: this.fetchImpl,
