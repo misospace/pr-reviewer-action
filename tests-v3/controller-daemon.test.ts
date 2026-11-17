@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer as createNetServer, type AddressInfo } from "node:net";
+import { createServer as createNetServer, connect as netConnect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -3310,6 +3310,41 @@ test("a Gitea-family daemon ENFORCES its canonical intake route (#1683)", async 
   // with no signature at all — the handler's 401 is never reached.
   const unsigned = await post("/", false);
   assert.equal(unsigned.status, 404, "route refusal precedes signature verification");
+  // Raw-socket lane (what `fetch` cannot express): an off-route
+  // chunked upload that keeps streaming. The fixed 404 must still flush
+  // IN FULL, and the connection must then CLOSE — proof the refusal path
+  // never drains an unbounded body (a bare resume() would keep reading
+  // forever and the probe would hit its inactivity timeout instead).
+  const probe = await new Promise<{ received: string; closed: boolean }>((resolve, reject) => {
+    const sock = netConnect(port, "127.0.0.1");
+    let received = "";
+    let closed = false;
+    const fail = (why: string): void => {
+      sock.destroy();
+      reject(new Error(why));
+    };
+    sock.setTimeout(5_000, () => fail("the off-route chunked probe neither refused nor closed the connection"));
+    sock.on("data", (chunk) => {
+      received += chunk.toString("latin1");
+    });
+    const keepStreaming = (): void => {
+      if (sock.writable) sock.write("8\r\ngarbage!\r\n", keepStreaming);
+    };
+    sock.on("connect", () => {
+      sock.write("POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+      keepStreaming();
+    });
+    // A reset instead of a clean FIN after the flushed refusal is the
+    // same contract seen from the client; either closes the probe.
+    sock.on("error", () => undefined);
+    sock.on("close", () => {
+      closed = true;
+      resolve({ received, closed });
+    });
+  });
+  assert.match(probe.received, /^HTTP\/1\.1 404 /, "the chunked off-route request gets the fixed 404");
+  assert.match(probe.received, /\{"status":"not found"\}$/, "the refusal body flushes in full before the drop");
+  assert.ok(probe.closed, "the connection closes after the refusal — the off-route body is never drained");
   // Nothing reached intake: no refused delivery minted anything.
   assert.equal(minted.length, 0, "no off-route delivery reached the webhook processing");
 

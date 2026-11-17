@@ -1915,10 +1915,17 @@ export async function startControllerDaemon(
         : (req, res) => {
             const path = (req.url ?? "").split(/[?#]/, 1)[0];
             if (path !== intakeRoute) {
-              req.resume();
               res.statusCode = 404;
               res.setHeader("content-type", "application/json");
               res.end('{"status":"not found"}');
+              // The off-route body is NEVER consumed: once the fixed
+              // refusal has flushed, the connection drops. (A bare
+              // req.resume() would drain unbounded off-route garbage —
+              // the handler's 1 MiB cap protected this port before the
+              // mount existed, and the mount replaces it on this path.)
+              // An aborted upload must not crash the listener.
+              res.once("finish", () => req.destroy());
+              req.on("error", () => undefined);
               return;
             }
             operatorHost.handler(req, res);
