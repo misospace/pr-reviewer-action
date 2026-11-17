@@ -43,6 +43,8 @@ export {
 } from "./tangled.js";
 export { TangledAdapter, type TangledAdapterOptions } from "./tangled-adapter.js";
 export { resolveTangledPull, TangledResolverError, type ResolveTangledPullOptions, type TangledPullIdentity, type TangledResolverFailure } from "./tangled-bobbin.js";
+export { readTangledPatchDiff, TangledGitError, type TangledGitDiff, type TangledGitFile } from "./tangled-git.js";
+export { resolveTangledReviewIdentity, type ResolveTangledReviewIdentityOptions, type TangledReviewIdentity } from "./tangled-ticket.js";
 export { USER_AGENT } from "./user-agent.js";
 export { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from "./head-ref.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";

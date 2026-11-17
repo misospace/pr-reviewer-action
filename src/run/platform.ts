@@ -32,6 +32,12 @@ export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): 
   if (platform === "tangled") {
     return new TangledAdapter({
       context: tangledContextFromEnv(env),
+      // The run workspace (the Spindle checkout of the pull's selected
+      // round) is the Git read surface the reviewed diff/files are derived
+      // from (#1690). The run directory carries the resolved review
+      // identity to the publication boundary (#1695 TOCTOU).
+      ...(env.GITHUB_WORKSPACE !== undefined ? { workspace: env.GITHUB_WORKSPACE } : {}),
+      ...(env.PR_REVIEWER_RUN_DIR !== undefined ? { runDir: env.PR_REVIEWER_RUN_DIR } : {}),
       ...(fetchImpl !== undefined ? { fetchImpl } : {}),
     });
   }

@@ -13,12 +13,8 @@ import type {
   ThreadQueryResult,
 } from "./publish-api.js";
 import { TangledAtprotoClient } from "./tangled-atproto.js";
-import {
-  parseTangledAtUri,
-  resolveTangledPull,
-  TangledResolverError,
-  type TangledPullIdentity,
-} from "./tangled-bobbin.js";
+import { parseTangledAtUri } from "./tangled-bobbin.js";
+import type { TangledReviewIdentity } from "./tangled-ticket.js";
 import type { TangledContext } from "./tangled.js";
 
 /**
@@ -75,15 +71,23 @@ interface ManagedReviewRecord {
 export interface TangledPublishApiOptions {
   context: TangledContext;
   atproto: TangledAtprotoClient;
-  /** Injected transport for the Bobbin pull resolver (tests). */
-  fetchImpl?: FetchLike | undefined;
-  /** Per-request timeout forwarded to the Bobbin pull resolver. */
-  timeoutMs?: number | undefined;
+  /** #1695 TOCTOU: the REVIEWED identity — the ticket/patch lineage the
+   * review actually ran against, carried from the read path (the adapter
+   * persists it into the run directory; `buildPublishApi` reads it back).
+   * This is the ONLY write identity: the managed record binds to THIS
+   * ticket, never to an independently re-resolved one — a replacement
+   * ticket that happens to share the reviewed commit SHA must never
+   * inherit the review. Absent → publication refuses (fail closed): without
+   * reviewed-identity provenance there is nothing this seam may write onto. */
+  reviewedIdentity?: TangledReviewIdentity | undefined;
   /** #588: a FRESH read of the pull's current head, for the #451
-   * publication-boundary re-check. Absent → the current head is unknown and
-   * publication is refused (fail closed) until a trustworthy source exists.
-   * The launch-time `TANGLED_PR_SOURCE_SHA` is NEVER used for this: it is
-   * the head THIS run reviewed, not the head the pull has now. */
+   * publication-boundary re-check. On Tangled this read MUST be bound to
+   * the reviewed ticket's lineage (`readReviewedTicketCurrentHead`) — a
+   * branch-tuple re-resolution would let a replacement ticket sharing the
+   * reviewed SHA pass the guard. Absent → the current head is unknown and
+   * publication is refused (fail closed). The launch-time
+   * `TANGLED_PR_SOURCE_SHA` is NEVER used for this: it is the head THIS run
+   * reviewed, not the head the pull has now. */
   currentHeadSha?: (() => Promise<string | null>) | undefined;
 }
 
@@ -115,34 +119,21 @@ export class TangledPublishApi implements PublishPlatformApi {
    * publication-boundary re-check needs the knot patch-record read
    * (#1165), so the publish step says so instead of the generic
    * "could not re-fetch" wording. */
-  readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head";
+  readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head for the REVIEWED ticket's lineage — the reviewed ticket must still be open with its reviewed patch revision still newest";
 
   private readonly context: TangledContext;
   private readonly atproto: TangledAtprotoClient;
-  private readonly fetchImpl: FetchLike | undefined;
-  private readonly timeoutMs: number | undefined;
+  /** #1695 TOCTOU: the reviewed identity — the ONLY write identity. */
+  private readonly reviewedIdentity: TangledReviewIdentity | undefined;
   /** #588: the fresh current-head read; absent → the current head is
    * unknown and publication fails closed. */
   private readonly currentHeadSha: (() => Promise<string | null>) | undefined;
-  /** Memoized canonical pull resolution: at most one resolution per
-   * instance. A rejection is memoized too and is reported deterministically
-   * by `upsertStickyComment`, never thrown at construction. */
-  private pullPromise: Promise<TangledPullIdentity> | undefined;
 
   constructor(options: TangledPublishApiOptions) {
     this.context = options.context;
     this.atproto = options.atproto;
-    this.fetchImpl = options.fetchImpl;
-    this.timeoutMs = options.timeoutMs;
+    this.reviewedIdentity = options.reviewedIdentity;
     this.currentHeadSha = options.currentHeadSha;
-  }
-
-  private resolvePull(): Promise<TangledPullIdentity> {
-    this.pullPromise ??= resolveTangledPull(this.context, {
-      fetchImpl: this.fetchImpl,
-      timeoutMs: this.timeoutMs,
-    });
-    return this.pullPromise;
   }
 
   /**
@@ -158,12 +149,14 @@ export class TangledPublishApi implements PublishPlatformApi {
    *
    * The head comes only from an injected fresh reader (#1165:
    * `src/platform/tangled-head.ts` reads the knot's
-   * `org.tangled.review.patch` records — the trusted source). The pull
-   * record / `getPull`/`listPulls` expose NO head commit, and
-   * `src/platform/tangled-diff.ts` marks `declaredHeadSha` as ADVISORY,
-   * forgeable metadata that must never be an exact-head input. An absent
-   * reader (or a failed, empty, or non-string read) yields `null`: the
-   * caller then refuses to publish (fail closed) rather than publishing
+   * `org.tangled.review.patch` records — the trusted source). On the
+   * CURRENT record model (#1690) those records carry the trusted
+   * `head.oid` per immutable revision, and the reviewed head the marker
+   * carries is the resolved revision's `head.oid` — so this fresh read is
+   * the same-revision check: a resubmission mid-run makes the newest
+   * revision disagree with the reviewed head and publication refuses. An
+   * absent reader (or a failed, empty, or non-string read) yields `null`:
+   * the caller then refuses to publish (fail closed) rather than publishing
    * a possibly stale review.
    */
   async getHeadSha(): Promise<string | null> {
@@ -191,13 +184,17 @@ export class TangledPublishApi implements PublishPlatformApi {
 
   /**
    * Create or update the ONE managed top-level review record for the
-   * resolved pull. Deterministic and fail closed:
-   * - zero pull-matching records → create;
+   * resolved review identity (#1690: one ticket + its newest immutable
+   * patch revision; the record binds to the ticket AT-URI). Deterministic
+   * and fail closed:
+   * - zero identity-matching records → create;
    * - one marker-matching record → update in place (same rkey);
-   * - one pull-matching record without the current marker → stale marker
-   *   format drift on the SAME managed record: update in place (same rkey);
-   * - more than one marker-matching record, or more than one pull-matching
-   *   record with no marker match → ambiguous, no mutation.
+   * - one identity-matching record without the current marker → stale
+   *   marker format drift on the SAME managed record: update in place
+   *   (same rkey);
+   * - more than one marker-matching record, or more than one
+   *   identity-matching record with no marker match → ambiguous, no
+   *   mutation.
    */
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
     if (typeof marker !== "string" || marker === "") {
@@ -207,13 +204,17 @@ export class TangledPublishApi implements PublishPlatformApi {
       return { ok: false, created: false, error: "upsertStickyComment requires a non-empty body" };
     }
 
-    let identity: TangledPullIdentity;
-    try {
-      identity = await this.resolvePull();
-    } catch (error) {
-      const kind = error instanceof TangledResolverError ? error.kind : "read-failed";
-      const message = error instanceof Error ? error.message : String(error);
-      return { ok: false, created: false, error: `Tangled pull resolution failed (${kind}): ${message}` };
+    // #1695 TOCTOU: the write identity is the REVIEWED identity, carried
+    // from the read path. This seam never re-resolves one: an independent
+    // resolution could land on a different ticket that merely shares the
+    // reviewed commit SHA, publishing the T1 review onto T2.
+    const identity = this.reviewedIdentity;
+    if (identity === undefined) {
+      return {
+        ok: false,
+        created: false,
+        error: "no reviewed Tangled identity was carried from the review path; refusing to publish onto an independently resolved ticket (fail closed)",
+      };
     }
 
     try {
@@ -227,15 +228,15 @@ export class TangledPublishApi implements PublishPlatformApi {
       const createdAt = new Date().toISOString();
       const record = this.buildRecord(identity, sessionDid, body, createdAt);
 
-      // A record is a candidate iff it points at the resolved pull; wrong
+      // A record is a candidate iff it points at the resolved ticket; wrong
       // reviewer identity and a stale repo binding make it invisible (not
       // ours, or bound to a different repo), and an unattributable record is
       // ignored rather than adopted.
       const pullMatching = listed.filter(({ value }) => {
-        if (value.pull !== identity.uri) return false;
+        if (value.pull !== identity.ticketUri) return false;
         if (sessionDid === undefined) return false;
         if (typeof value.reviewer !== "string" || value.reviewer !== sessionDid) return false;
-        return value.pullRepoDid === identity.repoDid;
+        return value.pullRepoDid === this.context.repoDid;
       });
       const markerMatching = pullMatching.filter(({ value }) => typeof value.body === "string" && value.body.includes(marker));
 
@@ -247,7 +248,7 @@ export class TangledPublishApi implements PublishPlatformApi {
         return {
           ok: false,
           created: false,
-          error: `ambiguous managed review: ${markerMatching.length} marker-matching records exist for pull ${identity.uri}`,
+          error: `ambiguous managed review: ${markerMatching.length} marker-matching records exist for ticket ${identity.ticketUri}`,
         };
       }
       if (markerMatching.length === 1) {
@@ -263,7 +264,7 @@ export class TangledPublishApi implements PublishPlatformApi {
         return {
           ok: false,
           created: false,
-          error: `ambiguous managed review: ${pullMatching.length} pull-matching records exist for pull ${identity.uri} and none matches the current marker`,
+          error: `ambiguous managed review: ${pullMatching.length} identity-matching records exist for ticket ${identity.ticketUri} and none matches the current marker`,
         };
       }
       const stale = pullMatching[0];
@@ -305,10 +306,14 @@ export class TangledPublishApi implements PublishPlatformApi {
     return records;
   }
 
-  /** The managed record value. Unknown optional fields are OMITTED (never
-   * `undefined`) so the serialized record carries no undefined values. */
+  /** The managed record value (#1690: bound to the resolved TICKET uri, with
+   * `sourceSha` carrying the resolved patch revision's trusted `head.oid` —
+   * the reviewed head, identical to what the marker publishes, so the
+   * #1165 fresh-head comparison is the same-revision check). Unknown
+   * optional fields are OMITTED (never `undefined`) so the serialized
+   * record carries no undefined values. */
   private buildRecord(
-    identity: TangledPullIdentity,
+    identity: TangledReviewIdentity,
     sessionDid: string | undefined,
     body: string,
     createdAt: string,
@@ -316,16 +321,19 @@ export class TangledPublishApi implements PublishPlatformApi {
     if (sessionDid === undefined) {
       throw new Error("AT-Proto session has no DID to attribute the managed review record to");
     }
+    if (this.context.repoDid === undefined || this.context.repoDid === "") {
+      throw new Error("resolved review identity carries no repository DID to bind the managed record to");
+    }
     const record: ManagedReviewRecord = {
       $type: TANGLED_MANAGED_REVIEW_COLLECTION,
-      pull: identity.uri,
-      pullRepoDid: identity.repoDid,
+      pull: identity.ticketUri,
+      pullRepoDid: this.context.repoDid,
       reviewer: sessionDid,
       body,
       createdAt,
     };
-    if (identity.cid !== "") record.pullCid = identity.cid;
-    if (this.context.sourceSha !== undefined) record.sourceSha = this.context.sourceSha;
+    if (identity.ticketCid !== undefined && identity.ticketCid !== "") record.pullCid = identity.ticketCid;
+    record.sourceSha = identity.headOid;
     return record;
   }
 

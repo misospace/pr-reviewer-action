@@ -9,7 +9,10 @@ import {
 } from "./safe-fetch.js";
 
 /**
- * Read-only AT-Protocol blob client for Tangled pull rounds (#586).
+ * Read-only AT-Protocol blob client for Tangled pull rounds (#586) —
+ * LEGACY since the #1690 protocol pivot (served the pre-2026-10-28
+ * patch-blob model; no production caller remains, see tangled-ticket.ts +
+ * tangled-git.ts).
  *
  * Tangled pull rounds reference gzipped git-format-patch blobs that live in
  * the pull AUTHOR's PDS (not in Bobbin). This module is the read path for
