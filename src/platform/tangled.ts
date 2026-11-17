@@ -48,7 +48,7 @@ export function requireImplementedBackend(
   if (platform === "tangled") throw new TangledNotImplementedError();
 }
 
-/** A Tangled read capability that #585 has not wired yet. The message names
+/** A Tangled read capability the runtime has not wired yet. The message names
  * the specific capability so a caller can see exactly what is missing; the
  * class stays in the `TangledNotImplementedError` family so existing
  * `instanceof` guards keep matching. Unlike the zero-arg guard error above,
@@ -56,7 +56,7 @@ export function requireImplementedBackend(
 export class TangledCapabilityError extends TangledNotImplementedError {
   constructor(capability: string) {
     super();
-    this.message = `tangled ${capability} is not implemented yet (#564 wires metadata and round-diff reads)`;
+    this.message = `tangled ${capability} is not implemented yet (metadata and round-diff reads are wired by #1690)`;
     this.name = "TangledCapabilityError";
   }
 }
