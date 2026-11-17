@@ -506,7 +506,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown>; threadBody?: string } = {},
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown>; threadBody?: string; extraThreads?: Array<Record<string, unknown>> } = {},
 ): Promise<{ artifact: Record<string, unknown>; threadView: Array<Record<string, unknown>>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -531,20 +531,23 @@ async function runStaleThreadVerdict(
         body: options.threadBody ?? `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
       }],
     };
-    const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    // #1681 round 5: additional carried threads (the multi-finding
+    // change-request shape), listed and reconciled exactly like the first.
+    const threads: unknown[] = [majorThread, ...(options.extraThreads ?? [])];
+    const adapter = mockPlatform({ threads }) as PlatformReadAdapter;
     // #1663: trusted authorship metadata says the carried thread is the
     // action's own; the body marker alone would not be trusted provenance.
     adapter.authenticatedIdentity = () => Promise.resolve(options.identity === undefined ? "bot" : options.identity);
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
-      if (reads === 1) return Promise.resolve({ ok: true, data: [majorThread] });
+      if (reads === 1) return Promise.resolve({ ok: true, data: threads });
       if (options.secondReadFails === true) {
         return Promise.resolve({ ok: false, error: "HTTP 502 from the forge" });
       }
       return Promise.resolve({
         ok: true,
-        data: options.secondListing ?? [majorThread],
+        data: options.secondListing ?? threads,
         ...(options.secondListingComplete === false ? { complete: false } : {}),
       });
     };
@@ -826,29 +829,111 @@ test("#1663: a rotated-identity historical Major with a supported reason still b
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("#1663: a human-owned PAT comment is never dismissal-authorized by the run's own identity", async () => {
+test("#1681 round 5: a human thread with code-citing proof of fix is addressed, not re-emitted — and never closed on the forge", async () => {
   // Failure A: the workflow authenticates as `alice` (her PAT) and Alice
   // hand-wrote this unmarked thread. Login matching alone must not classify
   // it as the action's own finding and let a `fixed` disposition dismiss it.
+  // Round-5 split: what DISMISSES is the action writing GitHub state, and
+  // that remains forbidden. A current-head `fixed` that CITES CODE settles
+  // the concern semantically: no re-emitted finding, no obligation, nothing
+  // holding back approval — while the thread stays physically open.
   const { artifact, threadView, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md line 12 shows it is handled" }],
   }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" });
   assert.equal(threadView[0]!.authorship, "human",
     "the login match does NOT authorize reading her comment as the action's own");
   const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
-  assert.equal(record.disposition, "open", "the model's `fixed` cannot dismiss a human thread");
+  assert.equal(record.disposition, "fixed", "the settlement is recorded honestly, not forced to open");
+  assert.match(String(record.enforced), /stays open on the forge/,
+    "the disclosure says the physical thread remains open — the action cannot close it");
+  assert.match(String(record.enforced), /addressed, so it is not carried as a current finding/);
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"), false,
+    "the addressed concern is not re-emitted as a current finding");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined,
+    "it is not an unresolved semantic obligation either");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "an addressed human thread never manufactures a block");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "and no native block is submitted");
+  assert.ok(String(artifact.review_markdown).includes("`PRRT_stale1`: fixed"),
+    "the physical open state is still disclosed in the provenance section");
+});
+
+test("#1681 round 5: a bare human `fixed` claim without code-citing evidence stays fail-closed", async () => {
+  // The reply saying "fixed" is a LEAD, never proof. Without a current-head
+  // citation the concern is not settled: it keeps the historical reading —
+  // recorded open, re-emitted at the human-side non-blocking severity.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "the author replied that it is fine now" }],
+  }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" });
+  const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "an uncited claim cannot discharge a human thread");
   assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
   const carried = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
-  assert.equal(carried?.severity, "minor", "the thread survives open at the human-side severity, unresolvable by the action");
+  assert.equal(carried?.severity, "minor", "the concern stays visible at the human-side severity");
   assert.notEqual(result.finalDisposition?.kind, "request_changes", "an ordinary human question never manufactures a block");
-  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "and no native block is submitted");
-  assert.ok(!(result.finalDisposition?.materialUnknowns ?? []).some((entry) => entry.code === "unverified_blocking_claim"),
-    "nor is a proven human root turned into a material uncertainty");
-  assert.notEqual(result.finalDisposition?.reason, "material_unknown",
-    "any withholding here is the harness's certification gate, not the human thread");
+});
+
+test("#1681 round 5: an addressed human change request with several fixed threads blocks nothing (the #1681 shape)", async () => {
+  // Several findings from a prior REQUEST_CHANGES review, every one proven
+  // fixed at the current head, every GitHub conversation still physically
+  // open. None may appear in the current Findings, none may block APPROVE,
+  // and the open conversation state is disclosed separately. This is the
+  // exact shape that made the round-4 review self-contradictory; the pin
+  // exists so "resolve your threads to get approval" can never return.
+  const human = (id: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 10,
+      user: { login: "joryirving", type: "User" },
+      created_at: "2026-11-17T01:26:24Z",
+      updated_at: "2026-11-17T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "All three defects are fixed at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:3 — the defect the old thread pointed at no longer exists at this head" },
+      { thread_id: "PRRT_corpus1", disposition: "fixed", evidence: "src/engine/review.ts:4110 now fails the lane closed on a twice-invalid serialization" },
+      { thread_id: "PRRT_schema2", disposition: "fixed", evidence: "src/model/request.ts:120 pins the exact-N schema on every corpus attempt" },
+      { thread_id: "PRRT_payload3", disposition: "fixed", evidence: "src/tools/harness.ts:1400 builds the correction from the effective payload" },
+    ],
+  }, {
+    identity: "alice",
+    extraThreads: [
+      human("PRRT_corpus1", "Major: a still-invalid corpus correction is kept as semantic authority.\n"),
+      human("PRRT_schema2", "Major: the exact-N schema is only consulted after the response arrives.\n"),
+      human("PRRT_payload3", "Major: the correction payload is rebuilt from first, not the effective payload.\n"),
+    ],
+  });
+  const records = (artifact.thread_dispositions as Array<Record<string, unknown>>);
+  assert.equal(records.length, 4, "every carried thread settles — the stale one plus the three human threads");
+  for (const record of records) {
+    assert.equal(record.disposition, "fixed", `${record.thread_id}: settled on current-head evidence`);
+  }
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id), false,
+    "no addressed thread re-enters the current Findings set");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined,
+    "no addressed thread counts as an unresolved semantic obligation");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes",
+    "nothing here blocks approval");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES");
+  const markdown = String(artifact.review_markdown);
+  for (const id of ["PRRT_corpus1", "PRRT_schema2", "PRRT_payload3"]) {
+    assert.ok(markdown.includes(`\`${id}\`: fixed`), `${id}: physical open state disclosed for provenance`);
+  }
 });
 
 test("#1663: a historical managed Major under a rotated human PAT identity stays material", async () => {

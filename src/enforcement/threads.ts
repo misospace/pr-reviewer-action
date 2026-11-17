@@ -31,8 +31,12 @@
  * (INCOMPLETE/COMMENT) — so a ghost blocker cannot block and an unevaluated
  * concern cannot certify a clean approval. An `unproven` root is conservative
  * in both directions: no bot disposition closes it, and its severity is never
- * re-emitted. A `human` thread is closed only by the forge's resolved state
- * and keeps its existing non-blocking severity.
+ * re-emitted. A `human` thread is closed on GitHub only by the forge's
+ * resolved state (#1663) — the action never mutates a human's conversation —
+ * but that physical state is not semantic authority (#1681): a code-citing
+ * `fixed` settles the thread's FINDING as addressed (disclosed with its open
+ * physical state, not re-emitted, never blocking), while any weaker claim
+ * keeps the fail-closed open reading at the human-side non-blocking severity.
  *
  * Re-emitted findings carry `thread_id` (the publish step skips those inline
  * — the thread already exists) plus `thread_ids` provenance. Duplicate
@@ -172,7 +176,9 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
  * re-emits. An omitted disposition, an evidence-free `open`, or an
  * unsupported answer is recorded as unverified and its old blocking severity
  * is withheld (never re-emitted). A human-authored unresolved thread is never
- * closed by a bot disposition. The settled records replace
+ * closed by a bot disposition (#1663), but a code-citing `fixed` settles it
+ * SEMANTICALLY at this head (#1681 round 5): physically open on the forge,
+ * not carried as a current finding. The settled records replace
  * `thread_dispositions` in the artifact.
  *
  * #1645: before a listed thread can settle into the finding set it must
@@ -311,11 +317,25 @@ export function applyReviewThreadEnforcement(
       }
       if (materialIfUnverified) reassessment = "unverified";
     } else if (authorship === "human") {
-      // #1663: a human-authored unresolved thread is closed by the forge
-      // (its live state above), never by a bot disposition. The model's
-      // fixed/withdrawn/disputed claim is recorded as open and the thread is
-      // re-emitted at the existing human-thread severity (minor by default).
-      if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
+      // #1663: human-authored unresolved thread closed by the FORGE
+      // (its live state above), never by a bot disposition — the action
+      // never mutates another human's conversation. #1681 round 5 splits
+      // what that non-closing rule does and does not mean: GitHub
+      // `is_resolved` is PHYSICAL conversation state, not semantic
+      // authority over whether the code defect still exists. A `fixed`
+      // disposition carrying evidence that cites current code settles
+      // the finding SEMANTICALLY: the concern is addressed at this head,
+      // so it is not re-emitted as a current finding, does not count as
+      // an unresolved semantic obligation, and cannot hold back approval
+      // — while the thread stays physically open on the forge and the
+      // record below discloses exactly that. Any weaker claim — `fixed`
+      // without code-citing evidence, `withdrawn`, `disputed`, a bare or
+      // missing disposition — does NOT prove the defect gone and keeps
+      // the historical fail-closed reading: recorded open and re-emitted
+      // at the human-side non-blocking severity.
+      if (disposition === "fixed" && evidenceCitesCode(evidence, thread.path)) {
+        note = "human-authored thread stays open on the forge — a bot disposition cannot close it; the current-head evidence establishes the concern is addressed, so it is not carried as a current finding";
+      } else if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
         disposition = "open";
         note = "human-authored thread: a bot disposition cannot close it";
       } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {

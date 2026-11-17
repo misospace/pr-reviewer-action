@@ -1292,20 +1292,93 @@ test("#1663: a fresh current-head major still requests changes regardless of his
   assert.equal(finalKind(a), "request_changes");
 });
 
-test("#1663: a human unresolved thread is not closed by a bot disposition", () => {
+test("#1681 round 5: a human thread proven fixed with code evidence is addressed, not re-emitted (#252 boundary)", () => {
+  // The physical thread stays open (`liveListing` still reports it) because
+  // the action must never mutate a human's conversation — but GitHub
+  // `is_resolved` is not semantic authority over whether the defect exists.
+  // Current-head, code-citing evidence settles the FINDING: no re-emission,
+  // no obligation, nothing holding approval hostage; the open thread remains
+  // disclosed in the provenance record and markdown.
   const human = botMajor("h", { severity: "minor", category: null, own_finding: false, authorship: "human", message: "Should this handle None?" });
   const a = artifact({
     verdict: "approve",
     findings: [],
-    thread_dispositions: [{ thread_id: "h", disposition: "fixed", evidence: "src/a.ts:9" }],
+    thread_dispositions: [{ thread_id: "h", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
   });
   applyReviewThreadEnforcement(a, [human], "strict", liveListing("h"));
   const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
-  assert.equal(record.disposition, "open", "the forge's resolved state is the only human-thread closure");
-  assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
-  const reemitted = a.findings.find((item) => item.thread_id === "h");
-  assert.equal(reemitted?.severity, "minor", "human threads keep their existing non-blocking severity");
+  assert.equal(record.disposition, "fixed", "the settlement is recorded honestly");
+  assert.match(String(record.enforced), /stays open on the forge — a bot disposition cannot close it/);
+  assert.match(String(record.enforced), /not carried as a current finding/);
+  assert.equal(a.findings.some((item) => item.thread_id === "h"), false, "no re-emitted finding for an addressed concern");
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined, "no unresolved semantic obligation");
+  assert.match(String(a.review_markdown), /`h`: fixed/, "the physically open thread is still disclosed");
+  assert.equal(finalKind(a), "approve", "an addressed human thread never blocks APPROVE");
+});
+
+test("#1681 round 5: an addressed human change request with several threads never resurfaces as current findings (the #1681 shape)", () => {
+  // Three human findings from a prior REQUEST_CHANGES review, each proven
+  // fixed at the current head, all GitHub conversations still open. Pinning
+  // this so reviewer approval can never again require "PR gardening".
+  const threads = ["h1", "h2", "h3"].map((id) =>
+    botMajor(id, { severity: "blocker", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "h1", disposition: "fixed", evidence: "src/a.ts:9 closes the first concern" },
+      { thread_id: "h2", disposition: "fixed", evidence: "src/a.ts:21 fixes the second" },
+      { thread_id: "h3", disposition: "fixed", evidence: "src/a.ts:33 resolves the third" },
+    ],
+  });
+  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"));
+  assert.equal(a.findings.length, 0, "no addressed concern re-enters the current Findings set");
+  for (const record of a.thread_dispositions as Array<Record<string, unknown>>) {
+    assert.equal(record.disposition, "fixed");
+    assert.equal(record.reconciliation, "live_unresolved", "the physical thread was live-open the whole time");
+  }
+  assert.equal(a.thread_reconciliation?.unreassessed, undefined);
   assert.equal(finalKind(a), "approve");
+});
+
+test("#1681 round 5: a human thread whose fix is NOT proven keeps the fail-closed reading", () => {
+  // The other half of the split: an uncited `fixed`, a `withdrawn`, a
+  // `disputed`, or no disposition at all does not establish the defect gone.
+  // The thread keeps its historical open treatment — recorded open,
+  // re-emitted at the human-side non-blocking severity — and only the
+  // forge's resolved state closes it.
+  for (const [disposition, evidence] of [
+    ["fixed", "the author says it is fine now"],
+    ["withdrawn", "closed per reply"],
+    ["disputed", "closed per reply"],
+  ] as const) {
+    const a = artifact({
+      verdict: "approve",
+      findings: [],
+      thread_dispositions: [{ thread_id: "h", disposition, evidence }],
+    });
+    applyReviewThreadEnforcement(a, [botMajor("h", { severity: "minor", category: null, own_finding: false, authorship: "human", message: "Should this handle None?" })], "strict", liveListing("h"));
+    const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+    assert.equal(record.disposition, "open", `${disposition}: an unproven claim cannot discharge a human thread`);
+    assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
+    assert.equal(a.findings.find((item) => item.thread_id === "h")?.severity, "minor");
+  }
+});
+
+test("#1681 round 5: a human thread whose live state cannot be verified is disclosed, never silently declared fixed", () => {
+  // Case C: the listing is unreadable, so neither closure nor continuation
+  // can be proven. Existing #1645 semantics hold: nothing re-emits, nothing
+  // blocks, the incompleteness is DISCLOSED — and the unproven claim is
+  // recorded as `unknown` reconciliation, never dressed up as addressed.
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyReviewThreadEnforcement(a, [botMajor("h", { severity: "minor", category: null, own_finding: false, authorship: "human", message: "Should this handle None?" })], "strict", { ...liveListing(), available: false });
+  const record = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.reconciliation, "unknown");
+  assert.equal(record.disposition, "open", "no disposition given: never auto-answered as fixed");
+  assert.equal(a.findings.length, 0, "unverifiable live state never manufactures a current finding");
+  assert.equal(a.thread_reconciliation?.unknown, 1);
+  assert.match(String(a.review_markdown), /reconciliation incomplete/);
+  assert.equal(finalKind(a), "approve", "and per #1645 it stays advisory, not a material veto");
 });
 
 test("#1663: unproven authorship neither closes nor re-blocks a carried marker finding", () => {
