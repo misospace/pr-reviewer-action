@@ -88,8 +88,6 @@ const PATCH_RECORD = {
   },
 };
 
-const listPullsResponder = (): Response => json({ records: [TICKET_RECORD] });
-
 /** The knot serves ticket and patch collections from the repo account. */
 const knotRecordsResponder = (url: URL): Response => {
   const collection = url.searchParams.get("collection");

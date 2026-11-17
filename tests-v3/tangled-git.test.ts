@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTangledPatchDiff, TangledGitError } from "../src/platform/tangled-git.js";
@@ -112,13 +112,51 @@ test("object ids are validated before they reach argv", () => {
   }
 });
 
-test("a checkout without the reviewed objects fails closed", () => {
+test("a checkout left at a DIFFERENT round fails closed before any content is derived", () => {
   const fix = makeFixture();
   try {
-    // A 64-hex (SHA-256) head cannot exist in a SHA-1 repo: the object read
-    // fails closed with the failing git read named.
+    // H2 exists in the repository (it is the branch tip), but the checkout
+    // is deliberately left at the base commit H1: the reviewed diff must
+    // refuse, because the shared engine reads the checked-out bytes.
+    git(fix.dir, ["checkout", "-q", "--detach", fix.baseOid]);
+    assert.equal(git(fix.dir, ["rev-parse", "HEAD"]), fix.baseOid, "the fixture checkout is at H1");
     assert.throws(
-      () => readTangledPatchDiff(fix.dir, fix.baseOid, `b${"2".repeat(63)}`),
+      () => readTangledPatchDiff(fix.dir, fix.baseOid, fix.headOid),
+      (e: unknown) => e instanceof TangledGitError && /checked-out round/.test(e.message),
+      "the HEAD binding fails closed before the diff is derived",
+    );
+  } finally {
+    fix.close();
+  }
+});
+
+test("a launch-time reviewed head that disagrees with the patch revision fails closed", () => {
+  const fix = makeFixture();
+  try {
+    // The checkout binding passes (HEAD == head.oid), but the host
+    // launched on a different round: TANGLED_PR_SOURCE_SHA must agree too.
+    const otherRound = "f".repeat(40);
+    assert.throws(
+      () => readTangledPatchDiff(fix.dir, fix.baseOid, fix.headOid, { launchHeadSha: otherRound }),
+      (e: unknown) => e instanceof TangledGitError && /launch-time reviewed head/.test(e.message),
+    );
+    // An absent or empty launch head stays advisory: the checkout binding
+    // is the required invariant.
+    const result = readTangledPatchDiff(fix.dir, fix.baseOid, fix.headOid, { launchHeadSha: "" });
+    assert.match(result.diff, /\+world/);
+  } finally {
+    fix.close();
+  }
+});
+
+test("a base object the checkout cannot reach fails closed with the git read named", () => {
+  const fix = makeFixture();
+  try {
+    // The checkout binds to the trusted head (so the HEAD check passes),
+    // but the base object is missing: the diff read itself fails closed.
+    const unreachableBase = `a${"1".repeat(39)}`;
+    assert.throws(
+      () => readTangledPatchDiff(fix.dir, unreachableBase, fix.headOid),
       (e: unknown) => e instanceof TangledGitError && /git diff/.test(e.message),
     );
     // An empty path fails closed too: without the checkout there is no read

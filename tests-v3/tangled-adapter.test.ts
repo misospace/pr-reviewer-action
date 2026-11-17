@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectTangledReviewIdentity, TangledAdapter } from "../src/platform/tangled-adapter.js";
@@ -296,12 +296,13 @@ test("getPrDiff fails closed with the typed error of the failing step", async ()
   assert.equal(noMatchFiles.ok, false, "listPrFiles surfaces the same failed resolution");
 });
 
-test("getPrDiff fails closed when the checkout cannot produce the reviewed diff", async () => {
+test("getPrDiff fails closed when the checkout is not at the selected patch head", async () => {
   const fix = makeWorkspace();
   try {
-    // A patch revision whose head object the checkout does not carry
-    // (e.g. a round submitted after the host checked out): git exits
-    // nonzero → fail closed with the failing read named.
+    // A newer patch revision H2 exists and the resolver selects it, but the
+    // checkout (and the launch-time SHA) remain at H1: the HEAD binding
+    // must refuse before any review content is derived — the shared engine
+    // reads the checked-out bytes.
     const knot = makeKnotFetch(
       [ticketFixture()],
       [patchFixture({ baseOid: fix.baseOid, headOid: "3".repeat(40) })],
@@ -313,11 +314,35 @@ test("getPrDiff fails closed when the checkout cannot produce the reviewed diff"
     });
     await assert.rejects(
       () => adapter.getPrDiff(),
-      (e: unknown) => e instanceof TangledGitError,
+      (e: unknown) => e instanceof TangledGitError && /checked-out round/.test(e.message),
     );
     const files = await adapter.listPrFiles();
     assert.equal(files.ok, false);
-    if (!files.ok) assert.match(files.error, /git diff/, "the ReadResult error carries the typed failure");
+    if (!files.ok) assert.match(files.error, /checked-out round/, "the ReadResult error carries the typed failure");
+  } finally {
+    fix.close();
+  }
+});
+
+test("getPrDiff fails closed when the launch-time SHA disagrees with the selected patch head", async () => {
+  const fix = makeWorkspace();
+  try {
+    // The checkout binds to the selected revision (HEAD == head.oid), but
+    // the host launched on a different round (TANGLED_PR_SOURCE_SHA): the
+    // adapter requires the launch head to agree too.
+    const knot = makeKnotFetch(
+      [ticketFixture()],
+      [patchFixture({ baseOid: fix.baseOid, headOid: fix.headOid })],
+    );
+    const adapter = new TangledAdapter({
+      context: makeCtx({ sourceSha: "f".repeat(40) }),
+      fetchImpl: knot.fetchImpl,
+      workspace: fix.workspace,
+    });
+    await assert.rejects(
+      () => adapter.getPrDiff(),
+      (e: unknown) => e instanceof TangledGitError && /launch-time reviewed head/.test(e.message),
+    );
   } finally {
     fix.close();
   }
@@ -339,7 +364,8 @@ test("getPrDiff and listPrFiles derive the reviewed diff/files from the selected
   try {
     const knot = makeKnotFetch([ticketFixture()], [patchFor(fix)]);
     const adapter = new TangledAdapter({
-      context: makeCtx(),
+      // The launch-time reviewed head is the checked-out round's commit.
+      context: makeCtx({ sourceSha: fix.headOid }),
       fetchImpl: knot.fetchImpl,
       workspace: fix.workspace,
     });

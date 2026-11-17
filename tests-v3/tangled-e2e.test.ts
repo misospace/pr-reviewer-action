@@ -66,12 +66,12 @@ const KNOT_HOST = "knot.test";
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-/** A real SHA-256 repository spanning the patch revision's two commits:
- * the base commit says `hello`, the head commit adds `world`. SHA-256 is
- * the current knot default (new repositories), so the smoke proves the
- * 64-hex oid path end to end. Fixed-argv git with local config overrides —
- * no global config (signing, identity) can leak into the fixture. */
-function makeRoundWorkspace(): { workspace: string; baseOid: string; headOid: string; close(): void } {
+/** A real SHA-256 repository spanning three commits: base (`hello`), an
+ * intermediate round H1, and the head commit H2 (`world`). SHA-256 is the
+ * current knot default (new repositories), so the smoke proves the 64-hex
+ * oid path end to end. Fixed-argv git with local config overrides — no
+ * global config (signing, identity) can leak into the fixture. */
+function makeRoundWorkspace(): { workspace: string; baseOid: string; intermediateOid: string; headOid: string; close(): void } {
   const workspace = mkdtempSync(join(tmpdir(), "v3-tangled-e2e-ws-"));
   const git = (args: string[]): string =>
     execFileSync("git", [
@@ -89,13 +89,18 @@ function makeRoundWorkspace(): { workspace: string; baseOid: string; headOid: st
   git(["add", "."]);
   git(["commit", "-q", "-m", "base: greeting"]);
   const baseOid = git(["rev-parse", "HEAD"]);
+  writeFileSync(join(workspace, "README.md"), "hello\ndevelopment\n");
+  git(["add", "."]);
+  git(["commit", "-q", "-m", "round 1: development state"]);
+  const intermediateOid = git(["rev-parse", "HEAD"]);
   writeFileSync(join(workspace, "README.md"), "hello\nworld\n");
   git(["add", "."]);
-  git(["commit", "-q", "-m", "head: add the greeting"]);
+  git(["commit", "-q", "-m", "round 2: add the greeting"]);
   const headOid = git(["rev-parse", "HEAD"]);
   return {
     workspace,
     baseOid,
+    intermediateOid,
     headOid,
     close(): void {
       rmSync(workspace, { recursive: true, force: true });
@@ -236,6 +241,7 @@ interface TangledWorld {
   markdown: { current: string };
   workspace: string;
   baseOid: string;
+  intermediateOid: string;
   headOid: string;
   runsRoot: string;
   close(): Promise<void>;
@@ -279,6 +285,7 @@ async function startTangledWorld(): Promise<TangledWorld> {
     markdown,
     workspace: round.workspace,
     baseOid: round.baseOid,
+    intermediateOid: round.intermediateOid,
     headOid: round.headOid,
     runsRoot,
     async close() {
@@ -319,7 +326,7 @@ function knotFixtures(world: TangledWorld): { ticket: Record<string, unknown>; p
  * `GITHUB_WORKSPACE`, the checked-out round the Git read surface reads.
  * The `ATPROTO_*` credentials and `TANGLED_REPO_KNOT` feed the production
  * `buildPublishApi` factory. */
-function tangledEnv(world: TangledWorld, runDir: string): NodeJS.ProcessEnv {
+function tangledEnv(world: TangledWorld, runDir: string, sourceSha?: string): NodeJS.ProcessEnv {
   mkdirSync(runDir, { recursive: true });
   return {
     PATH: process.env.PATH,
@@ -336,7 +343,7 @@ function tangledEnv(world: TangledWorld, runDir: string): NodeJS.ProcessEnv {
     TANGLED_REPO_NAME: "demo/repo",
     TANGLED_PR_SOURCE_BRANCH: "feature",
     TANGLED_PR_TARGET_BRANCH: "main",
-    TANGLED_PR_SOURCE_SHA: world.headOid,
+    TANGLED_PR_SOURCE_SHA: sourceSha ?? world.headOid,
     TANGLED_REPO_KNOT: KNOT_HOST,
     ATPROTO_HOST: world.pds.server.url,
     ATPROTO_HANDLE: "reviewer.bot.test",
@@ -354,12 +361,12 @@ function tangledEnv(world: TangledWorld, runDir: string): NodeJS.ProcessEnv {
 async function runTangledSmokeRound(
   world: TangledWorld,
   runDirName: string,
-  options: { withKnot?: boolean } = {},
+  options: { withKnot?: boolean; sourceSha?: string } = {},
 ): Promise<{ code: number; knotCalls: string[] }> {
-  const { withKnot = true } = options;
+  const { withKnot = true, sourceSha } = options;
   const runDir = join(world.runsRoot, runDirName);
   const execute = async (): Promise<number> =>
-    platformActionMain(tangledEnv(world, runDir), { runDir });
+    platformActionMain(tangledEnv(world, runDir, sourceSha), { runDir });
   if (!withKnot) {
     return { code: await execute(), knotCalls: [] };
   }
@@ -430,6 +437,35 @@ test("a re-review updates the existing managed review instead of duplicating it"
     assert.match(String(second.value.body), /Second review: still looks fine\./);
     assert.doesNotMatch(String(second.value.body), /First review: looks fine\./,
       "the superseded body no longer stays visible");
+  } finally {
+    await world.close();
+  }
+});
+
+test("a stale checkout fails closed BEFORE the model is called, even with H2 present locally", async () => {
+  const world = await startTangledWorld();
+  try {
+    // The host launched at the intermediate round H1 (checked out, and
+    // TANGLED_PR_SOURCE_SHA=H1), while the newest immutable patch revision
+    // for the ticket is H2 — whose object DOES exist in the local
+    // repository. The resolver selects H2, the HEAD binding must refuse
+    // before any review content is derived, and the model must never be
+    // consulted (no split-brain review: the context readers would have
+    // seen H1's checked-out bytes against H2's diff).
+    execFileSync("git", ["checkout", "-q", "--detach", world.intermediateOid], {
+      cwd: world.workspace,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await assert.rejects(
+      () => runTangledSmokeRound(world, "run-stale-checkout", { sourceSha: world.intermediateOid }),
+      (e: unknown) => e instanceof Error,
+      "the run fails on the checkout binding (the TangledGitError message itself is pinned in tangled-git.test.ts)",
+    );
+    assert.equal(world.model.requests.length, 0, "the model was never consulted");
+    assert.equal(world.pds.records.size, 0, "nothing was published");
+    assert.equal(world.pds.creates, 0);
+    assert.equal(world.pds.puts, 0);
   } finally {
     await world.close();
   }

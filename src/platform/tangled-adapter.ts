@@ -163,6 +163,9 @@ export class TangledAdapter implements PlatformReadAdapter {
       }
       return readTangledPatchDiff(this.workspace, identity.baseOid, identity.headOid, {
         ...(this.gitTimeoutSec !== undefined ? { timeoutSec: this.gitTimeoutSec } : {}),
+        // The launch-time reviewed head (TANGLED_PR_SOURCE_SHA), when the
+        // host provides one, must agree with the selected revision too.
+        ...(this.context.sourceSha !== undefined ? { launchHeadSha: this.context.sourceSha } : {}),
       });
     })();
     return this.diffPending;

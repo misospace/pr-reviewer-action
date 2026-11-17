@@ -52,6 +52,12 @@ export interface TangledGitDiff {
 export interface TangledGitReadOptions {
   timeoutSec?: number | undefined;
   maxBuffer?: number | undefined;
+  /** The launch-time reviewed head (`TANGLED_PR_SOURCE_SHA`), when the host
+   * provides one. When set it must agree with the patch revision's
+   * `head.oid` too — a disagreement means the host launched on a different
+   * round than the one being reviewed, and the run fails closed. The
+   * REQUIRED invariant, though, is the checkout binding below. */
+  launchHeadSha?: string | undefined;
 }
 
 const DEFAULT_TIMEOUT_SEC = 60;
@@ -188,6 +194,17 @@ function parsePerFilePatches(diff: string): Map<string, { patch: string; oldPath
  * round. The workspace must contain both commits (the knot's git transport
  * is the read surface that put them there); a checkout that cannot produce
  * the diff fails closed with the missing state named.
+ *
+ * The REQUIRED invariant (#1695 review): the workspace's committed HEAD
+ * must equal the selected patch revision's trusted `head.oid`, proven with
+ * a fixed-argv bounded `git rev-parse HEAD` BEFORE any content is derived.
+ * The shared reviewer consumes checkout bytes directly (manifest contexts,
+ * repository contexts, tool fallbacks), so a stale checkout that merely
+ * CONTAINS the newer commit object would otherwise produce a split-brain
+ * review: the model reads the patch revision's diff while the context
+ * readers see the older checked-out bytes. When the host also provides a
+ * launch-time reviewed head it must agree too; both comparisons normalize
+ * case and reject a missing/unreadable HEAD outright.
  */
 export function readTangledPatchDiff(
   workspace: string,
@@ -199,6 +216,22 @@ export function readTangledPatchDiff(
   const head = validatedOid(headOid, "head");
   if (workspace === "") {
     throw new TangledGitError("the run workspace path is empty; the checked-out round is the diff read surface");
+  }
+  // The checkout binding: what the shared engine actually reads.
+  const checkoutHead = runGit(workspace, ["rev-parse", "HEAD"], options).stdout.trim().toLowerCase();
+  if (checkoutHead === "") {
+    throw new TangledGitError("git rev-parse HEAD returned nothing; the checkout has no committed HEAD to bind");
+  }
+  if (checkoutHead !== head.toLowerCase()) {
+    throw new TangledGitError(
+      `the checked-out round is ${checkoutHead.slice(0, 12)}, not the selected patch revision's trusted head ${head.slice(0, 12)}; refusing to review a stale checkout (fail closed)`,
+    );
+  }
+  const launchHead = options?.launchHeadSha?.trim().toLowerCase() ?? "";
+  if (launchHead !== "" && launchHead !== head) {
+    throw new TangledGitError(
+      `the launch-time reviewed head ${launchHead.slice(0, 12)} disagrees with the selected patch revision's trusted head ${head.slice(0, 12)}; the host launched on a different round than the one being reviewed (fail closed)`,
+    );
   }
   const numstat = parseNumstat(runGit(workspace, ["diff", "--numstat", "-z", base, head], options).stdout);
   const diff = runGit(workspace, ["diff", "--no-color", "--no-ext-diff", base, head], options).stdout;
