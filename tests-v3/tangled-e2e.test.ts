@@ -61,6 +61,9 @@ const BOT_DID = "did:plc:bot0000000000000000000000000000000000000000000000000";
 const TICKET_RKEY = "3lzq4w5qk2c2a";
 const TICKET_URI = `at://${REPO_DID}/org.tangled.track.ticket/${TICKET_RKEY}`;
 const PATCH_CID = "bafyreipatch0000000000000000000000000000000000000000000";
+const TICKET2_RKEY = "3lzvvvvvvvvvvvvb";
+const TICKET2_URI = `at://${REPO_DID}/org.tangled.track.ticket/${TICKET2_RKEY}`;
+const PATCH2_CID = "bafyreipatch200000000000000000000000000000000000000000";
 const KNOT_HOST = "knot.test";
 
 const json = (body: unknown, status = 200): Response =>
@@ -114,11 +117,30 @@ function makeRoundWorkspace(): { workspace: string; baseOid: string; intermediat
  * scoped `globalThis.fetch` stub that intercepts ONLY the knot host and
  * passes everything else through. `calls` records every intercepted
  * collection read. */
+interface KnotFixtures {
+  ticket: Record<string, unknown>;
+  patch: Record<string, unknown>;
+  /** Additional tickets/patches the tracker exposes alongside the run's own
+   * (the stateful TOCTOU fixtures: a replacement ticket that appeared). */
+  extraTickets?: Array<{ uri: string; cid: string; value: Record<string, unknown> }>;
+  extraPatches?: Array<{ uri: string; cid: string; value: Record<string, unknown> }>;
+}
+
+/** Optional extras for a STATEFUL knot: `afterFirstTicketRead` fires exactly
+ * once, after the first ticket-collection page is served — the hook a test
+ * uses to mutate the tracker mid-run (the TOCTOU window opens at that
+ * moment: the read adapter has resolved, publication has not run yet). */
+interface KnotStubOptions {
+  fixtures: () => KnotFixtures;
+  afterFirstTicketRead?: (() => void) | undefined;
+}
+
 async function withKnotStub<T>(
   run: () => Promise<T>,
-  fixtures: { ticket: Record<string, unknown>; patch: Record<string, unknown> },
+  options: KnotStubOptions,
 ): Promise<{ result: T; knotCalls: string[] }> {
   const calls: string[] = [];
+  let ticketReads = 0;
   const original = globalThis.fetch;
   const stubbed: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -128,17 +150,27 @@ async function withKnotStub<T>(
     calls.push(String(url.searchParams.get("collection")));
     if (url.searchParams.get("repo") !== REPO_DID) return json({ error: "unknown repo" }, 400);
     if (url.searchParams.get("collection") === "org.tangled.track.ticket") {
+      ticketReads += 1;
+      const fixtures = options.fixtures();
+      if (ticketReads === 1) options.afterFirstTicketRead?.();
       return json({
-        records: [{ uri: TICKET_URI, cid: "bafyreiticket", value: fixtures.ticket }],
+        records: [
+          { uri: TICKET_URI, cid: "bafyreiticket", value: fixtures.ticket },
+          ...(fixtures.extraTickets ?? []),
+        ],
       });
     }
     if (url.searchParams.get("collection") === "org.tangled.review.patch") {
+      const fixtures = options.fixtures();
       return json({
-        records: [{
-          uri: `at://${REPO_DID}/org.tangled.review.patch/${PATCH_CID}`,
-          cid: PATCH_CID,
-          value: fixtures.patch,
-        }],
+        records: [
+          {
+            uri: `at://${REPO_DID}/org.tangled.review.patch/${PATCH_CID}`,
+            cid: PATCH_CID,
+            value: fixtures.patch,
+          },
+          ...(fixtures.extraPatches ?? []),
+        ],
       });
     }
     return json({ records: [] });
@@ -361,16 +393,24 @@ function tangledEnv(world: TangledWorld, runDir: string, sourceSha?: string): No
 async function runTangledSmokeRound(
   world: TangledWorld,
   runDirName: string,
-  options: { withKnot?: boolean; sourceSha?: string } = {},
+  options: {
+    withKnot?: boolean;
+    sourceSha?: string;
+    fixtures?: () => KnotFixtures;
+    afterFirstTicketRead?: () => void;
+  } = {},
 ): Promise<{ code: number; knotCalls: string[] }> {
-  const { withKnot = true, sourceSha } = options;
+  const { withKnot = true, sourceSha, fixtures, afterFirstTicketRead } = options;
   const runDir = join(world.runsRoot, runDirName);
   const execute = async (): Promise<number> =>
     platformActionMain(tangledEnv(world, runDir, sourceSha), { runDir });
   if (!withKnot) {
     return { code: await execute(), knotCalls: [] };
   }
-  const { result, knotCalls } = await withKnotStub(execute, knotFixtures(world));
+  const { result, knotCalls } = await withKnotStub(execute, {
+    fixtures: fixtures ?? (() => knotFixtures(world)),
+    ...(afterFirstTicketRead !== undefined ? { afterFirstTicketRead } : {}),
+  });
   return { code: result, knotCalls };
 }
 
@@ -466,6 +506,50 @@ test("a stale checkout fails closed BEFORE the model is called, even with H2 pre
     assert.equal(world.pds.records.size, 0, "nothing was published");
     assert.equal(world.pds.creates, 0);
     assert.equal(world.pds.puts, 0);
+  } finally {
+    await world.close();
+  }
+});
+
+test("publication refuses when the reviewed ticket closes mid-run and a replacement shares the head", async () => {
+  const world = await startTangledWorld();
+  try {
+    // The TOCTOU window opens the moment the read adapter resolves T1/H1
+    // (the first ticket read): the tracker then closes T1 and a replacement
+    // T2 appears on the same target/source with a patch whose head is STILL
+    // H1. A SHA-only freshness guard would pass (the fresh head equals the
+    // reviewed SHA) and the T1 review would be published onto T2; the
+    // lineage-bound guard must refuse instead, with zero writes anywhere.
+    let flipped = false;
+    const base = knotFixtures(world);
+    const t2Patch = {
+      $type: "org.tangled.review.patch",
+      ticket: TICKET2_URI,
+      base: { oid: world.baseOid },
+      head: { oid: world.headOid },
+      createdAt: "2026-10-02T10:00:00.000Z",
+      source: { repo: REPO_DID, branch: "feature" },
+    };
+    const { code } = await runTangledSmokeRound(world, "run-ticket-closed", {
+      fixtures: () => flipped
+        ? {
+          ticket: { ...base.ticket, state: "closed" },
+          patch: base.patch,
+          extraTickets: [{
+            uri: TICKET2_URI,
+            cid: "bafyreiticket2",
+            value: { ...base.ticket, title: "Replacement ticket", state: "open" },
+          }],
+          extraPatches: [{ uri: `at://${REPO_DID}/org.tangled.review.patch/${PATCH2_CID}`, cid: PATCH2_CID, value: t2Patch }],
+        }
+        : base,
+      afterFirstTicketRead: () => { flipped = true; },
+    });
+    assert.equal(code, 1, "the publication is refused (fail closed)");
+    assert.ok(world.model.requests.length >= 1, "the review itself ran against the reviewed ticket T1");
+    assert.equal(world.pds.records.size, 0, "nothing was published");
+    assert.equal(world.pds.creates, 0, "no managed record was created — not on T1, not on T2");
+    assert.equal(world.pds.puts, 0, "no managed record was updated");
   } finally {
     await world.close();
   }

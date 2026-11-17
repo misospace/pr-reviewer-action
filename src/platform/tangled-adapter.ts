@@ -1,6 +1,6 @@
 import type { FetchLike } from "./http.js";
 import { readTangledPatchDiff, type TangledGitDiff } from "./tangled-git.js";
-import { resolveTangledReviewIdentity, type ResolveTangledReviewIdentityOptions, type TangledReviewIdentity } from "./tangled-ticket.js";
+import { resolveTangledReviewIdentity, writeReviewedTangledIdentity, type ResolveTangledReviewIdentityOptions, type TangledReviewIdentity } from "./tangled-ticket.js";
 import { tangledCapabilityError, type TangledContext } from "./tangled.js";
 import type {
   ExternalCheck,
@@ -64,6 +64,13 @@ export interface TangledAdapterOptions {
   /** Git read timeout in seconds; defaults to the bounded git catalog's
    * standard. */
   gitTimeoutSec?: number | undefined;
+  /** The run directory. When provided, the adapter persists its resolved
+   * review identity into it (first writer wins) the moment the resolution
+   * succeeds — the provenance the publication boundary binds to (#1695
+   * TOCTOU: the identity that was reviewed is the identity that is
+   * published). Best-effort; a failed write surfaces at publication as a
+   * missing artifact and fails closed there. */
+  runDir?: string | undefined;
 }
 
 export class TangledAdapter implements PlatformReadAdapter {
@@ -74,6 +81,7 @@ export class TangledAdapter implements PlatformReadAdapter {
   private readonly timeoutMs: number | undefined;
   private readonly workspace: string | undefined;
   private readonly gitTimeoutSec: number | undefined;
+  private readonly runDir: string | undefined;
   /** The resolved review identity (ticket + selected patch revision), bound
    * once and reused by every `getPr` call. `null` until a resolution
    * succeeds. */
@@ -94,6 +102,7 @@ export class TangledAdapter implements PlatformReadAdapter {
     this.timeoutMs = options.timeoutMs;
     this.workspace = options.workspace;
     this.gitTimeoutSec = options.gitTimeoutSec;
+    this.runDir = options.runDir;
   }
 
   /** The resolved review identity (ticket + selected patch revision), or
@@ -120,6 +129,11 @@ export class TangledAdapter implements PlatformReadAdapter {
         try {
           const resolved = await resolveTangledReviewIdentity(this.context, options);
           this.identity = resolved;
+          // Publication provenance (#1695 TOCTOU): persist the identity the
+          // moment it resolves, first writer wins — the engine's adapter is
+          // the reviewer, so ITS identity is the reviewed one and a later
+          // adapter can never overwrite it.
+          if (this.runDir !== undefined) writeReviewedTangledIdentity(this.runDir, resolved);
           return resolved;
         } finally {
           this.inFlight = null;

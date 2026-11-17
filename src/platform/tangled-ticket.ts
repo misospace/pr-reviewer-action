@@ -1,3 +1,4 @@
+import { openSync, closeSync, fstatSync, readFileSync, writeFileSync, renameSync, constants } from "node:fs";
 import type { FetchLike } from "./http.js";
 import { parseTangledAtUri, TangledResolverError } from "./tangled-bobbin.js";
 import {
@@ -8,6 +9,9 @@ import {
   TANGLED_TICKET_COLLECTION,
   type ReadTangledCurrentHeadOptions,
 } from "./tangled-head.js";
+
+const REVIEWED_IDENTITY_ARTIFACT = "tangled-reviewed-identity.json";
+const MAX_REVIEWED_IDENTITY_BYTES = 8 * 1024;
 import type { TangledContext } from "./tangled.js";
 
 /**
@@ -307,4 +311,177 @@ function patchMatchesTicketForHistory(
 ): boolean {
   const ticketField = str(patchValue.ticket);
   return ticketField === ticket.rkey || ticketField === ticket.uri;
+}
+
+// ── reviewed-identity publication handoff (#1695 TOCTOU) ────────────────
+
+/**
+ * The reviewed identity as the publication boundary consumes it: the
+ * invariant is that the Tangled identity that was REVIEWED is the identity
+ * that is PUBLISHED. The read adapter persists its resolved identity into
+ * the run directory the moment it resolves ({@link
+ * writeReviewedTangledIdentity}, first writer wins — the engine's adapter
+ * is the reviewer, so its identity is the reviewed one); the publish seam
+ * reads it back ({@link readReviewedTangledIdentityFromRunDir}) and binds
+ * BOTH the managed record and the fresh knot freshness read to that exact
+ * ticket/patch lineage ({@link readReviewedTicketCurrentHead}). Without the
+ * artifact there is no provenance for what was reviewed and publication
+ * fails closed — a replacement ticket that happens to share the reviewed
+ * commit SHA must never inherit the review.
+ */
+
+/** Persist the resolved review identity into the run directory. Best-effort
+ * and FIRST-WRITER-WINS: the write never throws (a failed write surfaces at
+ * the publication boundary as a missing artifact, which fails closed), and
+ * an existing artifact is never overwritten — the first adapter to resolve
+ * in a run is the reviewer's adapter, so a later-constructed adapter (e.g. a
+ * publish-side diff provider) can never re-resolve a different ticket into
+ * the reviewed provenance. */
+export function writeReviewedTangledIdentity(runDir: string, identity: TangledReviewIdentity): void {
+  if (runDir === "" || identity.ticketUri === "" || identity.patchUri === "") return;
+  try {
+    const target = `${runDir}/${REVIEWED_IDENTITY_ARTIFACT}`;
+    // O_EXCL-style first-writer-wins via the existence check; the run
+    // directory is private to this run (#838), so no concurrent writer
+    // exists outside the process.
+    let fd: number;
+    try {
+      fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
+    } catch {
+      fd = -1;
+    }
+    if (fd !== -1) {
+      closeSync(fd);
+      return;
+    }
+    const payload = {
+      ticket_uri: identity.ticketUri,
+      ...(identity.ticketCid !== undefined ? { ticket_cid: identity.ticketCid } : {}),
+      patch_uri: identity.patchUri,
+      ...(identity.patchCid !== undefined ? { patch_cid: identity.patchCid } : {}),
+      base_oid: identity.baseOid,
+      head_oid: identity.headOid,
+      ...(identity.targetBranch !== undefined ? { target_branch: identity.targetBranch } : {}),
+      ...(identity.sourceBranch !== undefined ? { source_branch: identity.sourceBranch } : {}),
+      ...(identity.sourceRepoDid !== undefined ? { source_repo_did: identity.sourceRepoDid } : {}),
+    };
+    const staged = `${runDir}/.${REVIEWED_IDENTITY_ARTIFACT}.tmp`;
+    writeFileSync(staged, JSON.stringify(payload));
+    renameSync(staged, target);
+  } catch {
+    // Best-effort: the publication boundary fails closed on a missing
+    // artifact, never on a failed diagnostic write.
+  }
+}
+
+function artifactOid(value: unknown, what: string): string | null {
+  if (typeof value !== "string" || !TANGLED_OID_RE.test(value)) return null;
+  return value.toLowerCase();
+}
+
+/** Read the reviewed identity back from the run directory. Returns `null`
+ * on ANY malformation — a missing, unreadable, oversized, or shape-invalid
+ * artifact proves nothing about what was reviewed, and the publication
+ * boundary fails closed on `null`. */
+export function readReviewedTangledIdentityFromRunDir(runDir: string | undefined): TangledReviewIdentity | null {
+  if (runDir === undefined || runDir === "") return null;
+  let fd: number;
+  try {
+    fd = openSync(`${runDir}/${REVIEWED_IDENTITY_ARTIFACT}`, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  let raw: string;
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    const bytes = readFileSync(fd);
+    if (bytes.byteLength > MAX_REVIEWED_IDENTITY_BYTES) return null;
+    raw = bytes.toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    parsed = value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const ticketUri = typeof parsed.ticket_uri === "string" ? parsed.ticket_uri : "";
+  const patchUri = typeof parsed.patch_uri === "string" ? parsed.patch_uri : "";
+  if (ticketUri === "" || patchUri === "") return null;
+  let ticket: ReturnType<typeof parseTangledAtUri>;
+  let patch: ReturnType<typeof parseTangledAtUri>;
+  try {
+    ticket = parseTangledAtUri(ticketUri);
+    patch = parseTangledAtUri(patchUri);
+  } catch {
+    return null;
+  }
+  if (ticket.collection !== TANGLED_TICKET_COLLECTION || patch.collection !== TANGLED_PATCH_COLLECTION) return null;
+  if (ticket.did !== patch.did) return null;
+  const baseOid = artifactOid(parsed.base_oid, "base");
+  const headOid = artifactOid(parsed.head_oid, "head");
+  if (baseOid === null || headOid === null) return null;
+  const ticketCid = typeof parsed.ticket_cid === "string" && parsed.ticket_cid !== "" ? parsed.ticket_cid : undefined;
+  const patchCid = typeof parsed.patch_cid === "string" && parsed.patch_cid !== "" ? parsed.patch_cid : undefined;
+  const targetBranch = typeof parsed.target_branch === "string" && parsed.target_branch !== "" ? parsed.target_branch : undefined;
+  const sourceBranch = typeof parsed.source_branch === "string" && parsed.source_branch !== "" ? parsed.source_branch : undefined;
+  const sourceRepoDid = typeof parsed.source_repo_did === "string" && parsed.source_repo_did !== "" ? parsed.source_repo_did : undefined;
+  return {
+    ticketUri,
+    ticketCid,
+    ticketRkey: ticket.rkey,
+    ticketValue: {},
+    patchUri,
+    patchCid,
+    patchValue: {},
+    baseOid,
+    headOid,
+    targetBranch,
+    sourceBranch,
+    sourceRepoDid,
+    state: undefined,
+  };
+}
+
+/**
+ * The FRESH knot read, bound to the reviewed ticket's lineage (#1695
+ * TOCTOU): this is the publication-boundary freshness check, and it is
+ * pinned to the ticket that was reviewed — never re-resolved against
+ * whatever ticket now matches the branch tuple. Returns the trusted
+ * current head only when ALL of the following hold fresh at the knot:
+ * - the reviewed ticket still exists in the repository account and is
+ *   still `open` (a closed/merged/completed ticket refuses — its review
+ *   conversation is settled and a replacement ticket is a different
+ *   conversation);
+ * - the ticket's NEWEST immutable patch revision is still the reviewed
+ *   revision (same AT-URI; a resubmission mid-run refuses);
+ * - that revision's trusted `head.oid` still equals the reviewed head.
+ * Any other outcome — including a DIFFERENT ticket pointing at the same
+ * commit SHA — is `null`, and the caller refuses to publish.
+ */
+export async function readReviewedTicketCurrentHead(
+  ctx: TangledContext,
+  reviewed: TangledReviewIdentity,
+  options?: ReadTangledCurrentHeadOptions,
+): Promise<string | null> {
+  try {
+    const tickets = await listCollectionRecords(ctx, TANGLED_TICKET_COLLECTION, options);
+    if (tickets === null) return null;
+    const current = tickets.find((t) => t.uri === reviewed.ticketUri || t.rkey === reviewed.ticketRkey);
+    if (current === undefined) return null;
+    if (str(current.value.state) !== "open") return null;
+    const patches = await listCollectionRecords(ctx, TANGLED_PATCH_COLLECTION, options);
+    if (patches === null) return null;
+    const newest = selectNewestPatch(patches, { rkey: reviewed.ticketRkey, uri: reviewed.ticketUri });
+    if (newest === null || newest.uri !== reviewed.patchUri) return null;
+    const head = oid(newest.value.head, "head", newest.uri);
+    return head === reviewed.headOid.toLowerCase() ? head : null;
+  } catch {
+    return null;
+  }
 }

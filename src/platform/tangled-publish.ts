@@ -13,12 +13,8 @@ import type {
   ThreadQueryResult,
 } from "./publish-api.js";
 import { TangledAtprotoClient } from "./tangled-atproto.js";
-import { parseTangledAtUri, TangledResolverError } from "./tangled-bobbin.js";
-import {
-  resolveTangledReviewIdentity,
-  type ResolveTangledReviewIdentityOptions,
-  type TangledReviewIdentity,
-} from "./tangled-ticket.js";
+import { parseTangledAtUri } from "./tangled-bobbin.js";
+import type { TangledReviewIdentity } from "./tangled-ticket.js";
 import type { TangledContext } from "./tangled.js";
 
 /**
@@ -75,15 +71,23 @@ interface ManagedReviewRecord {
 export interface TangledPublishApiOptions {
   context: TangledContext;
   atproto: TangledAtprotoClient;
-  /** Injected transport for the Bobbin pull resolver (tests). */
-  fetchImpl?: FetchLike | undefined;
-  /** Per-request timeout forwarded to the Bobbin pull resolver. */
-  timeoutMs?: number | undefined;
+  /** #1695 TOCTOU: the REVIEWED identity — the ticket/patch lineage the
+   * review actually ran against, carried from the read path (the adapter
+   * persists it into the run directory; `buildPublishApi` reads it back).
+   * This is the ONLY write identity: the managed record binds to THIS
+   * ticket, never to an independently re-resolved one — a replacement
+   * ticket that happens to share the reviewed commit SHA must never
+   * inherit the review. Absent → publication refuses (fail closed): without
+   * reviewed-identity provenance there is nothing this seam may write onto. */
+  reviewedIdentity?: TangledReviewIdentity | undefined;
   /** #588: a FRESH read of the pull's current head, for the #451
-   * publication-boundary re-check. Absent → the current head is unknown and
-   * publication is refused (fail closed) until a trustworthy source exists.
-   * The launch-time `TANGLED_PR_SOURCE_SHA` is NEVER used for this: it is
-   * the head THIS run reviewed, not the head the pull has now. */
+   * publication-boundary re-check. On Tangled this read MUST be bound to
+   * the reviewed ticket's lineage (`readReviewedTicketCurrentHead`) — a
+   * branch-tuple re-resolution would let a replacement ticket sharing the
+   * reviewed SHA pass the guard. Absent → the current head is unknown and
+   * publication is refused (fail closed). The launch-time
+   * `TANGLED_PR_SOURCE_SHA` is NEVER used for this: it is the head THIS run
+   * reviewed, not the head the pull has now. */
   currentHeadSha?: (() => Promise<string | null>) | undefined;
 }
 
@@ -115,38 +119,21 @@ export class TangledPublishApi implements PublishPlatformApi {
    * publication-boundary re-check needs the knot patch-record read
    * (#1165), so the publish step says so instead of the generic
    * "could not re-fetch" wording. */
-  readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head";
+  readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head for the REVIEWED ticket's lineage — the reviewed ticket must still be open with its reviewed patch revision still newest";
 
   private readonly context: TangledContext;
   private readonly atproto: TangledAtprotoClient;
-  private readonly fetchImpl: FetchLike | undefined;
-  private readonly timeoutMs: number | undefined;
+  /** #1695 TOCTOU: the reviewed identity — the ONLY write identity. */
+  private readonly reviewedIdentity: TangledReviewIdentity | undefined;
   /** #588: the fresh current-head read; absent → the current head is
    * unknown and publication fails closed. */
   private readonly currentHeadSha: (() => Promise<string | null>) | undefined;
-  /** Memoized review-identity resolution (#1690: ticket + newest immutable
-   * patch revision on the current record model): at most one resolution per
-   * instance. A rejection is memoized too and is reported deterministically
-   * by `upsertStickyComment`, never thrown at construction time. */
-  private identityPromise: Promise<TangledReviewIdentity> | undefined;
 
   constructor(options: TangledPublishApiOptions) {
     this.context = options.context;
     this.atproto = options.atproto;
-    this.fetchImpl = options.fetchImpl;
-    this.timeoutMs = options.timeoutMs;
+    this.reviewedIdentity = options.reviewedIdentity;
     this.currentHeadSha = options.currentHeadSha;
-  }
-
-  private resolvePull(): Promise<TangledReviewIdentity> {
-    this.identityPromise ??= (() => {
-      const options: ResolveTangledReviewIdentityOptions = {
-        fetchImpl: this.fetchImpl,
-        timeoutMs: this.timeoutMs,
-      };
-      return resolveTangledReviewIdentity(this.context, options);
-    })();
-    return this.identityPromise;
   }
 
   /**
@@ -217,13 +204,17 @@ export class TangledPublishApi implements PublishPlatformApi {
       return { ok: false, created: false, error: "upsertStickyComment requires a non-empty body" };
     }
 
-    let identity: TangledReviewIdentity;
-    try {
-      identity = await this.resolvePull();
-    } catch (error) {
-      const kind = error instanceof TangledResolverError ? error.kind : "read-failed";
-      const message = error instanceof Error ? error.message : String(error);
-      return { ok: false, created: false, error: `Tangled pull resolution failed (${kind}): ${message}` };
+    // #1695 TOCTOU: the write identity is the REVIEWED identity, carried
+    // from the read path. This seam never re-resolves one: an independent
+    // resolution could land on a different ticket that merely shares the
+    // reviewed commit SHA, publishing the T1 review onto T2.
+    const identity = this.reviewedIdentity;
+    if (identity === undefined) {
+      return {
+        ok: false,
+        created: false,
+        error: "no reviewed Tangled identity was carried from the review path; refusing to publish onto an independently resolved ticket (fail closed)",
+      };
     }
 
     try {
