@@ -1,10 +1,10 @@
-import { PlatformRequestError, requestJson, type FetchLike } from "./http.js";
+import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 
 /**
  * Generic AT-Proto session + record client (#837), the primitive the later
  * Tangled publish module (#588) consumes. Deliberately narrow: session
- * establishment and `createRecord`/`putRecord`/`listRecords` ONLY — no
- * pull/comment/review semantics live here.
+ * establishment and `createRecord`/`putRecord`/`deleteRecord`/`listRecords`
+ * ONLY — no pull/comment/review semantics live here.
  *
  * Security properties:
  * - every HTTP call goes through the shared `requestJson` transport; no raw
@@ -69,6 +69,7 @@ const DEFAULT_HOST = "https://bsky.social";
 const XRPC_CREATE_SESSION = "com.atproto.server.createSession";
 const XRPC_CREATE_RECORD = "com.atproto.repo.createRecord";
 const XRPC_PUT_RECORD = "com.atproto.repo.putRecord";
+const XRPC_DELETE_RECORD = "com.atproto.repo.deleteRecord";
 const XRPC_LIST_RECORDS = "com.atproto.repo.listRecords";
 
 const LIST_DEFAULT_LIMIT = 50;
@@ -218,21 +219,55 @@ export class TangledAtprotoClient {
         fetchImpl: this.fetchImpl,
       });
     } catch (error) {
-      if (error instanceof TangledAtprotoError) throw error;
-      if (error instanceof PlatformRequestError) {
-        throw new TangledAtprotoError(
-          error.kind === "invalid-json" ? "invalid-response" : "request",
-          `AT-Proto ${nsid} failed: ${redactMessage(error.message, this.appPassword)}`,
-        );
+      throw this.mapRequestError(nsid, error);
+    }
+  }
+
+  /** One text-body call against the validated host origin, for XRPC methods
+   * whose success response carries no JSON body (`deleteRecord`: a real PDS
+   * answers 200 with an empty body, which `requestJson` would report as
+   * invalid JSON). The body is parsed best-effort for error mapping only. */
+  private async callText(
+    nsid: string,
+    opts: { method?: string; token?: string; body?: string },
+  ): Promise<{ status: number; data: unknown }> {
+    try {
+      const result = await requestText(this.xrpcUrl(nsid), {
+        method: opts.method,
+        token: opts.token,
+        body: opts.body,
+        allowedOrigin: this.origin,
+        timeoutMs: this.timeoutMs,
+        fetchImpl: this.fetchImpl,
+      });
+      let data: unknown;
+      try {
+        data = JSON.parse(result.text) as unknown;
+      } catch {
+        data = undefined;
       }
-      throw new TangledAtprotoError(
-        "request",
-        `AT-Proto ${nsid} failed: ${redactMessage(
-          error instanceof Error ? error.message : String(error),
-          this.appPassword,
-        )}`,
+      return { status: result.status, data };
+    } catch (error) {
+      throw this.mapRequestError(nsid, error);
+    }
+  }
+
+  /** Shared transport-error mapping for `call`/`callText`. */
+  private mapRequestError(nsid: string, error: unknown): TangledAtprotoError {
+    if (error instanceof TangledAtprotoError) throw error;
+    if (error instanceof PlatformRequestError) {
+      return new TangledAtprotoError(
+        error.kind === "invalid-json" ? "invalid-response" : "request",
+        `AT-Proto ${nsid} failed: ${redactMessage(error.message, this.appPassword)}`,
       );
     }
+    return new TangledAtprotoError(
+      "request",
+      `AT-Proto ${nsid} failed: ${redactMessage(
+        error instanceof Error ? error.message : String(error),
+        this.appPassword,
+      )}`,
+    );
   }
 
   /** Whether a failed authenticated response indicates the session is dead. */
@@ -306,27 +341,13 @@ export class TangledAtprotoClient {
     });
   }
 
-  /** Map a non-OK (or shape-violating) authenticated response into either
-   * an `ExpiredResponse` signal (for the retry path) or a thrown error. */
-  private async expectOk(
-    nsid: string,
-    result: { status: number; data: unknown },
-  ): Promise<Record<string, unknown>> {
-    if (result.status >= 200 && result.status < 300) {
-      // A 200 whose body carries an expired/invalid token error code is a
-      // failed authenticated call, not a success.
-      if (TangledAtprotoClient.isExpired(result.status, result.data)) {
-        throw new ExpiredResponse(result.status, result.data);
-      }
-      const record = asRecord(result.data);
-      if (record === undefined) {
-        throw new TangledAtprotoError("invalid-response", `${nsid} did not return a JSON object`);
-      }
-      return record;
-    }
+  /** Map a failed or expired-session response; a 2xx that is not an
+   * expired-session body is accepted with NO payload requirement. */
+  private expectOkStatus(nsid: string, result: { status: number; data: unknown }): void {
     if (TangledAtprotoClient.isExpired(result.status, result.data)) {
       throw new ExpiredResponse(result.status, result.data);
     }
+    if (result.status >= 200 && result.status < 300) return;
     const record = asRecord(result.data);
     const serverMessage = record === undefined ? undefined : str(record.message);
     throw new TangledAtprotoError(
@@ -334,6 +355,20 @@ export class TangledAtprotoClient {
       `AT-Proto ${nsid} returned HTTP ${result.status}` +
         (serverMessage === undefined ? "" : `: ${redactMessage(serverMessage, this.appPassword)}`),
     );
+  }
+
+  /** Map a non-OK (or shape-violating) authenticated response into either
+   * an `ExpiredResponse` signal (for the retry path) or a thrown error. */
+  private async expectOk(
+    nsid: string,
+    result: { status: number; data: unknown },
+  ): Promise<Record<string, unknown>> {
+    this.expectOkStatus(nsid, result);
+    const record = asRecord(result.data);
+    if (record === undefined) {
+      throw new TangledAtprotoError("invalid-response", `${nsid} did not return a JSON object`);
+    }
+    return record;
   }
 
   /** `com.atproto.repo.createRecord`: POST the record into `collection`. */
@@ -382,6 +417,27 @@ export class TangledAtprotoClient {
         );
       }
       return { uri, cid };
+    });
+  }
+
+  /** `com.atproto.repo.deleteRecord`: delete the record at `rkey`. A real
+   * PDS answers a successful delete with 200 and an EMPTY body, so success
+   * here is the 2xx status alone — no response shape is required. A failed
+   * delete maps through the same expired-session retry path as every other
+   * authenticated call. */
+  async deleteRecord(collection: string, rkey: string): Promise<void> {
+    const validated = validateCollection(collection);
+    if (rkey === "") {
+      throw new TangledAtprotoError("config", "rkey must be a non-empty string");
+    }
+    return this.withSession(XRPC_DELETE_RECORD, async (session) => {
+      const body = JSON.stringify({ repo: session.did, collection: validated, rkey });
+      const result = await this.callText(XRPC_DELETE_RECORD, {
+        method: "POST",
+        token: `Bearer ${session.accessJwt}`,
+        body,
+      });
+      this.expectOkStatus(XRPC_DELETE_RECORD, result);
     });
   }
 
