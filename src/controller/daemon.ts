@@ -114,6 +114,7 @@ import {
 import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
 import { ingressWebhookPath } from "../ingress/endpoints.js";
+import { isForgeId } from "../platform/resolve.js";
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -400,9 +401,10 @@ export interface ControllerDaemon {
    *
    * It is the route an operator points the forge webhook at, so the daemon
    * REPORTS it (the controller's startup summary) instead of leaving the
-   * operator to guess. The webhook port keeps answering every path it
-   * answered before the route existed, so a deployment's existing webhook
-   * URL never breaks. */
+   * operator to guess. A Gitea-family daemon ENFORCES it: a delivery
+   * addressed to any other path is refused with a fixed 404 and never
+   * reaches the webhook processing, so a URL the operator never mounted
+   * cannot drive a review. */
   readonly intakeRoute: string;
   /** "" while every persisted queue mutation is durable; otherwise the
    * latched persistence-failure message (the daemon's health signal). */
@@ -1068,9 +1070,12 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
  *   label is what selects the intake's own projection, so the route and the
  *   projection always agree.
  *
- * The route is the DOCUMENTED mount, not a filter: the webhook port keeps
- * answering every path it answered before, so an existing deployment's
- * webhook URL never breaks.
+ * The route is the ENFORCED mount: the daemon's listener answers the intake
+ * ONLY on it, and a request addressed anywhere else gets a fixed 404 before
+ * the handler reads a byte — a correctly signed payload can never drive a
+ * review through a path the operator never mounted. The low-level handler
+ * stays path-agnostic (the mount point belongs to the daemon boundary, and
+ * the reusable intake stays composable wherever its embedder mounts it).
  */
 function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
   const platform = options.webhook?.platform;
@@ -1129,25 +1134,24 @@ export async function startControllerDaemon(
       );
     }
   }
-  // The platform labels are a CLOSED set (#1682): `forgeFamily` maps every
-  // non-github label to the forgejo family, so an unrecognized label (only
-  // reachable past the types, from a JS caller of this exported seam) must
-  // not silently join that family and mint generations under it. BOTH
-  // labels are validated here, BEFORE the family comparisons below, so an
-  // unknown label surfaces as an unknown label instead of a misleading
-  // family-mismatch message against a correctly labelled integration.
-  const forgePlatformLabels = ["github", "forgejo", "gitea"];
-  if (
-    options.webhook !== undefined &&
-    !forgePlatformLabels.includes(options.webhook.platform)
-  ) {
+  // The platform labels are a CLOSED set (#1682), owned by the PLATFORM SEAM
+  // (`isForgeId` — the one membership test every boundary that accepts a
+  // declared forge id from an untyped caller uses; the controller keeps no
+  // second vocabulary). `forgeFamily` maps every non-github label to the
+  // forgejo family, so an unrecognized label (only reachable past the types,
+  // from a JS caller of this exported seam) must not silently join that
+  // family and mint generations under it. BOTH labels are validated here,
+  // BEFORE the family comparisons below, so an unknown label surfaces as an
+  // unknown label instead of a misleading family-mismatch message against a
+  // correctly labelled integration.
+  if (options.webhook !== undefined && !isForgeId(options.webhook.platform)) {
     throw new TypeError(
       "ControllerDaemonOptions.webhook.platform must be 'github', 'forgejo', or 'gitea'",
     );
   }
   if (
     options.reconcile?.platform !== undefined &&
-    !forgePlatformLabels.includes(options.reconcile.platform)
+    !isForgeId(options.reconcile.platform)
   ) {
     throw new TypeError(
       "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'",
@@ -1899,7 +1903,27 @@ export async function startControllerDaemon(
   };
 
   if (operatorHost !== undefined) {
-    server = createServer(operatorHost.handler);
+    // The canonical route is the ENFORCED mount (#1683 review): the intake
+    // answers ONLY on the route the ingress seam names for the configured
+    // identity; every other path is a fixed 404 that never reaches the
+    // webhook processing. GitHub keeps its path-agnostic App intake (the
+    // seam names no route for it, so `canonicalIntakeRoute` reports "").
+    const intakeRoute = canonicalIntakeRoute(options);
+    server = createServer(
+      intakeRoute === ""
+        ? operatorHost.handler
+        : (req, res) => {
+            const path = (req.url ?? "").split(/[?#]/, 1)[0];
+            if (path !== intakeRoute) {
+              req.resume();
+              res.statusCode = 404;
+              res.setHeader("content-type", "application/json");
+              res.end('{"status":"not found"}');
+              return;
+            }
+            operatorHost.handler(req, res);
+          },
+    );
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(options.webhook!.port, () => resolve());

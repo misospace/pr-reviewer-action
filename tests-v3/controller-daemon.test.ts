@@ -3045,7 +3045,7 @@ test("a signed Gitea IssueCommentPayload (no top-level number) drives a follow_u
     repository: { full_name: "owner/repo" },
     sender: { login: "alice" },
   });
-  const res = await fetch(`http://127.0.0.1:${port}/`, {
+  const res = await fetch(`http://127.0.0.1:${port}/webhooks/gitea`, {
     method: "POST",
     headers: {
       "x-gitea-event": "issue_comment",
@@ -3208,6 +3208,116 @@ test("the canonical intake route follows the configured identity, and GitHub has
     cleanup(github);
   });
   assert.equal(github.daemon.intakeRoute, "");
+});
+
+test("a Gitea-family daemon ENFORCES its canonical intake route (#1683)", async (t) => {
+  // The canonical route is the ENFORCED mount, not just documentation: a
+  // signed delivery addressed anywhere but `/webhooks/gitea` gets a fixed
+  // 404 WITHOUT reaching the webhook processing — the path-agnostic handler
+  // behind the daemon's listener must never be reachable through `/`, a
+  // foreign-family route, or a trailing-slash near-miss. The route check
+  // runs BEFORE signature verification: an unsigned request to a wrong path
+  // is a routing refusal (404), not an authentication one (401). The
+  // canonical route still serves the very same signed delivery.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: giteaForges(),
+      } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(h.daemon.intakeRoute, "/webhooks/gitea");
+
+  const body = JSON.stringify({
+    action: "created",
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
+    issue: {
+      id: 12,
+      url: "https://gitea.example/owner/repo/issues/7",
+      number: 7,
+      title: "Add thing",
+      state: "open",
+      pull_request: { url: "https://gitea.example/owner/repo/pulls/7", merged: false },
+    },
+    comment: { id: 556, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "alice" },
+  });
+  const post = (path: string, signed = true) =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: {
+        "x-gitea-event": "issue_comment",
+        ...(signed
+          ? { "x-gitea-signature": computeForgejoWebhookSignature(GITEA_WEBHOOK_SECRET, body) }
+          : {}),
+      },
+      body,
+    });
+
+  // Every correctly signed delivery addressed OFF the canonical route is
+  // refused with the fixed 404 body: the root, the FORGEJO-family route (a
+  // Gitea daemon never answers the other product's mount), a trailing-slash
+  // near-miss, and a prefix.
+  for (const path of ["/", "/webhooks/forgejo", "/webhooks/gitea/", "/webhooks"]) {
+    const res = await post(path);
+    assert.equal(res.status, 404, `a signed delivery on '${path}' is refused`);
+    assert.deepEqual(JSON.parse(await res.text()), { status: "not found" });
+  }
+  // Routing is decided BEFORE authentication: a wrong path is a 404 even
+  // with no signature at all — the handler's 401 is never reached.
+  const unsigned = await post("/", false);
+  assert.equal(unsigned.status, 404, "route refusal precedes signature verification");
+  // Nothing reached intake: no refused delivery minted anything.
+  assert.equal(minted.length, 0, "no off-route delivery reached the webhook processing");
+
+  // The canonical route still serves the very same signed delivery.
+  const ok = await post("/webhooks/gitea");
+  assert.equal(ok.status, 202);
+  assert.deepEqual(JSON.parse(await ok.text()), { status: "accepted", kind: "follow_up" });
+  await waitFor(() => minted.length === 1);
 });
 
 test("a gitea-kind integration refuses foreign-family bindings and accepts its own family (#1682)", async () => {
