@@ -36,7 +36,11 @@ const PAGE_LIMIT = 100;
 const MAX_PAGES = 10;
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+/** One git object id as the current record model carries it: SHA-1 (40 hex,
+ * migrated Go-knot repositories) or SHA-256 (64 hex, new repositories).
+ * "Don't assume a fixed hash length in tools" — tangled.org docs. */
+export const TANGLED_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -94,7 +98,7 @@ export function selectNewestPatchHead(
     if (!Number.isFinite(time)) return null;
     const head = asRecord(value.head);
     const oid = head === undefined ? undefined : str(head.oid);
-    if (oid === undefined || !SHA_RE.test(oid)) return null;
+    if (oid === undefined || !TANGLED_OID_RE.test(oid)) return null;
     const normalized = oid.toLowerCase();
     if (best === undefined || time > best.time) {
       best = { time, head: normalized };
@@ -105,12 +109,19 @@ export function selectNewestPatchHead(
   return best?.head ?? null;
 }
 
+/** The knot reads are public/unauthenticated by default; an optional
+ * pre-formatted Authorization value (the adapter's `token` option, #1690)
+ * is sent only to the validated knot origin. */
 export interface ReadTangledCurrentHeadOptions {
   fetchImpl?: FetchLike | undefined;
   timeoutMs?: number | undefined;
+  token?: string | undefined;
 }
 
-function knotBase(ctx: TangledContext): { base: string; origin: string } | null {
+/** The validated knot XRPC base for `ctx`'s repository account, or `null`
+ * when no knot host is configured. Shared with the #1690 ticket/patch
+ * resolution (tangled-ticket.ts), which reads the same repo account. */
+export function knotBase(ctx: TangledContext): { base: string; origin: string } | null {
   const knotHost = ctx.knotHost;
   if (knotHost === undefined || knotHost.trim() === "") return null;
   const host = knotHost.trim().toLowerCase();
@@ -122,7 +133,7 @@ function knotBase(ctx: TangledContext): { base: string; origin: string } | null 
 /** One listed record: the parsed AT-URI identity plus the record value. The
  * `uri` is the canonical `at://did/collection/rkey` form rebuilt from the
  * parsed record uri, so every consumer matches against the same shape. */
-interface ListedRecord {
+export interface ListedRecord {
   uri: string;
   cid: string | undefined;
   value: Record<string, unknown>;
@@ -132,8 +143,10 @@ interface ListedRecord {
 /** Bounded listRecords read of one collection; null on any failure. The
  * single pagination+parse loop behind every knot read in this module: page
  * cap, per-item fail-closed validation, and repository binding live here
- * once so the public readers cannot drift. */
-async function listCollectionRecords(
+ * once so the public readers cannot drift. Exported for the #1690
+ * ticket/patch resolution, which reads the same repo account and must not
+ * drift from these bounds. */
+export async function listCollectionRecords(
   ctx: TangledContext,
   collection: string,
   options?: ReadTangledCurrentHeadOptions,
@@ -155,6 +168,7 @@ async function listCollectionRecords(
         allowedOrigin: knot.origin,
         fetchImpl: options?.fetchImpl,
         timeoutMs: options?.timeoutMs,
+        ...(options?.token !== undefined ? { token: options.token } : {}),
       });
       if (result.status < 200 || result.status >= 300) return null;
       const resp = asRecord(result.data);
@@ -304,7 +318,7 @@ export async function readTangledCurrentHeadForContext(
   // History fallback (see docblock): identify by reviewed SHA, return
   // newest trusted head — never the launch-time value itself.
   const reviewed = typeof ctx.sourceSha === "string" ? ctx.sourceSha.trim().toLowerCase() : "";
-  if (!SHA_RE.test(reviewed)) return null;
+  if (!TANGLED_OID_RE.test(reviewed)) return null;
   const matches = new Map<string, string>();
   for (const candidate of candidates) {
     const newest = selectNewestPatchHead(items, candidate.rkey, candidate.uri, undefined);

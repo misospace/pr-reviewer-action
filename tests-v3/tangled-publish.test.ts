@@ -15,37 +15,35 @@ import { longestBacktickRun } from "../src/context/fence.js";
 
 /**
  * Tangled publish adapter (#588), exercised through a hand-rolled AT-Proto
- * stub (no HTTP) and an injected Bobbin transport for pull resolution.
+ * stub (no HTTP), publishing onto the REVIEWED identity carried from the
+ * read path (#1695 TOCTOU: the publish seam never re-resolves a write
+ * identity — it refuses without one).
  */
 
 const SESSION_DID = "did:plc:tester";
-const PULL_URI = "at://did:plc:author/sh.tangled.repo.pull/3mxb";
+const TICKET_RKEY = "3lzq4w5qk2c2a";
+const TICKET_URI = `at://did:plc:repo/org.tangled.track.ticket/${TICKET_RKEY}`;
 const REPO_DID = "did:plc:repo";
 const MARKER = "<!-- pr-reviewer managed review (run:abc123) -->";
 const BODY = `${MARKER}\n\nreview body text`;
 
-// ── Bobbin resolution transport (copied responder style) ────────────────
-
-interface Call {
-  url: URL;
-  nsid: string;
-  query: Record<string, string>;
-}
-
-function makeFetch(
-  responder: (url: URL, init?: RequestInit) => Response | Promise<Response>,
-): { fetchImpl: FetchLike; calls: Call[] } {
-  const calls: Call[] = [];
-  const fetchImpl: FetchLike = async (input, init) => {
-    const url = new URL(String(input));
-    const nsid = decodeURIComponent(url.pathname.replace(/^.*\/xrpc\//, ""));
-    const query: Record<string, string> = {};
-    for (const [k, v] of url.searchParams.entries()) query[k] = v;
-    calls.push({ url, nsid, query });
-    return responder(url, init);
-  };
-  return { fetchImpl, calls };
-}
+/** The reviewed identity the publish seam binds to (#1695 TOCTOU): the
+ * ticket/patch lineage the review ran against, carried from the read path. */
+const REVIEWED_IDENTITY = {
+  ticketUri: TICKET_URI,
+  ticketCid: "bafyreiticket",
+  ticketRkey: TICKET_RKEY,
+  ticketValue: {},
+  patchUri: `at://${REPO_DID}/org.tangled.review.patch/bafyreipatch1`,
+  patchCid: "bafyreipatch1",
+  patchValue: {},
+  baseOid: "1111111111111111111111111111111111111111",
+  headOid: "2222222222222222222222222222222222222222",
+  targetBranch: "main",
+  sourceBranch: "feat/x",
+  sourceRepoDid: REPO_DID,
+  state: "open",
+};
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -63,23 +61,6 @@ function makeCtx(over: Partial<TangledContext> = {}): TangledContext {
     ...over,
   };
 }
-
-const LIST_ONE = {
-  items: [
-    {
-      uri: PULL_URI,
-      cid: "bafyrei2",
-      state: "open",
-      value: {
-        target: { branch: "main", repo: REPO_DID },
-        source: { branch: "feat/x" },
-      },
-    },
-  ],
-  cursor: null,
-};
-
-const listPullsResponder = (): Response => json(LIST_ONE);
 
 // ── AT-Proto stub client ────────────────────────────────────────────────
 
@@ -196,7 +177,7 @@ function managedRecord(over: Partial<Record<string, unknown>> = {}): ListedRecor
   delete over.rkey;
   const value: Record<string, unknown> = {
     $type: TANGLED_MANAGED_REVIEW_COLLECTION,
-    pull: PULL_URI,
+    pull: TICKET_URI,
     pullRepoDid: REPO_DID,
     reviewer: SESSION_DID,
     body: MARKER,
@@ -219,21 +200,34 @@ function pdsRequestError(status: number, message = "no such record"): TangledAtp
 function makeApi(
   stub: TangledAtprotoClient,
   over: Partial<TangledContext> = {},
-  fetchResponder: (url: URL, init?: RequestInit) => Response | Promise<Response> = listPullsResponder,
-): { api: TangledPublishApi; calls: Call[] } {
-  const { fetchImpl, calls } = makeFetch(fetchResponder);
-  const api = new TangledPublishApi({ context: makeCtx(over), atproto: stub, fetchImpl, timeoutMs: 5000 });
-  return { api, calls };
+  options: { reviewedIdentity?: typeof REVIEWED_IDENTITY | undefined } = {},
+): { api: TangledPublishApi } {
+  const api = new TangledPublishApi({
+    context: makeCtx(over),
+    atproto: stub,
+    // The reviewed identity is the DEFAULT write identity; only the
+    // missing-identity refusal test overrides it to undefined.
+    reviewedIdentity: "reviewedIdentity" in options ? options.reviewedIdentity : REVIEWED_IDENTITY,
+  });
+  return { api };
 }
 
 // ── #1691: deterministic managed-record key ─────────────────────────────
 
-test("managedReviewRkey is deterministic per pull, distinct across pulls, and valid rkey grammar", () => {
-  const a1 = managedReviewRkey(PULL_URI);
-  const a2 = managedReviewRkey(PULL_URI);
-  const other = managedReviewRkey("at://did:plc:author/sh.tangled.repo.pull/3myothers");
-  assert.equal(a1, a2, "same pull → same key, every run");
-  assert.notEqual(a1, other, "different pull → different key");
+test("managedReviewRkey is deterministic per identity, distinct across identities, and valid rkey grammar", () => {
+  const a1 = managedReviewRkey(TICKET_URI);
+  const a2 = managedReviewRkey(TICKET_URI);
+  const other = managedReviewRkey(`at://${REPO_DID}/org.tangled.track.ticket/3lzother`);
+  // Pinned exact keys (#1691 review request): these literals are the
+  // lowercase RFC-4648 base32 of the first 8 bytes of SHA-256 over the
+  // namespaced domain string plus the URI, computed independently of the
+  // implementation. Pinning them proves the documented 64-bit collision
+  // span for this fixture is the actual output, and freezes it against any
+  // future encoder change.
+  assert.equal(a1, "prsxmxrfq3ox67k");
+  assert.equal(other, "prwv673djh3ysd2");
+  assert.equal(a1, a2, "same identity → same key, every run");
+  assert.notEqual(a1, other, "different identities → different keys");
   for (const rkey of [a1, other]) {
     // atproto rkey grammar: at most 15 chars from [A-Za-z0-9_-], and never
     // something that reads as a bare number — the letter prefix guarantees
@@ -253,7 +247,7 @@ test("first publish puts exactly one record at the deterministic rkey with the f
   assert.deepEqual(result, {
     ok: true,
     created: true,
-    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(PULL_URI)}`,
+    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
     updatedAt: result.updatedAt,
     action: "created",
   });
@@ -263,7 +257,7 @@ test("first publish puts exactly one record at the deterministic rkey with the f
   // createRecord is off the publication path entirely.
   assert.equal(calls.created.length, 0);
   assert.equal(calls.puts.length, 1);
-  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(PULL_URI));
+  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(TICKET_URI));
   const { collection, record } = calls.puts[0] ?? { collection: "", record: {} };
   assert.equal(collection, TANGLED_MANAGED_REVIEW_COLLECTION);
   assert.deepEqual(Object.keys(record).sort(), [
@@ -277,11 +271,12 @@ test("first publish puts exactly one record at the deterministic rkey with the f
     "sourceSha",
   ]);
   assert.equal(record.$type, TANGLED_MANAGED_REVIEW_COLLECTION);
-  assert.equal(record.pull, PULL_URI);
-  assert.equal(record.pullCid, "bafyrei2");
+  assert.equal(record.pull, TICKET_URI);
+  assert.equal(record.pullCid, "bafyreiticket", "pullCid is the ticket record's CID");
   assert.equal(record.pullRepoDid, REPO_DID);
   assert.equal(record.reviewer, SESSION_DID);
-  assert.equal(record.sourceSha, makeCtx().sourceSha);
+  assert.equal(record.sourceSha, "2222222222222222222222222222222222222222",
+    "sourceSha is the resolved patch revision's trusted head.oid");
   assert.equal(record.body, BODY);
   assert.equal(typeof record.createdAt, "string");
   assert.notEqual(new Date(String(record.createdAt)).toString(), "Invalid Date");
@@ -291,14 +286,16 @@ test("first publish puts exactly one record at the deterministic rkey with the f
   for (const value of Object.values(record)) assert.notEqual(value, undefined);
 });
 
-test("record omits sourceSha when the context has none (never undefined)", async () => {
+test("sourceSha is the resolved revision's head regardless of the launch-time context (never undefined)", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
-  const { api } = makeApi(client, { sourceSha: undefined });
+  // The launch-time TANGLED_PR_SOURCE_SHA is advisory: the record binds the
+  // resolved patch revision's trusted head, whatever the context carried.
+  const { api } = makeApi(client, { sourceSha: "f".repeat(40) });
 
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.equal(result.ok, true);
   const record = calls.puts[0]?.record ?? {};
-  assert.equal("sourceSha" in record, false);
+  assert.equal(record.sourceSha, "2222222222222222222222222222222222222222");
   assert.equal("pullCid" in record, true);
   assert.deepEqual(JSON.parse(JSON.stringify(record)), record);
 });
@@ -317,9 +314,8 @@ test("re-review updates the SAME record: putRecord with the same rkey, no second
     action: "updated",
   });
 
-  // Memoization: the second upsert reuses the pull resolution (see the
-  // memoization test for the fetch-count assertion); here both writes hit
-  // the same rkey and createRecord stays at zero.
+  // Both writes hit the same rkey and createRecord stays at zero: the
+  // reviewed identity is the only write identity.
   const second = await api.upsertStickyComment(MARKER, BODY + " round 2");
   assert.deepEqual(second, {
     ok: true,
@@ -334,16 +330,7 @@ test("re-review updates the SAME record: putRecord with the same rkey, no second
   assert.equal(calls.puts[0]?.rkey, "3lab1");
   assert.equal(calls.puts[1]?.rkey, "3lab1");
   assert.equal(calls.puts[0]?.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
-  assert.equal(calls.puts[0]?.record.pull, PULL_URI);
-});
-
-test("pull resolution is memoized: two upserts trigger exactly ONE resolution", async () => {
-  const { client } = makeStub({ did: SESSION_DID });
-  const { api, calls } = makeApi(client);
-
-  await api.upsertStickyComment(MARKER, BODY);
-  await api.upsertStickyComment(MARKER, BODY);
-  assert.equal(calls.length, 1, "expected exactly one Bobbin listPulls call across two upserts");
+  assert.equal(calls.puts[0]?.record.pull, TICKET_URI);
 });
 
 test("wrong reviewer identity is ignored → treated as no managed record → creates fresh", async () => {
@@ -357,7 +344,7 @@ test("wrong reviewer identity is ignored → treated as no managed record → cr
   assert.equal(result.action, "created");
   assert.equal(calls.created.length, 0);
   assert.equal(calls.puts.length, 1);
-  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(PULL_URI));
+  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(TICKET_URI));
 });
 
 test("unattributable record (missing/non-string reviewer) is ignored", async () => {
@@ -424,7 +411,7 @@ test("two concurrent first publications with both listings before either write l
   assert.equal(first.commentId, second.commentId);
   assert.equal(
     String(first.commentId),
-    `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(PULL_URI)}`,
+    `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
   );
 
   // A third, sequential run sees exactly one record and updates it.
@@ -578,7 +565,7 @@ test("a malformed record uri fails before ANY delete or put (no half-applied rec
     cid: "bafybad",
     value: {
       $type: TANGLED_MANAGED_REVIEW_COLLECTION,
-      pull: PULL_URI,
+      pull: TICKET_URI,
       pullRepoDid: REPO_DID,
       reviewer: SESSION_DID,
       body: MARKER,
@@ -612,37 +599,26 @@ test("empty marker or body fails without any network call", async () => {
   assert.equal(calls.puts.length, 0);
 });
 
-// ── pull resolution failure ──────────────────────────────────────────────
+// ── reviewed-identity handoff (#1695 TOCTOU) ─────────────────────────────
 
-test("pull resolution failure surfaces the kind deterministically, zero ATProto calls", async () => {
+test("upsert without a reviewed identity refuses fail-closed with zero ATProto calls", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
-  // No repoDid and no pullUri → the resolver fails with kind "config"
-  // without any Bobbin call either.
-  const { api } = makeApi(client, { repoDid: undefined });
+  // No reviewed identity carried from the read path → the seam has no
+  // provenance for what was reviewed and must not write anywhere: an
+  // independently resolved replacement ticket can never inherit the review.
+  const { api } = makeApi(client, {}, { reviewedIdentity: undefined });
 
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.equal(result.ok, false);
   assert.equal(result.created, false);
-  assert.ok(
-    result.error?.startsWith("Tangled pull resolution failed (config):"),
-    `expected a config-kind resolution failure, got: ${result.error}`,
+  assert.match(
+    result.error ?? "",
+    /no reviewed Tangled identity was carried from the review path/,
+    `expected the reviewed-identity refusal, got: ${result.error}`,
   );
-  assert.equal(calls.lists, 0);
+  assert.equal(calls.lists, 0, "no managed-record listing happens without a write identity");
   assert.equal(calls.created.length, 0);
   assert.equal(calls.puts.length, 0);
-});
-
-test("pull resolution no-match (empty listing) is surfaced with its kind", async () => {
-  const { client, calls } = makeStub({ did: SESSION_DID });
-  const { api } = makeApi(client, {}, () => json({ items: [], cursor: null }));
-
-  const result = await api.upsertStickyComment(MARKER, BODY);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.error?.startsWith("Tangled pull resolution failed (no-match):"),
-    `expected a no-match resolution failure, got: ${result.error}`,
-  );
-  assert.equal(calls.lists, 0);
 });
 
 // ── atproto failures and pagination ──────────────────────────────────────
@@ -763,7 +739,6 @@ test("first publish works against the REAL client whose DID is undefined until t
     const url = new URL(String(input));
     const nsid = url.pathname.replace(/^.*\/xrpc\//, "");
     nsids.push(nsid);
-    if (nsid === "sh.tangled.repo.listPulls") return json(LIST_ONE);
     if (nsid === "com.atproto.server.createSession") {
       return json({ did: SESSION_DID, accessJwt: "jwt-access", refreshJwt: "jwt-refresh" });
     }
@@ -775,11 +750,11 @@ test("first publish works against the REAL client whose DID is undefined until t
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       assert.equal(body.repo, SESSION_DID);
       assert.equal(body.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
-      // #1691: creation is a putRecord at the deterministic pull rkey.
-      assert.equal(body.rkey, managedReviewRkey(PULL_URI));
+      // #1691: creation is a putRecord at the deterministic ticket-bound rkey.
+      assert.equal(body.rkey, managedReviewRkey(TICKET_URI));
       const record = body.record as Record<string, unknown>;
       assert.equal(record.reviewer, SESSION_DID);
-      assert.equal(record.pull, PULL_URI);
+      assert.equal(record.pull, TICKET_URI);
       return json({ uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${String(body.rkey)}`, cid: "bafynew" });
     }
     throw new Error(`unexpected XRPC call: ${nsid}`);
@@ -787,14 +762,13 @@ test("first publish works against the REAL client whose DID is undefined until t
   const api = new TangledPublishApi({
     context: makeCtx(),
     atproto: new TangledAtprotoClient({ host: "http://127.0.0.1:9999", handle: "bot.test", appPassword: "pw", timeoutMs: 5000, fetchImpl }),
-    fetchImpl,
-    timeoutMs: 5000,
+    reviewedIdentity: REVIEWED_IDENTITY,
   });
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.deepEqual(result, {
     ok: true,
     created: true,
-    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(PULL_URI)}`,
+    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
     updatedAt: result.updatedAt,
     action: "created",
   });
@@ -872,16 +846,14 @@ function makePublishApi(
   stub: TangledAtprotoClient,
   over: Partial<TangledContext> = {},
   currentHeadSha?: () => Promise<string | null>,
-): { api: RecordingTangledApi; calls: Call[] } {
-  const { fetchImpl, calls } = makeFetch(listPullsResponder);
+): { api: RecordingTangledApi } {
   const api = new RecordingTangledApi({
     context: makeCtx(over),
     atproto: stub,
-    fetchImpl,
-    timeoutMs: 5000,
+    reviewedIdentity: REVIEWED_IDENTITY,
     ...(currentHeadSha === undefined ? {} : { currentHeadSha }),
   });
-  return { api, calls };
+  return { api };
 }
 
 function publishInput(over: Partial<PublishInput> = {}): PublishInput {
@@ -1243,7 +1215,7 @@ test("#588: an unknown current head fails closed (no record written)", async () 
   assert.equal(result.status, "failed");
   assert.equal(
     result.error,
-    "Could not determine the current head of the pull request: Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head. Refusing to publish a potentially stale review.",
+    "Could not determine the current head of the pull request: Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head for the REVIEWED ticket's lineage — the reviewed ticket must still be open with its reviewed patch revision still newest. Refusing to publish a potentially stale review.",
     "the unknown head fails the #451 publication-boundary re-check closed, and says why",
   );
   assert.equal(calls.created.length, 0);

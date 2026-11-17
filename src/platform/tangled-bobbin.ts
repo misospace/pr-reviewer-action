@@ -2,7 +2,14 @@ import { PlatformRequestError, requestJson, type FetchLike } from "./http.js";
 import type { TangledContext } from "./tangled.js";
 
 /**
- * Read-side Bobbin client for Tangled pulls (#584).
+ * Read-side Bobbin client for Tangled pulls (#584) — LEGACY since the
+ * #1690 protocol pivot (2026-11-17): `resolveTangledPull` reads the
+ * pre-2026-10-28 `sh.tangled.repo.pull` model, which current Tangled
+ * replaced with `org.tangled.track.ticket` + `org.tangled.review.patch` in
+ * the repository account on the knot. No production caller remains (the
+ * adapter and publish seam resolve through tangled-ticket.ts); this module
+ * stays for #584's historical tests, and because `parseTangledAtUri` /
+ * `TangledResolverError` are shared infrastructure.
  *
  * This is the read-side backend step of the Tangled backend work: it pulls
  * the pull record(s) for a repository over Bobbin's public XRPC surface and

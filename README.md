@@ -130,8 +130,8 @@ The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is e
 
 | Feature | GitHub | Forgejo | Tangled (experimental) |
 |---|---|---|---|
-| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ⚠️ Degraded — the metadata read works, the diff read stops the run |
-| Managed sticky comment | ✅ Full | ✅ Full | ⚠️ Degraded — one managed AT-Proto review record, published after the diff read and the current-head proof land |
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ✅ Full — ticket + immutable patch revision from the repo account on the knot, and the diff/files derived from the revision's trusted base/head over the Git read surface |
+| Managed sticky comment | ✅ Full | ✅ Full | ✅ Full — one managed AT-Proto review record bound to the ticket, published only after the knot-proven current-head check passes |
 | Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors | ❌ Unsupported — Tangled has no inline review object |
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST | ❌ Unsupported — Tangled has no native verdict object |
 | Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST | ❌ Unsupported — the verdict stays in the review body |
@@ -140,7 +140,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is e
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) | ❌ Unsupported — the runner turns the CI gate off |
 | Evidence providers | ✅ Full | ✅ Full | ⚠️ Degraded — the provider commands read the checkout. A provider that calls the GitHub API does not work |
 | Tool harness | ✅ Full | ✅ Full | ⚠️ Degraded — the `gh_api` and `repo_contents` tools fail |
-| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ⚠️ Degraded — the engine path is shared, but a Tangled run reaches no verdict |
+| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ✅ Full — the engine path is shared, and a Tangled run reaches a verdict |
 
 Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
 
@@ -148,7 +148,7 @@ Forgejo Authorized Integrations can reuse managed sticky comments with repositor
 
 Tangled is not GitHub Actions, so `action.yml` is not the Tangled entry point. A Tangled review runs on the host-neutral runner, `node dist/index.js tangled`, in one plain Node process. The runner pins the platform to `tangled` and refuses a `github` or `forgejo` platform instead of falling back to another forge.
 
-A Tangled run does not complete today. The metadata read works, and the run stops at the diff read. After that, the publication step fails closed until a trustworthy current-head read exists ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)), because a review that cannot prove the pull did not advance is never published.
+A Tangled run completes end-to-end on the stock adapter on the current record model ([#1690](https://github.com/misospace/pr-reviewer-action/issues/1690)): the run resolves one `org.tangled.track.ticket` pull request plus its newest immutable `org.tangled.review.patch` revision from the repository account on the knot, derives the reviewed diff/files from that revision's trusted base/head over the Git read surface, and publishes the managed review record bound to the ticket. Publication stays fail-closed: the trustworthy current-head read ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)) must prove the pull did not advance, because a review that cannot prove that is never published.
 
 Read [Tangled (experimental)](docs/tangled.md) for the setup, the configuration, the identity model and the full support matrix. The copyable Spindle workflow example is [`examples/tangled-workflow.yml`](examples/tangled-workflow.yml).
 
