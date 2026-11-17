@@ -37,8 +37,8 @@ export interface ForgejoWebhookHandlerOptions {
   readonly rereviewLabel?: string | undefined;
   readonly onEvent: (event: CanonicalForgeEvent) => void | Promise<void>;
   /** operator-mode event router. When present, canonical `follow_up`
-   * delivery is handed to it (and never to `onEvent`); everything else
-   * unchanged. Absent → handler behaves exactly it did before. */
+   * delivery is handed to it (and never to `onEvent`); everything else is
+   * unchanged. Absent → handler behaves exactly as it did before. */
   readonly router?: OperatorEventRouter | undefined;
   /** #1678: the native-vocabulary projection that runs before the #728
    * normalizer. Defaults to the Forgejo projection; a Gitea intake passes
