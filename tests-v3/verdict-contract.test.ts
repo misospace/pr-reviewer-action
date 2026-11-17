@@ -209,7 +209,7 @@ test("#1681 round 4: hostile requirement text renders INERT in the closing block
   // INSIDE it, so no run can close the span early or open a fence.
   const line = block.split("\n").find((l) => l.startsWith(`- ${id!}:`))!;
   const quoted = line.slice(`- ${id!}: `.length);
-  assert.match(quoted, /^`[^``]*`$/, "the description renders as one inert code span");
+  assert.match(quoted, /^`[^`]*`$/, "the description renders as one inert code span");
   assert.ok(!block.includes("```"), "no fence run reaches the model");
   // No line of the block can forge heading structure.
   for (const l of block.split("\n")) assert.ok(!l.startsWith("#"), "no forged heading line");
