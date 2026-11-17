@@ -83,6 +83,13 @@ export const MATERIAL_DISPOSITION_CODES = [
    * execution failure, every call failed, the loop recorded a no-evidence
    * degradation) — a genuine capability failure, never a call count. */
   "investigation_unavailable",
+  /** #1678 hardening: the authoritative closing verdict failed the exact
+   * requirement-decision contract (missing/duplicate/unexpected/malformed
+   * rows, or coverage absent while in-scope requirements exist) even after
+   * the one bounded serialization correction — an invalid serialization,
+   * which can never certify approval and is distinct from the trace's
+   * per-row `mandatory_requirement_unresolved`. */
+  "verdict_contract_incomplete",
 ] as const;
 export type MaterialDispositionCode = (typeof MATERIAL_DISPOSITION_CODES)[number];
 
@@ -337,6 +344,8 @@ export const MATERIAL_CODE_CLAUSES: Readonly<Record<MaterialDispositionCode, str
   unverified_blocking_claim: "an open blocker/major claim could not be grounded or refuted",
   mandatory_requirement_unresolved: "a mandatory requirement remains unresolved",
   investigation_unavailable: "the investigation did not finish",
+  // #1678 hardening: name the SERIALIZATION failure, not a semantic unknown.
+  verdict_contract_incomplete: "the closing verdict did not decide every required requirement",
 });
 
 function incompleteWording(materialUnknowns: readonly DispositionEvidence[]): {

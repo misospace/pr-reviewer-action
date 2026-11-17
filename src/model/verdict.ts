@@ -395,6 +395,20 @@ function contentHasKnownSecret(response: unknown, secrets: readonly (string | nu
   return containsKnownSecret(text, secrets);
 }
 
+/**
+ * #1678 hardening: the bounded completion TEXT a verdict response carries,
+ * in the same shape the verdict parser consumes it. The verdict-contract
+ * correction turn echoes the invalid serialization back as an assistant
+ * message so the model repairs the exact object it emitted; the echo is
+ * length-capped because it rides a request, not an artifact.
+ */
+export function verdictCompletionText(response: unknown, maxChars = 8000): string {
+  if (!isRecord(response)) return "";
+  const raw = extractContent(response);
+  const text = Array.isArray(raw) ? raw.join("") : typeof raw === "string" ? raw : "";
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
+
 function extractContent(response: Record<string, unknown>): string | string[] | null {
   const choices = response.choices;
   if (Array.isArray(choices) && choices.length > 0) {

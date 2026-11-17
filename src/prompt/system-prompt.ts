@@ -226,6 +226,21 @@ export function applyRequirementTraceFragment(
   // #935: with a deterministic scope, ask only for the in-scope requirements
   // (none in scope: no trace instructions at all).
   if (scopeIds !== undefined && scopeIds.length === 0) return state;
+  // #1678: when a deterministic scope exists, the ledger guidance must demand
+  // the SAME exact set the closing-verdict contract validates. Out-of-scope
+  // ledger rows would make the closing serialization contract-invalid and
+  // burn the single bounded correction on scope instead of structure. Only
+  // the default sentence is replaced (this fragment is `isDefault`-gated
+  // above), so operator replace-mode prompts keep their own text.
+  if (scopeIds !== undefined && scopeIds.length > 0) {
+    state = {
+      ...state,
+      systemPrompt: state.systemPrompt.replace(
+        "Every requirement in the Requirement Ledger must be assessed in requirement_coverage.",
+        "Every requirement named in the trace scope or in the Required requirement decisions block must be assessed in requirement_coverage; no other requirement may carry a coverage row.",
+      ),
+    };
+  }
   let trace = bashCapture(rawFragment(assets, "requirement_trace"));
   if (trace === "") return state;
   if (scopeIds !== undefined) {

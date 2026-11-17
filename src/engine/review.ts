@@ -53,6 +53,17 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { buildTracePlan, TRACE_PLAN_ARTIFACT } from "../requirements/trace-plan.js";
+// #1678 hardening: one owner for the closing-verdict requirement-decision
+// contract (artifact, closing block, pre-acceptance validator, correction).
+import {
+  VERDICT_CONTRACT_ARTIFACT,
+  buildVerdictContract,
+  describeVerdictContractDiagnostics,
+  renderRequiredRequirementDecisionsBlock,
+  renderVerdictContractArtifact,
+  renderVerdictContractCorrectionMessage,
+  validateVerdictRequirementContract,
+} from "../requirements/verdict-contract.js";
 import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
@@ -2232,6 +2243,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     scopeIds: requirementTraceEnabled ? traceScopeIds : [],
     distributedHints,
   }))}\n`, "utf8"));
+  // #1678 hardening: the closing-verdict requirement-decision contract,
+  // derived from the SAME deterministic trace scope the validator uses (never
+  // a separately reconstructed list) and written beside the trace plan so
+  // every authoritative verdict lane — the native tool loop, the corpus
+  // review calls, and the disposition feed — consumes one expected set.
+  // Written even when the feature is disabled (ZERO rows) so a stale contract
+  // can never survive into a later run; a zero-row contract keeps every lane
+  // byte-identical to the pre-#1678 behavior.
+  const verdictContract = buildVerdictContract(ledgerValue, traceScopeIds);
+  ws.write(VERDICT_CONTRACT_ARTIFACT, Buffer.from(renderVerdictContractArtifact(verdictContract), "utf8"));
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   // #1003 human-review triage: an operator-only, review-only opt-in. The
   // fragment adds ONE question to the reviewer and nothing else — no tool,
@@ -2280,11 +2301,21 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // before it can reach the escalation, repair or enforcement stages.
   checkpoint();
   const userMessage = buildUserMessage(ws, "classification.json");
+  // #1678 hardening: the closing-local restatement of the exact in-scope
+  // requirement decisions rides at the END of the corpus user message — the
+  // last trusted text before the model answers — derived from the same
+  // deterministic trace scope the validator will use. An empty contract
+  // leaves the message byte-identical.
+  const requiredDecisionsBlock = renderRequiredRequirementDecisionsBlock(verdictContract);
+  const closingUserMessage = requiredDecisionsBlock === ""
+    ? userMessage
+    : `${userMessage}\n\n${requiredDecisionsBlock}`;
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
+    env, ws, profiles, streamBool, userMessage: closingUserMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
     signal: cancellation.scope.signal,
     generatedPaths, standards, runDir, workspace,
     ghApi: adapter.ghApi.bind(adapter),
+    verdictContractIds: traceScopeIds,
   });
   checkpoint();
   let analysisEngine = primary.analysisEngine;
@@ -2318,10 +2349,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ws.write("ai-output.primary.json", ws.read("ai-output.json") ?? new Uint8Array(0));
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
-      env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
+      env, ws, profiles, streamBool, userMessage: closingUserMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
       signal: cancellation.scope.signal,
       ghApi: adapter.ghApi.bind(adapter),
+      verdictContractIds: traceScopeIds,
     });
     delete env.TOOL_ESCALATION;
     checkpoint();
@@ -2971,6 +3003,20 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // independently prevent APPROVE.
     traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
     traceUnmetClaimed: traceUnmetClaimed,
+    // #1678 hardening: an authoritative closing verdict whose
+    // requirement_coverage is not EXACTLY the run's in-scope requirement set
+    // (after that lane's single bounded correction, if one ran) is an invalid
+    // SERIALIZATION, not seven semantic unknowns. Withheld as its own
+    // machine-readable material code so the INCOMPLETE reason names the
+    // contract failure, distinct from the trace's per-row
+    // `mandatory_requirement_unresolved`. The verdict lanes gate acceptance
+    // on this same validator; this feed is the deterministic backstop over
+    // whichever artifact ended up authoritative. A model-unavailable notice
+    // never carries a closing verdict, so it is exempt (it fails closed
+    // through its own path).
+    verdictContractIncomplete: analysisEngine !== MODEL_UNAVAILABLE_ENGINE
+      && traceScopeIds.length > 0
+      && !validateVerdictRequirementContract(reviewRecord.requirement_coverage, traceScopeIds).ok,
     // The exact-head CI floor: the CI gate's already-paid conclusion — a
     // KNOWN failure can never certify an approval; a PENDING one withholds
     // only when the #1594 head-bound evidence contract proves CI materially
@@ -4120,6 +4166,11 @@ interface ReviewCallInput {
    * request this input produces so an aborted caller tears the in-flight
    * provider request down instead of abandoning it. */
   readonly signal?: AbortSignal;
+  /** #1678 hardening: the run's exact in-scope requirement IDs (from the
+   * deterministic trace scope). A corpus closing verdict whose
+   * `requirement_coverage` is not exactly this set gets ONE bounded
+   * no-evidence correction before acceptance. Empty = no contract. */
+  readonly verdictContractIds?: readonly string[];
 }
 
 export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
@@ -4348,9 +4399,92 @@ async function callTier(
     // published output whenever the configured key is short (legal — `k` masks
     // every `k` in `blockers: 1`). The provider REFLECTION surface is the raw
     // body above, which is masked; the model never sees a header value.
-    const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
+    let artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
+    let acceptedRaw = outcome.rawResponse;
+    // #1678 hardening — PRE-ACCEPTANCE verdict-contract validation on the
+    // corpus lane (the sibling of `produceNativeVerdict`'s gate on the
+    // native lane). A closing verdict whose `requirement_coverage` is not
+    // EXACTLY the run's in-scope requirement IDs is an invalid
+    // serialization, never a semantic answer, and must not become the
+    // authoritative artifact unseen: the first verdict is discarded from
+    // authority, ONE no-tools, no-new-evidence correction request reuses
+    // the same system prompt + corpus with the deterministic structural
+    // error appended, and the corrected verdict is accepted only if it
+    // passes the entire contract. Still-invalid (or a failed correction
+    // request) leaves the original parsed record on disk for disclosure —
+    // approval itself is withheld by the deterministic
+    // `verdict_contract_incomplete` disposition feed. No second correction.
+    const contractIds = input.verdictContractIds ?? [];
+    const contractCheck = validateVerdictRequirementContract(artifact.requirement_coverage, contractIds);
+    if (!contractCheck.ok && contractIds.length > 0) {
+      errorLog(
+        `${profile.label}: closing verdict failed the requirement-decision contract (${describeVerdictContractDiagnostics(contractCheck)}); re-asking ONCE for a complete serialization — same conversation, no new evidence`,
+      );
+      const correctionUser = `${input.userMessage}\n\n${renderVerdictContractCorrectionMessage(contractCheck)}`;
+      const correctionRequestArtifact = requestArtifact.replace(/\.json$/, ".contract-correction.json");
+      const correctionResponseArtifact = responseArtifact.replace(/\.json$/, ".contract-correction.json");
+      ws.write(correctionRequestArtifact, pyJsonDumps(buildModelRequest({
+        apiFormat: profile.apiFormat,
+        model: profile.model,
+        system: env.SYSTEM_PROMPT ?? "",
+        user: correctionUser,
+        corpus: corpusText,
+        stream: profile.stream,
+        shape: profile.shape,
+        maxTokens: profile.maxTokens,
+        temperature: profile.temperature,
+        responseFormat: profile.responseFormat,
+        tokensParam: profile.tokensParam,
+        reasoningEffort: profile.reasoningEffort,
+        anthropicEffortSupported: profile.anthropicEffortSupported,
+        anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
+        anthropicCacheCheckpoint: true,
+      }).body));
+      const correction = await callModelTier(profile, {
+        system: env.SYSTEM_PROMPT ?? "",
+        user: correctionUser,
+        corpus: corpusText,
+      }, {
+        ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
+        priority: tier === "primary" ? GOVERNOR_PRIORITY_AUTHORITATIVE : GOVERNOR_PRIORITY_RECOVERY,
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+        call: async (chatInput) => {
+          const result = await runChatRequest({
+            ...chatInput,
+            ...(input.sleep !== undefined ? { sleep: (ms: number) => input.sleep!(ms / 1000) } : {}),
+            ...(input.signal !== undefined ? { signal: input.signal } : {}),
+          });
+          if (result.status === "failure") return result;
+          ws.write(correctionResponseArtifact, pyJsonDumps(redactTextDeep(result.raw, knownSecrets)));
+          return result;
+        },
+      });
+      if (correction.status === "ok") {
+        try {
+          const correctionParsed = parseVerdictResponse(correction.rawResponse, knownSecrets);
+          const correctionArtifact = reviewArtifactFromParsed(correctionParsed) as unknown as Record<string, unknown>;
+          const recheck = validateVerdictRequirementContract(correctionArtifact.requirement_coverage, contractIds);
+          if (recheck.ok) {
+            artifact = correctionArtifact;
+            acceptedRaw = correction.rawResponse;
+            // The response artifact must carry the SAME body the engine
+            // accepted (deep-redacted exactly like the primary write), so a
+            // debugging operator never reads a discarded serialization as
+            // the published verdict.
+            ws.write(responseArtifact, pyJsonDumps(redactTextDeep(correction.rawResponse, knownSecrets)));
+            log(`${profile.label}: the single verdict-contract correction returned a complete requirement table; the corrected serialization is authoritative`);
+          } else {
+            errorLog(`${profile.label}: the single contract correction stayed invalid (${describeVerdictContractDiagnostics(recheck)}) — approval will be withheld as a verdict-contract failure; no further correction`);
+          }
+        } catch (exc) {
+          errorLog(`${profile.label}: the single contract correction did not parse as a verdict (${exc instanceof Error ? exc.message : "unknown"}) — approval will be withheld as a verdict-contract failure; no further correction`);
+        }
+      } else {
+        errorLog(`${profile.label}: the single contract correction request failed (${correction.status}) — approval will be withheld as a verdict-contract failure; no further correction`);
+      }
+    }
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-    return { ok: true, artifact, rawResponse: outcome.rawResponse };
+    return { ok: true, artifact, rawResponse: acceptedRaw };
   }
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
