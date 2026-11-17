@@ -320,16 +320,24 @@ async function startMockPds(): Promise<MockPds> {
     }
     if (path === "/xrpc/com.atproto.repo.deleteRecord") {
       // #1691: a real PDS answers a successful delete with 200 and an
-      // EMPTY body — the mock matches that wire behavior.
+      // EMPTY body — the mock matches that wire behavior, including the
+      // 404 `RecordNotFound` for an already-missing record (the shape a
+      // concurrent reconcile loser sees).
       const request = JSON.parse(body) as { collection: string; rkey: string };
       if (request.collection !== TANGLED_MANAGED_REVIEW_COLLECTION) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "Unknown collection" }));
         return;
       }
+      const uri = `at://${BOT_DID}/${request.collection}/${request.rkey}`;
+      if (!records.has(uri)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "RecordNotFound", message: "no such record" }));
+        return;
+      }
       counter += 1;
       pds.deletes += 1;
-      records.delete(`at://${BOT_DID}/${request.collection}/${request.rkey}`);
+      records.delete(uri);
       res.statusCode = 200;
       res.end("");
       return;
@@ -645,6 +653,54 @@ test("#1691: a full runner round heals a pre-existing duplicate set instead of w
     assert.equal(world.pds.deletes, 1, "the superseded duplicate was deleted through the real client (empty-200 wire)");
     assert.equal(world.pds.puts, 1);
     assert.equal(world.pds.creates, 0);
+    assert.deepEqual(world.pds.server.handlerErrors, []);
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1691: concurrent reconcile: the loser's 404 on an already-deleted duplicate still updates the keeper", async () => {
+  const world = await startTangledWorld();
+  try {
+    // Seed the legacy duplicate set, then force BOTH concurrent runs to
+    // list it before either writes: both pick the same keeper and both
+    // delete the same superseded duplicate, so the loser's delete answers
+    // 404 RecordNotFound over the real wire — the interleaving that used
+    // to fail the run without ever updating the keeper.
+    const legacyMarker = "<!-- pr-reviewer managed review (legacy) -->";
+    const legacy = (rkey: string, createdAt: string, text: string) => ({
+      $type: TANGLED_MANAGED_REVIEW_COLLECTION,
+      pull: PULL_URI,
+      pullCid: PULL_CID,
+      pullRepoDid: REPO_DID,
+      reviewer: BOT_DID,
+      body: `${legacyMarker}\n${text}`,
+      createdAt,
+    });
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupa`,
+      legacy("3mqdupa", "2026-10-01T00:00:00.000Z", "Legacy review one."));
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      legacy("3mqdupb", "2026-10-02T00:00:00.000Z", "Legacy review two."));
+
+    world.pds.armListBarrier(2);
+    const marker = "<!-- pr-reviewer managed review (reconcile race) -->";
+    const [first, second] = await Promise.all([
+      makePublishApi(world, true).upsertStickyComment(marker, `${marker}\nReconcile race A.`),
+      makePublishApi(world, true).upsertStickyComment(marker, `${marker}\nReconcile race B.`),
+    ]);
+    assert.equal(first.ok, true, `first reconcile run failed: ${first.error}`);
+    assert.equal(second.ok, true, `loser reconcile run failed on its 404: ${second.error}`);
+    assert.equal(first.action, "reconciled");
+    assert.equal(second.action, "reconciled");
+    assert.equal(first.commentId, `at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      "both runs deterministically keep the newest createdAt record");
+    assert.equal(second.commentId, first.commentId);
+
+    const { uri, value } = soleManagedRecord(world);
+    assert.equal(uri, first.commentId);
+    assert.equal(world.pds.deletes, 1, "the duplicate was deleted once; the loser's second delete answered 404");
+    assert.match(String(value.body), /Reconcile race/);
+    assert.doesNotMatch(String(value.body), /Legacy review/, "the superseded body no longer stays visible");
     assert.deepEqual(world.pds.server.handlerErrors, []);
   } finally {
     await world.close();

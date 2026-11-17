@@ -244,7 +244,7 @@ test("deleteRecord: empty rkey rejected as a config error without any call", asy
   const client = new TangledAtprotoClient(makeConfig({ fetchImpl }));
   await assert.rejects(
     () => client.deleteRecord("app.test.thing", ""),
-    (e: unknown) => e instanceof TangledAtprotoError && e.kind === "config",
+    (e: unknown) => e instanceof TangledAtprotoError && e.kind === "config" && e.status === undefined,
   );
   assert.equal(calls.length, 0, "config validation precedes any session or network call");
 });
@@ -281,6 +281,9 @@ test("deleteRecord: 404 maps to a request-kind error carrying the status", async
     (e: unknown) => {
       assert.ok(e instanceof TangledAtprotoError);
       assert.equal(e.kind, "request");
+      // The structured status is what lets the #1691 reconcile loop tell an
+      // already-deleted duplicate (404, tolerable) from an unknown failure.
+      assert.equal(e.status, 404);
       assert.equal(e.message.includes("404"), true);
       assert.equal(e.message.includes("no such record"), true);
       return true;
@@ -505,6 +508,7 @@ test("4xx without token-error code throws request kind with status in message", 
     (e: unknown) => {
       assert.ok(e instanceof TangledAtprotoError);
       assert.equal(e.kind, "request");
+      assert.equal(e.status, 404);
       assert.equal(e.message.includes("404"), true);
       assert.equal(e.message.includes("no such record"), true);
       return true;

@@ -36,10 +36,16 @@ export type TangledAtprotoFailureKind = "config" | "auth" | "request" | "invalid
 export class TangledAtprotoError extends Error {
   readonly kind: TangledAtprotoFailureKind;
 
-  constructor(kind: TangledAtprotoFailureKind, message: string) {
+  /** The HTTP status behind a server-rejection error (`kind: "request"`
+   * thrown from `expectOkStatus`); undefined for config/auth/transport and
+   * invalid-response failures, which carry no server status. */
+  readonly status: number | undefined;
+
+  constructor(kind: TangledAtprotoFailureKind, message: string, status?: number) {
     super(message);
     this.name = "TangledAtprotoError";
     this.kind = kind;
+    this.status = status;
   }
 }
 
@@ -354,6 +360,7 @@ export class TangledAtprotoClient {
       "request",
       `AT-Proto ${nsid} returned HTTP ${result.status}` +
         (serverMessage === undefined ? "" : `: ${redactMessage(serverMessage, this.appPassword)}`),
+      result.status,
     );
   }
 

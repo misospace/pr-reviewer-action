@@ -13,7 +13,7 @@ import type {
   StickyResult,
   ThreadQueryResult,
 } from "./publish-api.js";
-import { TangledAtprotoClient } from "./tangled-atproto.js";
+import { TangledAtprotoClient, TangledAtprotoError } from "./tangled-atproto.js";
 import {
   parseTangledAtUri,
   resolveTangledPull,
@@ -270,12 +270,14 @@ export class TangledPublishApi implements PublishPlatformApi {
    *   SAME managed record keeps its identity);
    * - more than one pull-matching record → reconcile by the documented
    *   rule: keep the newest `createdAt` (tie → greater uri), update it in
-   *   place, delete the superseded duplicates, and report the count. Every
-   *   candidate is ours by construction (the filter pins reviewer to the
-   *   session DID, the pull URI, and the repo binding), so this only ever
-   *   removes the bot's own redundant records; a duplicate set can now only
-   *   predate the deterministic-rkey fix, and one run heals it — the old
-   *   permanent ambiguous wedge no longer exists.
+   *   place, delete the superseded duplicates, and report the count. A
+   *   duplicate the PDS already reports as missing (HTTP 404, deleted by a
+   *   concurrent reconcile run) counts as resolved without failing this
+   *   run. Every candidate is ours by construction (the filter pins
+   *   reviewer to the session DID, the pull URI, and the repo binding), so
+   *   this only ever removes the bot's own redundant records; a duplicate
+   *   set can now only predate the deterministic-rkey fix, and one run
+   *   heals it — the old permanent ambiguous wedge no longer exists.
    */
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
     if (typeof marker !== "string" || marker === "") {
@@ -335,9 +337,13 @@ export class TangledPublishApi implements PublishPlatformApi {
       // Duplicate set: resolve it per the documented rule instead of
       // wedging on ambiguity (#1691). Every uri is parsed and its rkey
       // validated BEFORE any mutation, so a malformed uri can never leave a
-      // half-applied reconciliation; a failed delete propagates through the
-      // outer catch and the next run reconciles the remainder from a fresh
-      // listing.
+      // half-applied reconciliation. A duplicate whose delete answers HTTP
+      // 404 (RecordNotFound) is already gone — a concurrent reconcile run
+      // deleted it first — which IS the intended end state, so it is
+      // tolerated and the keeper update still proceeds (a losing run must
+      // not exit 1 over an already-achieved deletion). Any other failed
+      // delete propagates through the outer catch and the next run
+      // reconciles the remainder from a fresh listing.
       const ours = pullMatching.map((candidate) => ({
         ...candidate,
         rkey: parseTangledAtUri(candidate.uri).rkey,
@@ -345,7 +351,11 @@ export class TangledPublishApi implements PublishPlatformApi {
       const keeper = pickKeeperRecord(ours);
       const superseded = ours.filter((candidate) => candidate !== keeper);
       for (const duplicate of superseded) {
-        await this.atproto.deleteRecord(TANGLED_MANAGED_REVIEW_COLLECTION, duplicate.rkey);
+        try {
+          await this.atproto.deleteRecord(TANGLED_MANAGED_REVIEW_COLLECTION, duplicate.rkey);
+        } catch (error) {
+          if (!(error instanceof TangledAtprotoError) || error.status !== 404) throw error;
+        }
       }
       await this.putManagedRecord(keeper.uri, record);
       return {

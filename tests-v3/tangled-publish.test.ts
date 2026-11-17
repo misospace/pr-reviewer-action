@@ -5,7 +5,7 @@ import {
   TangledPublishApi,
   managedReviewRkey,
 } from "../src/platform/tangled-publish.js";
-import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
+import { TangledAtprotoClient, TangledAtprotoError } from "../src/platform/tangled-atproto.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { ManagedInlineCommentRef, NativeReviewRequest, PublishReviewRef, ThreadQueryResult } from "../src/platform/publish-api.js";
@@ -108,6 +108,9 @@ interface StubOptions {
   /** #1691: `putRecord`/`deleteRecord` also mutate the store that
    * `listRecords` returns, like a real PDS. */
   stateful?: boolean;
+  /** rkeys whose `deleteRecord` throws the given error — e.g. a real PDS
+   * answering 404 `RecordNotFound` for an already-missing record. */
+  deleteErrors?: Array<{ rkey: string; error: Error }>;
 }
 
 function makeStub(options: StubOptions = {}): { client: TangledAtprotoClient; calls: StubCalls } {
@@ -176,6 +179,8 @@ function makeStub(options: StubOptions = {}): { client: TangledAtprotoClient; ca
     async deleteRecord(collection: string, rkey: string): Promise<void> {
       calls.deleted.push({ collection, rkey });
       if (options.throwOn === "delete") throw new Error("delete boom");
+      const injected = options.deleteErrors?.find((candidate) => candidate.rkey === rkey);
+      if (injected !== undefined) throw injected.error;
       if (options.stateful === true) {
         const uri = `at://${SESSION_DID}/${collection}/${rkey}`;
         const index = store.findIndex((candidate) => candidate.uri === uri);
@@ -199,6 +204,16 @@ function managedRecord(over: Partial<Record<string, unknown>> = {}): ListedRecor
     ...over,
   };
   return { uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${rkey}`, cid: "bafyold", value };
+}
+
+/** Exactly the error shape `TangledAtprotoClient.expectOkStatus` throws for
+ * a PDS rejection of the given HTTP status. */
+function pdsRequestError(status: number, message = "no such record"): TangledAtprotoError {
+  return new TangledAtprotoError(
+    "request",
+    `AT-Proto com.atproto.repo.deleteRecord returned HTTP ${status}: ${message}`,
+    status,
+  );
 }
 
 function makeApi(
@@ -489,11 +504,60 @@ test("invalid or missing createdAt sorts oldest; the next sequential run updates
   assert.equal(calls.puts[1]?.rkey, "3lab2");
 });
 
+test("the concurrent-reconcile loser tolerates a 404 on an already-deleted duplicate and still updates the keeper", async () => {
+  // Two runs reconciling the same duplicate set both list it before either
+  // writes; the loser's delete then targets a record the winner already
+  // deleted, and a real PDS answers 404 `RecordNotFound`. That IS the
+  // intended end state, so the run must still update the keeper and report
+  // success — a re-review round must not exit 1 over an already-achieved
+  // deletion.
+  const gone = managedRecord({ rkey: "3lab0", createdAt: "2026-05-01T00:00:00.000Z" });
+  const deletedByWinner = managedRecord({ rkey: "3lab1" });
+  const keeperValue = managedRecord({ rkey: "3lab2", createdAt: "2026-06-01T00:00:00.000Z" });
+  const { client, calls } = makeStub({
+    did: SESSION_DID,
+    records: [gone, deletedByWinner, keeperValue],
+    deleteErrors: [{ rkey: "3lab1", error: pdsRequestError(404) }],
+  });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true, `a 404 on an already-deleted duplicate must not fail the run: ${result.error}`);
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.supersededDuplicates, 2, "a duplicate already gone still counts as superseded");
+  assert.equal(result.commentId, keeperValue.uri);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey).sort(), ["3lab0", "3lab1"]);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, "3lab2", "the keeper update ran despite the 404");
+});
+
+test("a typed non-404 delete failure propagates: no keeper update, no reported success", async () => {
+  // Only a definite 404 proves the duplicate is already gone. A 500 leaves
+  // the deletion state unknown, so the reconciliation must not continue and
+  // claim success: the run fails, and the next run reconciles the remainder
+  // from a fresh listing.
+  const a = managedRecord({ rkey: "3lab1" });
+  const b = managedRecord({ rkey: "3lab2", createdAt: "2026-06-01T00:00:00.000Z" });
+  const { client, calls } = makeStub({
+    did: SESSION_DID,
+    records: [a, b],
+    deleteErrors: [{ rkey: "3lab1", error: pdsRequestError(500, "pds exploded") }],
+  });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /HTTP 500/);
+  assert.equal(result.action, undefined);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey), ["3lab1"]);
+  assert.equal(calls.puts.length, 0, "the keeper update never ran, so no success is reported");
+});
+
 test("a failed delete reports failure without pretending the put happened", async () => {
-  // The concurrent-reconcile loser lands here too: a duplicate another run
-  // deleted first makes `deleteRecord` answer 404, which the real client
-  // maps to a request-kind error (pinned in tangled-atproto.test.ts); this
-  // run fails honestly and the NEXT run reconciles what remains.
+  // Only NON-404 delete failures propagate: session-dead or PDS-down means
+  // the deletion state is unknown, so this run fails honestly and the NEXT
+  // run reconciles what remains from a fresh listing. (The loser's
+  // already-deleted 404 is the case pinned in the test above.)
   const a = managedRecord({ rkey: "3lab1" });
   const b = managedRecord({ rkey: "3lab2" });
   const { client, calls } = makeStub({ did: SESSION_DID, records: [a, b], throwOn: "delete" });
