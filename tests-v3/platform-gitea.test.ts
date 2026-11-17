@@ -23,6 +23,7 @@ import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { actionStageEnv } from "../src/run/action.js";
 import { buildChildEnv } from "../src/runtime/env.js";
 import { CI_GATE_ENV_KEYS } from "../src/gates/env.js";
+import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
 const INSTANCE = "https://git.example.internal:3000";
