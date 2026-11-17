@@ -130,8 +130,8 @@ The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is e
 
 | Feature | GitHub | Forgejo | Tangled (experimental) |
 |---|---|---|---|
-| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ✅ Full — metadata plus the pull's latest-round diff and files through the Bobbin/PDS chain |
-| Managed sticky comment | ✅ Full | ✅ Full | ✅ Full — one managed AT-Proto review record, published only after the knot-proven current-head check passes |
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ✅ Full — ticket + immutable patch revision from the repo account on the knot, and the diff/files derived from the revision's trusted base/head over the Git read surface |
+| Managed sticky comment | ✅ Full | ✅ Full | ✅ Full — one managed AT-Proto review record bound to the ticket, published only after the knot-proven current-head check passes |
 | Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors | ❌ Unsupported — Tangled has no inline review object |
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST | ❌ Unsupported — Tangled has no native verdict object |
 | Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST | ❌ Unsupported — the verdict stays in the review body |
@@ -148,7 +148,7 @@ Forgejo Authorized Integrations can reuse managed sticky comments with repositor
 
 Tangled is not GitHub Actions, so `action.yml` is not the Tangled entry point. A Tangled review runs on the host-neutral runner, `node dist/index.js tangled`, in one plain Node process. The runner pins the platform to `tangled` and refuses a `github` or `forgejo` platform instead of falling back to another forge.
 
-A Tangled run completes end-to-end on the stock adapter: metadata, latest-round diff and changed files ([#586](https://github.com/misospace/pr-reviewer-action/issues/586), wired by [#1690](https://github.com/misospace/pr-reviewer-action/issues/1690)), then managed-record publication. Publication stays fail-closed: the trustworthy current-head read ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)) must prove the pull did not advance, because a review that cannot prove that is never published.
+A Tangled run completes end-to-end on the stock adapter on the current record model ([#1690](https://github.com/misospace/pr-reviewer-action/issues/1690)): the run resolves one `org.tangled.track.ticket` pull request plus its newest immutable `org.tangled.review.patch` revision from the repository account on the knot, derives the reviewed diff/files from that revision's trusted base/head over the Git read surface, and publishes the managed review record bound to the ticket. Publication stays fail-closed: the trustworthy current-head read ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)) must prove the pull did not advance, because a review that cannot prove that is never published.
 
 Read [Tangled (experimental)](docs/tangled.md) for the setup, the configuration, the identity model and the full support matrix. The copyable Spindle workflow example is [`examples/tangled-workflow.yml`](examples/tangled-workflow.yml).
 

@@ -1012,8 +1012,9 @@ The Spindle runtime context normalization lives in
 the Bobbin pull resolver (#584), the AT-Proto record client (#837), the
 managed top-level review record (#588) and the host-neutral runner (#590).
 Tangled support is experimental. Since #1690 a run completes end-to-end on
-the stock adapter: the round-diff chain (#586) is wired into the read
-adapter, and publication stays fail-closed unless the trustworthy
+the stock adapter on the current record model (org.tangled.track.ticket +
+immutable org.tangled.review.patch, resolved from the repository account on
+the knot), and publication stays fail-closed unless the trustworthy
 current-head read (#1165) proves the pull did not advance.
 [`docs/tangled.md`](tangled.md) holds the support matrix, the setup and the
 guardrails.

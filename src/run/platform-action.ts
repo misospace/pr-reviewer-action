@@ -39,8 +39,10 @@ import { rawInputsFromEnv, runReview } from "./review.js";
   * pipeline-status seam exists): the CI gate is forced off here rather than
   * spawning a child the platform guard would refuse, exactly as the issue
   * permits. The read capability is fully wired since #1690: a real run
-  * completes precheck → review over the stock `TangledAdapter`'s round-diff
-  * chain (#586) and publishes through the production `buildPublishApi` —
+  * completes precheck → review over the stock `TangledAdapter`'s current-
+  * record-model resolution (ticket + newest immutable patch revision from
+  * the repository account on the knot, diff derived over the Git read
+  * surface) and publishes through the production `buildPublishApi` —
   * which stays fail-closed at the #451 current-head re-check (the #1165
   * knot patch-record read) whenever the knot cannot prove the current head.
   * That refusal is propagated as a non-zero outcome — a review that cannot

@@ -11,9 +11,13 @@ import {
 import type { TangledPullIdentity } from "./tangled-bobbin.js";
 
 /**
- * Tangled pull round diff (#586) — the thin orchestrator that turns a
- * resolved canonical Tangled pull identity into the reviewable
- * diff/files.
+ * Tangled pull round diff (#586) — LEGACY since the #1690 protocol pivot
+ * (2026-11-17): this chain decodes the pre-2026-10-28
+ * `sh.tangled.repo.pull` / `rounds[].patchBlob` model, which current
+ * Tangled replaced with `org.tangled.track.ticket` + immutable
+ * `org.tangled.review.patch` revisions. The production adapter no longer
+ * consumes this module (see tangled-ticket.ts + tangled-git.ts); it stays
+ * for #586's historical tests only.
  *
  * This is the network-completing half of the #586 work. `tangled-bobbin.ts`
  * (#584) already resolved the pull record into a `TangledPullIdentity`
@@ -64,9 +68,9 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  * through to `fetchAtprotoBlob`: production resolves with
  * `systemResolver` + `isPublicAddress` from the shared SSRF infrastructure.
  *
- * Production wiring (#1690): `TangledAdapter.getPrDiff`/`listPrFiles` drive
- * this chain against the adapter's resolved pull identity, so a real
- * Tangled run reaches the review engine with the latest round's patch.
+ * No production caller: the #1690 pivot derives the reviewed diff/files
+ * from the selected patch revision's trusted base/head through the Git
+ * read surface instead.
  */
 
 export interface TangledRoundDiffOptions {

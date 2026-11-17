@@ -15,12 +15,13 @@ import { longestBacktickRun } from "../src/context/fence.js";
  */
 
 const SESSION_DID = "did:plc:tester";
-const PULL_URI = "at://did:plc:author/sh.tangled.repo.pull/3mxb";
+const TICKET_RKEY = "3lzq4w5qk2c2a";
+const TICKET_URI = `at://did:plc:repo/org.tangled.track.ticket/${TICKET_RKEY}`;
 const REPO_DID = "did:plc:repo";
 const MARKER = "<!-- pr-reviewer managed review (run:abc123) -->";
 const BODY = `${MARKER}\n\nreview body text`;
 
-// ── Bobbin resolution transport (copied responder style) ────────────────
+// ── knot resolution transport (copied responder style) ──────────────────
 
 interface Call {
   url: URL;
@@ -60,22 +61,42 @@ function makeCtx(over: Partial<TangledContext> = {}): TangledContext {
   };
 }
 
-const LIST_ONE = {
-  items: [
-    {
-      uri: PULL_URI,
-      cid: "bafyrei2",
-      state: "open",
-      value: {
-        target: { branch: "main", repo: REPO_DID },
-        source: { branch: "feat/x" },
-      },
-    },
-  ],
-  cursor: null,
+/** The current-model knot records one resolution reads: one open
+ * pull-request ticket plus its newest immutable patch revision. */
+const TICKET_RECORD = {
+  uri: TICKET_URI,
+  cid: "bafyreiticket",
+  value: {
+    $type: "org.tangled.track.ticket",
+    title: "Publish me",
+    createdAt: "2026-01-02T03:04:05Z",
+    state: "open",
+    targetBranch: "main",
+  },
 };
 
-const listPullsResponder = (): Response => json(LIST_ONE);
+const PATCH_RECORD = {
+  uri: `at://${REPO_DID}/org.tangled.review.patch/bafyreipatch1`,
+  cid: "bafyreipatch1",
+  value: {
+    $type: "org.tangled.review.patch",
+    ticket: TICKET_URI,
+    base: { oid: "1111111111111111111111111111111111111111" },
+    head: { oid: "2222222222222222222222222222222222222222" },
+    createdAt: "2026-01-02T03:04:05Z",
+    source: { repo: REPO_DID, branch: "feat/x" },
+  },
+};
+
+const listPullsResponder = (): Response => json({ records: [TICKET_RECORD] });
+
+/** The knot serves ticket and patch collections from the repo account. */
+const knotRecordsResponder = (url: URL): Response => {
+  const collection = url.searchParams.get("collection");
+  if (collection === "org.tangled.track.ticket") return json({ records: [TICKET_RECORD] });
+  if (collection === "org.tangled.review.patch") return json({ records: [PATCH_RECORD] });
+  return json({ records: [] });
+};
 
 // ── AT-Proto stub client ────────────────────────────────────────────────
 
@@ -144,7 +165,7 @@ function managedRecord(over: Partial<Record<string, unknown>> = {}): ListedRecor
   delete over.rkey;
   const value: Record<string, unknown> = {
     $type: TANGLED_MANAGED_REVIEW_COLLECTION,
-    pull: PULL_URI,
+    pull: TICKET_URI,
     pullRepoDid: REPO_DID,
     reviewer: SESSION_DID,
     body: MARKER,
@@ -157,7 +178,7 @@ function managedRecord(over: Partial<Record<string, unknown>> = {}): ListedRecor
 function makeApi(
   stub: TangledAtprotoClient,
   over: Partial<TangledContext> = {},
-  fetchResponder: (url: URL, init?: RequestInit) => Response | Promise<Response> = listPullsResponder,
+  fetchResponder: (url: URL, init?: RequestInit) => Response | Promise<Response> = knotRecordsResponder,
 ): { api: TangledPublishApi; calls: Call[] } {
   const { fetchImpl, calls } = makeFetch(fetchResponder);
   const api = new TangledPublishApi({ context: makeCtx(over), atproto: stub, fetchImpl, timeoutMs: 5000 });
@@ -193,11 +214,12 @@ test("first publish creates exactly one record with the full contract shape", as
     "sourceSha",
   ]);
   assert.equal(record.$type, TANGLED_MANAGED_REVIEW_COLLECTION);
-  assert.equal(record.pull, PULL_URI);
-  assert.equal(record.pullCid, "bafyrei2");
+  assert.equal(record.pull, TICKET_URI);
+  assert.equal(record.pullCid, "bafyreiticket", "pullCid is the ticket record's CID");
   assert.equal(record.pullRepoDid, REPO_DID);
   assert.equal(record.reviewer, SESSION_DID);
-  assert.equal(record.sourceSha, makeCtx().sourceSha);
+  assert.equal(record.sourceSha, "2222222222222222222222222222222222222222",
+    "sourceSha is the resolved patch revision's trusted head.oid");
   assert.equal(record.body, BODY);
   assert.equal(typeof record.createdAt, "string");
   assert.notEqual(new Date(String(record.createdAt)).toString(), "Invalid Date");
@@ -207,14 +229,16 @@ test("first publish creates exactly one record with the full contract shape", as
   for (const value of Object.values(record)) assert.notEqual(value, undefined);
 });
 
-test("record omits sourceSha when the context has none (never undefined)", async () => {
+test("sourceSha is the resolved revision's head regardless of the launch-time context (never undefined)", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
-  const { api } = makeApi(client, { sourceSha: undefined });
+  // The launch-time TANGLED_PR_SOURCE_SHA is advisory: the record binds the
+  // resolved patch revision's trusted head, whatever the context carried.
+  const { api } = makeApi(client, { sourceSha: "f".repeat(40) });
 
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.equal(result.ok, true);
   const record = calls.created[0]?.record ?? {};
-  assert.equal("sourceSha" in record, false);
+  assert.equal(record.sourceSha, "2222222222222222222222222222222222222222");
   assert.equal("pullCid" in record, true);
   assert.deepEqual(JSON.parse(JSON.stringify(record)), record);
 });
@@ -238,7 +262,7 @@ test("re-review updates the SAME record: putRecord with the same rkey, no second
   assert.equal(calls.puts[0]?.rkey, "3lab1");
   assert.equal(calls.puts[1]?.rkey, "3lab1");
   assert.equal(calls.puts[0]?.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
-  assert.equal(calls.puts[0]?.record.pull, PULL_URI);
+  assert.equal(calls.puts[0]?.record.pull, TICKET_URI);
 });
 
 test("pull resolution is memoized: two upserts trigger exactly ONE resolution", async () => {
@@ -247,7 +271,7 @@ test("pull resolution is memoized: two upserts trigger exactly ONE resolution", 
 
   await api.upsertStickyComment(MARKER, BODY);
   await api.upsertStickyComment(MARKER, BODY);
-  assert.equal(calls.length, 1, "expected exactly one Bobbin listPulls call across two upserts");
+  assert.equal(calls.length, 2, "one ticket + one patch knot read across two upserts");
 });
 
 test("wrong reviewer identity is ignored → treated as no managed record → creates fresh", async () => {
@@ -324,7 +348,7 @@ test("two pull-matching records, none marker-matching → fail closed, no mutati
   assert.equal(result.created, false);
   assert.ok(result.error?.includes("ambiguous"), `expected "ambiguous" in: ${result.error}`);
   // Distinct from the marker-matching ambiguity message.
-  assert.notEqual(result.error, "ambiguous managed review: 2 marker-matching records exist for pull " + PULL_URI);
+  assert.notEqual(result.error, "ambiguous managed review: 2 marker-matching records exist for ticket " + TICKET_URI);
   assert.equal(calls.created.length, 0);
   assert.equal(calls.puts.length, 0);
 });
@@ -366,9 +390,9 @@ test("pull resolution failure surfaces the kind deterministically, zero ATProto 
   assert.equal(calls.puts.length, 0);
 });
 
-test("pull resolution no-match (empty listing) is surfaced with its kind", async () => {
+test("pull resolution no-match (empty ticket collection) is surfaced with its kind", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
-  const { api } = makeApi(client, {}, () => json({ items: [], cursor: null }));
+  const { api } = makeApi(client, {}, () => json({ records: [] }));
 
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.equal(result.ok, false);
@@ -496,7 +520,9 @@ test("first publish works against the REAL client whose DID is undefined until t
     const url = new URL(String(input));
     const nsid = url.pathname.replace(/^.*\/xrpc\//, "");
     nsids.push(nsid);
-    if (nsid === "sh.tangled.repo.listPulls") return json(LIST_ONE);
+    if (nsid === "com.atproto.repo.listRecords" && url.searchParams.get("repo") === REPO_DID) {
+      return knotRecordsResponder(url);
+    }
     if (nsid === "com.atproto.server.createSession") {
       return json({ did: SESSION_DID, accessJwt: "jwt-access", refreshJwt: "jwt-refresh" });
     }
@@ -510,7 +536,7 @@ test("first publish works against the REAL client whose DID is undefined until t
       assert.equal(body.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
       const record = body.record as Record<string, unknown>;
       assert.equal(record.reviewer, SESSION_DID);
-      assert.equal(record.pull, PULL_URI);
+      assert.equal(record.pull, TICKET_URI);
       return json({ uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3new`, cid: "bafynew" });
     }
     throw new Error(`unexpected XRPC call: ${nsid}`);
@@ -597,7 +623,7 @@ function makePublishApi(
   over: Partial<TangledContext> = {},
   currentHeadSha?: () => Promise<string | null>,
 ): { api: RecordingTangledApi; calls: Call[] } {
-  const { fetchImpl, calls } = makeFetch(listPullsResponder);
+  const { fetchImpl, calls } = makeFetch(knotRecordsResponder);
   const api = new RecordingTangledApi({
     context: makeCtx(over),
     atproto: stub,

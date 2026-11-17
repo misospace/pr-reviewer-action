@@ -1,7 +1,9 @@
 import { gunzipSync } from "node:zlib";
 
 /**
- * Tangled pull patch decoding (#586).
+ * Tangled pull patch decoding (#586) — LEGACY since the #1690 protocol
+ * pivot (decodes the pre-2026-10-28 `rounds[].patchBlob` envelope model;
+ * no production caller remains, see tangled-ticket.ts + tangled-git.ts).
  *
  * The deterministic, pure half of the Tangled backend work: it selects the
  * current reviewable round of a Tangled pull and decodes the round's blob
