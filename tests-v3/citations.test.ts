@@ -28,6 +28,7 @@ test("parseCitationLocation rejects anything that names no head location", () =>
     "https://x/y:80",
     "src/a.ts:0",
     "src/a.ts:-12", // the base-side anchor is not a head location
+    "src/a.ts:232-206", // reversed plain range: malformed, not a citation
     "src/a.ts:+232-206:1", // reversed range
     "src/a.ts:+0",
     "line 12", // no path
@@ -71,4 +72,7 @@ test("extraction is bounded, de-duplicated, and order preserving", () => {
   assert.deepEqual(found[0], { file: "src/f0.ts", line: 1 });
   const dup = extractCitationLocations("src/a.ts:1 then src/a.ts:1 again src/a.ts:2");
   assert.deepEqual(dup, [{ file: "src/a.ts", line: 1 }, { file: "src/a.ts", line: 2 }]);
+  // Pathological length cites nothing: the shipped channels cap evidence far
+  // below this, and the prose scan is quadratic on adversarial input.
+  assert.deepEqual(extractCitationLocations(`${"a".repeat(9000)}.ts:12`), []);
 });

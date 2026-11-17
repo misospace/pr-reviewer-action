@@ -101,8 +101,11 @@ export interface ArtifactThreadDisposition {
 
 export interface ArtifactHumanReviewDisposition {
   review_id: string;
-  disposition: "addressed" | "not_addressed";
+  disposition: "addressed" | "not_addressed" | "unresolved";
   evidence: string | null;
+  /** #1681 r6: which authority answered — the settled human-thread concerns
+   * (the single current-head truth), or the model's own duplicate claim. */
+  basis?: "thread-settlement" | "model-claim";
 }
 
 export interface ReviewArtifact {

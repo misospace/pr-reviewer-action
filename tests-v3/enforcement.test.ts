@@ -1808,3 +1808,96 @@ test("#1681 r6: a human change request `addressed` requires a resolving citation
   assert.equal(settled(run("src/a.ts:999999 closes it")), "not_addressed", "an out-of-range line cannot either");
   assert.equal(settled(run("the prose says it is addressed")), "not_addressed");
 });
+
+// ---------------------------------------------------------------------------
+// #1681 r6: ONE current-head answer for an outstanding human change request.
+// The settled human-thread concern states are the authority; the duplicate
+// `human_review_dispositions` claim may never contradict them, and physical
+// conversation state never gates.
+// ---------------------------------------------------------------------------
+
+test("#1681 r6: the human change request aggregates the settled thread concerns — addressed", () => {
+  const threads = ["h1", "h2", "h3"].map((id) =>
+    botMajor(id, { severity: "blocker", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "h1", disposition: "fixed", evidence: "src/a.ts:9 closes the first concern" },
+      { thread_id: "h2", disposition: "fixed", evidence: "src/a.ts:21 fixes the second" },
+      { thread_id: "h3", disposition: "fixed", evidence: "src/a.ts:33 resolves the third" },
+    ],
+    // The model's DUPLICATE answer contradicts its own thread work: the
+    // settled concerns are authoritative, the duplicate never wins.
+    human_review_dispositions: [{ review_id: "5931073237", disposition: "not_addressed", evidence: "leftover prose" }],
+  });
+  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "5931073237", login: "joryirving", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "addressed", "every settled concern addressed → the request is addressed");
+  assert.equal(record.basis, "thread-settlement", "the answer rides the settled concerns, not the duplicate claim");
+  const markdown = String(a.review_markdown);
+  assert.ok(markdown.includes("judged addressed at this head"));
+  assert.ok(!markdown.includes("not shown addressed"), "one answer — never addressed AND not-addressed");
+  assert.ok(!markdown.includes("needs the reviewer's own re-review"));
+});
+
+test("#1681 r6: a still-present human concern makes the change request not addressed", () => {
+  const threads = ["h1", "h2", "h3"].map((id) =>
+    botMajor(id, { severity: "major", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "h1", disposition: "fixed", evidence: "src/a.ts:9 closes the first concern" },
+      { thread_id: "h2", disposition: "fixed", evidence: "src/a.ts:21 fixes the second" },
+      { thread_id: "h3", disposition: "open", evidence: "still present at this head: the guard is missing exactly as the thread says" },
+    ],
+  });
+  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "not_addressed", "a proven-present concern dominates the fixed ones");
+  assert.equal(record.basis, "thread-settlement");
+});
+
+test("#1681 r6: a genuinely un-reassessed concern yields unresolved, never a collapsed addressed", () => {
+  const threads = ["h1", "h2", "h3"].map((id) =>
+    botMajor(id, { severity: "major", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "h1", disposition: "fixed", evidence: "src/a.ts:9 closes the first concern" },
+      { thread_id: "h2", disposition: "fixed", evidence: "src/a.ts:21 fixes the second" },
+      // h3: no disposition given — genuinely not reassessed.
+    ],
+    human_review_dispositions: [{ review_id: "r1", disposition: "addressed", evidence: "src/a.ts:1" }],
+  });
+  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "unresolved", "the model's optimistic duplicate cannot collapse a real unknown");
+  assert.match(String(a.review_markdown), /is unresolved at this head/);
+  assert.ok(!String(a.review_markdown).includes("judged addressed"));
+});
+
+test("#1681 r6: with no settled human threads the model claim remains the answer", () => {
+  const a = artifact({
+    verdict: "approve",
+    thread_dispositions: [],
+    human_review_dispositions: [{ review_id: "r1", disposition: "addressed", evidence: "src/a.ts:1" }],
+  });
+  applyHumanReviewEnforcement(a, [
+    { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "addressed");
+  assert.equal(record.basis, "model-claim", "no concerns settled ⇒ nothing to aggregate, the claim stands");
+});

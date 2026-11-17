@@ -54,6 +54,35 @@ export interface HumanReviewEnforcementResult {
 }
 
 /**
+ * The ONE current-head answer for an outstanding human change request,
+ * aggregated from the settled human-thread concern states the thread
+ * settlement just recorded (#1681 r6). The threads a human reviewer raised
+ * ARE the material concerns of their change request; their settled semantic
+ * states — proven fixed (`addressed`), still present at head (`present`),
+ * or genuinely un-evaluated (`unresolved`) — decide the aggregate:
+ * - every concern addressed → `addressed`
+ * - any concern still present → `not_addressed`
+ * - otherwise any concern unresolved → `unresolved` (a genuine unknown is
+ *   never collapsed into `addressed`)
+ * Returns null when the run carried no human threads at all: with no
+ * settled concerns there is nothing to aggregate, and the model's own
+ * grounded claim remains the answer. Physical conversation state is not an
+ * input — a human thread may stay open forever without gating this.
+ */
+export function aggregateHumanConcerns(
+  dispositions: readonly Record<string, unknown>[] | undefined,
+): "addressed" | "not_addressed" | "unresolved" | null {
+  if (!Array.isArray(dispositions) || dispositions.length === 0) return null;
+  const concerns = dispositions
+    .map((entry) => (typeof entry?.concern === "string" ? entry.concern : null))
+    .filter((state): state is string => state !== null);
+  if (concerns.length === 0) return null;
+  if (concerns.includes("present")) return "not_addressed";
+  if (concerns.includes("unresolved")) return "unresolved";
+  return "addressed";
+}
+
+/**
  * Settle every outstanding human change request against the model's
  * dispositions, in place. Dispositions other than the two literal words (or
  * `addressed` whose evidence cites current-head code) downgrade to
@@ -62,7 +91,11 @@ export interface HumanReviewEnforcementResult {
  * — the same grammar and validator the requirement trace and thread
  * settlement use — so the report cannot simultaneously call a request
  * addressed (the reviewer's re-review prose) and ungrounded (a citation
- * format mismatch in this parallel channel). Without grounding (legacy
+ * format mismatch in this parallel channel). When this run settled
+ * human-authored threads, the AGGREGATED concern states are the authority
+ * and override an omitted, malformed, or contradicting duplicate claim —
+ * the report answers the change request exactly once, from the same
+ * current-head truth the Findings set uses. Without grounding (legacy
  * unit callers) the historical lexical reading stands. Always returns
  * applied:false — this pass never counts as enforcement and never produces
  * a banner reason; the human remains the merge gate, and physical
@@ -94,11 +127,12 @@ export function applyHumanReviewEnforcement(
     }
   }
 
-  const settled: Array<{ review_id: string; disposition: string; evidence: string | null }> = [];
+  const settled: Array<{ review_id: string; disposition: string; evidence: string | null; basis: "thread-settlement" | "model-claim" }> = [];
+  const aggregate = aggregateHumanConcerns(artifact.thread_dispositions as readonly Record<string, unknown>[] | undefined);
   for (const reviewId of byId.keys()) {
     const entry = given.get(reviewId) ?? {};
     let disposition = entry.disposition as string | undefined;
-    const evidence = typeof entry.evidence === "string" ? entry.evidence : null;
+    let evidence = typeof entry.evidence === "string" ? entry.evidence : null;
     if (disposition === undefined || !HUMAN_REVIEW_DISPOSITIONS.includes(disposition)) {
       disposition = "not_addressed";
     } else if (disposition === "addressed") {
@@ -107,13 +141,23 @@ export function applyHumanReviewEnforcement(
         : extractCitationLocations(evidence).some((loc) => grounding.resolveLocation(loc.file, loc.line));
       if (!grounded) disposition = "not_addressed";
     }
-    settled.push({ review_id: reviewId, disposition, evidence });
+    let basis: "thread-settlement" | "model-claim" = "model-claim";
+    if (aggregate !== null) {
+      // The settled human-thread concerns are the authoritative current-head
+      // answer; the duplicate model claim may never contradict it. A
+      // model-consistent claim keeps its (grounded) evidence for disclosure.
+      if (aggregate !== disposition) evidence = null;
+      disposition = aggregate;
+      basis = "thread-settlement";
+    }
+    settled.push({ review_id: reviewId, disposition, evidence, basis });
   }
 
   artifact.human_review_dispositions = settled.map((record) => ({
     review_id: record.review_id,
     disposition: record.disposition,
     evidence: record.evidence,
+    basis: record.basis,
   }));
 
   const lines = ["", "", "## Outstanding Human Change Requests", ""];
@@ -128,7 +172,10 @@ export function applyHumanReviewEnforcement(
     }
     const who = `@${review.login || "unknown"}`;
     if (record.disposition === "addressed") {
-      lines.push(`- ${who}'s change request (${where}) judged addressed at this head: ${inlineCode(record.evidence)}`);
+      const detail = record.evidence !== null ? inlineCode(record.evidence) : "every concern raised in this review is settled by current-head evidence";
+      lines.push(`- ${who}'s change request (${where}) judged addressed at this head: ${detail}`);
+    } else if (record.disposition === "unresolved") {
+      lines.push(`- ${who}'s change request (${where}) is unresolved at this head: one or more of its concerns could not be re-evaluated against the current code, so the review cannot claim it addressed.`);
     } else {
       lines.push(`- ${who}'s change request (${where}) is not shown addressed at this head; it stays unresolved until proven at the reviewed head.`);
     }

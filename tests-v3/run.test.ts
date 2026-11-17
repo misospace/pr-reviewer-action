@@ -6642,3 +6642,69 @@ test("#1688: covered app-code investigation reaches a native approval", async ()
     assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify({ disposition: result.finalDisposition, body: api.submitted[0]!.body }));
   } finally { await server.close(); cleanup(); }
 });
+
+test("#1681 r6: settled human concerns outrank a contradicting duplicate human-review claim", async () => {
+  // Three human findings from the prior REQUEST_CHANGES review, every one
+  // settled fixed at the current head — while the model's DUPLICATE
+  // `human_review_dispositions` answer still says not_addressed. The
+  // aggregated settled concerns are the single current-head truth; the
+  // published report answers the change request exactly once, addressed,
+  // and no manual thread resolution is required.
+  const human = (id: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 20,
+      user: { login: "joryirving", type: "User" },
+      created_at: "2026-11-17T01:26:24Z",
+      updated_at: "2026-11-17T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "All three prior blockers are fixed at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:+1-1:0 the carried bot concern is fixed too" },
+      { thread_id: "PRRT_corpus1", disposition: "fixed", evidence: "src/engine/review.ts:+10-14:1 the lane is non-authoritative now" },
+      { thread_id: "PRRT_schema2", disposition: "fixed", evidence: "src/engine/review.ts:+20-24:2 the schema pins exact N up front" },
+      { thread_id: "PRRT_payload3", disposition: "fixed", evidence: "src/engine/review.ts:+30-34:3 the correction rides the effective payload" },
+    ],
+    human_review_dispositions: [{
+      review_id: "5931073237",
+      disposition: "not_addressed",
+      evidence: "stale duplicate answer contradicting the thread work",
+    }],
+  }, {
+    identity: "alice",
+    headFiles: { "README.md": "x\n", "src/engine/review.ts": "x\n".repeat(40) },
+    extraThreads: [
+      human("PRRT_corpus1", "Major: a still-invalid corpus correction is kept as semantic authority.\n"),
+      human("PRRT_schema2", "Major: the exact-N schema is only consulted after the response arrives.\n"),
+      human("PRRT_payload3", "Major: the correction payload is rebuilt from first, not the effective payload.\n"),
+    ],
+    reviews: [{
+      id: 5931073237,
+      user: { login: "joryirving", type: "User" },
+      state: "CHANGES_REQUESTED",
+      body: "Three functional blockers.\n",
+      commit_id: "a".repeat(40),
+      submitted_at: "2026-11-17T01:26:24Z",
+    }],
+  });
+  const settled = (artifact.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(settled.disposition, "addressed", "the settled concern states outrank the duplicate claim");
+  assert.equal(settled.basis, "thread-settlement");
+  const markdown = String(artifact.review_markdown);
+  assert.ok(markdown.includes("judged addressed at this head"));
+  assert.ok(!markdown.includes("not shown addressed"), "exactly one answer — never both");
+  assert.ok(!markdown.includes("needs the reviewer's own re-review"));
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id), false);
+  assert.deepEqual(result.finalDisposition?.materialUnknowns ?? [], [], "physical open threads gate nothing");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/);
+});

@@ -465,6 +465,22 @@ export function applyReviewThreadEnforcement(
       record.enforced = note;
       downgraded += 1;
     }
+    // #1681 r6: a human-authored thread additionally carries its SEMANTIC
+    // concern state at this head — the single current-head answer the
+    // human-change-request settlement aggregates. Proven fixed →
+    // `addressed`; a supported `open` (no forcing note) → `present`; any
+    // forced/unsupported/unevaluated reading (including a `fixed` whose
+    // citation did not resolve, and an unverifiable live state) →
+    // `unresolved`, never collapsed into either settled answer.
+    if (authorship === "human") {
+      record.concern = disposition === "fixed"
+        ? "addressed"
+        : state !== "live_unresolved"
+          ? "unresolved"
+          : disposition === "open" && note === null
+            ? "present"
+            : "unresolved";
+    }
     settled.push(record);
     if (disposition === "withdrawn") settledWithdrawn += 1;
     if (reassessment === "invalid") invalidated += 1;

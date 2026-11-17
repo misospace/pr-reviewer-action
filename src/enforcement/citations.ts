@@ -90,6 +90,10 @@ export function parseCitationLocation(ref: unknown): CitationLocation | null {
   if (plain !== null) {
     const line = Number(plain[2]);
     if (!Number.isSafeInteger(line) || line <= 0) return null;
+    if (plain[3] !== undefined) {
+      const end = Number(plain[3]);
+      if (!Number.isSafeInteger(end) || end < line) return null;
+    }
     return { file: plain[1] as string, line };
   }
   const anchor = DIFF_ANCHOR_RE.exec(trimmed);
@@ -129,7 +133,7 @@ function stripEdgePunctuation(token: string): string {
  * prose out of the candidate set while `src/a.b/x.ts` stays in. */
 function looksLikeFilePath(path: string): boolean {
   if (path === "" || /\s/.test(path)) return false;
-  if (path.includes("://")) return false;
+  if (path.includes("://") || path.includes("//")) return false;
   const base = path.slice(path.lastIndexOf("/") + 1);
   return /\.[A-Za-z][A-Za-z0-9]*$/.test(base);
 }
@@ -147,6 +151,10 @@ const PROSE_CITATION_RE =
  * head. Bounded, order-preserving, de-duplicated. */
 export function extractCitationLocations(text: string | null | undefined): CitationLocation[] {
   if (typeof text !== "string" || text.trim() === "") return [];
+  // Self-defense for future callers: the shipped channels cap evidence at
+  // ~1k chars, and the prose regex is quadratic on adversarial runs of
+  // word characters, so a pathologically long string cites nothing.
+  const input = text.length > 8192 ? "" : text;
   const out: CitationLocation[] = [];
   const seen = new Set<string>();
   const push = (file: string, line: number): void => {
@@ -158,10 +166,10 @@ export function extractCitationLocations(text: string | null | undefined): Citat
     seen.add(key);
     out.push({ file, line });
   };
-  for (const match of text.matchAll(PROSE_CITATION_RE)) {
+  for (const match of input.matchAll(PROSE_CITATION_RE)) {
     // Skip the path part of a URL: `http://host/x.ts:80` names a host, not a
     // repository file, even though the suffix looks like a line number.
-    if (text.slice(Math.max(0, match.index - 3), match.index) === "://") continue;
+    if (input.slice(Math.max(0, match.index - 3), match.index) === "://") continue;
     const groups = match.groups ?? {};
     const file = groups.path ?? "";
     const line = groups.line !== undefined ? Number(groups.line) : Number(groups.kwline);
@@ -170,7 +178,7 @@ export function extractCitationLocations(text: string | null | undefined): Citat
   // Directory-qualified bare path tokens (no `:line`, no "line N"): a repo
   // path in prose is file-level provenance (`src/x/y.ts`); a bare filename
   // or a sentence fragment like "e.g." names no location.
-  for (const raw of text.split(/\s+/)) {
+  for (const raw of input.split(/\s+/)) {
     if (out.length >= MAX_EXTRACTED_LOCATIONS) break;
     const token = stripEdgePunctuation(raw);
     if (token === "" || hasControlBytes(token)) continue;
