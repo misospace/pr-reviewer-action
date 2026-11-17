@@ -28,7 +28,9 @@
 //
 // The second nuance is the label delivery: Gitea's `IssuePayload` and
 // `PullRequestPayload` carry NO top-level `label` field, so the trigger label
-// for a `label_updated` delivery is always read out of the PR's own label list.
+// for a `label_updated` delivery is always read out of the PR's own label
+// list — which is already the shared Forgejo projection's behavior, so label
+// deliveries need no Gitea-specific projection at all.
 //
 // Security posture is inherited unchanged from `webhook-handler.ts` and
 // `forgejo-events.ts`: the HMAC covers the RAW BODY ONLY, so both event headers
@@ -104,64 +106,18 @@ function projectGiteaCommentEvent(payload: Record<string, unknown>): Record<stri
   return projected;
 }
 
-/** The effective trigger label: the operator-configured value, falling back to
- * the "ai-review" default on an absent or EMPTY option — the same `||`
- * convention the #728 normalizer and the precheck use, so the projection and the
- * normalizer can never disagree on which label triggers a re-review. */
-function rereviewLabelOf(options: { rereviewLabel?: string }): string {
-  return options.rereviewLabel || "ai-review";
-}
-
-/** The `label` the projected `labeled` envelope carries. A usable top-level
- * label is passed through UNCHANGED (the normalizer's byte-exact comparison owns
- * that decision). Otherwise the PR's own label list is scanned for a BYTE-EXACT
- * match on the trusted trigger label, and on a match the label is emitted as the
- * trusted constant — never as a copy of payload text — so a hostile label cannot
- * forge the trigger. On no match the sentinel `""` maps to `unknown` downstream. */
-function projectedLabel(payload: Record<string, unknown>, rereview: string): unknown {
-  const label = payload.label;
-  if (typeof label === "string" || (isPlainObject(label) && typeof label.name === "string")) {
-    return label;
-  }
-  const pr = payload.pull_request;
-  const labels = isPlainObject(pr) ? pr.labels : undefined;
-  if (Array.isArray(labels)) {
-    for (const entry of labels) {
-      // Only a plain object with a byte-exact string `name` can match; strings,
-      // numbers, arrays and nulls are skipped, and a `"__proto__"` entry is just
-      // an array element, never a property access.
-      if (isPlainObject(entry) && typeof entry.name === "string" && entry.name === rereview) {
-        return { name: rereview };
-      }
-    }
-  }
-  return "";
-}
-
-/** Project one Gitea label delivery onto the canonical `labeled` shape. Gitea
- * sends no top-level `label`, so the trigger comes from the PR's own list. */
-function projectGiteaLabelEvent(
-  payload: Record<string, unknown>,
-  options: { rereviewLabel?: string },
-): Record<string, unknown> {
-  const projected: Record<string, unknown> = {
-    ...payload,
-    name: "pull_request",
-    action: "labeled",
-  };
-  projected.label = projectedLabel(payload, rereviewLabelOf(options));
-  return projected;
-}
-
 /** Project a raw native Gitea delivery onto the GitHub-shaped envelope the #728
  * normalizer accepts.
  *
  * Gitea's grouped header for a PR sync is already `pull_request` (its
  * `HookEventPullRequestSync.Event()` maps into that group), and
  * `pull_request_label` / `pull_request_comment` appear as both group and type
- * values, so the shared projection covers Gitea's vocabulary. This wrapper
- * re-decides only the two families where Gitea's payload shape differs, and
- * delegates everything else, so the two forges cannot drift.
+ * values, so the shared projection covers Gitea's vocabulary — including the
+ * label delivery: its fail-closed scan already reads the trigger byte-exact
+ * out of the PR's own label list, so there is deliberately no second
+ * implementation of it here. This wrapper re-decides only the family where
+ * Gitea's payload shape actually differs — the PR comment — and delegates
+ * everything else, so the two forges cannot drift.
  *
  * Every hint stays gated on the SIGNED `action`, exactly as in
  * `forgejo-events.ts`: a captured terminal delivery replayed with forged sync,
@@ -176,8 +132,8 @@ export function projectGiteaWebhookPayload(
   const group = eventHeader === "pull_request_sync" ? "pull_request" : eventHeader;
   const action = typeof payload.action === "string" ? payload.action : "";
 
-  // The two Gitea branches below read untrusted fields directly, so they are
-  // contained: a hostile accessor on `issue` / `pull_request` / `label` degrades
+  // The Gitea branch below reads untrusted fields directly, so it is
+  // contained: a hostile accessor on `issue` / `pull_request` degrades
   // to the SHARED projection (which is itself total) rather than escaping this
   // boundary. Without the guard the module's "never throws" claim would hold
   // only by construction.
@@ -197,13 +153,6 @@ export function projectGiteaWebhookPayload(
       return projectGiteaCommentEvent(payload);
     }
 
-    // PR label delivery: grouped `pull_request` with a `label_updated` action, or
-    // the `pull_request_label` group header. Both are gated on the same signed
-    // action, so a label hint on a non-label body degrades to the shared
-    // projection's passthrough (which maps to `unknown`).
-    if (action === "label_updated" && (group === "pull_request" || eventHeader === "pull_request_label")) {
-      return projectGiteaLabelEvent(payload, options);
-    }
   } catch {
     // Fall through to the shared projection. It never synthesizes a name this
     // boundary would not have produced, and it never rethrows.
