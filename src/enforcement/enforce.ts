@@ -418,7 +418,7 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
     }
   }
 
-  const humanReviews = applyHumanReviewEnforcement(artifact, inputs.humanReviews, inputs.citationGrounding);
+  const humanReviews = applyHumanReviewEnforcement(artifact, inputs.humanReviews, inputs.citationGrounding, threads.settled);
   if (humanReviews.applied) {
     applied += 1;
     // Human change-request settlement never forces a verdict, so it never

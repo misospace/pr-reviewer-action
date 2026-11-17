@@ -174,6 +174,13 @@ export interface EnforcementThread {
 export interface ThreadEnforcementResult {
   applied: boolean;
   reason: string;
+  /** #1681 r7b: the DETERMINISTIC settled records this pass stamped (every
+   * return path, including the empty one). These — not the artifact field,
+   * which still holds the model's RAW rows when the pass early-returns with
+   * no carried threads — are the only authoritative `concern` /
+   * `parent_review_id` provenance, so a model-fabricated pair can never
+   * settle a human change request. */
+  settled: readonly Record<string, unknown>[];
 }
 
 /** #1645: settlement-time reconciliation states for a listed thread against
@@ -264,7 +271,7 @@ export function applyReviewThreadEnforcement(
   grounding?: EvidenceGrounding | null,
 ): ThreadEnforcementResult {
   if (!Array.isArray(threads) || threads.length === 0) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled: [] };
   }
   const counts: Record<ThreadReconciliationState, number> = {
     live_unresolved: 0,
@@ -609,7 +616,7 @@ export function applyReviewThreadEnforcement(
   }
 
   if (settled.length === 0) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled: [] };
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
@@ -666,10 +673,11 @@ export function applyReviewThreadEnforcement(
     }
   }
   if (!changed) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled };
   }
   return {
     applied: true,
+    settled,
     reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}${unreassessed.size > 0 ? `, ${unreassessed.size} blocking concern(s) without current-head re-evaluation` : ""}`,
   };
 }

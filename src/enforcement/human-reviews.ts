@@ -13,7 +13,7 @@ import type { ReviewArtifact } from "./artifact.js";
 import { evidenceCitesCode } from "./threads.js";
 import { extractCitationLocations, type EvidenceGrounding } from "./citations.js";
 
-export const HUMAN_REVIEW_DISPOSITIONS: readonly string[] = ["addressed", "not_addressed"];
+export const HUMAN_REVIEW_DISPOSITIONS: readonly string[] = ["addressed", "not_addressed", "unresolved"];
 
 /**
  * Render model-written text as one bounded inline code span: whitespace
@@ -101,7 +101,9 @@ export function aggregateHumanConcernsForReview(
  * addressed (the reviewer's re-review prose) and ungrounded (a citation
  * format mismatch in this parallel channel). When this run settled
  * human-authored threads THIS submission owns (forge-proven parent review
- * id), the aggregated concern states are the authoritative answer for that
+ * id in the settlement's OWN records — never the artifact field, which can
+ * still carry raw model rows when the thread pass early-returned), the
+ * aggregated concern states are the authoritative answer for that
  * request and override an omitted, malformed, or contradicting duplicate
  * claim — the report answers each change request exactly once, from the
  * same current-head truth the Findings set uses. A review with no
@@ -116,6 +118,7 @@ export function applyHumanReviewEnforcement(
   artifact: ReviewArtifact,
   reviews: readonly EnforcementHumanReview[] | null,
   grounding?: EvidenceGrounding | null,
+  settledThreads?: readonly Record<string, unknown>[] | null,
 ): HumanReviewEnforcementResult {
   if (!Array.isArray(reviews) || reviews.length === 0) {
     return { applied: false, reason: "" };
@@ -139,7 +142,14 @@ export function applyHumanReviewEnforcement(
   }
 
   const settled: Array<{ review_id: string; disposition: string; evidence: string | null; basis: "thread-settlement" | "model-claim" }> = [];
-  const threadDispositions = artifact.thread_dispositions as readonly Record<string, unknown>[] | undefined;
+  // #1681 r7b: the ONLY aggregation input is the deterministic settlement's
+  // own records (passed explicitly by the enforcement pipeline). The
+  // artifact field is NOT consumed: when the thread pass early-returned
+  // with no carried threads it still holds the model's RAW rows, and a
+  // fabricated `parent_review_id` + `concern` pair there must never settle
+  // a human change request. No records ⇒ no attributable concerns ⇒ every
+  // review keeps its own grounded model claim.
+  const threadDispositions = settledThreads ?? undefined;
   for (const reviewId of byId.keys()) {
     const entry = given.get(reviewId) ?? {};
     let disposition = entry.disposition as string | undefined;

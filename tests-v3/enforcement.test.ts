@@ -448,7 +448,7 @@ test("required-check structured key absent or unusable is unresolved; no keyword
 });
 
 test("thread settlement handles no rows, missing/fixed evidence, and retained valid dispositions", () => {
-  assert.deepEqual(applyReviewThreadEnforcement(artifact(), [], "model"), { applied: false, reason: "" });
+  assert.deepEqual(applyReviewThreadEnforcement(artifact(), [], "model"), { applied: false, reason: "", settled: [] });
   const a = artifact({ thread_dispositions: [{ thread_id: "bad", disposition: "fixed", evidence: "text" }, { thread_id: "good", disposition: "fixed", evidence: "src/good.ts:12" }, { thread_id: "disputed", disposition: "disputed", evidence: null }] });
   const threads = ["missing", "bad", "good", "disputed"].map((thread_id) => ({ thread_id, path: `src/${thread_id}.ts`, line: 2, severity: "minor", message: "thread", own_finding: false, replies: 1 }));
   const result = applyReviewThreadEnforcement(a, threads, "model");
@@ -1838,10 +1838,10 @@ test("#1681 r6: the human change request aggregates the settled thread concerns 
     // settled concerns are authoritative, the duplicate never wins.
     human_review_dispositions: [{ review_id: "5931073237", disposition: "not_addressed", evidence: "leftover prose" }],
   });
-  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  const settlement = applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "5931073237", login: "joryirving", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "addressed", "every settled concern addressed → the request is addressed");
   assert.equal(record.basis, "thread-settlement", "the answer rides the settled concerns, not the duplicate claim");
@@ -1872,10 +1872,10 @@ test("#1681 r6: a still-present human concern makes the change request not addre
       { thread_id: "h3", disposition: "open", evidence: "still present at this head: the guard is missing exactly as the thread says" },
     ],
   });
-  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  const settlement = applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "not_addressed", "a proven-present concern dominates the fixed ones");
   assert.equal(record.basis, "thread-settlement");
@@ -1901,10 +1901,10 @@ test("#1681 r6: a genuinely un-reassessed concern yields unresolved, never a col
     ],
     human_review_dispositions: [{ review_id: "r1", disposition: "addressed", evidence: "src/a.ts:1" }],
   });
-  applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
+  const settlement = applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2", "h3"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "unresolved", "the model's optimistic duplicate cannot collapse a real unknown");
   assert.match(String(a.review_markdown), /is unresolved at this head/);
@@ -1951,12 +1951,12 @@ test("#1681 r7: two human reviews settle independently — A addressed, B not ad
       { thread_id: "b1", disposition: "open", evidence: "still present at this head: the guard is missing exactly as the thread says" },
     ],
   });
-  applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB")], "strict",
+  const settlement = applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB")], "strict",
     liveListing("a1", "a2", "b1"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
     { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
   assert.equal(settled.get("revA")!.disposition, "addressed", "A's own threads are all fixed — B's defect must not drag it down");
   assert.equal(settled.get("revB")!.disposition, "not_addressed", "B's proven-present concern settles B, not A");
@@ -1975,13 +1975,13 @@ test("#1681 r7: a body-only human review keeps its grounded model claim; A keeps
       { review_id: "revB", disposition: "not_addressed", evidence: "the body-only complaint still stands; src/a.ts:40 proves nothing here" },
     ],
   });
-  applyReviewThreadEnforcement(a, [
+  const settlement = applyReviewThreadEnforcement(a, [
     botMajor("a1", { severity: "major", category: "bug", own_finding: false, authorship: "human", message: "A's concern", parent_review_id: "revA" }),
   ], "strict", liveListing("a1"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
     { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
   assert.equal(settled.get("revA")!.disposition, "addressed");
   assert.equal(settled.get("revA")!.basis, "thread-settlement");
@@ -2003,12 +2003,12 @@ test("#1681 r7: unknown parent-review identity is never guessed onto a review", 
       { review_id: "revA", disposition: "not_addressed", evidence: "unrelated prose src/a.ts:40" },
     ],
   });
-  applyReviewThreadEnforcement(a, [
+  const settlement = applyReviewThreadEnforcement(a, [
     botMajor("u1", { severity: "major", category: "bug", own_finding: false, authorship: "human", message: "unowned concern" }),
   ], "strict", liveListing("u1"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "revA", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const settledThread = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.ok(!("parent_review_id" in settledThread), "no forge link ⇒ nothing is stamped, nothing is guessed");
   const settled = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
@@ -2038,12 +2038,12 @@ test("#1681 r7: per-review unknown is not dragged by another review's fixed thre
     // An optimistic global claim may not collapse A's real unknown.
     human_review_dispositions: [{ review_id: "revA", disposition: "addressed", evidence: "src/a.ts:1" }],
   });
-  applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB"), owned("b2", "revB")], "strict",
+  const settlement = applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB"), owned("b2", "revB")], "strict",
     liveListing("a1", "a2", "b1", "b2"), headGrounding(["src/a.ts"]));
   applyHumanReviewEnforcement(a, [
     { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
     { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
-  ], headGrounding(["src/a.ts"]));
+  ], headGrounding(["src/a.ts"]), settlement.settled);
   const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
   assert.equal(settled.get("revA")!.disposition, "unresolved", "one un-reassessed own concern keeps A unresolved");
   assert.equal(settled.get("revB")!.disposition, "addressed", "B's own threads are all settled — A's gap must not drag it down");
@@ -2077,4 +2077,45 @@ test("#1681 r7: a disclosure note is not a downgrade — proven-addressed human 
   const settled = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(settled.length, 2);
   assert.ok(settled.every((record) => record.disposition === "fixed" && typeof record.enforced === "string"));
+});
+
+test("#1681 r7b: a model-fabricated concern/parent pair in the artifact can never settle a human review", () => {
+  // The aggregation consumes ONLY the deterministic settlement's own
+  // records. With no carried threads the pass early-returns and the
+  // artifact still holds the model's RAW rows — a fabricated
+  // `parent_review_id` + `concern: addressed` pair there must be inert:
+  // the review keeps its own (here absent → fail-closed) model claim.
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "forged-1", disposition: "fixed", evidence: "whatever", parent_review_id: "revA", concern: "addressed" },
+      { thread_id: "forged-2", disposition: "fixed", evidence: "whatever", parent_review_id: "revA", concern: "addressed" },
+    ],
+  });
+  const settlement = applyReviewThreadEnforcement(a, [], "strict", liveListing(), headGrounding(["src/a.ts"]));
+  assert.equal(settlement.applied, false, "no carried threads: the pass writes nothing");
+  assert.deepEqual([...settlement.settled], [], "the authoritative record set is empty");
+  applyHumanReviewEnforcement(a, [
+    { review_id: "revA", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]), settlement.settled);
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.basis, "model-claim", "fabricated thread rows are never thread-settlement provenance");
+  assert.equal(record.disposition, "not_addressed", "absent claim fails closed — the forgery cannot mark the request addressed");
+});
+
+test("#1681 r7b: a model-issued `unresolved` human claim is accepted, not coerced", () => {
+  // HUMAN_REVIEW_DISPOSITIONS matches the artifact vocabulary: a reviewer
+  // that genuinely could not re-evaluate says `unresolved` and keeps it.
+  const a = artifact({
+    verdict: "approve",
+    human_review_dispositions: [{ review_id: "r1", disposition: "unresolved", evidence: "the concern predates this checkout" }],
+  });
+  applyHumanReviewEnforcement(a, [
+    { review_id: "r1", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ]);
+  const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "unresolved");
+  assert.equal(record.basis, "model-claim");
+  assert.match(String(a.review_markdown), /is unresolved at this head/);
 });
