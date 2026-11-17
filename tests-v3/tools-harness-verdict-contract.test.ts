@@ -308,3 +308,81 @@ test("#1678: duplicated plus missing rows both trigger the ONE correction", asyn
   assert.match(correctionUser, /Duplicate/);
   assert.match(correctionUser, /Do not call any tools/);
 });
+
+// ---------------------------------------------------------------------------
+// #1678 review round 3: the correction inherits the EFFECTIVE successful
+// payload — a token-cap raise spent on the #637 retry must carry into the
+// correction, or the "complete" re-emit truncates again under the old budget
+// and the run falsely lands on verdict_contract_incomplete.
+// ---------------------------------------------------------------------------
+
+test("#1678: a streamed token-cap truncation's raised budget carries into the contract correction", async () => {
+  const ids = requirementIds(9);
+  const calls: Array<Record<string, unknown>> = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, payload) => {
+    calls.push(structuredClone(payload) as Record<string, unknown>);
+    if (calls.length === 1) {
+      // The raise's exact evidence shape: token-cap-truncated streamed body.
+      return { choices: [{ message: { content: "not a verdict body" }, finish_reason: "length" }] };
+    }
+    if (calls.length === 2) {
+      // The raised non-streamed retry parses fine but returns the organic
+      // #1681 partial table (2 of 9).
+      return coverageVerdict([coverageRow(ids[0]!), coverageRow(ids[1]!)]);
+    }
+    return coverageVerdict(ids.map((id) => coverageRow(id)));
+  }, {
+    requirementContractIds: ids,
+    verdictPayload: {
+      messages: [{ role: "user", content: "the whole tool-loop conversation" }],
+      stream: true,
+      model: "test-model",
+      max_tokens: 512,
+    },
+  }));
+
+  assert.equal(outcome.ok, true, "the correction recovers the complete table");
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.retryKind, "stream");
+  assert.equal(outcome.transport, "non-streamed-contract-correction");
+  assert.equal(outcome.attempts, 3, "streamed + raised retry + exactly one correction");
+  assert.equal(calls.length, 3);
+  assert.equal(outcome.budgetRaisedTo, 2048);
+  const retry = calls[1]!;
+  const correction = calls[2]!;
+  assert.equal(retry.max_tokens, 2048, "the retry carries the raise");
+  assert.equal(correction.max_tokens, 2048, "the correction INHERITS the raised budget — rebuilding from the original 512 would truncate the complete table again");
+  assert.equal(correction.model, "test-model", "the correction keeps the model/format shape");
+  assert.equal(correction.stream, false);
+  assert.equal("stream_options" in correction, false);
+  // The conversation base is the RETRY payload's messages (the effective
+  // successful attempt), plus exactly the echo and the correction turn.
+  assertCorrectionTurn(calls, 1, 2, 1, coverageVerdictText([coverageRow(ids[0]!), coverageRow(ids[1]!)]));
+  assert.equal(outcome.contractCorrection?.recovered, true);
+});
+
+test("#1678: the correction inherits response_format and other request-shape fields from the effective payload", async () => {
+  const ids = requirementIds(2);
+  const calls: Array<Record<string, unknown>> = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, payload) => {
+    calls.push(structuredClone(payload) as Record<string, unknown>);
+    if (calls.length === 1) return coverageVerdict([coverageRow(ids[0]!)]);
+    return coverageVerdict(ids.map((id) => coverageRow(id)));
+  }, {
+    requirementContractIds: ids,
+    verdictPayload: {
+      messages: [{ role: "user", content: "the whole tool-loop conversation" }],
+      stream: false,
+      model: "test-model",
+      max_tokens: 512,
+      response_format: { type: "json_schema", json_schema: { name: "pr_review", strict: true } },
+    },
+  }));
+  assert.equal(outcome.ok, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls[1]!.response_format,
+    { type: "json_schema", json_schema: { name: "pr_review", strict: true } },
+    "the run-pinned schema rides the correction — the corrected answer is shaped by the same exact-N contract",
+  );
+});

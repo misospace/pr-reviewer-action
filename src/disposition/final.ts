@@ -243,6 +243,16 @@ export interface FinalDispositionInput {
   reviewProduced: boolean;
   /** True when the run produced a parseable final verdict. */
   validVerdict: boolean;
+  /** #1678 round 3: a corpus lane CLOSED on the closing-verdict
+   * requirement-decision contract (parseable verdict, invalid
+   * serialization, one correction spent) and the run carries only the
+   * fixed notice — no authoritative semantic verdict exists. This is NOT
+   * capability failure: the review RAN and deterministically proved the
+   * serialization incomplete, so the disposition is INCOMPLETE/COMMENT
+   * over the material `verdict_contract_incomplete` code, never the
+   * generic `unavailable` abstention (which would misname a quality
+   * stop as a capability failure). */
+  verdictContractFailed?: boolean;
   /** The final verdict ("approve" | "request_changes" | "" when none). It
    * is an input, never proof of a defect on its own — a blocking
    * conclusion with no grounded/proven evidence behind it is a material
@@ -401,7 +411,18 @@ export function computeFinalDisposition(input: FinalDispositionInput): FinalDisp
 
   let kind: FinalDispositionKind;
   let reason: FinalDispositionReason;
-  if (!input.reviewProduced || !input.validVerdict) {
+  if (input.verdictContractFailed === true) {
+    // #1678 round 3: the lane CLOSED on the exact-set contract. The review
+    // capability worked — it ran, parsed, and deterministically proved the
+    // closing serialization incomplete — so this settles as INCOMPLETE over
+    // the material `verdict_contract_incomplete` evidence entry, NOT the
+    // generic capability abstention below (whose reason would misname a
+    // quality stop as `review_failed`). It can never approve: no
+    // authoritative verdict exists, and the material entry keeps even the
+    // withhold-inside-approve floor out.
+    kind = "incomplete";
+    reason = "material_unknown";
+  } else if (!input.reviewProduced || !input.validVerdict) {
     kind = "unavailable";
     reason = input.reviewProduced ? "no_verdict" : "review_failed";
   } else if (input.degraded) {

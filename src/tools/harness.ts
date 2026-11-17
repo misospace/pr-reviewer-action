@@ -1094,6 +1094,15 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 
   const first: Record<string, unknown> = { ...input.verdictPayload, stream: Boolean(input.verdictPayload.stream) };
   const attemptedStream = Boolean(first.stream);
+  // #1678 review: the EFFECTIVE payload of the attempt that actually
+  // produced this turn's last response. The contract correction builds on
+  // THIS shape — a #637 retry's raised completion budget, the #1687
+  // transport-retry adjustments included — never on the original first
+  // payload: rebuilding from `first` after a token-cap raise would ask the
+  // model to re-emit a COMPLETE table under the budget that already
+  // truncated it, converting a recoverable serialization into a false
+  // `verdict_contract_incomplete`.
+  let effectivePayload: Record<string, unknown> = first;
 
   let attempts = 0;
   let retried = false;
@@ -1211,6 +1220,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
       detail = "non-streamed retry payload carries no messages — not sent";
       finalBudgetRaisedTo = null;
     } else {
+      effectivePayload = retryPayload;
       const retry = await request(retryPayload);
       attempts += 1;
       response = retry.response;
@@ -1288,6 +1298,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           ? Math.max(1, Math.trunc(input.turnTimeout - failedElapsed))
           : undefined;
         const retryStartMs = performance.now();
+        effectivePayload = retryPayload;
         const retry = await request(retryPayload, timeoutCap);
         attempts += 1;
         transportRetry = recordFor((performance.now() - retryStartMs) / 1000);
@@ -1338,7 +1349,13 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         duplicated_ids: [...firstDiags.duplicated],
         unexpected_ids: [...firstDiags.unexpected],
       };
-      const baseMessages = Array.isArray(first.messages) ? first.messages : null;
+      // The EFFECTIVE successful payload is the base: its model, format/
+      // schema, and the completion budget that actually produced this
+      // response (the #637 raise included). The correction changes ONLY
+      // what it intentionally changes: the conversation gains the rejected
+      // assistant serialization plus the deterministic no-tools correction
+      // turn, and the request goes non-streamed (`stream_options` drops).
+      const baseMessages = Array.isArray(effectivePayload.messages) ? effectivePayload.messages : null;
       const correctionRemaining = input.deadline - timeFn();
       if (baseMessages === null || baseMessages.length === 0 || correctionRemaining <= 0) {
         // Fail closed WITHOUT a wire call (the #1464 boundary): a correction
@@ -1354,7 +1371,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           { role: "user", content: renderVerdictContractCorrectionMessage(firstDiags) },
         ];
         const correctionPayload: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(first)) {
+        for (const [k, v] of Object.entries(effectivePayload)) {
           if (k !== "stream_options") correctionPayload[k] = v;
         }
         correctionPayload.stream = false;

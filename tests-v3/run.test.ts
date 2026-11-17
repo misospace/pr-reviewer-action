@@ -2367,10 +2367,8 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
       review_markdown: "Fallback request-changes review.\n",
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -2436,10 +2434,8 @@ test("#978: fallback no-evidence unverifiable trace blocks bypass without synthe
       review_markdown: "Fallback request-changes review with unverifiable trace.\n",
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unverifiable",
-        enforcement: [],
-        test: [],
-        reason: "The available evidence does not establish that source SHA is checked.",
+        status: "unknown",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "The available evidence does not establish that source SHA is checked." }],
       }],
     })));
   });
@@ -4904,10 +4900,8 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
         // No file at this path exists in the checkout at all — the
         // malformed-location case, distinct from the real #854 shape below
         // (where the cited line exists but only copies the value).
-        disposition: "met",
-        enforcement: [{ file: "src/context-resolution.ts", line: 42 }],
-        test: [],
-        reason: "resolveContext compares ctx.sourceSha against the pull's head",
+        status: "satisfied",
+        evidence: [{ kind: "file", ref: "src/context-resolution.ts:42", detail: "resolveContext compares ctx.sourceSha against the pull's head" }],
       }],
     })));
   });
@@ -4964,10 +4958,8 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unverifiable",
-        enforcement: [],
-        test: [],
-        reason: "The available evidence does not establish that source SHA is checked.",
+        status: "unknown",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "The available evidence does not establish that source SHA is checked." }],
       }],
     })));
   });
@@ -5025,10 +5017,11 @@ test("#1658: a 'met' claim citing a real line that only copies the value is the 
         // The real #854 defect: the cited line EXISTS and even names the
         // right field, but only copies ctx.sourceSha onto the output —
         // nothing ever compares it. Location existence must not pass this.
-        disposition: "met",
-        enforcement: [{ file: "src/context-resolution.ts", line: 5 }],
-        test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-        reason: "sourceSha is present on the resolved context object",
+        status: "satisfied",
+        evidence: [
+          { kind: "file", ref: "src/context-resolution.ts:5", detail: "sourceSha is present on the resolved context object" },
+          { kind: "test", ref: "tests/context-resolution.test.ts:1", detail: "sourceSha is present on the resolved context object" },
+        ],
       }],
     })));
   });
@@ -5131,10 +5124,8 @@ test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, nev
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -5188,10 +5179,8 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -5240,10 +5229,8 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });

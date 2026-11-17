@@ -388,67 +388,12 @@ export function renderVerdictContractCorrectionMessage(diagnostics: VerdictContr
 }
 
 /**
- * The run-specific strict verdict schema: the pinned verdict schema with
- * `requirement_coverage` narrowed from nullable to an EXACT-N array whose
- * `requirement_id` is enum-pinned to the expected set. Schema support is an
- * aid, never the authority — the deterministic validator stays the gate for
- * prompt-only and capability-stripped providers. The base
- * {@link OPENAI_VERDICT_JSON_SCHEMA} object is never mutated (its byte pin
- * is a separate, frozen contract).
+ * The run-specific strict verdict schema lives with the wire layer that
+ * owns the frozen base schema ({@link ../model/request.ts}
+ * {@link buildRunVerdictSchema}), so both the native
+ * verdict turn and every corpus review call pin the SAME builder output —
+ * and the pinning code can never import-cycle against the schema it pins.
+ * Re-exported here so every consumer keeps importing the contract from this
+ * single owner module.
  */
-export function buildRunVerdictSchema(
-  expectedIds: readonly string[],
-  baseSchema: Record<string, unknown> = OPENAI_VERDICT_JSON_SCHEMA,
-): Record<string, unknown> {
-  const schema = structuredClone(baseSchema) as Record<string, unknown>;
-  const inner = (schema.json_schema as { schema: Record<string, unknown> } | undefined)?.schema;
-  const properties = (asPlainObject(inner)?.properties as Record<string, unknown> | undefined) ?? null;
-  const baseCoverage = properties === null
-    ? null
-    : asPlainObject(properties.requirement_coverage);
-  const baseItems = baseCoverage === null
-    ? null
-    : asPlainObject(baseCoverage.items);
-  if (properties === null || baseCoverage === null || baseItems === null) {
-    // A base schema without the canonical `requirement_coverage` shape is
-    // returned unchanged: no pin, no invented property. The deterministic
-    // validator remains the gate either way.
-    return schema;
-  }
-  const coverage = structuredClone(baseCoverage) as Record<string, unknown>;
-  const count = expectedIds.length;
-  coverage.type = "array";
-  coverage.minItems = count;
-  coverage.maxItems = count;
-  coverage.description = `Exactly ${count} requirement decision row(s): one per required requirement ID, no others. satisfied = current-head evidence establishes the requirement; violated = current-head evidence establishes it is not met; unknown = neither conclusion can be established. Unknown is always preferable to omission.`;
-  const items = structuredClone(baseItems) as Record<string, unknown>;
-  const itemProps: Record<string, unknown> = asPlainObject(items.properties) ?? {};
-  itemProps.requirement_id = {
-    type: "string",
-    enum: [...expectedIds],
-    description: "The requirement ID this row decides. Must be one of the required IDs; echo it exactly.",
-  };
-  const itemStatus = asPlainObject(itemProps.status);
-  if (itemStatus !== null) {
-    itemStatus.enum = [...REQUIREMENT_DECISION_STATUSES];
-  } else {
-    itemProps.status = { type: "string", enum: [...REQUIREMENT_DECISION_STATUSES] };
-  }
-  items.properties = itemProps;
-  coverage.items = items;
-  properties.requirement_coverage = coverage;
-  return schema;
-}
-
-/** The Anthropic `output_config.format` envelope for the run-specific
- * schema, mirroring ANTHROPIC_VERDICT_OUTPUT_FORMAT's shape. */
-export function buildRunVerdictOutputFormat(
-  expectedIds: readonly string[],
-  baseSchema: Record<string, unknown> = OPENAI_VERDICT_JSON_SCHEMA,
-): Record<string, unknown> {
-  const schema = buildRunVerdictSchema(expectedIds, baseSchema);
-  return {
-    type: "json_schema",
-    schema: (schema.json_schema as { schema: Record<string, unknown> }).schema,
-  };
-}
+export { buildRunVerdictOutputFormat, buildRunVerdictSchema } from "../model/request.js";

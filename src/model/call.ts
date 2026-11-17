@@ -151,6 +151,11 @@ export interface ModelCallContext {
   system: string;
   user: string;
   corpus: string;
+  /** #1678 hardening: the run's exact in-scope requirement IDs. Forwarded to
+   * the request builder so every attempt's `json_schema` response format is
+   * the run-specific pinning (see ModelRequestConfig). Absent = the base
+   * verdict wrapper, byte-identical. */
+  verdictRequirementIds?: readonly string[];
 }
 
 export interface ModelCallDeps {
@@ -298,6 +303,11 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
     // checkpoint strip). The one-attempt lanes never build a request through
     // here.
     anthropicCacheCheckpoint: true,
+    // #1678 hardening: the run's exact requirement-ID set pins the closing
+    // verdict schema on every attempt of this tier (both wire families).
+    ...(context.verdictRequirementIds !== undefined
+      ? { verdictRequirementIds: context.verdictRequirementIds }
+      : {}),
   };
 }
 
