@@ -999,20 +999,20 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   /** Fresh diff used to re-validate inline-comment positions. */
   private readonly diffProvider: (() => Promise<string>) | null;
 
-constructor(options: {
-  repo: string;
-  prNumber: string;
-  token?: string | undefined;
-  authMethod?: string | undefined;
-  authorizedIntegrationAudience?: string | undefined;
-  baseUrl?: string | undefined;
-  /** #1678: which product the endpoint runs. `"gitea"` forwards to the adapter,
-   * whose constructor refuses the Forgejo-only `authorized_integration` mode. */
-  forge?: GiteaFamilyForge | undefined;
-  timeoutMs?: number | undefined;
-  fetchImpl?: FetchLike | undefined;
-  diffProvider?: (() => Promise<string>) | undefined;
-}) {
+  constructor(options: {
+    repo: string;
+    prNumber: string;
+    token?: string | undefined;
+    authMethod?: string | undefined;
+    authorizedIntegrationAudience?: string | undefined;
+    baseUrl?: string | undefined;
+    /** #1678: which product the endpoint runs. `"gitea"` forwards to the adapter,
+     * whose constructor refuses the Forgejo-only `authorized_integration` mode. */
+    forge?: GiteaFamilyForge | undefined;
+    timeoutMs?: number | undefined;
+    fetchImpl?: FetchLike | undefined;
+    diffProvider?: (() => Promise<string>) | undefined;
+  }) {
     const parsed = parsePlatformBaseUrl(options.baseUrl ?? "", "Forgejo API base URL");
     this.base = parsed.base;
     this.origin = parsed.origin;

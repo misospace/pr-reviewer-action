@@ -31,12 +31,18 @@ A Gitea instance still uses the existing `forgejo-api-url` and
 no new action input. This is a known naming wart.
 
 For self-hosted runs the token may also come from the environment.
-`GITEA_TOKEN` is an alias. The family's own `FORGEJO_TOKEN` still wins over
-it, then `GITHUB_TOKEN`, then `GH_TOKEN`. The alias is honored by the shared
-family token resolver, not only by the Gitea-named entry point: every family
-call site (read adapter, publish client, CI-wait gate, ancillary clients)
-resolves through that one resolver, so an alias honored in only one place
-would leave the others unauthenticated.
+`GITEA_TOKEN` is an alias, honored only for a run that explicitly declares the
+Gitea identity (`platform: gitea`). For such a run the family's own
+`FORGEJO_TOKEN` still wins over it, then `GITHUB_TOKEN`, then `GH_TOKEN`. A
+plain Forgejo run keeps its historical chain (`FORGEJO_TOKEN`, `GITHUB_TOKEN`,
+`GH_TOKEN`) and ignores `GITEA_TOKEN` entirely: sharing a wire family must not
+let a host that happens to export `GITEA_TOKEN` silently change which
+credential an ordinary Forgejo review authenticates with. The rule lives in
+the shared family token resolver, not in the Gitea-named entry point: every
+family call site (read adapter, publish client, CI-wait gate, ancillary
+clients) resolves through that one resolver with the run's declared identity,
+so one run can never authenticate the review with one credential and the CI
+lane with another.
 
 ## Refused: authorized_integration
 

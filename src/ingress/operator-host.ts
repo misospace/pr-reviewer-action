@@ -300,12 +300,12 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
   // differs — the router, the follow-up consumer and the durable budget are
   // the same objects either way, so the single-router and single-budget
   // invariants are untouched by the platform choice.
-    const platform = options.platform ?? "forgejo";
-    // #1678: the Gitea intake is the NATIVE intake with the Gitea projection
-    // injected, so `gitea` and `forgejo` share one verification pipeline and one
-    // router binding. `github` never sees `project` — its handler has its own
-    // projection and its own signature scheme.
-    const handlerOptions: ForgejoWebhookHandlerOptions & GitHubWebhookHandlerOptions = {
+  const platform = options.platform ?? "forgejo";
+  // #1678: the Gitea intake is the NATIVE intake with the Gitea projection
+  // injected, so `gitea` and `forgejo` share one verification pipeline and one
+  // router binding. `github` never sees `project` — its handler has its own
+  // projection and its own signature scheme.
+  const handlerOptions: ForgejoWebhookHandlerOptions & GitHubWebhookHandlerOptions = {
     secret: options.secret,
     maxBodyBytes: options.maxBodyBytes,
     rereviewLabel: options.rereviewLabel,

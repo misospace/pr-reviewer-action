@@ -268,13 +268,28 @@ test("omitting the forge option keeps the Forgejo client's fixed error text", as
   assert.deepEqual(result, { ok: false, error: "forgejo ingress request failed" });
 });
 
-test("#1678: the family token resolver accepts the GITEA_TOKEN alias too", () => {
+test("#1678: GITEA_TOKEN alias is identity-scoped — plain Forgejo precedence never moves", () => {
   // Every Forgejo/Gitea-family call site (read adapter, publish API, CI-wait
-  // gate, ancillary clients) resolves through forgejoTokenFromEnv, so an alias
-  // honored only on the Gitea-named path would leave those sites unauthenticated.
-  assert.equal(forgejoTokenFromEnv({ GITEA_TOKEN: "gt" }), "gt");
-  assert.equal(forgejoTokenFromEnv({ FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
-  assert.equal(forgejoTokenFromEnv({ GITHUB_TOKEN: "ght", GITEA_TOKEN: "gt" }), "gt");
+  // gate, ancillary clients) resolves through forgejoTokenFromEnv, so the
+  // alias must follow ONE rule for the whole run — decided by the declared
+  // identity, never by which variable the host happens to export:
+  // - a declared Gitea run honors GITEA_TOKEN after FORGEJO_TOKEN;
+  // - a plain (or auto-detected) Forgejo run keeps its pre-#1678 chain
+  //   FORGEJO_TOKEN > GITHUB_TOKEN > GH_TOKEN and ignores GITEA_TOKEN, so a
+  //   host exporting GITEA_TOKEN cannot silently change which credential an
+  //   ordinary Forgejo review authenticates with.
+  assert.equal(forgejoTokenFromEnv({ GITEA_TOKEN: "gt" }), undefined);
+  assert.equal(forgejoTokenFromEnv({ GITHUB_TOKEN: "ght", GITEA_TOKEN: "gt" }), "ght");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "forgejo", GH_TOKEN: "gh", GITEA_TOKEN: "gt" }), "gh");
+  // A declared Gitea identity (via PLATFORM) honors the alias at the family position.
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", GITEA_TOKEN: "gt" }), "gt");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", GITEA_TOKEN: "gt", GITHUB_TOKEN: "ght" }), "gt");
+  // The Gitea-named resolver applies the alias explicitly, independent of ambient
+  // PLATFORM spelling, and keeps the family's FORGEJO_TOKEN precedence.
+  assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "gt" }), "gt");
+  assert.equal(giteaTokenFromEnv({ FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
+  assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "gt", GITHUB_TOKEN: "ght" }), "gt");
 });
 
 // --- env boundary: the refusal is reachable without loadConfig -------------
