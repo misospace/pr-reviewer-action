@@ -46,6 +46,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, lstat, open, readlink, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { forgeWireFamily } from "../platform/resolve.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { gitInvocationEnv } from "./git-env.js";
 import type { MirrorCache } from "./mirror.js";
@@ -268,7 +269,7 @@ export async function createReviewWorkspace(
         rootPath: workspaceDir,
         headSha,
         mergeBaseSha,
-        platform: mirror.platform,
+        platform: forgeWireFamily(mirror.platform),
         repoFullName: mirror.repoFullName,
         createdAtMs: Date.now(),
       };

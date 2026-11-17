@@ -5,6 +5,7 @@ import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
 import { commentBodyTriggersCommentCommand, eventLabelName, type PrecheckEvent } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { bindForgejoToken } from "../platform/forgejo-auth.js";
 import { forgejoAncillaryWrite, forgejoApiBase } from "../platform/forgejo-ancillary.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
@@ -205,9 +206,10 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
   // stageEnvFromConfig projects `github-token` (secret-revealed) as GITHUB_TOKEN.
   const token = stage.GITHUB_TOKEN || env.GH_TOKEN || "";
   stage.GH_TOKEN = token;
-  if ((stage.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
-    stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || env.FORGEJO_TOKEN || token;
-  }
+  // #1678/#1683: the family's token is bound through the seam's ONE chain
+  // (`bindForgejoToken`), which the engine's admission stage env also calls —
+  // so the alias and the precedence cannot drift between the two lanes.
+  bindForgejoToken(stage, env, token);
   stage.REPO = stage.REPO || env.GITHUB_REPOSITORY || "";
   stage.PR_NUMBER = stage.PR_NUMBER || readEvent(env).prNumber || "";
   const server = env.GITHUB_SERVER_URL ?? "";

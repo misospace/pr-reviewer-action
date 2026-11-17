@@ -120,6 +120,16 @@ forges:
     credential: forge-cred
 `;
 
+/** #1682: `gitea` is an identity served by the Forgejo-compatible stack —
+ * the config is identical except for the kind. */
+const GITEA_INSTANCE_CONFIG = `${MIN_INSTANCE_CONFIG}
+forges:
+  - name: primary
+    kind: gitea
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred
+`;
+
 /** The minimal production-shaped environment for one startup. */
 function baseEnv(configPath: string): NodeJS.ProcessEnv {
   return {
@@ -354,6 +364,166 @@ test("a forgejo instance without FORGEJO_TOKEN: exit 2 (no forge integration)", 
       const code = await controllerMain([], env);
       assert.equal(code, 2);
       assert.match(stderr.lines().join(""), /Forgejo token/);
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("a gitea-kind instance starts with FORGEJO_TOKEN (#1682)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-ok-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_TOKEN = "forgejo-token";
+
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      publish: async () => ({ publicationId: "forgejo-comment:1" }),
+    },
+    followUpAdapter: followUpAdapter(),
+    followUpBotLogin: async () => "reviewer-bot",
+    followUpAnswer: async () => "an answer",
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+  assert.notEqual(handle, null);
+  const started = handle!;
+
+  // The graceful stop drains and exits 0, exactly the successful-boot contract.
+  const code = await started.stop();
+  assert.equal(code, 0);
+  assert.equal(started.daemon.stopped, true);
+});
+
+test("a gitea-kind instance without FORGEJO_TOKEN refuses startup (#1682)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-notoken-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2);
+      assert.match(
+        stderr.lines().join(""),
+        /serves gitea but no Gitea token is configured \(FORGEJO_TOKEN\)/,
+      );
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("a gitea-kind instance with FORGEJO_AUTH_METHOD=authorized_integration is refused (#1682)", async () => {
+  // Gitea has no Forgejo "authorized integration": the DECLARED product
+  // decides the refusal, and the platform seam's Gitea token reader raises
+  // it (#1678's canonical message) before any token lookup. The refusal
+  // names the missing capability — not a missing credential.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-oidc-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_AUTH_METHOD = "authorized_integration";
+  env.FORGEJO_TOKEN = "forgejo-token";
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2, "authorized integration is never accepted for gitea");
+      assert.match(
+        stderr.lines().join(""),
+        /Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token/,
+      );
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("a gitea-kind instance with a bare authorized-integration audience is refused (#1682)", async () => {
+  // The audience alone forces integration mode on Forgejo, so refusing only
+  // the explicit method would let the configuration degrade silently into
+  // token mode on Gitea instead of naming the misconfiguration.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-audience-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITEA_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE = "https://forgejo.example";
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2, "a bare authorized-integration audience is refused for gitea");
+      assert.match(
+        stderr.lines().join(""),
+        /Gitea does not support 'forgejo-authorized-integration-audience'/,
+      );
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("a mixed forgejo+gitea-kind instance is refused at startup (#1682)", async () => {
+  // One daemon serves ONE platform (#1484's guard), and `gitea` does NOT
+  // relax it by sharing the forgejo FAMILY: two kind labels mean two
+  // integrations an operator could bind inconsistently. Refuse, exit 2.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gitea-mixed-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(
+    configPath,
+    `${MIN_INSTANCE_CONFIG}
+forges:
+  - name: fj
+    kind: forgejo
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred
+  - name: gt
+    kind: gitea
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred
+`,
+    "utf8",
+  );
+  const env = baseEnv(configPath);
+  env.FORGEJO_TOKEN = "forgejo-token";
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /exactly one platform/);
     } finally {
       stderr.detach();
     }

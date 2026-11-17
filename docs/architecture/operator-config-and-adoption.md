@@ -59,7 +59,7 @@ version: 1
 unknown-profile-policy: reject        # reject | fallback_default (default reject)
 forges:                               # optional; forge integrations/installations
   - name: primary                     # names unique; several of one KIND are
-    kind: github                      # github | forgejo
+    kind: github                      # github | forgejo | gitea (#1682)
     endpoint: https://github.internal # allowed when the daemon binds one by
     credential: forge-primary         # name (#1440); opaque reference, #735
 model-profiles:                       # required, >= 1
@@ -104,6 +104,29 @@ storage:                              # optional operator-owned paths
   state-path: /var/lib/pr-reviewer
   workspace-cache-path: /var/cache/pr-reviewer
 ```
+
+The `forges[].kind` closed set is `github | forgejo | gitea` (#1682).
+`gitea` is the **identity** of the Gitea wire family served by the
+Forgejo-compatible stack: the same token environment (`FORGEJO_TOKEN`, with
+the `authorized_integration` refusal applying — Gitea has no Forgejo
+"authorized integration"), the same native `X-Gitea-Signature` intake, the
+same `/api/v1` adapters. It changes capability composition and diagnostics,
+never the canonical platform: every event, job, and generation id from a
+Gitea instance stays in the `forgejo` family (`forgeFamily`), so a
+Gitea-labelled reconcile poll and the instance's webhook deliveries converge
+on one generation and one head never buys a second review. The daemon
+refuses a cross-family binding (integration, intake, or poll) at startup.
+
+The Gitea intake answers on the canonical Gitea route `/webhooks/gitea`
+(`GITEA_WEBHOOK_PATH`, named by the ingress seam `ingressWebhookPath`). The
+controller daemon reports that route in its startup summary. The host still
+runs one router, one follow-up consumer, and one durable Q&A budget, and
+enforcement is per-identity: a `gitea` daemon mounts the intake on that
+EXACT path and a delivery addressed anywhere else gets a fixed 404 before
+the webhook processing, while a `forgejo` daemon reports its canonical
+route but stays path-agnostic — an existing Forgejo deployment's webhook
+URL never breaks (#1683). New Gitea webhooks mount at the reported route. See
+[controller-daemon.md](controller-daemon.md).
 
 `reviewer-defaults` keys must be `repo-configurable` contract inputs
 (secrets, endpoints, and required inputs are structurally excluded by

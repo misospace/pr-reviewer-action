@@ -61,6 +61,16 @@ export interface IngressEndpoints {
   readonly webhookPath: string;
 }
 
+/** The route the native intake of a Gitea-family forge answers on (#1682).
+ *
+ * The route depends on the declared product alone, so a caller that has no
+ * endpoint to resolve — the controller daemon naming the route its intake
+ * serves — asks this function instead of resolving an endpoint it does not
+ * need. */
+export function ingressWebhookPath(forge: GiteaFamilyForge): string {
+  return forge === "gitea" ? GITEA_WEBHOOK_PATH : FORGEJO_WEBHOOK_PATH;
+}
+
 /** Resolve the ingress surface for one Gitea-family forge (#1678).
  *
  * Gitea and Forgejo share the `/api/v1` REST base, so `resolveForgejoEndpoints`
@@ -79,6 +89,6 @@ export function selectIngressEndpoints(
   return {
     forge,
     endpoints: resolveForgejoEndpoints(endpoint),
-    webhookPath: forge === "gitea" ? GITEA_WEBHOOK_PATH : FORGEJO_WEBHOOK_PATH,
+    webhookPath: ingressWebhookPath(forge),
   };
 }

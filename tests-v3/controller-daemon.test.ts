@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer as createNetServer, type AddressInfo } from "node:net";
+import { createServer as createNetServer, connect as netConnect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +36,7 @@ import type {
 } from "../src/executor/index.js";
 import type { ReviewJob } from "../src/jobs/types.js";
 import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
+import { computeForgejoWebhookSignature } from "../src/ingress/signature.js";
 import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
 import { reconcileRepositories, type ReconcileReport } from "../src/ingress/reconcile.js";
 import type { ReadResult } from "../src/ingress/api-client.js";
@@ -2941,4 +2942,681 @@ test("the daemon-composed poll hands its report to the operator (#1446)", async 
   assert.deepEqual([...last.handoffRefusals], [], "the composed handoff was not refused");
   await waitFor(() => store.load().records.length > 0);
   assert.equal(store.load().records[0]!.job.forgeIntegration, "fj-bound");
+});
+
+// ── Gitea-family instances: `kind: gitea` is a served identity (#1682) ──
+//
+// A `gitea` instance-config integration is the Gitea wire family under its
+// own identity: the native `X-Gitea-Signature` intake, the Forgejo-compatible
+// adapters, and — decisively — the SAME canonical `forgejo` platform on every
+// event, job, and generation id. Webhook and poll of one head must still
+// converge on one generation; the identity must never re-key a generation.
+
+const GITEA_WEBHOOK_SECRET = "gitea-webhook-secret";
+
+function giteaForges(name = "git-primary"): Array<InstanceConfig["forges"][number]> {
+  return [
+    { name, kind: "gitea", endpoint: "https://gitea.example/api/v1", credential: "git-cred" },
+  ];
+}
+
+test("a signed Gitea IssueCommentPayload (no top-level number) drives a follow_up through the daemon (#1682)", async (t) => {
+  // End-to-end over the daemon's REAL operator host: a genuine Gitea
+  // comment delivery — NO top-level `number` (Gitea's IssueCommentPayload
+  // carries the PR link at `issue.pull_request` and the number at
+  // `issue.number`) — signed with `X-Gitea-Signature` on the intake the
+  // `gitea` identity selects, CONSUMED as a canonical `follow_up`: the
+  // rereview command mints exactly one generation.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: giteaForges(),
+      } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            // The comment author is a collaborator: the planner's
+            // authority gate must pass before a rereview is planned.
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            // The operator host carries no comment body, so the consumer
+            // reads it by canonical comment id.
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  const body = JSON.stringify({
+    action: "created",
+    // The REAL Gitea shape: the pull request rides at the top level with
+    // its number, and `issue.pull_request` carries the number-LESS
+    // `PullRequestMeta` Gitea sets on a pull request linked issue. The
+    // Gitea projection moves the top level pull request onto
+    // `issue.pull_request`, so the normalizer takes the issue path that a
+    // follow-up needs. Without that move the shared Forgejo projection
+    // leaves `issue.pull_request` alone, the normalizer prefers the top
+    // level pull request, and the delivery is NOT a follow_up. This payload
+    // therefore discriminates the two projections.
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
+    issue: {
+      id: 12,
+      url: "https://gitea.example/owner/repo/issues/7",
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      pull_request: { url: "https://gitea.example/owner/repo/pulls/7", merged: false },
+    },
+    comment: { id: 555, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "alice" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/webhooks/gitea`, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "issue_comment",
+      "x-gitea-signature": computeForgejoWebhookSignature(GITEA_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "follow_up" });
+  await waitFor(() => minted.length === 1);
+  // The minted generation carries the CANONICAL `forgejo` family identity —
+  // the `gitea` identity never re-keys a generation — and the bound
+  // integration identity every job of this daemon's intake carries.
+  assert.equal(minted[0]!.platform, "forgejo", "the generation identity stays the forgejo family");
+  assert.equal(minted[0]!.kind, "review");
+  assert.equal(minted[0]!.forgeIntegration, "git-primary");
+});
+
+test("the daemon serves the Gitea intake on the canonical Gitea route (#1682)", async (t) => {
+  // The route is NAMED by the ingress seam (`selectIngressEndpoints`), so the
+  // operator's webhook URL and the daemon's own surface cannot disagree: a
+  // Gitea instance's canonical intake route is `/webhooks/gitea`. The daemon
+  // reports it (the controller's startup summary carries it) and serves the
+  // intake there.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: giteaForges(),
+      } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  assert.equal(h.daemon.intakeRoute, "/webhooks/gitea");
+
+  const body = JSON.stringify({
+    action: "created",
+    // The REAL Gitea shape: the pull request rides at the top level with
+    // its number, and `issue.pull_request` carries the number-LESS
+    // `PullRequestMeta` Gitea sets on a pull request linked issue. The
+    // Gitea projection moves the top level pull request onto
+    // `issue.pull_request`, so the normalizer takes the issue path that a
+    // follow-up needs. Without that move the shared Forgejo projection
+    // leaves `issue.pull_request` alone, the normalizer prefers the top
+    // level pull request, and the delivery is NOT a follow_up. This payload
+    // therefore discriminates the two projections.
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
+    issue: {
+      id: 12,
+      url: "https://gitea.example/owner/repo/issues/7",
+      number: 7,
+      title: "Add the thing",
+      state: "open",
+      pull_request: { url: "https://gitea.example/owner/repo/pulls/7", merged: false },
+    },
+    comment: { id: 556, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "alice" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/webhooks/gitea`, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "issue_comment",
+      "x-gitea-signature": computeForgejoWebhookSignature(GITEA_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "follow_up" });
+  await waitFor(() => minted.length === 1);
+  assert.equal(minted[0]!.platform, "forgejo", "the generation identity stays the forgejo family");
+});
+
+test("the canonical intake route follows the configured identity, and GitHub has none (#1682)", async (t) => {
+  // The route names the PRODUCT the operator declared: a Forgejo instance's
+  // canonical route is `/webhooks/forgejo`. The GitHub App intake is
+  // path-agnostic, so the seam names no route for it and the daemon reports
+  // none — it never guesses one.
+  const forgejo = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "forgejo-1", kind: "forgejo", endpoint: "https://forgejo.example/api/v1", credential: "f-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "forgejo",
+        port: 0,
+        secret: "forgejo-webhook-secret",
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await forgejo.daemon.stop().catch(() => undefined);
+    cleanup(forgejo);
+  });
+  assert.equal(forgejo.daemon.intakeRoute, "/webhooks/forgejo");
+
+  const github = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "github-1", kind: "github", endpoint: "https://api.github.com", credential: "g-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "github",
+        port: 0,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await github.daemon.stop().catch(() => undefined);
+    cleanup(github);
+  });
+  assert.equal(github.daemon.intakeRoute, "");
+});
+
+test("a Forgejo daemon stays PATH-AGNOSTIC: a signed legacy-path delivery still schedules (#1683)", async (t) => {
+  // #1683 final ruling: the exact-route filter applies to the `gitea`
+  // identity ONLY. An existing Forgejo deployment keeps whatever webhook
+  // URL it configured before Gitea joined the family — the canonical
+  // `/webhooks/forgejo` is REPORTED, never ENFORCED — so a valid signed
+  // delivery on the legacy root path still reaches intake and schedules
+  // exactly one generation. (The Gitea daemon's 404s on the same paths
+  // are pinned by the enforcement test below.)
+  const port = await freePort();
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "forgejo-1", kind: "forgejo", endpoint: "https://forgejo.example/api/v1", credential: "f-cred" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "forgejo",
+        port,
+        secret: "forgejo-webhook-secret",
+        followUp: {} as never,
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  // The route is still REPORTED (the startup summary tells the operator
+  // where NEW webhooks should go)…
+  assert.equal(h.daemon.intakeRoute, "/webhooks/forgejo");
+
+  // …but a delivery addressed to the LEGACY root path is served as before.
+  const body = JSON.stringify({
+    action: "synchronized",
+    repository: { full_name: "owner/repo" },
+    sender: { login: "contributor" },
+    pull_request: {
+      number: 7,
+      head: { sha: HEAD },
+      base: { repo: { full_name: "owner/repo" } },
+    },
+  });
+  const legacy = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "pull_request",
+      "x-gitea-signature": computeForgejoWebhookSignature("forgejo-webhook-secret", body),
+    },
+    body,
+  });
+  assert.equal(legacy.status, 202, "the legacy Forgejo webhook path is still served");
+  assert.deepEqual(JSON.parse(await legacy.text()), { status: "accepted", kind: "synchronize" });
+  // The delivery reached intake and scheduled exactly one generation.
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1, "the legacy-path delivery scheduled one generation");
+  assert.equal(h.fake.started[0]!.headSha, HEAD);
+});
+
+test("a Gitea-family daemon ENFORCES its canonical intake route (#1683)", async (t) => {
+  // The canonical route is the ENFORCED mount, not just documentation: a
+  // signed delivery addressed anywhere but `/webhooks/gitea` gets a fixed
+  // 404 WITHOUT reaching the webhook processing — the path-agnostic handler
+  // behind the daemon's listener must never be reachable through `/`, a
+  // foreign-family route, or a trailing-slash near-miss. The route check
+  // runs BEFORE signature verification: an unsigned request to a wrong path
+  // is a routing refusal (404), not an authentication one (401). The
+  // canonical route still serves the very same signed delivery.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: giteaForges(),
+      } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(h.daemon.intakeRoute, "/webhooks/gitea");
+
+  const body = JSON.stringify({
+    action: "created",
+    pull_request: {
+      id: 70,
+      number: 7,
+      title: "Add thing",
+      state: "open",
+      merged: false,
+      head: { ref: "feature", sha: "a".repeat(40) },
+      base: { ref: "main", sha: "b".repeat(40) },
+    },
+    issue: {
+      id: 12,
+      url: "https://gitea.example/owner/repo/issues/7",
+      number: 7,
+      title: "Add thing",
+      state: "open",
+      pull_request: { url: "https://gitea.example/owner/repo/pulls/7", merged: false },
+    },
+    comment: { id: 556, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "alice" },
+  });
+  const post = (path: string, signed = true) =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: {
+        "x-gitea-event": "issue_comment",
+        ...(signed
+          ? { "x-gitea-signature": computeForgejoWebhookSignature(GITEA_WEBHOOK_SECRET, body) }
+          : {}),
+      },
+      body,
+    });
+
+  // Every correctly signed delivery addressed OFF the canonical route is
+  // refused with the fixed 404 body: the root, the FORGEJO-family route (a
+  // Gitea daemon never answers the other product's mount), a trailing-slash
+  // near-miss, and a prefix.
+  for (const path of ["/", "/webhooks/forgejo", "/webhooks/gitea/", "/webhooks"]) {
+    const res = await post(path);
+    assert.equal(res.status, 404, `a signed delivery on '${path}' is refused`);
+    assert.deepEqual(JSON.parse(await res.text()), { status: "not found" });
+  }
+  // Routing is decided BEFORE authentication: a wrong path is a 404 even
+  // with no signature at all — the handler's 401 is never reached.
+  const unsigned = await post("/", false);
+  assert.equal(unsigned.status, 404, "route refusal precedes signature verification");
+  // Raw-socket lane (what `fetch` cannot express): an off-route
+  // chunked upload that keeps streaming. The fixed 404 must still flush
+  // IN FULL, and the connection must then CLOSE — proof the refusal path
+  // never drains an unbounded body (a bare resume() would keep reading
+  // forever and the probe would hit its inactivity timeout instead).
+  const probe = await new Promise<{ received: string; closed: boolean }>((resolve, reject) => {
+    const sock = netConnect(port, "127.0.0.1");
+    let received = "";
+    let closed = false;
+    const fail = (why: string): void => {
+      sock.destroy();
+      reject(new Error(why));
+    };
+    sock.setTimeout(5_000, () => fail("the off-route chunked probe neither refused nor closed the connection"));
+    sock.on("data", (chunk) => {
+      received += chunk.toString("latin1");
+    });
+    const keepStreaming = (): void => {
+      if (sock.writable) sock.write("8\r\ngarbage!\r\n", keepStreaming);
+    };
+    sock.on("connect", () => {
+      sock.write("POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+      keepStreaming();
+    });
+    // A reset instead of a clean FIN after the flushed refusal is the
+    // same contract seen from the client; either closes the probe.
+    sock.on("error", () => undefined);
+    sock.on("close", () => {
+      closed = true;
+      resolve({ received, closed });
+    });
+  });
+  assert.match(probe.received, /^HTTP\/1\.1 404 /, "the chunked off-route request gets the fixed 404");
+  assert.match(probe.received, /\{"status":"not found"\}$/, "the refusal body flushes in full before the drop");
+  assert.ok(probe.closed, "the connection closes after the refusal — the off-route body is never drained");
+  // Nothing reached intake: no refused delivery minted anything.
+  assert.equal(minted.length, 0, "no off-route delivery reached the webhook processing");
+
+  // The canonical route still serves the very same signed delivery.
+  const ok = await post("/webhooks/gitea");
+  assert.equal(ok.status, 202);
+  assert.deepEqual(JSON.parse(await ok.text()), { status: "accepted", kind: "follow_up" });
+  await waitFor(() => minted.length === 1);
+});
+
+test("a gitea-kind integration refuses foreign-family bindings and accepts its own family (#1682)", async () => {
+  // Bound kind `gitea` + GitHub App intake: cross-family — the intake would
+  // stamp deliveries this capability cannot act on. Refuse at construction.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+          webhook: {
+            platform: "github",
+            port: 0,
+            secret: GITHUB_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+          forgeIntegration: "git-1",
+        },
+      }),
+    /forgeIntegration 'git-1' serves kind 'gitea', which does not match the bound intake platform/,
+  );
+  // The same family check guards the reconciliation poll's platform.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+          reconcile: { intervalMs: 1000, platform: "github", run: async () => undefined },
+          forgeIntegration: "git-1",
+        },
+      }),
+    /forgeIntegration 'git-1' serves kind 'gitea', which does not match the bound intake platform/,
+  );
+  // An intake and a poll that name DIFFERENT families refuse each other even
+  // with no bound integration: the poll would mint generations the webhook
+  // of the other platform never converges with.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+          webhook: {
+            platform: "github",
+            port: 0,
+            secret: GITHUB_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+          reconcile: { intervalMs: 1000, platform: "gitea", run: async () => undefined },
+        },
+      }),
+    /reconcile\.platform must match the intake platform/,
+  );
+  // The platform labels stay a CLOSED set at this exported seam: a label
+  // past the types must not silently join the forgejo family via
+  // `forgeFamily`'s non-github mapping and mint generations under it.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          reconcile: {
+            intervalMs: 1000,
+            platform: "giteax" as unknown as "github",
+            run: async () => undefined,
+          },
+        },
+      }),
+    /reconcile\.platform must be 'github', 'forgejo', or 'gitea'/,
+  );
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          webhook: {
+            platform: "giteax" as unknown as "github",
+            port: 0,
+            secret: GITEA_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+        },
+      }),
+    /webhook\.platform must be 'github', 'forgejo', or 'gitea'/,
+  );
+  // The closed-set check runs BEFORE the family comparisons: an unknown
+  // intake label bound to a same-family integration must surface as the
+  // unknown label it is, not as a misleading family mismatch.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+          webhook: {
+            platform: "giteax" as unknown as "github",
+            port: 0,
+            secret: GITEA_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+          forgeIntegration: "git-1",
+        },
+      }),
+    /webhook\.platform must be 'github', 'forgejo', or 'gitea'/,
+  );
+  // `gitea` intake + `forgejo` poll (and either label bound to a `gitea`
+  // integration) is ONE family — both mint the canonical `forgejo`-family
+  // identity — so construction succeeds and shuts down cleanly.
+  const h = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: giteaForges("git-1") } as InstanceConfig,
+      webhook: {
+        platform: "gitea",
+        port: 0,
+        secret: GITEA_WEBHOOK_SECRET,
+        followUp: {} as never,
+      },
+      reconcile: { intervalMs: 1000, platform: "forgejo", run: async () => undefined },
+      forgeIntegration: "git-1",
+    },
+  });
+  await h.daemon.stop();
+  cleanup(h);
+});
+
+test("the named gitea-kind integration resolves the envelope endpoint for a forgejo-family job (#1682)", async (t) => {
+  const h = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: giteaForges() } as InstanceConfig,
+      forgeIntegration: "git-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(forgejoEvent()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  // The named `gitea` integration serves the `forgejo`-family job that
+  // names it: same family, one installation — the identity check passes and
+  // the envelope carries the configured Gitea endpoint.
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://gitea.example/api/v1");
+});
+
+test("an identity-less job resolves its envelope endpoint through the lone gitea-kind integration (#1682)", async (t) => {
+  // The no-identity fallback resolves by platform FAMILY: a lone `gitea`
+  // integration is unambiguous for a `forgejo`-family job.
+  const h = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: giteaForges("git-only") } as InstanceConfig,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(forgejoEvent());
+  assert.notEqual(job, null);
+  assert.equal(job!.forgeIntegration, "");
+  await h.daemon.enqueue(job!);
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://gitea.example/api/v1");
+});
+
+test("a gitea-labelled poll converges with the webhook intake on ONE generation (#1682)", async (t) => {
+  // The convergence invariant restated for the identity: the poll labels
+  // itself `gitea`, but the daemon mints its generations with the canonical
+  // family, so every pass of the same head the webhook already claimed
+  // dedupes into ONE durable generation — never a second review.
+  let pollCalls = 0;
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: giteaForges("git-bound") } as InstanceConfig,
+      forgeIntegration: "git-bound",
+      queueStore: store,
+      reconcile: {
+        intervalMs: 50,
+        platform: "gitea",
+        poll: {
+          repos: ["owner/repo"],
+          installationId: "12345",
+          listOpenPullRequests: async () => {
+            pollCalls += 1;
+            return { ok: true, data: [forgejoPrPayload()] };
+          },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  // The webhook intake claims the head first.
+  assert.equal(await h.daemon.ingest(forgejoEvent()), "scheduled");
+  await waitFor(() => store.load().records.length > 0);
+  const webhookJobId = store.load().records[0]!.job.jobId;
+  assert.equal(
+    store.load().records[0]!.job.platform,
+    "forgejo",
+    "the Gitea-family daemon mints the canonical family identity",
+  );
+  const passesBefore = pollCalls;
+  await waitFor(() => pollCalls >= passesBefore + 2);
+  assert.equal(store.load().records.length, 1, "no pass minted a second generation");
+  assert.equal(store.load().records[0]!.job.jobId, webhookJobId);
+  await settleFor(200);
+  assert.equal(h.fake.started.length, 1, "exactly one generation was ever executed");
 });

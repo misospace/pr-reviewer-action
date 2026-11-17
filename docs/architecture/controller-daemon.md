@@ -37,9 +37,25 @@ a forge-specific CLI.
   capability is a single per-platform capability, so the intake it binds
   is platform-aware: `webhook.platform` selects the GitHub App intake
   (`X-Hub-Signature-256`, `X-GitHub-Event`) or the native Forgejo intake
-  (`X-Gitea-Signature`, `X-Gitea-Event`). Both are served by the same
+  (`X-Gitea-Signature`, `X-Gitea-Event`) — the `gitea` identity (#1682)
+  selects that same native intake with the Gitea projection, and its
+  events mint the canonical `forgejo`-family identity, so poll and
+  webhook converge. Both are
+  served by the same
   operator host — one router, one follow-up consumer, one durable Q&A
   budget — so only the handler differs.
+- **The intake has one canonical route, and the daemon reports it.**
+  The route comes from the ingress seam (`ingressWebhookPath`):
+  `/webhooks/gitea` for a Gitea instance, `/webhooks/forgejo` for a
+  Forgejo instance, and none for GitHub (the App intake is
+  path-agnostic). The controller's startup summary carries the route, so
+  the operator never has to guess where a delivery lands. Enforcement is
+  per-identity: a `gitea` daemon mounts the intake on that EXACT path and a
+  request addressed anywhere else gets a fixed 404 before the webhook
+  processing, so a URL the operator never mounted cannot drive a review. A
+  `forgejo` daemon REPORTS its canonical route but stays path-agnostic
+  exactly as before Gitea joined the family — an existing Forgejo
+  deployment's webhook URL never breaks (#1683).
 - **The durable generation dedupe lives in the idempotency-key layer**
   (#736), with an in-process fast path. The claim horizon (default 7
   days) must never be shorter than the deployment's compaction retention

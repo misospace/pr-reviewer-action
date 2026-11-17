@@ -131,7 +131,7 @@ const CI_GATE_ENV_KEYS_SNAPSHOT = [
   "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", "FORGEJO_AUTH_METHOD",
   "FORGEJO_SKIP_PERMISSION_PREFLIGHT", "FORGEJO_TOKEN", "FORGEJO_RUN_ID", "FORGEJO_RUN_NUMBER", "FORGEJO_REPOSITORY", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
   "GH_HOST", "GH_TOKEN", "GITHUB_API_URL", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_OUTPUT",
-  "GITHUB_JOB", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER", "GITHUB_SERVER_URL", "GITHUB_TOKEN", "GITHUB_WORKFLOW", "HOME", "HTTPS_PROXY",
+  "GITHUB_JOB", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER", "GITHUB_SERVER_URL", "GITHUB_TOKEN", "GITHUB_WORKFLOW", "GITEA_TOKEN", "HOME", "HTTPS_PROXY",
   "HTTP_PROXY", "NO_PROXY", "PATH", "PLATFORM", "PR_HEAD_SHA", "PR_NUMBER",
   "PR_REVIEWER_GATE_CHILD", "REPO", "RUNNER_TRACKING_ID", "SSL_CERT_DIR", "SSL_CERT_FILE",
   "TANGLED_REPO_DID", "XDG_CONFIG_HOME", "all_proxy", "http_proxy", "https_proxy", "no_proxy",
@@ -194,6 +194,7 @@ test("end-to-end CI child env through runConcurrentGates excludes reviewer secre
       TOOL_MCP_TOKEN: "SENTINEL-MCP-TOKEN",
       LINEAR_API_KEY: "SENTINEL-LINEAR-KEY",
       GH_TOKEN: "SENTINEL-GH-TOKEN",
+      GITEA_TOKEN: "SENTINEL-GITEA-TOKEN",
       REPO: "owner/repo",
     },
   });
@@ -203,6 +204,9 @@ test("end-to-end CI child env through runConcurrentGates excludes reviewer secre
   assert.equal(observed.TOOL_MCP_TOKEN, undefined);
   assert.equal(observed.LINEAR_API_KEY, undefined);
   assert.equal(observed.GH_TOKEN, "SENTINEL-GH-TOKEN", "GitHub auth is required by the CI gate");
+  // #1678: the CI-wait gate resolves its forge token through the shared family
+  // resolver, so the Gitea alias must cross the allowlist with it.
+  assert.equal(observed.GITEA_TOKEN, "SENTINEL-GITEA-TOKEN", "the family token alias reaches the CI child");
   assert.equal(observed.REPO, "owner/repo");
 });
 

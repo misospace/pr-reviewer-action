@@ -1,6 +1,7 @@
 import type { ActionContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
 import { runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { bindForgejoToken } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { stageEnvFromConfig } from "../run/env.js";
 import type { ReviewRequest } from "./types.js";
@@ -43,15 +44,20 @@ export function admissionStageEnv(
   // adapter the review stages use from this env.
   const token = env.GITHUB_TOKEN || ambient.GH_TOKEN || "";
   env.GH_TOKEN = token;
-  if ((env.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
-    env.FORGEJO_TOKEN = env.FORGEJO_TOKEN || ambient.FORGEJO_TOKEN || token;
-  }
+  // #1683 review: the request's declared platform is projected BEFORE the
+  // token binding below, so the binding's identity-scoped `GITEA_TOKEN`
+  // alias sees the same declaration every later resolver sees.
+  env.PLATFORM = env.PLATFORM || request.platform;
+  // #1678/#1683: the same seam binding the Action stage env calls
+  // (`bindForgejoToken`) — one definition of the family chain, so the two
+  // lanes hand the resolver the same credential and the fingerprint inputs
+  // stay byte-identical.
+  bindForgejoToken(env, ambient, token);
   env.REPO = env.REPO || request.repository || ambient.GITHUB_REPOSITORY || "";
   env.PR_NUMBER = env.PR_NUMBER || request.prNumber;
   const server = ambient.GITHUB_SERVER_URL ?? "";
   env.FORGEJO_API_URL = env.FORGEJO_API_URL || request.forgejoApiUrl
     || (server !== "" && server !== "https://github.com" ? server : "");
-  env.PLATFORM = env.PLATFORM || request.platform;
   env.ACTION_REF = ambient.GITHUB_ACTION_REF ?? "";
   env.LINEAR_API_KEY_CONFIGURED = env.LINEAR_API_KEY ? "true" : "false";
   env.EVENT_HEAD_SHA = request.eventHeadSha ?? "";

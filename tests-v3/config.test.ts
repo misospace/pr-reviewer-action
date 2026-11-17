@@ -44,10 +44,12 @@ test("#1678: platform gitea refuses the Forgejo-only authorized_integration auth
   };
   // Rejected at the typed input boundary — before any token lookup or request —
   // rather than surfacing later as an authentication failure that no longer
-  // names the misconfiguration.
+  // names the misconfiguration. The refusal quotes the platform seam's
+  // canonical message (#1682), so this boundary and the token reader cannot
+  // drift apart.
   assert.throws(
     () => loadConfig(contract, base),
-    /'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'/,
+    /'forgejo-auth-method' cannot be 'authorized_integration' when 'platform' is 'gitea'\. Gitea does not support auth method 'authorized_integration'/,
   );
   // The Gitea declaration itself is accepted, in token mode.
   assert.equal(loadConfig(contract, { ...base, "forgejo-auth-method": "token" }).platform, "gitea");

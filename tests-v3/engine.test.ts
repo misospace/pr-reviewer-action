@@ -11,6 +11,7 @@ import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.j
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
 import { actionStageEnv } from "../src/run/action.js";
+import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 import { validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
@@ -1441,6 +1442,126 @@ test("admission stage env keeps the Action fingerprint config byte-identical", (
   const admissionLines = collectConfigLines(admissionStageEnv(contract, request, workspace));
   const actionLines = collectConfigLines(actionStageEnv(env) as Record<string, string>);
   assert.deepEqual(admissionLines, actionLines, "the fingerprint config hash inputs are byte-identical");
+});
+
+// #1678 alias, #1683 review: the engine's pre-admission env binds the forge token
+// for the read adapter, so the alias must be honored there exactly as in
+// `actionStageEnv` — the same credential, not the GitHub fallback.
+test("admission stage env honors the GITEA_TOKEN alias like the action stage env", () => {
+  const contract = validateContract(V3_CONTRACT);
+  const workspace = "/checkouts/pr";
+  const env: NodeJS.ProcessEnv = {
+    "INPUT_GITHUB-TOKEN": "tok",
+    "INPUT_REPO": "o/r",
+    "INPUT_PR-NUMBER": "7",
+    "INPUT_AI-BASE-URL": "https://model.invalid",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_PLATFORM": "gitea",
+    "INPUT_FORGEJO-API-URL": "https://gitea.example.invalid",
+    GITHUB_REPOSITORY: "o/r",
+    GITHUB_SERVER_URL: "https://gitea.example.invalid",
+    GITHUB_WORKSPACE: workspace,
+    GITEA_TOKEN: "gitea-pat",
+  };
+  const request: ReviewRequest = {
+    repository: "o/r",
+    prNumber: "7",
+    headSha: "",
+    baseRef: "",
+    isForkPr: "",
+    platform: "gitea",
+    forgejoApiUrl: "https://gitea.example.invalid",
+    ciChecksFile: "",
+    inputs: rawInputsFromEnv(contract, env),
+    ambient: env,
+    triggerReason: "push",
+    forceRereview: false,
+  };
+  const admission = admissionStageEnv(contract, request, workspace) as Record<string, string>;
+  const action = actionStageEnv(env) as Record<string, string>;
+  assert.equal(admission.FORGEJO_TOKEN, "gitea-pat");
+  assert.equal(action.FORGEJO_TOKEN, "gitea-pat");
+  assert.equal(forgejoTokenFromEnv(admission), forgejoTokenFromEnv(action));
+
+  // Integration mode binds no token in either path, alias included. (A Gitea
+  // platform would be refused by config validation outright, so this checks the
+  // family's own integration path.)
+  const integrationEnv: NodeJS.ProcessEnv = {
+    ...env,
+    "INPUT_PLATFORM": "forgejo",
+    "INPUT_FORGEJO-AUTH-METHOD": "authorized_integration",
+    "INPUT_FORGEJO-AUTHORIZED-INTEGRATION-AUDIENCE": "aud",
+  };
+  const integrationAdmission = admissionStageEnv(
+    contract,
+    { ...request, platform: "forgejo", inputs: rawInputsFromEnv(contract, integrationEnv) },
+    workspace,
+  ) as Record<string, string>;
+  assert.equal(integrationAdmission.FORGEJO_TOKEN, "");
+  assert.equal(actionStageEnv(integrationEnv).FORGEJO_TOKEN, "");
+});
+
+// #1683 review: the family chain has ONE definition (the seam's
+// `bindForgejoToken`, which both stage envs call), so the two lanes cannot
+// drift on the alias or on the precedence. This pins the observable property:
+// for every credential shape, both lanes bind the same credential — the one
+// the family resolver reads back.
+test("the action and admission stage envs bind the family token through one chain", () => {
+  const contract = validateContract(V3_CONTRACT);
+  const workspace = "/checkouts/pr";
+  const shapes: Array<{ name: string; ambient: Record<string, string>; expected: string }> = [
+    {
+      name: "the family's own name wins",
+      ambient: { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" },
+      expected: "family-pat",
+    },
+    {
+      name: "the alias wins over the GitHub fallback",
+      ambient: { GITEA_TOKEN: "alias-pat" },
+      expected: "alias-pat",
+    },
+    {
+      name: "the GitHub credential is the last resort",
+      ambient: {},
+      expected: "runner-pat",
+    },
+  ];
+  for (const shape of shapes) {
+    const env: NodeJS.ProcessEnv = {
+      "INPUT_GITHUB-TOKEN": "runner-pat",
+      "INPUT_REPO": "o/r",
+      "INPUT_PR-NUMBER": "7",
+      "INPUT_AI-BASE-URL": "https://model.invalid",
+      "INPUT_AI-MODEL": "m",
+      "INPUT_PLATFORM": "gitea",
+      "INPUT_FORGEJO-API-URL": "https://gitea.example.invalid",
+      GITHUB_REPOSITORY: "o/r",
+      GITHUB_SERVER_URL: "https://gitea.example.invalid",
+      GITHUB_WORKSPACE: workspace,
+      ...shape.ambient,
+    };
+    const request: ReviewRequest = {
+      repository: "o/r",
+      prNumber: "7",
+      headSha: "",
+      baseRef: "",
+      isForkPr: "",
+      platform: "gitea",
+      forgejoApiUrl: "https://gitea.example.invalid",
+      ciChecksFile: "",
+      inputs: rawInputsFromEnv(contract, env),
+      ambient: env,
+      triggerReason: "push",
+      forceRereview: false,
+    };
+    const action = actionStageEnv(env) as Record<string, string>;
+    const admission = admissionStageEnv(contract, request, workspace) as Record<string, string>;
+    assert.equal(action.FORGEJO_TOKEN, shape.expected, shape.name);
+    assert.equal(admission.FORGEJO_TOKEN, shape.expected, shape.name);
+    // The resolver reads back exactly what the stage bound.
+    assert.equal(forgejoTokenFromEnv(action), shape.expected, shape.name);
+    assert.equal(forgejoTokenFromEnv(admission), shape.expected, shape.name);
+  }
 });
 
 // #1635 (PR #1638 review): the compaction watermark reaches the precheck

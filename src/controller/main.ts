@@ -42,8 +42,11 @@
  *   PEM): the GitHub App material when the instance serves `github`.
  *   `PR_REVIEWER_GITHUB_APP_INSTALLATION_ID` is additionally required when
  *   reconciliation is enabled.
- * - `FORGEJO_TOKEN` (the platform's own helper, `forgejoTokenFromEnv`):
- *   the Forgejo token when the instance serves `forgejo`.
+ * - `FORGEJO_TOKEN` (the platform seam's own helper, `forgeTokenFromEnv`):
+ *   the Forgejo/Gitea token when the instance serves `forgejo` or `gitea`
+ *   (#1682: one family, one token env; the declared product decides the
+ *   refusal — a Gitea instance fails closed on the Forgejo-only
+ *   `authorized_integration` mode).
  * - `PR_REVIEWER_CREDENTIAL_<REF>`: the #735 credential material for each
  *   opaque reference the instance config names (model-profile credentials;
  *   the reference is uppercased with every non-alphanumeric character
@@ -65,12 +68,13 @@ import { validateContract } from "../config/contract.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import {
   parseInstanceConfigText,
+  forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   type InstanceConfig,
   type ModelProfile,
 } from "../config/instance-config.js";
 import type { ApiFormat } from "../config/types.js";
-import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
+import { forgeProductLabel, forgeTokenFromEnv } from "../platform/forge-identity.js";
 import type { FetchLike } from "../platform/http.js";
 import {
   buildWorkerCredentialPlan,
@@ -251,7 +255,10 @@ export class StartupRefusal extends Error {
  * cheap and total). */
 interface StartupConfig {
   readonly instance: InstanceConfig;
-  readonly platform: "github" | "forgejo";
+  /** The configured identity platform (#1682: `gitea` is a Gitea-family
+   * identity served by the Forgejo-compatible stack). Canonical jobs,
+   * events, and credential scopes stay in the `forgeFamily` of this value. */
+  readonly platform: "github" | "forgejo" | "gitea";
   readonly forgeEndpoint: string;
   readonly controlPlaneDsn: string;
   readonly durableStateDir: string;
@@ -376,10 +383,22 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
       );
     }
   } else {
-    const token = forgejoTokenFromEnv(env);
+    // #1682: `forgejo` and `gitea` are one family — the token env contract
+    // is shared (FORGEJO_TOKEN) — but the DECLARED product decides what the
+    // family refuses, and that difference lives in the platform seam
+    // (`forgeTokenFromEnv`): Gitea has no Forgejo "authorized integration",
+    // so a Gitea instance may never authenticate by that mode. The refusal
+    // is a misconfiguration, not a missing credential: it is reported as
+    // the startup refusal it is.
+    let token: string | undefined;
+    try {
+      token = forgeTokenFromEnv(platform, env);
+    } catch (error) {
+      throw new StartupRefusal(errorMessage(error), 2);
+    }
     if (token === undefined) {
       throw new StartupRefusal(
-        "the instance config serves forgejo but no Forgejo token is configured (FORGEJO_TOKEN)",
+        `the instance config serves ${platform} but no ${forgeProductLabel(platform)} token is configured (FORGEJO_TOKEN)`,
         2,
       );
     }
@@ -558,7 +577,9 @@ function createAdminDeps(deps: {
   readonly store: ControlPlaneStore;
   readonly daemon: ControllerDaemon;
   readonly instance: InstanceConfig;
-  readonly platform: "github" | "forgejo";
+  /** The configured identity platform (a diagnostics string — `gitea` is
+   * reported as configured, #1682). */
+  readonly platform: "github" | "forgejo" | "gitea";
   readonly auditPath: string;
 }): ControllerAdminDeps {
   const audit = (line: string): void => {
@@ -786,21 +807,23 @@ function servingForgePublishCredentialRef(
         `job names forge integration '${forgeIntegration}' which ${named.length} instance forge integrations share: the worker's publish-purpose credential cannot be selected without guessing`,
       );
     }
-    // A named integration whose kind does not match the serving platform
-    // is a corrupted or misrouted identity: the daemon's own endpoint
-    // resolution refuses it, so the credential reference must not be
-    // selected from it either — fail closed on uncertain state.
-    if (named[0]!.kind !== platform) {
+    // A named integration whose kind belongs to a different FAMILY than
+    // the serving platform is a corrupted or misrouted identity: the
+    // daemon's own endpoint resolution refuses it, so the credential
+    // reference must not be selected from it either — fail closed on
+    // uncertain state. A `gitea`-kind integration serving a `forgejo`-
+    // family job is the same installation (#1682) and selects.
+    if (forgeFamily(named[0]!.kind) !== platform) {
       throw new RangeError(
         `job names forge integration '${forgeIntegration}' of kind '${named[0]!.kind}' but the job's platform is '${platform}': the identity does not match the job's platform`,
       );
     }
     return named[0]!.credential;
   }
-  const sameKind = instance.forges.filter((entry) => entry.kind === platform);
+  const sameKind = instance.forges.filter((entry) => forgeFamily(entry.kind) === platform);
   if (sameKind.length > 1) {
     throw new RangeError(
-      `${sameKind.length} instance forge integrations share kind '${platform}': the worker's publish-purpose credential cannot be selected without guessing`,
+      `${sameKind.length} instance forge integrations share platform family '${platform}': the worker's publish-purpose credential cannot be selected without guessing`,
     );
   }
   return sameKind[0]?.credential ?? "";
@@ -1235,7 +1258,10 @@ export async function controllerMain(
   //    evidence default, so the assertion below is proven by startup.
   const credentialVault = createModelCredentialVault({
     instance: startup.instance,
-    platform: startup.platform,
+    // Credential scopes are FAMILY-scoped (#1682): a Gitea instance's
+    // material carries the `forgejo` scope, the family every plan request
+    // for this instance names.
+    platform: forgeFamily(startup.platform),
     modelCredentialMaterial: startup.modelCredentialMaterial,
   });
   // A real GitHub composition serves the worker's `forge-publish` reads
@@ -1393,7 +1419,10 @@ export async function controllerMain(
           const daemon = daemonRef.value;
           if (daemon === null || startup.reconcile === null) return;
           await reconcileRepositories({
-            platform: startup.platform,
+            // The mint site hashes the FAMILY identity (#1682): a Gitea
+            // instance's poll mints what its own intake mints for the same
+            // head, so the two converge on one generation.
+            platform: forgeFamily(startup.platform),
             // The poll's installation identity rides the canonical event into
             // the minted job (#1624): the reconciler authenticates and
             // list-opens AS the configured App installation, so the job's
@@ -1503,6 +1532,10 @@ export async function controllerMain(
     `controller: platform=${startup.platform} executors=${startup.instance.executorProfiles.length}` +
       ` models=${startup.instance.modelProfiles.length}` +
       ` webhook=${startup.webhook === null ? "off" : String(startup.webhook.port)}` +
+      // The canonical intake route (#1682): the path an operator points the
+      // forge webhook at. Empty when the platform has no route (the GitHub
+      // App intake is path-agnostic) — never a guess.
+      ` route=${daemon.intakeRoute}` +
       ` admin=${startup.admin === null ? "off" : String(startup.admin.port)}` +
       ` dashboard=${startup.admin !== null && startup.admin.dashboard ? "on" : "off"}` +
       ` reconcile=${startup.reconcile === null ? "off" : String(startup.reconcile.intervalMs)}\n`,

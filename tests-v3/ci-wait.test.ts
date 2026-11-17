@@ -792,6 +792,20 @@ test("the CI gate never drives GitHub or Forgejo for a resolved tangled platform
   );
 });
 
+// #1683: the alias must win over the GitHub fallback in THIS lane too — the CI
+// child resolves its token through the shared family resolver, and the
+// allowlist carries `GITEA_TOKEN` (tests-v3/gates.test.ts).
+test("the CI gate resolves the GITEA_TOKEN alias ahead of the GitHub fallback", async () => {
+  const adapter = ciAdapterFromEnv(
+    { PLATFORM: "gitea", FORGEJO_API_URL: "https://gitea.example.invalid", GITHUB_TOKEN: "gh-fallback", GITEA_TOKEN: "gt" },
+    "o/r",
+    "9",
+    "gh-fallback",
+  );
+  const auth = await (adapter as unknown as { authorizationHeader(): Promise<string | undefined> }).authorizationHeader();
+  assert.equal(auth, "token gt");
+});
+
 test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artifact", () => {
   const line = renderCiEvidenceOutput(SHA, "success", [
     { name: "Unit Tests", state: "success", conclusion: "success" },

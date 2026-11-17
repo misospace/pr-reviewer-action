@@ -78,6 +78,7 @@ import { randomUUID } from "node:crypto";
 import type { CanonicalForgeEvent } from "../events/types.js";
 import { decideAdoption } from "../config/adoption.js";
 import type { InstanceConfig } from "../config/instance-config.js";
+import { forgeFamily } from "../config/instance-config.js";
 import {
   StateConflictError,
   type ControlPlaneStore,
@@ -112,6 +113,9 @@ import {
 } from "../executor/index.js";
 import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
+import { ingressWebhookPath } from "../ingress/endpoints.js";
+import { forgeEnforcesWebhookRoute } from "../platform/forge-identity.js";
+import { isForgeId } from "../platform/resolve.js";
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -313,13 +317,15 @@ export interface ControllerDaemonOptions {
   readonly reconcile?: {
     readonly intervalMs: number;
     /** The forge platform the poll observes. It is part of the generation
-     * identity, so a poll mislabelled as the other platform would mint a
+     * identity, so a poll mislabelled as the other FAMILY would mint a
      * generation that never converges with its own webhook delivery. When
-     * the daemon serves an intake (`webhook.platform`), the two MUST
-     * agree — a mismatch fails construction (fail closed). REQUIRED for
+     * the daemon serves an intake (`webhook.platform`), the two MUST agree
+     * IN FAMILY (`forgeFamily`): a `gitea` instance polls as the `forgejo`
+     * family, exactly like its intake mints — a `github` poll against a
+     * Gitea-family intake fails construction (fail closed). REQUIRED for
      * `poll` when there is no intake platform to inherit: the daemon mints
      * the poll's generations and must name the forge it polled. */
-    readonly platform?: "github" | "forgejo";
+    readonly platform?: "github" | "forgejo" | "gitea";
     /** The canonical reconciliation composition (#1446): the daemon runs
      * `reconcileRepositories` itself against its OWN context (ledger,
      * per-event identity resolver, queue handoff), so the identity the mint
@@ -345,14 +351,20 @@ export interface ControllerDaemonOptions {
    * daemon serves exactly ONE forge platform per instance (its forge
    * capability is a single per-platform capability), and `platform` selects
    * the intake the daemon binds — `github` the GitHub App intake
-   * (`X-Hub-Signature-256`) or `forgejo` the native Forgejo intake
-   * (`X-Gitea-Signature`). When present, the daemon constructs the operator
+   * (`X-Hub-Signature-256`) or `forgejo`/`gitea` the native Gitea-header
+   * intake (`X-Gitea-Signature`; #1682: `gitea` names the identity, the
+   * family — and the intake implementation — is shared with `forgejo`).
+   * When present, the daemon constructs the operator
    * host (which unconditionally binds the follow-up consumer) and serves it
    * on `port`. */
   readonly webhook?: {
     /** The forge platform this daemon instance serves: `github` (the GitHub
-     * App intake) or `forgejo` (the native Forgejo intake). */
-    readonly platform: "github" | "forgejo";
+     * App intake) or `forgejo`/`gitea` (the native Gitea-header intake —
+     * `gitea` is the identity selected by a `kind: gitea` instance #1682;
+     * the wire intake is the same verified `X-Gitea-Signature` one, and the
+     * canonical events/jobs it mints carry the `forgejo` family, so poll
+     * and webhook converge). */
+    readonly platform: "github" | "forgejo" | "gitea";
     readonly port: number;
     readonly secret: string;
     /** The follow-up consumer configuration; the daemon injects its own
@@ -382,6 +394,19 @@ export interface ControllerDaemon {
   readonly ledger: GenerationLedger;
   /** The operator host when `webhook` was configured. */
   readonly operatorHost: OperatorHost | undefined;
+  /** The CANONICAL route the served intake answers on (#1682) — the route
+   * the ingress seam names for this platform (`/webhooks/gitea` for a Gitea
+   * instance, `/webhooks/forgejo` for a Forgejo instance), or "" when the
+   * platform has no route in that seam (the GitHub App intake is
+   * path-agnostic) or the daemon serves no intake.
+   *
+   * It is the route an operator points the forge webhook at, so the daemon
+   * REPORTS it (the controller's startup summary) instead of leaving the
+   * operator to guess. A `gitea` daemon ENFORCES it: a delivery addressed
+   * to any other path is refused with a fixed 404 and never reaches the
+   * webhook processing. A `forgejo` daemon reports the canonical route but
+   * stays path-agnostic — existing webhook URLs keep working (#1683). */
+  readonly intakeRoute: string;
   /** "" while every persisted queue mutation is durable; otherwise the
    * latched persistence-failure message (the daemon's health signal). */
   queuePersistenceError(): string;
@@ -1032,6 +1057,38 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
   }
 }
 
+/** The CANONICAL route the daemon's intake answers on (#1682).
+ *
+ * The route is named by the INGRESS SEAM (`ingressWebhookPath`, the same
+ * route `selectIngressEndpoints` names), never by a literal here: the
+ * operator's webhook URL and the daemon's own surface can never disagree
+ * about where a Gitea delivery lands.
+ *
+ * - GitHub has no route in that seam (the App intake is path-agnostic), so
+ *   the daemon serves its whole webhook port, as it always did.
+ * - A Gitea-family intake routes by the identity it was configured with
+ *   (`gitea` → `/webhooks/gitea`, `forgejo` → `/webhooks/forgejo`): that
+ *   label is what selects the intake's own projection, so the route and the
+ *   projection always agree.
+ *
+ * The route is the DOCUMENTED canonical mount. It is ENFORCED only for the
+ * newly introduced `gitea` identity (#1683 final ruling): a Gitea daemon
+ * answers the intake ONLY on `/webhooks/gitea`, and a request addressed
+ * anywhere else gets a fixed 404 before the handler reads a byte — a
+ * correctly signed payload can never drive a review through a path the
+ * operator never mounted. A `forgejo` daemon REPORTS its canonical route
+ * but stays path-agnostic exactly as it was before Gitea joined the family:
+ * an existing Forgejo deployment's webhook URL never breaks, and narrowing
+ * it is out of #1682's scope. The low-level handler stays path-agnostic for
+ * every identity (the mount point belongs to the daemon boundary, and the
+ * reusable intake stays composable wherever its embedder mounts it).
+ */
+function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
+  const platform = options.webhook?.platform;
+  if (platform === undefined || platform === "github") return "";
+  return ingressWebhookPath(platform);
+}
+
 /** Start the controller daemon. Fails closed: every option is validated
  * before anything binds, migrations run before work is accepted, and
  * queue/state recovery happens before the first tick. */
@@ -1068,10 +1125,11 @@ export async function startControllerDaemon(
   //
   // The envelope's endpoint is resolved by the JOB's `forgeIntegration`
   // identity (#1440): a job minted with an integration name resolves its
-  // `forgeApiUrl` from that named integration. A job with NO identity
-  // ("" — legacy/pre-#1440) resolves by platform kind only when exactly
-  // one integration of that kind exists; when several share the kind the
-  // request is refused at build time, never guessed. Same-kind
+  // `forgeApiUrl` from that named integration (a `gitea`-kind integration
+  // serves the `forgejo`-family job that names it — #1682). A job with NO
+  // identity ("" — legacy/pre-#1440) resolves by platform family only when
+  // exactly one integration of that family exists; when several share the
+  // family the request is refused at build time, never guessed. Same-family
   // integrations are therefore allowed here: instance config already
   // enforces unique integration NAMES.
   for (const forge of options.instance.forges) {
@@ -1081,6 +1139,29 @@ export async function startControllerDaemon(
         `instance forge integration '${forge.name}' endpoint ${problem}: every execution envelope for that platform would be refused`,
       );
     }
+  }
+  // The platform labels are a CLOSED set (#1682), owned by the PLATFORM SEAM
+  // (`isForgeId` — the one membership test every boundary that accepts a
+  // declared forge id from an untyped caller uses; the controller keeps no
+  // second vocabulary). `forgeFamily` maps every non-github label to the
+  // forgejo family, so an unrecognized label (only reachable past the types,
+  // from a JS caller of this exported seam) must not silently join that
+  // family and mint generations under it. BOTH labels are validated here,
+  // BEFORE the family comparisons below, so an unknown label surfaces as an
+  // unknown label instead of a misleading family-mismatch message against a
+  // correctly labelled integration.
+  if (options.webhook !== undefined && !isForgeId(options.webhook.platform)) {
+    throw new TypeError(
+      "ControllerDaemonOptions.webhook.platform must be 'github', 'forgejo', or 'gitea'",
+    );
+  }
+  if (
+    options.reconcile?.platform !== undefined &&
+    !isForgeId(options.reconcile.platform)
+  ) {
+    throw new TypeError(
+      "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'",
+    );
   }
   // When the daemon binds an integration name, the name must name exactly
   // one configured integration, and that integration's platform kind must
@@ -1115,9 +1196,14 @@ export async function startControllerDaemon(
       );
     }
     const boundKind = named[0]!.kind;
+    // FAMILY comparison (#1682): a bound integration of kind `gitea` and an
+    // intake/poll of kind `gitea` or `forgejo` are the SAME installation
+    // family (the Gitea wire family — the intakes and canonical identities
+    // coincide); any cross-family binding (github against the Gitea family,
+    // either direction) still refuses startup.
     if (
-      (options.webhook !== undefined && options.webhook.platform !== boundKind) ||
-      (options.reconcile?.platform !== undefined && options.reconcile.platform !== boundKind)
+      (options.webhook !== undefined && forgeFamily(options.webhook.platform) !== forgeFamily(boundKind)) ||
+      (options.reconcile?.platform !== undefined && forgeFamily(options.reconcile.platform) !== forgeFamily(boundKind))
     ) {
       throw new TypeError(
         `ControllerDaemonOptions.forgeIntegration '${options.forgeIntegration}' serves kind '${boundKind}', which does not match the bound intake platform`,
@@ -1135,15 +1221,17 @@ export async function startControllerDaemon(
   }
   const drainMs = options.drainMs ?? DEFAULT_DRAIN_MS;
   const claimTtlMs = options.generationClaimTtlMs ?? DEFAULT_GENERATION_CLAIM_TTL_MS;
-  // The poll's platform must agree with the intake's platform: the
-  // platform is part of the generation identity, so a poll that names the
-  // other forge would mint generations that never converge with the
+  // The poll's platform must agree with the intake's platform IN FAMILY
+  // (#1682): the canonical platform is part of the generation identity, and
+  // `gitea`/`forgejo` mint the SAME `forgejo`-family identity, so a Gitea
+  // intake and either Gitea-family poll label converge. A poll that names
+  // the OTHER family would mint generations that never converge with the
   // webhook deliveries of the same head (a duplicate review). Fail
   // closed at construction rather than at the first poll.
   if (
     options.reconcile?.platform !== undefined &&
     options.webhook !== undefined &&
-    options.reconcile.platform !== options.webhook.platform
+    forgeFamily(options.reconcile.platform) !== forgeFamily(options.webhook.platform)
   ) {
     throw new TypeError(
       "ControllerDaemonOptions.reconcile.platform must match the intake platform (webhook.platform)",
@@ -1248,24 +1336,31 @@ export async function startControllerDaemon(
             `job names forge integration '${job.forgeIntegration}' which ${named.length} instance forge integrations share: the envelope endpoint cannot be resolved without guessing`,
           );
         }
-        // A named integration whose kind does not match the job's platform
-        // is a corrupted/misrouted identity (e.g. a rehydrated snapshot
-        // record that never passed this daemon's enqueue guard): resolving
-        // it would stamp the other installation's endpoint into the
-        // envelope. Refuse the request — fail closed on uncertain state.
-        if (named[0]!.kind !== job.platform) {
+        // A named integration whose kind is in a different FAMILY than the
+        // job's platform is a corrupted/misrouted identity (e.g. a
+        // rehydrated snapshot record that never passed this daemon's enqueue
+        // guard): resolving it would stamp the other installation's endpoint
+        // into the envelope. A `gitea` integration serving a `forgejo`-family
+        // job is the SAME installation (#1682) and resolves. Refuse the
+        // request — fail closed on uncertain state.
+        if (forgeFamily(named[0]!.kind) !== job.platform) {
           throw new RangeError(
             `job names forge integration '${job.forgeIntegration}' of kind '${named[0]!.kind}' but the job's platform is '${job.platform}': the identity does not match the job's platform`,
           );
         }
         return named[0]!.endpoint;
       }
+      // An identity-less job resolves by platform FAMILY (#1682): a lone
+      // `gitea` integration serves a `forgejo`-family job; a `gitea` and a
+      // `forgejo` integration sharing the family is ambiguous for an
+      // identity-less job and refuses — the same no-guessing rule, now over
+      // the family the job actually carries.
       const sameKind = options.instance.forges.filter(
-        (entry) => entry.kind === job.platform,
+        (entry) => forgeFamily(entry.kind) === job.platform,
       );
       if (sameKind.length > 1) {
         throw new RangeError(
-          `job carries no forge integration identity but ${sameKind.length} instance forge integrations share kind '${job.platform}': the envelope endpoint cannot be resolved without guessing`,
+          `job carries no forge integration identity but ${sameKind.length} instance forge integrations share platform family '${job.platform}': the envelope endpoint cannot be resolved without guessing`,
         );
       }
       return sameKind[0]?.endpoint ?? "";
@@ -1712,6 +1807,9 @@ export async function startControllerDaemon(
   const daemon: ControllerDaemon = {
     ledger,
     operatorHost,
+    // The route an operator points the forge webhook at (#1682): named by
+    // the ingress seam, reported in the controller's startup summary.
+    intakeRoute: canonicalIntakeRoute(options),
     queuePersistenceError: () => (snapshotStore !== null ? snapshotStore.persistenceError() : ""),
     get stopped(): boolean {
       return stopped;
@@ -1811,7 +1909,38 @@ export async function startControllerDaemon(
   };
 
   if (operatorHost !== undefined) {
-    server = createServer(operatorHost.handler);
+    // Whether the configured intake enforces its canonical route is the
+    // PLATFORM SEAM's product decision (#1683) — never a product branch in
+    // controller policy: a gitea intake answers only on the route the
+    // ingress seam names for it (every other path is a fixed 404 that never
+    // reaches the webhook processing), while forgejo keeps its historical
+    // path-agnostic port (canonical route REPORTED, not enforced) and
+    // GitHub keeps its path-agnostic App intake.
+    const enforcedRoute = forgeEnforcesWebhookRoute(options.webhook!.platform)
+      ? canonicalIntakeRoute(options)
+      : "";
+    server = createServer(
+      enforcedRoute === ""
+        ? operatorHost.handler
+        : (req, res) => {
+            const path = (req.url ?? "").split(/[?#]/, 1)[0];
+            if (path !== enforcedRoute) {
+              res.statusCode = 404;
+              res.setHeader("content-type", "application/json");
+              res.end('{"status":"not found"}');
+              // The off-route body is NEVER consumed: once the fixed
+              // refusal has flushed, the connection drops. (A bare
+              // req.resume() would drain unbounded off-route garbage —
+              // the handler's 1 MiB cap protected this port before the
+              // mount existed, and the mount replaces it on this path.)
+              // An aborted upload must not crash the listener.
+              res.once("finish", () => req.destroy());
+              req.on("error", () => undefined);
+              return;
+            }
+            operatorHost.handler(req, res);
+          },
+    );
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(options.webhook!.port, () => resolve());
@@ -1841,7 +1970,10 @@ export async function startControllerDaemon(
         // in the build options before `buildReviewJob` hashes the generation,
         // and there is no operator callback that could drop it.
         void reconcileRepositories({
-          platform: reconcilePollPlatform!,
+          // The canonical identity the mint hashes is the FAMILY (#1682): a
+          // `gitea` poll mints `forgejo`-family generations, exactly what its
+          // own intake mints from a delivery of the same head.
+          platform: forgeFamily(reconcilePollPlatform!),
           listOpenPullRequests: poll.listOpenPullRequests,
           repos: poll.repos,
           ...(poll.installationId !== undefined ? { installationId: poll.installationId } : {}),

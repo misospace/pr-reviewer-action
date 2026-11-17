@@ -13,13 +13,17 @@ import {
   resolvePlatform,
 } from "../src/platform/resolve.js";
 import { pullHeadRefspec, pullRequestHeadRef } from "../src/platform/head-ref.js";
-import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
+import { bindForgejoToken, forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import { GITEA_WEBHOOK_PATH, FORGEJO_WEBHOOK_PATH, selectIngressEndpoints } from "../src/ingress/endpoints.js";
 import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/api-client.js";
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
 import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
+import { forgeEnforcesWebhookRoute } from "../src/platform/forge-identity.js";
 import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
+import { actionStageEnv } from "../src/run/action.js";
+import { buildChildEnv } from "../src/runtime/env.js";
+import { CI_GATE_ENV_KEYS } from "../src/gates/env.js";
 import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
@@ -112,6 +116,57 @@ test("giteaTokenFromEnv uses the family chain, with GITEA_TOKEN as an alias", ()
   assert.equal(giteaTokenFromEnv({ GITHUB_TOKEN: "ght" }), "ght");
   assert.equal(giteaTokenFromEnv({}), undefined);
   assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "" }), undefined);
+});
+
+test("bindForgejoToken binds the family's chain in the resolver's own order", () => {
+  // The binding is the resolver's chain — identity scope included — bound
+  // where the resolver reads it first: a `FORGEJO_TOKEN` already in the
+  // target (the config-projected secret) wins, then the ambient family's
+  // own name, then the ambient `GITEA_TOKEN` alias (ONLY for a declared
+  // Gitea identity, decided by the resolver itself over the merged
+  // `PLATFORM`), then the runner's GitHub credential.
+  const bind = (
+    target: Record<string, string | undefined>,
+    ambient: Record<string, string | undefined>,
+    githubToken = "gh",
+  ): string | undefined => {
+    bindForgejoToken(target, ambient, githubToken);
+    return target.FORGEJO_TOKEN;
+  };
+
+  assert.equal(bind({ PLATFORM: "gitea" }, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }), "family-pat");
+  assert.equal(bind({ PLATFORM: "gitea" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // The declaration may come from the ambient record too — the merged view
+  // is the resolver's own input.
+  assert.equal(bind({}, { PLATFORM: "gitea", GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // NO declared Gitea identity: the alias stays out and the pre-#1678
+  // chain holds — the binding cannot swap a plain run's credential.
+  assert.equal(bind({}, { GITEA_TOKEN: "alias-pat" }), "gh");
+  assert.equal(bind({ PLATFORM: "forgejo" }, { GITEA_TOKEN: "alias-pat" }), "gh");
+  assert.equal(bind({}, {}), "gh");
+  assert.equal(bind({ FORGEJO_TOKEN: "projected-pat" }, { FORGEJO_TOKEN: "family-pat" }), "projected-pat");
+  // An empty value is no value: the chain moves on to the next candidate.
+  assert.equal(bind({ PLATFORM: "gitea", FORGEJO_TOKEN: "" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // No credential anywhere binds NOTHING — undefined, not "": absent is the
+  // honest unset every stage sweep and resolver-side `||` already treats so.
+  assert.equal(bind({ PLATFORM: "gitea" }, {}, ""), undefined);
+
+  // Authorized Integration binds NO token: the OIDC exchange supplies the
+  // credential, and a bound token would be a second, wrong one.
+  assert.equal(
+    bind({ FORGEJO_AUTH_METHOD: "authorized_integration" }, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }),
+    undefined,
+  );
+});
+
+test("forgeEnforcesWebhookRoute is the seam's mount rule, not the controller's (#1683)", () => {
+  // The per-product webhook-mount decision lives in the identity seam; the
+  // daemon only asks it. Gitea (introduced with the canonical route as its
+  // only mount) enforces; Forgejo keeps its historical path-agnostic port;
+  // GitHub's App intake never had a route to enforce.
+  assert.equal(forgeEnforcesWebhookRoute("gitea"), true);
+  assert.equal(forgeEnforcesWebhookRoute("forgejo"), false);
+  assert.equal(forgeEnforcesWebhookRoute("github"), false);
 });
 
 test("giteaTokenFromEnv refuses authorized_integration instead of returning no token", () => {
@@ -407,6 +462,44 @@ test("#1678: the CI-wait gate and ancillary writes thread the identity too", asy
   await assert.rejects(
     () => forgejoAncillaryWrite(env, `${INSTANCE}/api/v1/repos/acme/widgets/issues/7/labels`, "POST"),
     /Gitea does not support auth method 'authorized_integration'/);
+});
+
+// #1682 review: the CI-wait gate child gets its environment from the
+// allowlisted slice of the Action stage env (`request.ambient`), and that env
+// carries the operator's DECLARED platform, because the `platform` contract
+// input is projected verbatim. A child carrying the RESOLVED `forgejo` family
+// would apply the Forgejo-only auth mode on a Gitea instance, and the guard
+// threaded into `ciAdapterFromEnv` could never fire in that lane. This test
+// pins that lane's environment, so the declaration cannot be flattened there
+// later.
+test("the CI-gate child env carries the declared Gitea identity, so that lane's guard is armed", () => {
+  const stage = actionStageEnv({
+    "INPUT_GITHUB-TOKEN": "gh",
+    "INPUT_REPO": "acme/widgets",
+    "INPUT_PR-NUMBER": "7",
+    "INPUT_AI-BASE-URL": "https://model.invalid",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_PLATFORM": "gitea",
+    "INPUT_FORGEJO-API-URL": INSTANCE,
+    "INPUT_FORGEJO-TOKEN": "gitea-pat",
+    GITHUB_REPOSITORY: "acme/widgets",
+    GITHUB_SERVER_URL: INSTANCE,
+  } as NodeJS.ProcessEnv);
+  assert.equal(stage.PLATFORM, "gitea", "the stage env carries the declaration");
+  const child = buildChildEnv(CI_GATE_ENV_KEYS, stage as NodeJS.ProcessEnv);
+  assert.equal(child.PLATFORM, "gitea", "the CI-gate child carries the declaration, not the resolved family");
+  assert.equal(child.FORGEJO_API_URL, INSTANCE);
+  // The lane's adapter is built from that child env, so it carries the
+  // Gitea identity too — the identity the guard below is keyed on.
+  const adapter = ciAdapterFromEnv(child, "acme/widgets", "7", "gitea-pat");
+  assert.equal((adapter as ForgejoAdapter).forge, "gitea");
+  // The typed input boundary refuses this mode for a Gitea instance before
+  // the run starts; the lane's own guard is the defense in depth behind it,
+  // and it fires exactly because the child carries the declared identity.
+  assert.throws(
+    () => ciAdapterFromEnv({ ...child, FORGEJO_TOKEN: "", FORGEJO_AUTH_METHOD: "authorized_integration" }, "acme/widgets", "7", "gitea-pat"),
+    /Gitea does not support auth method 'authorized_integration'/,
+  );
 });
 
 test("#1678: every refusal boundary quotes the same text", () => {

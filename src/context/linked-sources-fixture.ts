@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { ForgejoEnrichClient, GitHubEnrichClient } from "../platform/enrich.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { asciiJson, routeFetch } from "../platform/fixture.js";
 import { compareCodePoints } from "../platform/jq.js";
 import { fetchSource, type Exchange, type Resolver } from "../platform/safe-fetch.js";
@@ -89,7 +90,9 @@ export async function runLinkedSourcesFixture(fixturePath: string): Promise<{ ok
     },
     warn: (line) => warnings.push(line),
   });
-  const forgejoToken = env.FORGEJO_TOKEN ?? env.GITHUB_TOKEN ?? env.GH_TOKEN ?? "";
+  // The family resolver, not an inline copy of its chain: the alias
+  // (`GITEA_TOKEN`, #1678) and the integration-mode guard live in one place.
+  const forgejoToken = forgejoTokenFromEnv(env) ?? "";
   const deps = {
     budget,
     github: new GitHubEnrichClient({ token: input.gh_token ? `token ${input.gh_token}` : undefined, fetchImpl: apiFetch }),

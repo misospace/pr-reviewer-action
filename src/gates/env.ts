@@ -66,6 +66,11 @@ export const CI_GATE_ENV_KEYS: EnvAllowlist = [
   "FORGEJO_API_URL",
   "TANGLED_REPO_DID",
   "FORGEJO_TOKEN",
+  // #1678: `GITEA_TOKEN` is the family resolver's alias, and the CI-wait gate
+  // resolves its token THROUGH that resolver (`forgejoTokenFromEnv`), so the
+  // alias must reach this child or a Gitea deployment whose only credential is
+  // the alias reads the forge unauthenticated here.
+  "GITEA_TOKEN",
   "FORGEJO_AUTH_METHOD",
   "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE",
   "FORGEJO_SKIP_PERMISSION_PREFLIGHT",
