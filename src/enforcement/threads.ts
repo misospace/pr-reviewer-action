@@ -31,8 +31,18 @@
  * (INCOMPLETE/COMMENT) — so a ghost blocker cannot block and an unevaluated
  * concern cannot certify a clean approval. An `unproven` root is conservative
  * in both directions: no bot disposition closes it, and its severity is never
- * re-emitted. A `human` thread is closed only by the forge's resolved state
- * and keeps its existing non-blocking severity.
+ * re-emitted. A `human` thread is closed on GitHub only by the forge's
+ * resolved state (#1663) — the action never mutates a human's conversation —
+ * but that physical state is not semantic authority (#1681): a `fixed`
+ * whose citation RESOLVES at the exact reviewed head settles the thread's
+ * FINDING as addressed (disclosed with its open physical state, not
+ * re-emitted, never blocking), while any weaker claim — including a
+ * code-citing string whose cited location does not exist at head (#1681
+ * r6) — keeps the fail-closed open reading at the human-side non-blocking
+ * severity. A bot `fixed` additionally settles on this run's head-bound
+ * acquisition of the thread's file when the evidence names no citation
+ * candidate (PhAd convergence: one evidence representation across the
+ * review's parallel proof channels).
  *
  * Re-emitted findings carry `thread_id` (the publish step skips those inline
  * — the thread already exists) plus `thread_ids` provenance. Duplicate
@@ -54,6 +64,7 @@
 import { markRelaxationNotesSuperseded, type ArtifactFinding, type ReviewArtifact } from "./artifact.js";
 import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
 import { findingIdentity, findingIdentityFromRecord } from "../outcomes/identity.js";
+import { extractCitationLocations, type EvidenceGrounding } from "./citations.js";
 import type { ThreadAuthorship } from "../context/review-threads.js";
 
 export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
@@ -92,6 +103,54 @@ export function evidenceCitesCode(evidence: string | null | undefined, path: str
   return EVIDENCE_LOCATION_RE.test(text);
 }
 
+/** Citation candidates for one settlement: the canonical citations extracted
+ * from the evidence text. When grounding is ABSENT (legacy lexical reading)
+ * the historical rule also fires — the thread's own path merely mentioned in
+ * the evidence is no longer a resolvable candidate here, so callers fall
+ * back to `evidenceCitesCode` before ever consulting this list. */
+function citationCandidates(evidence: string | null | undefined): Array<{ file: string; line: number }> {
+  return extractCitationLocations(evidence);
+}
+
+/** #1681 r6: a `fixed` disposition is grounded when at least one cited
+ * location RESOLVES at the exact reviewed head — a plausible but fake
+ * `src/does-not-exist.ts:999999` proves nothing. Without engine grounding
+ * (legacy unit callers, replay) the settlement keeps the historical lexical
+ * reading; the production pipeline always supplies the resolver. */
+function fixedCitationResolves(
+  evidence: string | null | undefined,
+  path: string | null | undefined,
+  grounding: EvidenceGrounding | null | undefined,
+): boolean {
+  if (grounding === null || grounding === undefined) return evidenceCitesCode(evidence, path);
+  return citationCandidates(evidence).some((loc) => grounding.resolveLocation(loc.file, loc.line));
+}
+
+/** #1681 r6 (PhAd convergence): a historical BOT finding's `fixed` settles
+ * on a resolving citation, OR — when the evidence names no citation
+ * candidate at all — on this run's own head-bound acquisition of the
+ * thread's file (tool read or certified corpus diff). The reviewer's
+ * semantic judgment may rest on current-head content the run genuinely
+ * holds; it is not made to restate the same evidence in a second parallel
+ * proof channel. A citation that was ATTEMPTED but resolves nowhere is a
+ * broken claim, never rescued by acquisition; without grounding the
+ * historical lexical reading stands. */
+function botFixedSettled(
+  evidence: string | null | undefined,
+  path: string | null | undefined,
+  grounding: EvidenceGrounding | null | undefined,
+): boolean {
+  if (grounding === null || grounding === undefined) return evidenceCitesCode(evidence, path);
+  const candidates = citationCandidates(evidence);
+  if (candidates.length === 0) {
+    return (evidence ?? "").trim() !== ""
+      && grounding.acquiredPaths !== undefined
+      && path !== null && path !== undefined && path !== ""
+      && grounding.acquiredPaths.has(path);
+  }
+  return candidates.some((loc) => grounding.resolveLocation(loc.file, loc.line));
+}
+
 /** One thread from the enforcement view (`review-threads.json`). */
 export interface EnforcementThread {
   thread_id: string;
@@ -105,6 +164,9 @@ export interface EnforcementThread {
   /** #1663: what the forge metadata proves about the root author. Absent for
    * legacy callers, which keep the historical body-marker reading. */
   authorship?: ThreadAuthorship;
+  /** #1681 round 7: the forge-proven review submission owning this thread,
+   * when the read carries one (GitHub). Absent means unassociated. */
+  parent_review_id?: string;
   replies: number;
   category?: string | null;
 }
@@ -112,6 +174,13 @@ export interface EnforcementThread {
 export interface ThreadEnforcementResult {
   applied: boolean;
   reason: string;
+  /** #1681 r7b: the DETERMINISTIC settled records this pass stamped (every
+   * return path, including the empty one). These — not the artifact field,
+   * which still holds the model's RAW rows when the pass early-returns with
+   * no carried threads — are the only authoritative `concern` /
+   * `parent_review_id` provenance, so a model-fabricated pair can never
+   * settle a human change request. */
+  settled: readonly Record<string, unknown>[];
 }
 
 /** #1645: settlement-time reconciliation states for a listed thread against
@@ -172,7 +241,9 @@ function reconcileThreadState(threadId: string, reconciliation: ThreadReconcilia
  * re-emits. An omitted disposition, an evidence-free `open`, or an
  * unsupported answer is recorded as unverified and its old blocking severity
  * is withheld (never re-emitted). A human-authored unresolved thread is never
- * closed by a bot disposition. The settled records replace
+ * closed by a bot disposition (#1663), but a code-citing `fixed` settles it
+ * SEMANTICALLY at this head (#1681 round 5): physically open on the forge,
+ * not carried as a current finding. The settled records replace
  * `thread_dispositions` in the artifact.
  *
  * #1645: before a listed thread can settle into the finding set it must
@@ -197,9 +268,10 @@ export function applyReviewThreadEnforcement(
   threads: readonly EnforcementThread[] | null,
   verdictPolicy: string,
   reconciliation?: ThreadReconciliationInput | null,
+  grounding?: EvidenceGrounding | null,
 ): ThreadEnforcementResult {
   if (!Array.isArray(threads) || threads.length === 0) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled: [] };
   }
   const counts: Record<ThreadReconciliationState, number> = {
     live_unresolved: 0,
@@ -239,6 +311,12 @@ export function applyReviewThreadEnforcement(
 
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
+  // #1681 r7 review: a note that only DISCLOSES state (a human `fixed`
+  // settled at head whose thread stays physically open; an `open` flagged
+  // without a current-head reason) never changed the model's disposition
+  // and must not be billed as a downgrade. It still marks the settlement
+  // as having something to disclose, so the section renders.
+  let disclosed = 0;
   let settledWithdrawn = 0;
   let invalidated = 0;
   const counted = new Set<string>();
@@ -311,11 +389,25 @@ export function applyReviewThreadEnforcement(
       }
       if (materialIfUnverified) reassessment = "unverified";
     } else if (authorship === "human") {
-      // #1663: a human-authored unresolved thread is closed by the forge
-      // (its live state above), never by a bot disposition. The model's
-      // fixed/withdrawn/disputed claim is recorded as open and the thread is
-      // re-emitted at the existing human-thread severity (minor by default).
-      if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
+      // #1663: human-authored unresolved thread closed by the FORGE
+      // (its live state above), never by a bot disposition — the action
+      // never mutates another human's conversation. #1681 round 5 splits
+      // what that non-closing rule does and does not mean: GitHub
+      // `is_resolved` is PHYSICAL conversation state, not semantic
+      // authority over whether the code defect still exists. A `fixed`
+      // disposition carrying evidence that cites current code settles
+      // the finding SEMANTICALLY: the concern is addressed at this head,
+      // so it is not re-emitted as a current finding, does not count as
+      // an unresolved semantic obligation, and cannot hold back approval
+      // — while the thread stays physically open on the forge and the
+      // record below discloses exactly that. Any weaker claim — `fixed`
+      // without code-citing evidence, `withdrawn`, `disputed`, a bare or
+      // missing disposition — does NOT prove the defect gone and keeps
+      // the historical fail-closed reading: recorded open and re-emitted
+      // at the human-side non-blocking severity.
+      if (disposition === "fixed" && fixedCitationResolves(evidence, thread.path, grounding)) {
+        note = "human-authored thread stays open on the forge — a bot disposition cannot close it; the current-head evidence establishes the concern is addressed, so it is not carried as a current finding";
+      } else if (disposition === "fixed" || disposition === "withdrawn" || disposition === "disputed") {
         disposition = "open";
         note = "human-authored thread: a bot disposition cannot close it";
       } else if (disposition === undefined || !THREAD_DISPOSITIONS.includes(disposition)) {
@@ -326,7 +418,7 @@ export function applyReviewThreadEnforcement(
       disposition = "open";
       note = "no disposition given";
       if (materialIfUnverified) reassessment = "unverified";
-    } else if (disposition === "fixed" && !evidenceCitesCode(evidence, thread.path)) {
+    } else if (disposition === "fixed" && !botFixedSettled(evidence, thread.path, grounding)) {
       disposition = "open";
       note = "fixed without evidence citing current code";
       if (materialIfUnverified) reassessment = "unverified";
@@ -385,9 +477,35 @@ export function applyReviewThreadEnforcement(
     // ran — a legacy caller (no input) keeps byte-identical settled records.
     const record: Record<string, unknown> = { thread_id: threadId, disposition, evidence };
     if (reconciliation !== null && reconciliation !== undefined) record.reconciliation = state;
+    // #1681 round 7: carry the forge-proven owning review submission
+    // through settlement so the human-change-request pass can aggregate
+    // PER review. A forge without the link records nothing here — the
+    // concern stays unassociated rather than being guessed onto a review.
+    if (typeof thread.parent_review_id === "string" && thread.parent_review_id !== "") {
+      record.parent_review_id = thread.parent_review_id;
+    }
     if (note) {
       record.enforced = note;
-      downgraded += 1;
+      // Only a note that CHANGED the model's disposition is a downgrade;
+      // a note that merely annotates the settled reading is a disclosure.
+      if (entry.disposition === disposition) disclosed += 1;
+      else downgraded += 1;
+    }
+    // #1681 r6: a human-authored thread additionally carries its SEMANTIC
+    // concern state at this head — the single current-head answer the
+    // human-change-request settlement aggregates. Proven fixed →
+    // `addressed`; a supported `open` (no forcing note) → `present`; any
+    // forced/unsupported/unevaluated reading (including a `fixed` whose
+    // citation did not resolve, and an unverifiable live state) →
+    // `unresolved`, never collapsed into either settled answer.
+    if (authorship === "human") {
+      record.concern = disposition === "fixed"
+        ? "addressed"
+        : state !== "live_unresolved"
+          ? "unresolved"
+          : disposition === "open" && note === null
+            ? "present"
+            : "unresolved";
     }
     settled.push(record);
     if (disposition === "withdrawn") settledWithdrawn += 1;
@@ -498,11 +616,11 @@ export function applyReviewThreadEnforcement(
   }
 
   if (settled.length === 0) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled: [] };
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0
+  const changed = downgraded > 0 || disclosed > 0 || reemitted.length > 0 || settledWithdrawn > 0
     || invalidated > 0 || unreassessed.size > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
@@ -555,10 +673,11 @@ export function applyReviewThreadEnforcement(
     }
   }
   if (!changed) {
-    return { applied: false, reason: "" };
+    return { applied: false, reason: "", settled };
   }
   return {
     applied: true,
+    settled,
     reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}${unreassessed.size > 0 ? `, ${unreassessed.size} blocking concern(s) without current-head re-evaluation` : ""}`,
   };
 }

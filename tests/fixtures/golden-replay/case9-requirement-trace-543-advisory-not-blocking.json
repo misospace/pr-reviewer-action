@@ -55,42 +55,26 @@
     "findings": [],
     "requirement_coverage": [
       {
-        "requirement_id": "req-03c8c00c4e78",
-        "disposition": "unmet",
-        "enforcement": [],
-        "test": [],
-        "reason": "this is a merge-process constraint, but the pull request contains no production predicate, repository guard, or regression test that enforces sequential merging of sibling app.py extractions."
-      },
-      {
         "requirement_id": "req-470b9a0a2389",
-        "disposition": "unmet",
-        "enforcement": [
+        "status": "violated",
+        "evidence": [
           {
-            "file": "gallery_scan.py",
-            "line": 10
+            "kind": "file",
+            "ref": "gallery_scan.py:10",
+            "detail": "gallery_scan.py is added and contains the extracted module implementation, but no regression test asserts that the required helpers and constants are present in gallery_scan.py and re-exported through app.py. The cited line only performs a live app import and not an enforcing predicate."
           }
-        ],
-        "test": [],
-        "reason": "gallery_scan.py is added and contains the extracted module implementation, but no regression test asserts that the required helpers and constants are present in gallery_scan.py and re-exported through app.py. The cited line only performs a live app import and not an enforcing predicate."
+        ]
       },
       {
         "requirement_id": "req-79a95db059cc",
-        "disposition": "unverifiable",
-        "enforcement": [],
-        "test": [],
-        "reason": "the diff shows import-path updates, but it does not provide test execution results proving the four listed test files pass."
-      },
-      {
-        "requirement_id": "req-eecac42e59d1",
-        "disposition": "unmet",
-        "enforcement": [
+        "status": "unknown",
+        "evidence": [
           {
-            "file": "gallery_scan.py",
-            "line": 8
+            "kind": "tool",
+            "ref": "assessment",
+            "detail": "the diff shows import-path updates, but it does not provide test execution results proving the four listed test files pass."
           }
-        ],
-        "test": [],
-        "reason": "no test executes a future bootstrap that re-imports app, so the obligation that it also pop gallery_scan cannot be evidenced."
+        ]
       }
     ]
   },

@@ -38,9 +38,14 @@ import { fenceDelimiterFor } from "../context/fence.js";
 import { redactText } from "../context/redact.js";
 import { resolveDerivedObligations } from "../enforcement/derived-obligations.js";
 import { resolveRiskObligations } from "../enforcement/risk-obligations.js";
+// #1678 hardening: one owner for the requirement-decision vocabulary — the
+// corpus instruction and the native closing instruction quote the SAME
+// contract constant, so the trusted prompts can never again teach a shape
+// the strict decoder forbids.
+import { REQUIREMENT_DECISION_ROW_RULE } from "../requirements/verdict-contract.js";
 
 export const USER_MESSAGE_BASE =
-  "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Answer satisfied only when your assessment of the relevant current-head evidence supports that the required behavior actually holds — a file or test citation identifies the evidence you relied on, but it does not establish semantic correctness by itself; answer violated when you have a supported counterexample or evidence that the requirement is not met; answer unknown when you cannot establish whether the requirement holds, including when you located a likely implementation or test but cannot establish its adequacy. One genuine observation may support several requirements; cite it for each.";
+  "Analyze this pull request corpus and return STRICT JSON. " + REQUIREMENT_DECISION_ROW_RULE;
 
 const REQUIRED_CHECKS_PREAMBLE =
   "Required checks — disposition EACH of these review questions in the "

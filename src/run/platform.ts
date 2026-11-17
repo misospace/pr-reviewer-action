@@ -1,8 +1,9 @@
 import type { FetchLike } from "../platform/http.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { giteaAdapterFromEnv } from "../platform/gitea.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
-import { resolvePlatform } from "../platform/resolve.js";
+import { declaredForgeId, resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend, tangledContextFromEnv } from "../platform/tangled.js";
 import { TangledAdapter } from "../platform/tangled-adapter.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../platform/semantic-fixture.js";
@@ -44,6 +45,19 @@ export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): 
   const repo = env.REPO!;
   const prNumber = env.PR_NUMBER!;
   if (platform === "forgejo") {
+    // #1678/#1681 review: Gitea is the same wire family, so it gets the
+    // Forgejo-family adapter with the Gitea identity through `giteaAdapterFromEnv`
+    // — the factory that refuses the Forgejo-only auth settings BEFORE the
+    // adapter is constructed: `giteaTokenFromEnv(env)` raises on a declared
+    // `FORGEJO_AUTH_METHOD=authorized_integration` or a set
+    // `FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE`, and the adapter's own
+    // constructor guard repeats the refusal under the Gitea identity. The
+    // method/audience are absent from these options because the identity has
+    // one auth mode — never because a declared integration config degrades to
+    // token mode here.
+    if (declaredForgeId(env.PLATFORM, "forgejo") === "gitea") {
+      return giteaAdapterFromEnv(env, repo, prNumber, fetchImpl);
+    }
     return new ForgejoAdapter({
       repo,
       prNumber,

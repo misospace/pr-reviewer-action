@@ -13,7 +13,7 @@ import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { jqCompact } from "../platform/jq.js";
 import { forgejoSelfRunOrigin, type ExternalCheck } from "../platform/normalize.js";
-import { resolvePlatform } from "../platform/resolve.js";
+import { declaredFamilyForge, resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/types.js";
 
@@ -109,6 +109,11 @@ export function ciAdapterFromEnv(ciEnv: CiEnv, repo: string, prNumber: string, t
       token: forgejoToken,
       authMethod: (ciEnv.FORGEJO_AUTH_METHOD ?? "").trim().toLowerCase() || undefined,
       authorizedIntegrationAudience: (ciEnv.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE ?? "").trim() || undefined,
+      // #1678: the CI gate constructs its own adapter, so it threads the
+      // declared forge identity too — otherwise a Gitea run would carry the
+      // Forgejo-only `authorized_integration` mode into this lane, where the
+      // adapter's construction guard never sees the identity that refuses it.
+      forge: declaredFamilyForge(ciEnv.PLATFORM),
     });
   }
   return new GitHubAdapter({

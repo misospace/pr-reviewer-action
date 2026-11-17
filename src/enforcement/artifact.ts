@@ -97,12 +97,18 @@ export interface ArtifactThreadDisposition {
   evidence: string | null;
   /** Downgrade note recorded by enforcement ("no disposition given", …). */
   enforced?: string;
+  /** #1681 round 7: forge-proven review submission owning the thread,
+   * carried through settlement for per-review human aggregation. */
+  parent_review_id?: string;
 }
 
 export interface ArtifactHumanReviewDisposition {
   review_id: string;
-  disposition: "addressed" | "not_addressed";
+  disposition: "addressed" | "not_addressed" | "unresolved";
   evidence: string | null;
+  /** #1681 r6: which authority answered — the settled human-thread concerns
+   * (the single current-head truth), or the model's own duplicate claim. */
+  basis?: "thread-settlement" | "model-claim";
 }
 
 export interface ReviewArtifact {

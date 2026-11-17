@@ -56,6 +56,11 @@
       "kind": "file",
       "ref": "src/enforcement/threads.ts:1",
       "detail": "The implementation rejects non-string input."
+     },
+     {
+      "kind": "tool",
+      "ref": "call-1",
+      "detail": "Disclosure of an inspection tool call; not a source citation."
      }
     ]
    },
@@ -78,17 +83,6 @@
       "kind": "file",
       "ref": "src/enforcement/threads.ts:3",
       "detail": "The boolean response contract is preserved."
-     }
-    ]
-   },
-   {
-    "requirement_id": "req-b60526cb7f5d",
-    "status": "satisfied",
-    "evidence": [
-     {
-      "kind": "tool",
-      "ref": "call-1",
-      "detail": "Disclosure of an inspection tool call; not a source citation."
      }
     ]
    }

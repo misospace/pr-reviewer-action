@@ -18,6 +18,7 @@ import { ForgejoAdapter } from "./forgejo.js";
 import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
+import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 
 export type PublishPlatformName = "github" | "forgejo" | "tangled";
 
@@ -1005,6 +1006,9 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     authMethod?: string | undefined;
     authorizedIntegrationAudience?: string | undefined;
     baseUrl?: string | undefined;
+    /** #1678: which product the endpoint runs. `"gitea"` forwards to the adapter,
+     * whose constructor refuses the Forgejo-only `authorized_integration` mode. */
+    forge?: GiteaFamilyForge | undefined;
     timeoutMs?: number | undefined;
     fetchImpl?: FetchLike | undefined;
     diffProvider?: (() => Promise<string>) | undefined;
@@ -1023,6 +1027,12 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.integrationMode = method === "authorized_integration"
       || (method === "" && (options.authorizedIntegrationAudience ?? "").trim() !== "");
     this.integrationOwnerId = integrationOwnerIdFromAudience(options.authorizedIntegrationAudience);
+    // #1678: the same refusal the read adapter raises, restated here so the
+    // publish boundary names itself as the rejecter regardless of the order the
+    // adapter below is constructed in.
+    if (options.forge === "gitea" && this.integrationMode) {
+      throw new Error(GITEA_INTEGRATION_REFUSAL);
+    }
     this.authorization = new ForgejoAdapter({
       repo: options.repo,
       prNumber: options.prNumber,
@@ -1030,6 +1040,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       token: options.token,
       authMethod: options.authMethod,
       authorizedIntegrationAudience: options.authorizedIntegrationAudience,
+      ...(options.forge === undefined ? {} : { forge: options.forge }),
       timeoutMs: options.timeoutMs,
       fetchImpl: options.fetchImpl,
     });

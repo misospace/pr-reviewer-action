@@ -127,6 +127,7 @@ import { type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
+import { parseCitationLocation } from "./citations.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -391,6 +392,15 @@ function anyLocationValid(locations: readonly TraceLocation[], cache: FileTextCa
  * "test" citing a production file is not a regression test. */
 function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
   return locations.some((loc) => isTestPath(loc.file) && locationValid(loc, cache));
+}
+
+/** The exact-head location validator as a reusable predicate (#1681 r6):
+ * thread and human-review settlement ground their cited evidence against
+ * the SAME checkout the requirement trace validates, so there is one
+ * reviewed-head truth for every provenance channel. */
+export function createHeadLocationValidator(workspace: string): (file: string, line: number) => boolean {
+  const cache = new FileTextCache(workspace);
+  return (file: string, line: number): boolean => locationValid({ file, line }, cache);
 }
 
 /** Generic connective/verb words that never name a requirement's subject —
@@ -2336,31 +2346,16 @@ function coverageStatusDisposition(claim: RawClaim): string | null {
   return COVERAGE_STATUS_DISPOSITION.get(claim.status.trim().toLowerCase()) ?? null;
 }
 
-/** One evidence ref as a head-citable location: `path` or `path:line`
- * (a `line-end` range suffix takes the first line). Anything that is not a
- * path ref (`call-7`, a URL, free prose) yields null — it names no location
- * the checkout validator can resolve. */
+/** One evidence ref as a head-citable location, per the ONE canonical
+ * citation grammar (`src/enforcement/citations.ts`): `path`, `path:line`
+ * (a `line-end` range suffix — or a diff anchor `path:+line-end[:index]`
+ * as the corpus PR-Diff section renders it — takes the FIRST head-side
+ * line). Anything that is not a path ref (`call-7`, a URL, free prose)
+ * yields null — it names no location the checkout validator can resolve.
+ * Parsing accepts; only `locationValid` below vouches a location exists at
+ * the reviewed head. */
 function coverageRefLocation(ref: unknown): TraceLocation | null {
-  if (typeof ref !== "string") return null;
-  const trimmed = ref.trim();
-  if (trimmed === "") return null;
-  // #252 boundary: real paths never carry control characters, and a resolved
-  // location renders into the trace — so a hostile ref carrying a newline or
-  // terminal byte is rejected at the parse door, the same discipline
-  // `capReason` applies to evidence details. (The checkout validator would
-  // already refuse to credit it; this keeps the raw bytes out of the
-  // published rendering entirely.)
-  if (/[\x00-\x1f\x7f]/.test(trimmed)) return null;
-  const match = /^([^\s:][^:]*?):(\d+)\b/.exec(trimmed);
-  if (match !== null) {
-    const line = Number(match[2]);
-    if (!Number.isSafeInteger(line) || line <= 0) return null;
-    return { file: match[1] as string, line };
-  }
-  // A bare path (no `:line`) is still a path-shaped ref; a token with any
-  // whitespace is prose, not a path.
-  if (/\s/.test(trimmed)) return null;
-  return { file: trimmed, line: 1 };
+  return parseCitationLocation(ref);
 }
 
 interface CoverageClaimEvidence {

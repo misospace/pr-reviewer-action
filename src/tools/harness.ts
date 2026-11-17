@@ -40,7 +40,17 @@ import { KNOWN_SECRET_REDACTED, containsKnownSecret, maskAndTruncate, maskDiagno
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import { endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
-import { parseVerdictResponse } from "../model/verdict.js";
+import { parseVerdictResponse, verdictCompletionText } from "../model/verdict.js";
+// #1678 hardening: the closing-verdict requirement-decision contract (one
+// owner) — validator, correction message, and artifact parsing.
+import {
+  parseVerdictContractArtifact,
+  renderRequiredRequirementDecisionsBlock,
+  renderVerdictContractCorrectionMessage,
+  validateVerdictRequirementContract,
+  VERDICT_CONTRACT_ARTIFACT,
+  type VerdictContract,
+} from "../requirements/verdict-contract.js";
 import { VerdictParseFailure } from "../model/types.js";
 import { extractResponseText } from "../specialists/wire.js";
 import { raisedCompletionBudget } from "../model/call.js";
@@ -894,13 +904,35 @@ function joinedCompletionText(content: unknown, topLevel: boolean): string | nul
 }
 
 
+/** #1678 hardening: the bounded, content-free record of the ONE verdict-
+ * contract correction turn (requirement IDs and counts only — the IDs are
+ * content hashes, never user or model text). */
+export interface VerdictContractCorrectionRecord {
+  attempted: true;
+  recovered: boolean;
+  expected_count: number;
+  missing_ids: readonly string[];
+  missing_count: number;
+  duplicated_ids: readonly string[];
+  unexpected_ids: readonly string[];
+}
+
 export interface NativeVerdictOutcome {
   response: unknown;
   ok: boolean;
   attempts: number;
   retried: boolean;
-  transport: "streamed" | "non-streamed" | "non-streamed-retry" | "non-streamed-transport-retry" | "";
-  reason: "accepted" | "transport" | "parse" | "empty" | "";
+  transport:
+    | "streamed"
+    | "non-streamed"
+    | "non-streamed-retry"
+    | "non-streamed-transport-retry"
+    // #1678 hardening: the accepted attempt was the ONE bounded verdict-
+    // contract correction turn (never a transport recovery — it only runs on
+    // a response that succeeded on the wire).
+    | "non-streamed-contract-correction"
+    | "";
+  reason: "accepted" | "transport" | "parse" | "empty" | "contract" | "";
   detail: string;
   streamFailureKind: NativeVerdictOutcome["reason"];
   streamFailureDetail: string;
@@ -915,6 +947,15 @@ export interface NativeVerdictOutcome {
    * the discarded initial non-streamed attempt; `retry_elapsed_sec` is the
    * retry's own time (null when the retry failed closed unsent). */
   transportRetry?: StreamedAttemptFailureRecord;
+  /** #1678 hardening: present when the closing verdict failed the exact
+   * requirement-decision contract and the turn spent (or refused) its ONE
+   * bounded serialization-correction turn. Content-free by construction:
+   * counts and requirement IDs only, never response text. `recovered` is
+   * true only when the correction response passed the ENTIRE closing
+   * contract; a still-invalid correction fails closed
+   * (`reason: "contract"`, no authoritative response). There is never a
+   * second contract correction. */
+  contractCorrection?: VerdictContractCorrectionRecord;
   /** #1199: the verdict turn's provider-reported usage folded over EVERY
    * attempt (a streamed→non-streamed retry included, each folded at the same
    * sites the aggregate `usageAcc` folds them): per-field the sum of the
@@ -965,6 +1006,15 @@ export interface ProduceVerdictInput {
   /** #1047: the lane name for failure diagnostics ("primary" | "smart").
    * Optional so existing callers keep compiling; defaults to "primary". */
   tier?: string;
+  /** #1678 hardening: the run's exact in-scope requirement IDs (empty/absent
+   * = no contract, existing behavior byte-identical). A response that parses
+   * but whose `requirement_coverage` is not EXACTLY these IDs (each once, no
+   * extras, valid statuses) is an invalid closing serialization, not seven
+   * semantic "unknown" answers: it gets at most ONE no-tools, no-new-evidence
+   * correction turn in the same conversation. This state is disjoint from the
+   * transport retries above (which require a failed wire attempt), so the
+   * totals stay bounded: ≤2 transport-state attempts, +1 contract correction. */
+  requirementContractIds?: readonly string[];
 }
 
 /**
@@ -1044,6 +1094,15 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 
   const first: Record<string, unknown> = { ...input.verdictPayload, stream: Boolean(input.verdictPayload.stream) };
   const attemptedStream = Boolean(first.stream);
+  // #1678 review: the EFFECTIVE payload of the attempt that actually
+  // produced this turn's last response. The contract correction builds on
+  // THIS shape — a #637 retry's raised completion budget, the #1687
+  // transport-retry adjustments included — never on the original first
+  // payload: rebuilding from `first` after a token-cap raise would ask the
+  // model to re-emit a COMPLETE table under the budget that already
+  // truncated it, converting a recoverable serialization into a false
+  // `verdict_contract_incomplete`.
+  let effectivePayload: Record<string, unknown> = first;
 
   let attempts = 0;
   let retried = false;
@@ -1161,6 +1220,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
       detail = "non-streamed retry payload carries no messages — not sent";
       finalBudgetRaisedTo = null;
     } else {
+      effectivePayload = retryPayload;
       const retry = await request(retryPayload);
       attempts += 1;
       response = retry.response;
@@ -1238,6 +1298,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           ? Math.max(1, Math.trunc(input.turnTimeout - failedElapsed))
           : undefined;
         const retryStartMs = performance.now();
+        effectivePayload = retryPayload;
         const retry = await request(retryPayload, timeoutCap);
         attempts += 1;
         transportRetry = recordFor((performance.now() - retryStartMs) / 1000);
@@ -1252,6 +1313,99 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           ok = false;
           reason = "transport";
           detail = retry.transportError ?? "request failed";
+        }
+      }
+    }
+  }
+
+  // #1678 hardening — the ONE bounded verdict-contract correction. This runs
+  // only on a response that SUCCEEDED on the wire and parsed (#1688's
+  // transport states are disjoint: they require a failed attempt), so the
+  // totals stay bounded — never a Cartesian product of transport retries
+  // and contract corrections. A malformed requirement-decision table is an
+  // invalid closing SERIALIZATION, not a semantic answer: the first verdict
+  // is discarded (it can never become authoritative), the model gets ONE
+  // no-tools, no-new-evidence re-emit inside the same completed
+  // conversation, and a still-invalid correction fails closed as
+  // reason "contract". No second correction, ever.
+  const contractIds = (input.requirementContractIds ?? []).filter((id) => typeof id === "string" && id !== "");
+  let contractCorrection: VerdictContractCorrectionRecord | undefined;
+  if (ok && contractIds.length > 0 && response !== null) {
+    const coverageOf = (candidate: unknown): unknown => {
+      try {
+        return parseVerdictResponse(candidate, knownSecrets).requirementCoverage;
+      } catch {
+        return undefined;
+      }
+    };
+    const firstDiags = validateVerdictRequirementContract(coverageOf(response), contractIds);
+    if (!firstDiags.ok) {
+      contractCorrection = {
+        attempted: true,
+        recovered: false,
+        expected_count: firstDiags.expectedCount,
+        missing_ids: [...firstDiags.missing],
+        missing_count: firstDiags.missingTotal,
+        duplicated_ids: [...firstDiags.duplicated],
+        unexpected_ids: [...firstDiags.unexpected],
+      };
+      // The EFFECTIVE successful payload is the base: its model, format/
+      // schema, and the completion budget that actually produced this
+      // response (the #637 raise included). The correction changes ONLY
+      // what it intentionally changes: the conversation gains the rejected
+      // assistant serialization plus the deterministic no-tools correction
+      // turn, and the request goes non-streamed (`stream_options` drops).
+      const baseMessages = Array.isArray(effectivePayload.messages) ? effectivePayload.messages : null;
+      const correctionRemaining = input.deadline - timeFn();
+      if (baseMessages === null || baseMessages.length === 0 || correctionRemaining <= 0) {
+        // Fail closed WITHOUT a wire call (the #1464 boundary): a correction
+        // request that lost its conversation or its deadline is never sent.
+        ok = false;
+        reason = "contract";
+        detail = `closing verdict omitted/misspecified ${contractCorrection.missing_count} of ${firstDiags.expectedCount} required requirement rows; correction refused (${baseMessages === null || baseMessages.length === 0 ? "payload lost its messages" : "deadline exhausted"}) — no further retry`;
+        response = null;
+      } else {
+        const correctionMessages: unknown[] = [
+          ...baseMessages,
+          { role: "assistant", content: verdictCompletionText(response) },
+          { role: "user", content: renderVerdictContractCorrectionMessage(firstDiags) },
+        ];
+        const correctionPayload: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(effectivePayload)) {
+          if (k !== "stream_options") correctionPayload[k] = v;
+        }
+        correctionPayload.stream = false;
+        correctionPayload.messages = correctionMessages;
+        const correction = await request(correctionPayload);
+        attempts += 1;
+        let correctionOk = false;
+        let correctionDetail = "";
+        if (correction.response !== null) {
+          foldAttemptUsage(correction.response);
+          const evaluation = evaluateNativeVerdict(correction.response, knownSecrets);
+          if (evaluation.ok) {
+            const correctionDiags = validateVerdictRequirementContract(coverageOf(correction.response), contractIds);
+            if (correctionDiags.ok) {
+              correctionOk = true;
+              response = correction.response;
+              contractCorrection.recovered = true;
+            } else {
+              correctionDetail = `still ${correctionDiags.missing.length}/${firstDiags.expectedCount} rows short${correctionDiags.duplicated.length > 0 ? ", duplicated IDs" : ""}${correctionDiags.unexpected.length > 0 ? ", unexpected IDs" : ""}`;
+            }
+          } else {
+            correctionDetail = `correction turn ${evaluation.reason}: ${evaluation.detail}`;
+          }
+        } else {
+          correctionDetail = `correction turn transport failure: ${correction.transportError ?? "request failed"}`;
+        }
+        if (!correctionOk) {
+          // The first verdict stays discarded; the failed correction never
+          // replaces it; the engine's corpus-review fallback (with its own
+          // contract gate) takes over. No third contract correction.
+          ok = false;
+          reason = "contract";
+          detail = `closing verdict failed the requirement-decision contract (${contractCorrection.missing_count} of ${firstDiags.expectedCount} rows); one correction allowed — ${correctionDetail}`;
+          response = null;
         }
       }
     }
@@ -1303,9 +1457,15 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     attempts,
     retried,
     transport: ok
-      ? (!attemptedStream
-        ? (retryKind === "transport" ? "non-streamed-transport-retry" : "non-streamed")
-        : retried ? "non-streamed-retry" : "streamed")
+      ? contractCorrection?.recovered === true
+        ? "non-streamed-contract-correction"
+        : !attemptedStream
+          ? retryKind === "transport"
+            ? "non-streamed-transport-retry"
+            : "non-streamed"
+          : retried
+            ? "non-streamed-retry"
+            : "streamed"
       : "",
     reason: ok ? "accepted" : reason,
     detail: ok ? "" : detail,
@@ -1313,6 +1473,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     streamFailureDetail,
     retryKind,
     ...(transportRetry !== undefined ? { transportRetry } : {}),
+    ...(contractCorrection !== undefined ? { contractCorrection } : {}),
     usageTotals,
     knownSecrets,
     timing,
@@ -4160,6 +4321,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // identity block. Read once from the harness-authored candidates
     // artifact (empty on every path that never injected the rows).
     const proofIndexRows = proofIndexMustCheckRows(deps.readText("review-obligations-candidates.json"));
+    // #1678 hardening: the run's closing requirement-decision contract, read
+    // from the artifact the engine derived from the SAME deterministic trace
+    // scope the validator uses. Null/empty = fully inert (byte-identical
+    // closing turn), so every run without in-scope requirements is unchanged.
+    const verdictContract = parseVerdictContractArtifact(deps.readText(VERDICT_CONTRACT_ARTIFACT));
+    const requiredDecisionsBlock = renderRequiredRequirementDecisionsBlock(verdictContract);
     // The in-conversation verdict turn. #1503: the #1145 full-verdict REFRESH
     // re-run of this body was removed — the post-repair turn is now trace-only
     // (`runTraceOnlyRepairTurn` below), so this owns exactly one verdict: the
@@ -4196,10 +4363,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             `  native_loop: verdict-corpus dedup dropped ${dropped} section(s) already in the planning context (${saved} bytes saved)`,
           );
         }
+        // #1678 hardening: the exact expected requirement decisions ride at
+        // the END of the closing turn — the last text before the model
+        // answers — instead of opaque IDs buried 100k+ tokens earlier in the
+        // conversation. An empty contract renders an empty suffix, so every
+        // run without in-scope requirements stays byte-identical.
+        const requiredDecisionsSuffix = requiredDecisionsBlock === "" ? "" : `\n\n${requiredDecisionsBlock}\n`;
         if (shape === "trailing_task") {
-          conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION);
+          conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION + requiredDecisionsSuffix);
         } else {
-          conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped);
+          conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped + requiredDecisionsSuffix);
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
@@ -4233,6 +4406,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           responseFormat,
           tokensParam,
           cachePrefix: true,
+          // #1678 hardening: with an in-scope requirement set the closing
+          // turn's structured schema is pinned to exactly those IDs (where
+          // the lane sends the schema at all; prompt-only lanes keep the
+          // identical semantic contract through the block + validator).
+          verdictRequirementIds: verdictContract?.expectedIds ?? [],
           // #998: the closing verdict turn is part of this tier's spend too,
           // so it honors the same effort (and the same Anthropic opt-in).
           reasoningEffort,
@@ -4262,6 +4440,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           transport: deps.transport,
           timeFn,
           tier: input.tier,
+          // #1678 hardening: the exact expected requirement-ID set gates the
+          // closing verdict BEFORE it can become authoritative; a malformed
+          // table gets its one bounded correction turn here.
+          requirementContractIds: verdictContract?.expectedIds ?? [],
         });
         // #1199/#1145: decide acceptance ONCE, before any telemetry is written.
         // Short-circuits to false with zero budget-clock reads when the verdict
@@ -4331,6 +4513,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               ? ` native_loop: closing non-streamed verdict attempt failed (${formatStreamedAttemptFailure(verdict.transportRetry)}); retried once non-streamed and recovered`
               : ` native_loop: closing non-streamed verdict transport retry failed (${formatStreamedAttemptFailure(verdict.transportRetry)}) — no further retry`,
           );
+        }
+        // #1678 hardening: the verdict-contract correction is its OWN bounded
+        // surface — never a transport retry — and content-free by
+        // construction (requirement-ID hashes and counts only).
+        if (verdict.contractCorrection !== undefined) {
+          input.result.native_loop_verdict_contract_correction = verdict.contractCorrection;
+          log(
+            verdict.contractCorrection.recovered
+              ? ` native_loop: closing verdict missed ${verdict.contractCorrection.missing_count} of ${verdict.contractCorrection.expected_count} requirement rows; one no-tools correction turn returned a complete table`
+              : ` native_loop: closing verdict missed ${verdict.contractCorrection.missing_count} of ${verdict.contractCorrection.expected_count} requirement rows; one no-tools correction allowed — it did not complete the table (${maskKnownSecrets(verdict.detail, verdict.knownSecrets)})`,
+          );
         }        // #1047: the bounded failure-shape record (and the budget raise, when
         // the single non-streamed retry used one) — content-free counts and
         // reasons only, so the harness artifact can say WHY the verdict turn
@@ -4382,7 +4575,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 ? " via non-streamed retry"
                 : verdict.transport === "non-streamed-transport-retry"
                   ? " via non-streamed transport retry (#1687)"
-                  : ""),
+                  : verdict.transport === "non-streamed-contract-correction"
+                    ? " via one bounded verdict-contract correction (#1678)"
+                    : ""),
           );
           return verdict.response;
         }

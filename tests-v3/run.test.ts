@@ -506,7 +506,7 @@ test("#977: runReview does not attribute a non-forcing settlement to enforcement
 // be proven live-unresolved against the SECOND read before it can block.
 async function runStaleThreadVerdict(
   modelVerdict: Record<string, unknown>,
-  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown>; threadBody?: string } = {},
+  options: { secondListing?: unknown[]; secondListingComplete?: boolean; secondReadFails?: boolean; identity?: string | null; threadUser?: Record<string, unknown>; threadBody?: string; extraThreads?: Array<Record<string, unknown>>; reviews?: unknown[]; headFiles?: Record<string, string> } = {},
 ): Promise<{ artifact: Record<string, unknown>; threadView: Array<Record<string, unknown>>; result: Awaited<ReturnType<typeof runReview>>; threadReads: number }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -514,6 +514,14 @@ async function runStaleThreadVerdict(
   });
   const { runDir, cleanup } = withRunDir();
   try {
+    // #1681 r6: the settlement grounds cited evidence in the run's exact-head
+    // workspace (the runDir is the checkout in this harness), so cases that
+    // cite real locations seed them here the way a real checkout would.
+    for (const [path, body] of Object.entries(options.headFiles ?? {})) {
+      const target = join(runDir, path);
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, body);
+    }
     const majorThread = {
       thread_id: "PRRT_stale1",
       path: "README.md",
@@ -531,20 +539,27 @@ async function runStaleThreadVerdict(
         body: options.threadBody ?? `**⚠️ Major (bug):** stale defect\n\n${FINDING_TRAILER}`,
       }],
     };
-    const adapter = mockPlatform({ threads: [majorThread] }) as PlatformReadAdapter;
+    // #1681 round 5: additional carried threads (the multi-finding
+    // change-request shape), listed and reconciled exactly like the first.
+    const threads: unknown[] = [majorThread, ...(options.extraThreads ?? [])];
+    const adapter = mockPlatform({ threads }) as PlatformReadAdapter;
+    if (options.reviews !== undefined) {
+      const served: unknown[] = options.reviews;
+      adapter.listPrReviewsPaginated = () => Promise.resolve({ ok: true, data: served });
+    }
     // #1663: trusted authorship metadata says the carried thread is the
     // action's own; the body marker alone would not be trusted provenance.
     adapter.authenticatedIdentity = () => Promise.resolve(options.identity === undefined ? "bot" : options.identity);
     let reads = 0;
     adapter.listReviewThreads = () => {
       reads += 1;
-      if (reads === 1) return Promise.resolve({ ok: true, data: [majorThread] });
+      if (reads === 1) return Promise.resolve({ ok: true, data: threads });
       if (options.secondReadFails === true) {
         return Promise.resolve({ ok: false, error: "HTTP 502 from the forge" });
       }
       return Promise.resolve({
         ok: true,
-        data: options.secondListing ?? [majorThread],
+        data: options.secondListing ?? threads,
         ...(options.secondListingComplete === false ? { complete: false } : {}),
       });
     };
@@ -826,29 +841,236 @@ test("#1663: a rotated-identity historical Major with a supported reason still b
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("#1663: a human-owned PAT comment is never dismissal-authorized by the run's own identity", async () => {
+test("#1681 round 5: a human thread with code-citing proof of fix is addressed, not re-emitted — and never closed on the forge", async () => {
   // Failure A: the workflow authenticates as `alice` (her PAT) and Alice
   // hand-wrote this unmarked thread. Login matching alone must not classify
   // it as the action's own finding and let a `fixed` disposition dismiss it.
+  // Round-5 split: what DISMISSES is the action writing GitHub state, and
+  // that remains forbidden. A current-head `fixed` that CITES CODE settles
+  // the concern semantically: no re-emitted finding, no obligation, nothing
+  // holding back approval — while the thread stays physically open.
   const { artifact, threadView, result } = await runStaleThreadVerdict({
     verdict: "approve",
     review_markdown: "Looks fine.\n",
     findings: [],
-    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/a.ts:9 shows it is handled" }],
-  }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" });
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md line 12 shows it is handled" }],
+  }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n", headFiles: { "README.md": "x\n".repeat(12) } });
   assert.equal(threadView[0]!.authorship, "human",
     "the login match does NOT authorize reading her comment as the action's own");
   const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
-  assert.equal(record.disposition, "open", "the model's `fixed` cannot dismiss a human thread");
+  assert.equal(record.disposition, "fixed", "the settlement is recorded honestly, not forced to open");
+  assert.match(String(record.enforced), /stays open on the forge/,
+    "the disclosure says the physical thread remains open — the action cannot close it");
+  assert.match(String(record.enforced), /addressed, so it is not carried as a current finding/);
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"), false,
+    "the addressed concern is not re-emitted as a current finding");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined,
+    "it is not an unresolved semantic obligation either");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes", "an addressed human thread never manufactures a block");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "and no native block is submitted");
+  assert.ok(String(artifact.review_markdown).includes("`PRRT_stale1`: fixed"),
+    "the physical open state is still disclosed in the provenance section");
+});
+
+test("#1681 round 5: a bare human `fixed` claim without code-citing evidence stays fail-closed", async () => {
+  // The reply saying "fixed" is a LEAD, never proof. Without a current-head
+  // citation the concern is not settled: it keeps the historical reading —
+  // recorded open, re-emitted at the human-side non-blocking severity.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "the author replied that it is fine now" }],
+  }, { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" });
+  const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "open", "an uncited claim cannot discharge a human thread");
   assert.equal(record.enforced, "human-authored thread: a bot disposition cannot close it");
   const carried = (artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
-  assert.equal(carried?.severity, "minor", "the thread survives open at the human-side severity, unresolvable by the action");
+  assert.equal(carried?.severity, "minor", "the concern stays visible at the human-side severity");
   assert.notEqual(result.finalDisposition?.kind, "request_changes", "an ordinary human question never manufactures a block");
-  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES", "and no native block is submitted");
-  assert.ok(!(result.finalDisposition?.materialUnknowns ?? []).some((entry) => entry.code === "unverified_blocking_claim"),
-    "nor is a proven human root turned into a material uncertainty");
-  assert.notEqual(result.finalDisposition?.reason, "material_unknown",
-    "any withholding here is the harness's certification gate, not the human thread");
+});
+
+test("#1681 round 5: an addressed human change request with several fixed threads blocks nothing (the #1681 shape)", async () => {
+  // Several findings from a prior REQUEST_CHANGES review, every one proven
+  // fixed at the current head, every GitHub conversation still physically
+  // open. None may appear in the current Findings, none may block APPROVE,
+  // and the open conversation state is disclosed separately. This is the
+  // exact shape that made the round-4 review self-contradictory; the pin
+  // exists so "resolve your threads to get approval" can never return.
+  const human = (id: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 10,
+      user: { login: "joryirving", type: "User" },
+      created_at: "2026-11-17T01:26:24Z",
+      updated_at: "2026-11-17T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "All three defects are fixed at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:3 — the defect the old thread pointed at no longer exists at this head" },
+      { thread_id: "PRRT_corpus1", disposition: "fixed", evidence: "src/engine/review.ts:+4110-4115:2 now fails the lane closed on a twice-invalid serialization" },
+      { thread_id: "PRRT_schema2", disposition: "fixed", evidence: "src/model/request.ts:+120-126:3 pins the exact-N schema on every corpus attempt" },
+      { thread_id: "PRRT_payload3", disposition: "fixed", evidence: "src/tools/harness.ts:+1400-1410:4 builds the correction from the effective payload" },
+    ],
+  }, {
+    identity: "alice",
+    // #1681 r6: the diff-anchor refs must RESOLVE at the exact-head
+    // checkout, so the seeded workspace carries files long enough for the
+    // cited head-side lines. A fake or out-of-range anchor is tested
+    // fail-closed in the round-6 cases below.
+    headFiles: {
+      "README.md": "x\n".repeat(10),
+      "src/engine/review.ts": "x\n".repeat(4200),
+      "src/model/request.ts": "x\n".repeat(130),
+      "src/tools/harness.ts": "x\n".repeat(1500),
+    },
+    extraThreads: [
+      human("PRRT_corpus1", "Major: a still-invalid corpus correction is kept as semantic authority.\n"),
+      human("PRRT_schema2", "Major: the exact-N schema is only consulted after the response arrives.\n"),
+      human("PRRT_payload3", "Major: the correction payload is rebuilt from first, not the effective payload.\n"),
+    ],
+  });
+  const records = (artifact.thread_dispositions as Array<Record<string, unknown>>);
+  assert.equal(records.length, 4, "every carried thread settles — the stale one plus the three human threads");
+  for (const record of records) {
+    assert.equal(record.disposition, "fixed", `${record.thread_id}: settled on current-head evidence`);
+  }
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id), false,
+    "no addressed thread re-enters the current Findings set");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined,
+    "no addressed thread counts as an unresolved semantic obligation");
+  assert.notEqual(result.finalDisposition?.kind, "request_changes",
+    "nothing here blocks approval");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES");
+  const markdown = String(artifact.review_markdown);
+  for (const id of ["PRRT_corpus1", "PRRT_schema2", "PRRT_payload3"]) {
+    assert.ok(markdown.includes(`\`${id}\`: fixed`), `${id}: physical open state disclosed for provenance`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #1681 r6: the parallel proof channels converge. A `fixed`/`addressed`
+// claim settles only on evidence that RESOLVES at the exact reviewed head
+// (the runDir is the checkout in this harness); a historical blocker the run
+// reassessed on head-acquired content is never an `unverified_blocking_claim`;
+// and a prior human change request has exactly ONE current-head answer.
+// ---------------------------------------------------------------------------
+
+test("#1681 r6: fake and out-of-range fix citations fail closed; a resolving one settles", async () => {
+  const humanOpts = { identity: "alice", threadUser: { login: "alice", type: "User" }, threadBody: "Should this handle None?\n" };
+  // (a) A plausible-looking fake path cites nothing that exists at head.
+  const fake = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Fixed.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "src/does-not-exist.ts:999999 fixed it" }],
+  }, humanOpts);
+  assert.equal((fake.artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open",
+    "a citation that resolves nowhere cannot discharge a human thread");
+  const fakeCarried = (fake.artifact.findings as Array<{ thread_id?: string; severity?: string }>).find((item) => item.thread_id === "PRRT_stale1");
+  assert.equal(fakeCarried?.severity, "minor", "the concern stays visible at the human-side severity");
+  // (b) A real file with an out-of-range line is equally unproven.
+  const eof = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Fixed.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:+40-42:1 closes it" }],
+  }, { ...humanOpts, headFiles: { "README.md": "x\n" } });
+  assert.equal((eof.artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "open",
+    "an out-of-range head anchor cites nothing at head");
+  // (c) The same anchor form that resolves at head settles the finding.
+  const good = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Fixed.\n",
+    findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:+5-9:1 closes it" }],
+  }, { ...humanOpts, headFiles: { "README.md": "x\n".repeat(9) } });
+  assert.equal((good.artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!.disposition, "fixed",
+    "one grammar, honestly cited: the corpus anchor is accepted provenance");
+  assert.equal((good.artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"), false);
+  assert.notEqual(good.result.finalDisposition?.kind, "request_changes");
+});
+
+test("#1681 r6: a historical bot blocker the run reassessed on acquired head content is not unverified", async () => {
+  // The PhAd shape from the live review: the reviewer read the relevant file
+  // at this head and judged the boundary correct, describing it in prose
+  // without duplicating a `path:line` into the disposition field. That is a
+  // real current-head re-evaluation and must not become the material
+  // `unverified_blocking_claim` / INCOMPLETE.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "The ledger text rides the inline code escape before the closing instruction; the boundary holds.\n",
+    findings: [],
+    thread_dispositions: [{
+      thread_id: "PRRT_stale1",
+      disposition: "fixed",
+      evidence: "re-read the ledger rendering at this head: hostile derived text is escaped before it reaches the closing instruction, so the injection boundary is correct",
+    }],
+  }, { headFiles: { "README.md": "x\n".repeat(20) } });
+  const record = (artifact.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(record.disposition, "fixed", "the run's own head-bound content backs the reassessment");
+  assert.equal((artifact.thread_reconciliation as Record<string, unknown>).unreassessed, undefined,
+    "no false 'no current-head re-evaluation' claim");
+  assert.ok(!String(artifact.review_markdown).includes("no current-head re-evaluation"));
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_stale1"), false);
+  assert.deepEqual(result.finalDisposition?.materialUnknowns ?? [], [], "no unverified_blocking_claim from the reassessed blocker");
+  assert.equal(result.finalDisposition?.blockerProven, false, "and never a proven blocker");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/, "the recommendation is unambiguously approve");
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1681 r6: a prior human REQUEST_CHANGES has ONE consistent current-head answer", async () => {
+  // The #1681 contradiction: the review prose said the blockers were
+  // addressed while the parallel human-review channel said "needs re-review"
+  // because its lexical gate could not parse the reviewer's diff anchors.
+  // With grounding, the same honest citations settle BOTH channels, and the
+  // report says "addressed" once — never both things at once.
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "The three functional blockers from human review 5931073237 are addressed at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:+1-2:1 closes the first concern" },
+    ],
+    human_review_dispositions: [{
+      review_id: "5931073237",
+      disposition: "addressed",
+      evidence: "src/engine/review.ts:+10-14:1 the reconciliation seam settles all three findings at this head",
+    }],
+  }, {
+    identity: "alice",
+    headFiles: { "README.md": "x\n".repeat(2), "src/engine/review.ts": "x\n".repeat(20) },
+    reviews: [{
+      id: 5931073237,
+      user: { login: "joryirving", type: "User" },
+      state: "CHANGES_REQUESTED",
+      body: "Three functional blockers:\n1. the corpus lane stays authoritative when invalid\n2. the schema is consulted too late\n3. the correction payload is rebuilt\n",
+      commit_id: "a".repeat(40),
+      submitted_at: "2026-11-17T01:26:24Z",
+    }],
+  });
+  const markdown = String(artifact.review_markdown);
+  assert.ok(markdown.includes("judged addressed at this head"),
+    "the Outstanding Human Change Requests section answers addressed, once");
+  assert.ok(!markdown.includes("is not shown addressed at this head"),
+    "the report can never simultaneously say addressed and not-addressed");
+  assert.ok(!markdown.includes("needs the reviewer's own re-review"),
+    "the stale 'needs re-review' state does not return");
+  const settled = (artifact.human_review_dispositions as Array<{ disposition: string }>)[0]!;
+  assert.equal(settled.disposition, "addressed");
+  assert.deepEqual(result.finalDisposition?.materialUnknowns ?? [], [], "physical conversation state gates nothing");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/);
+  assert.notEqual(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES");
 });
 
 test("#1663: a historical managed Major under a rotated human PAT identity stays material", async () => {
@@ -2367,10 +2589,8 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
       review_markdown: "Fallback request-changes review.\n",
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -2436,10 +2656,8 @@ test("#978: fallback no-evidence unverifiable trace blocks bypass without synthe
       review_markdown: "Fallback request-changes review with unverifiable trace.\n",
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unverifiable",
-        enforcement: [],
-        test: [],
-        reason: "The available evidence does not establish that source SHA is checked.",
+        status: "unknown",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "The available evidence does not establish that source SHA is checked." }],
       }],
     })));
   });
@@ -4252,6 +4470,10 @@ test("#812: unresolved bot threads re-emit with their original severity and Mino
   });
   const { runDir, cleanup } = withRunDir();
   try {
+    // #1681 r6: the Major's `fixed` citation must resolve in the exact-head
+    // checkout — seed the referenced fixture the way the real workspace has it.
+    mkdirSync(join(runDir, "tests/fixtures/parity/corpus"), { recursive: true });
+    writeFileSync(join(runDir, "tests/fixtures/parity/corpus/v1.json"), "{}\n");
     const platform = mockPlatform();
     // #1663: origin comes from trusted forge authorship, not the body marker.
     platform.authenticatedIdentity = () => Promise.resolve("reviewer-bot");
@@ -4904,10 +5126,8 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
         // No file at this path exists in the checkout at all — the
         // malformed-location case, distinct from the real #854 shape below
         // (where the cited line exists but only copies the value).
-        disposition: "met",
-        enforcement: [{ file: "src/context-resolution.ts", line: 42 }],
-        test: [],
-        reason: "resolveContext compares ctx.sourceSha against the pull's head",
+        status: "satisfied",
+        evidence: [{ kind: "file", ref: "src/context-resolution.ts:42", detail: "resolveContext compares ctx.sourceSha against the pull's head" }],
       }],
     })));
   });
@@ -4964,10 +5184,8 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unverifiable",
-        enforcement: [],
-        test: [],
-        reason: "The available evidence does not establish that source SHA is checked.",
+        status: "unknown",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "The available evidence does not establish that source SHA is checked." }],
       }],
     })));
   });
@@ -5025,10 +5243,11 @@ test("#1658: a 'met' claim citing a real line that only copies the value is the 
         // The real #854 defect: the cited line EXISTS and even names the
         // right field, but only copies ctx.sourceSha onto the output —
         // nothing ever compares it. Location existence must not pass this.
-        disposition: "met",
-        enforcement: [{ file: "src/context-resolution.ts", line: 5 }],
-        test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
-        reason: "sourceSha is present on the resolved context object",
+        status: "satisfied",
+        evidence: [
+          { kind: "file", ref: "src/context-resolution.ts:5", detail: "sourceSha is present on the resolved context object" },
+          { kind: "test", ref: "tests/context-resolution.test.ts:1", detail: "sourceSha is present on the resolved context object" },
+        ],
       }],
     })));
   });
@@ -5131,10 +5350,8 @@ test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, nev
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -5188,10 +5405,8 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -5240,10 +5455,8 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        disposition: "unmet",
-        enforcement: [],
-        test: [],
-        reason: "no code path compares source SHA or target branch at all",
+        status: "violated",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "no code path compares source SHA or target branch at all" }],
       }],
     })));
   });
@@ -6428,4 +6641,129 @@ test("#1688: covered app-code investigation reaches a native approval", async ()
     const api = await publishRunHandoff(result);
     assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify({ disposition: result.finalDisposition, body: api.submitted[0]!.body }));
   } finally { await server.close(); cleanup(); }
+});
+
+test("#1681 r6: settled human concerns outrank a contradicting duplicate human-review claim", async () => {
+  // Three human findings from the prior REQUEST_CHANGES review, every one
+  // settled fixed at the current head — while the model's DUPLICATE
+  // `human_review_dispositions` answer still says not_addressed. The
+  // aggregated settled concerns are the single current-head truth; the
+  // published report answers the change request exactly once, addressed,
+  // and no manual thread resolution is required.
+  const human = (id: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 20,
+      // #1681 r7: the forge-proven owning submission, as GitHub's
+      // `pullRequestReview.databaseId` projects it.
+      parent_review_id: "5931073237",
+      user: { login: "joryirving", type: "User" },
+      created_at: "2026-11-17T01:26:24Z",
+      updated_at: "2026-11-17T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "All three prior blockers are fixed at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:+1-1:0 the carried bot concern is fixed too" },
+      { thread_id: "PRRT_corpus1", disposition: "fixed", evidence: "src/engine/review.ts:+10-14:1 the lane is non-authoritative now" },
+      { thread_id: "PRRT_schema2", disposition: "fixed", evidence: "src/engine/review.ts:+20-24:2 the schema pins exact N up front" },
+      { thread_id: "PRRT_payload3", disposition: "fixed", evidence: "src/engine/review.ts:+30-34:3 the correction rides the effective payload" },
+    ],
+    human_review_dispositions: [{
+      review_id: "5931073237",
+      disposition: "not_addressed",
+      evidence: "stale duplicate answer contradicting the thread work",
+    }],
+  }, {
+    identity: "alice",
+    headFiles: { "README.md": "x\n", "src/engine/review.ts": "x\n".repeat(40) },
+    extraThreads: [
+      human("PRRT_corpus1", "Major: a still-invalid corpus correction is kept as semantic authority.\n"),
+      human("PRRT_schema2", "Major: the exact-N schema is only consulted after the response arrives.\n"),
+      human("PRRT_payload3", "Major: the correction payload is rebuilt from first, not the effective payload.\n"),
+    ],
+    reviews: [{
+      id: 5931073237,
+      user: { login: "joryirving", type: "User" },
+      state: "CHANGES_REQUESTED",
+      body: "Three functional blockers.\n",
+      commit_id: "a".repeat(40),
+      submitted_at: "2026-11-17T01:26:24Z",
+    }],
+  });
+  const settled = (artifact.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(settled.disposition, "addressed", "the settled concern states outrank the duplicate claim");
+  assert.equal(settled.basis, "thread-settlement");
+  const markdown = String(artifact.review_markdown);
+  assert.ok(markdown.includes("judged addressed at this head"));
+  assert.ok(!markdown.includes("not shown addressed"), "exactly one answer — never both");
+  assert.ok(!markdown.includes("needs the reviewer's own re-review"));
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id), false);
+  assert.deepEqual(result.finalDisposition?.materialUnknowns ?? [], [], "physical open threads gate nothing");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/);
+});
+
+test("#1681 r7: two human change requests settle independently through the real engine", async () => {
+  // Review A (carol): two inline concerns, both proven fixed at head.
+  // Review B (bob): one inline concern, still present. Ownership rides the
+  // forge-proven parent review id on each thread's root comment; the
+  // published report answers each request from ITS OWN settled concerns.
+  const human = (id: string, reviewId: string, login: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 40,
+      parent_review_id: reviewId,
+      user: { login, type: "User" },
+      created_at: "2026-11-18T01:26:24Z",
+      updated_at: "2026-11-18T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Both prior change requests re-evaluated at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:1 the carried bot concern is fixed too" },
+      { thread_id: "PRRT_a1", disposition: "fixed", evidence: "src/engine/review.ts:+10-14:1 concern A1 is closed" },
+      { thread_id: "PRRT_a2", disposition: "fixed", evidence: "src/engine/review.ts:+20-24:2 concern A2 is closed" },
+      { thread_id: "PRRT_b1", disposition: "open", evidence: "still present at this head: src/engine/review.ts:30 keeps the old path" },
+    ],
+  }, {
+    identity: "alice",
+    headFiles: { "README.md": "x\n", "src/engine/review.ts": "x\n".repeat(40) },
+    extraThreads: [
+      human("PRRT_a1", "111", "carol", "Major: first A concern.\n"),
+      human("PRRT_a2", "111", "carol", "Major: second A concern.\n"),
+      human("PRRT_b1", "222", "bob", "Major: B concern still live.\n"),
+    ],
+    reviews: [
+      { id: 111, user: { login: "carol", type: "User" }, state: "CHANGES_REQUESTED", body: "A blockers.\n", commit_id: "a".repeat(40), submitted_at: "2026-11-18T01:26:24Z" },
+      { id: 222, user: { login: "bob", type: "User" }, state: "CHANGES_REQUESTED", body: "B blockers.\n", commit_id: "a".repeat(40), submitted_at: "2026-11-18T01:27:24Z" },
+    ],
+  });
+  const viewA = threadView.find((row) => row.thread_id === "PRRT_a1");
+  assert.equal(viewA?.parent_review_id, "111", "the enforcement view carries the forge-proven owner");
+  const settled = new Map((artifact.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
+  assert.equal(settled.get("111")!.disposition, "addressed", "A's own concerns are all fixed — B's live defect must not drag A");
+  assert.equal(settled.get("222")!.disposition, "not_addressed", "B's proven-present concern settles B, not A");
+  const markdown = String(artifact.review_markdown);
+  assert.ok(markdown.includes("@carol") && markdown.includes("judged addressed at this head"));
+  assert.ok(markdown.includes("@bob") && markdown.includes("not shown addressed at this head"));
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_a1"), false, "A's settled concerns never re-enter the findings set");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/, "the human-side severities stay non-blocking as before");
 });

@@ -91,6 +91,7 @@ import {
   createForgejoWebhookHandler,
   type ForgejoWebhookHandlerOptions,
 } from "./webhook-handler.js";
+import { createGiteaWebhookHandler } from "./gitea-events.js";
 
 /** The file name of the durable Q&A-budget ledger inside the operator's
  * durable state location (#1295). */
@@ -195,11 +196,13 @@ function createDurableRateLimitStore(
 export interface OperatorHostOptions {
   /** The forge platform this host's INTAKE serves: `github` binds the GitHub
    * App intake (`X-Hub-Signature-256`), `forgejo` the native Forgejo intake
-   * (`X-Gitea-Signature`). One platform per host: the operator's forge
+   * (`X-Gitea-Signature`), and `gitea` (#1678) the same native intake with the
+   * Gitea payload projection — Gitea signs and headers identically, so only the
+   * vocabulary projection differs. One platform per host: the operator's forge
    * capability is a single per-platform capability, so an intake that served
    * both would accept deliveries for a platform the instance cannot act on.
    * Absent → `forgejo`. */
-  readonly platform?: "github" | "forgejo" | undefined;
+  readonly platform?: "github" | "forgejo" | "gitea" | undefined;
   /** The webhook HMAC-SHA256 secret; the signature is verified over the raw
    * body before anything else (the handler's fail-closed boundary). */
   readonly secret: string;
@@ -298,6 +301,10 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
   // the same objects either way, so the single-router and single-budget
   // invariants are untouched by the platform choice.
   const platform = options.platform ?? "forgejo";
+  // #1678: the Gitea intake is the NATIVE intake with the Gitea projection
+  // injected, so `gitea` and `forgejo` share one verification pipeline and one
+  // router binding. `github` never sees `project` — its handler has its own
+  // projection and its own signature scheme.
   const handlerOptions: ForgejoWebhookHandlerOptions & GitHubWebhookHandlerOptions = {
     secret: options.secret,
     maxBodyBytes: options.maxBodyBytes,
@@ -320,7 +327,9 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
     handler:
       platform === "github"
         ? createGitHubWebhookHandler(handlerOptions)
-        : createForgejoWebhookHandler(handlerOptions),
+        : platform === "gitea"
+          ? createGiteaWebhookHandler(handlerOptions)
+          : createForgejoWebhookHandler(handlerOptions),
     rateLimitStore,
   };
 }
