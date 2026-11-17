@@ -54,26 +54,34 @@ export interface HumanReviewEnforcementResult {
 }
 
 /**
- * The ONE current-head answer for an outstanding human change request,
+ * The ONE current-head answer for ONE outstanding human change request,
  * aggregated from the settled human-thread concern states the thread
- * settlement just recorded (#1681 r6). The threads a human reviewer raised
- * ARE the material concerns of their change request; their settled semantic
- * states — proven fixed (`addressed`), still present at head (`present`),
- * or genuinely un-evaluated (`unresolved`) — decide the aggregate:
- * - every concern addressed → `addressed`
- * - any concern still present → `not_addressed`
- * - otherwise any concern unresolved → `unresolved` (a genuine unknown is
- *   never collapsed into `addressed`)
- * Returns null when the run carried no human threads at all: with no
- * settled concerns there is nothing to aggregate, and the model's own
- * grounded claim remains the answer. Physical conversation state is not an
- * input — a human thread may stay open forever without gating this.
+ * settlement just recorded, restricted to the threads the FORGE PROVES
+ * belong to that review submission (#1681 round 7). The threads a human
+ * reviewer raised ARE the material concerns of their change request; their
+ * settled semantic states — proven fixed (`addressed`), still present at
+ * head (`present`), or genuinely un-evaluated (`unresolved`) — decide the
+ * aggregate:
+ * - every attributable concern addressed → `addressed`
+ * - any attributable concern still present → `not_addressed`
+ * - otherwise any attributable concern unresolved → `unresolved` (a genuine
+ *   unknown is never collapsed into `addressed`)
+ * Returns null when the review has NO forge-attributable settled thread:
+ * with no proven association the review keeps its own grounded model claim,
+ * and a different review's threads may never overwrite it. Ownership comes
+ * only from the settled record's `parent_review_id` (GitHub's
+ * `pullRequestReview.databaseId`); it is never guessed from login, timing,
+ * message text or thread path, and platforms without the link leave every
+ * concern unassociated. Physical conversation state is not an input — a
+ * human thread may stay open forever without gating this.
  */
-export function aggregateHumanConcerns(
+export function aggregateHumanConcernsForReview(
+  reviewId: string,
   dispositions: readonly Record<string, unknown>[] | undefined,
 ): "addressed" | "not_addressed" | "unresolved" | null {
   if (!Array.isArray(dispositions) || dispositions.length === 0) return null;
   const concerns = dispositions
+    .filter((entry) => typeof entry?.parent_review_id === "string" && entry.parent_review_id === reviewId)
     .map((entry) => (typeof entry?.concern === "string" ? entry.concern : null))
     .filter((state): state is string => state !== null);
   if (concerns.length === 0) return null;
@@ -92,10 +100,13 @@ export function aggregateHumanConcerns(
  * settlement use — so the report cannot simultaneously call a request
  * addressed (the reviewer's re-review prose) and ungrounded (a citation
  * format mismatch in this parallel channel). When this run settled
- * human-authored threads, the AGGREGATED concern states are the authority
- * and override an omitted, malformed, or contradicting duplicate claim —
- * the report answers the change request exactly once, from the same
- * current-head truth the Findings set uses. Without grounding (legacy
+ * human-authored threads THIS submission owns (forge-proven parent review
+ * id), the aggregated concern states are the authoritative answer for that
+ * request and override an omitted, malformed, or contradicting duplicate
+ * claim — the report answers each change request exactly once, from the
+ * same current-head truth the Findings set uses. A review with no
+ * attributable thread keeps its own grounded claim; unrelated threads never
+ * overwrite it. Without grounding (legacy
  * unit callers) the historical lexical reading stands. Always returns
  * applied:false — this pass never counts as enforcement and never produces
  * a banner reason; the human remains the merge gate, and physical
@@ -128,7 +139,7 @@ export function applyHumanReviewEnforcement(
   }
 
   const settled: Array<{ review_id: string; disposition: string; evidence: string | null; basis: "thread-settlement" | "model-claim" }> = [];
-  const aggregate = aggregateHumanConcerns(artifact.thread_dispositions as readonly Record<string, unknown>[] | undefined);
+  const threadDispositions = artifact.thread_dispositions as readonly Record<string, unknown>[] | undefined;
   for (const reviewId of byId.keys()) {
     const entry = given.get(reviewId) ?? {};
     let disposition = entry.disposition as string | undefined;
@@ -141,11 +152,17 @@ export function applyHumanReviewEnforcement(
         : extractCitationLocations(evidence).some((loc) => grounding.resolveLocation(loc.file, loc.line));
       if (!grounded) disposition = "not_addressed";
     }
+    // #1681 round 7: PER REVIEW. Only threads the forge proves this
+    // submission owns (parent review id on the settled record) aggregate
+    // into its answer; another human reviewer's threads — or a body-only
+    // request with no inline threads at all — never overwrite this one.
+    const aggregate = aggregateHumanConcernsForReview(reviewId, threadDispositions);
     let basis: "thread-settlement" | "model-claim" = "model-claim";
     if (aggregate !== null) {
-      // The settled human-thread concerns are the authoritative current-head
-      // answer; the duplicate model claim may never contradict it. A
-      // model-consistent claim keeps its (grounded) evidence for disclosure.
+      // The settled concerns attributable to THIS review are the
+      // authoritative current-head answer; the duplicate model claim may
+      // never contradict it. A model-consistent claim keeps its (grounded)
+      // evidence for disclosure.
       if (aggregate !== disposition) evidence = null;
       disposition = aggregate;
       basis = "thread-settlement";

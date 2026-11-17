@@ -28,6 +28,14 @@
  * `Makefile`, or a stray tool-call id) keeps file-level provenance and is
  * rejected by checkout resolution, not by the grammar.
  *
+ * Model-facing citations are REPOSITORY-RELATIVE (#1681 round 7): an
+ * absolute path (`/tmp/x.ts:12`), a drive-shaped path (`C:/x.ts:12`) or a
+ * traversal segment (`../x.ts:12`, `src/../../x.ts:1`) is refused at the
+ * parse door, so an environment-specific spelling can never be a valid
+ * citation on any runner. The exact-head workspace containment and symlink
+ * guards stay exactly as they are — strictness here is the contract, the
+ * resolver stays the defense-in-depth enforcement.
+ *
  * Parsing never proves existence. Resolution is the injected
  * {@link EvidenceGrounding.resolveLocation} predicate, always backed by the
  * exact-head checkout (the requirement trace's own
@@ -62,6 +70,22 @@ function hasControlBytes(text: string): boolean {
   return /[\x00-\x1f\x7f]/.test(text);
 }
 
+/** Repository-relative only (#1681 round 7): the canonical contract says a
+ * model citation is a path RELATIVE to the repository root, so absolute
+ * paths (`/tmp/x.ts:12`, `/C:/x.ts:12`), drive-shaped paths (`C:/x.ts`) and
+ * traversal segments (`../x.ts`, `src/../../x.ts`) are refused by the
+ * grammar itself — an environment-specific or escaping spelling is not a
+ * citation anywhere, on any runner. The exact-head resolver's containment
+ * and symlink guards remain the defense-in-depth layer; this is the
+ * contract, not a replacement for that check. A URL scheme is caught by the
+ * `://` probe at the parse door; a bare `//` (protocol-relative or UNC)
+ * names no repository file either. */
+function isNonRelativePath(path: string): boolean {
+  if (path.startsWith("/") || path.includes("//")) return true;
+  if (/^[A-Za-z]:/.test(path)) return true;
+  return path.split("/").some((segment) => segment === "..");
+}
+
 /** `path:+LINE`, `path:+LINE-END`, or `path:+LINE-END:INDEX` — the diff
  * anchor as the corpus renders it. The file part may not contain
  * whitespace; a reversed range is malformed, not a citation. */
@@ -85,7 +109,7 @@ export function parseCitationLocation(ref: unknown): CitationLocation | null {
   if (hasControlBytes(trimmed)) return null;
   // A URL names no repository location, with or without a port-shaped
   // trailing number.
-  if (trimmed.includes("://")) return null;
+  if (trimmed.includes("://") || trimmed.includes("//")) return null;
   const plain = PLAIN_CITATION_RE.exec(trimmed);
   if (plain !== null) {
     const line = Number(plain[2]);
@@ -94,6 +118,7 @@ export function parseCitationLocation(ref: unknown): CitationLocation | null {
       const end = Number(plain[3]);
       if (!Number.isSafeInteger(end) || end < line) return null;
     }
+    if (isNonRelativePath(plain[1] as string)) return null;
     return { file: plain[1] as string, line };
   }
   const anchor = DIFF_ANCHOR_RE.exec(trimmed);
@@ -104,12 +129,14 @@ export function parseCitationLocation(ref: unknown): CitationLocation | null {
       const end = Number(anchor[3]);
       if (!Number.isSafeInteger(end) || end < line) return null;
     }
+    if (isNonRelativePath(anchor[1] as string)) return null;
     return { file: anchor[1] as string, line };
   }
   // A bare path (no `:line`) is still a path-shaped ref — file-level
   // provenance; a token with any whitespace is prose, not a path, and a
   // token still carrying a colon was location-shaped but malformed.
   if (/\s/.test(trimmed) || trimmed.includes(":")) return null;
+  if (isNonRelativePath(trimmed)) return null;
   return { file: trimmed, line: 1 };
 }
 
@@ -118,72 +145,106 @@ const MAX_EXTRACTED_LOCATIONS = 16;
 
 /** Tokens like `(src/x.ts:12),` appear in prose; strip the edge punctuation
  * that sentence structure adds, without touching path bytes (paths never
- * start or end with these). */
+ * start or end with these). The sentence period is deliberately NOT an edge
+ * character: repository roots like `.github/…` legitimately start with a
+ * dot, and stripping it would rewrite the path — a trailing-period token
+ * (`src/a.ts.`) then parses to nothing, which fails closed. */
 function stripEdgePunctuation(token: string): string {
   let start = 0;
   let end = token.length;
-  const EDGE = "([{<>\"'`,.;)]}";
+  const EDGE = "([{<>\"'`,;)]}";
   while (start < end && EDGE.includes(token[start]!)) start += 1;
   while (end > start && EDGE.includes(token[end - 1]!)) end -= 1;
   return token.slice(start, end);
 }
 
-/** A citable path must look like a file: a name carrying an extension dot,
- * no URL scheme, no whitespace. This keeps `http://host:8080` and bare
- * prose out of the candidate set while `src/a.b/x.ts` stays in. */
+/** The extractor-side path-shape HEURISTIC for prose discovery: a citable
+ * path carries a file-extension dot in its final segment, is non-empty, and
+ * is not absolute/traversal/URL-shaped. It never encodes the line/range
+ * grammar (that lives only in the canonical parser); it only keeps ordinary
+ * prose words and tool ids out of the candidate set. Shared by the colon
+ * and the `line N` discovery forms so the two can never drift. */
 function looksLikeFilePath(path: string): boolean {
-  if (path === "" || /\s/.test(path)) return false;
-  if (path.includes("://") || path.includes("//")) return false;
+  if (path === "" || /\s/.test(path) || hasControlBytes(path)) return false;
+  if (isNonRelativePath(path)) return false;
   const base = path.slice(path.lastIndexOf("/") + 1);
   return /\.[A-Za-z][A-Za-z0-9]*$/.test(base);
 }
 
-/** Prose forms scanned over the whole evidence string:
- * - `path:LINE[-END][:INDEX]` and the diff anchor `path:+LINE[-END][:INDEX]`
- * - the historical lexical `path … line N` form (round-5 evidence like
- *   "README.md line 12 shows it") — the path may be bare there because the
- *   "line" keyword disambiguates it from ordinary prose. */
-const PROSE_CITATION_RE =
-  /(?<path>[\w][\w./+-]*\.[A-Za-z][\w]*)(?::\+?(?<line>\d+)(?:-\d+)?(?::\d+)?|\s+line\s+(?<kwline>\d+))/gi;
+/** The historical lexical `path … line N` form (round-5 evidence like
+ * "README.md line 12 shows it") — a DISCOVERY pattern that binds a
+ * path-shaped token to a following `line N`; the produced `path:LINE` ref
+ * is then judged by the canonical parser like every other candidate. */
+const LINE_KEYWORD_RE = /(?:^|\s)([^\s:]+)[ \t]+[Ll][Ii][Nn][Ee][ \t]+(\d+)/g;
 
-/** Extract every citation CANDIDATE from a free-text evidence string —
- * candidates in the one grammar, each of which still has to resolve at
- * head. Bounded, order-preserving, de-duplicated. */
+/** Extract every citation CANDIDATE from a free-text evidence string and
+ * pass each through the canonical parser (#1681 round 7): the scanner only
+ * answers «which substrings might be citations?», `parseCitationLocation`
+ * alone answers «is this a valid citation and where?». Structured refs and
+ * prose therefore share ONE grammar — anything the parser accepts inside a
+ * requirement-evidence field is discoverable in thread/human evidence when
+ * embedded in ordinary prose. Bounded, order-preserving, de-duplicated. */
 export function extractCitationLocations(text: string | null | undefined): CitationLocation[] {
   if (typeof text !== "string" || text.trim() === "") return [];
   // Self-defense for future callers: the shipped channels cap evidence at
-  // ~1k chars, and the prose regex is quadratic on adversarial runs of
-  // word characters, so a pathologically long string cites nothing.
+  // ~1k chars, and scanning unbounded prose is quadratic work, so a
+  // pathologically long string cites nothing.
   const input = text.length > 8192 ? "" : text;
   const out: CitationLocation[] = [];
   const seen = new Set<string>();
-  const push = (file: string, line: number): void => {
+  const push = (candidate: string): void => {
     if (out.length >= MAX_EXTRACTED_LOCATIONS) return;
-    if (!Number.isSafeInteger(line) || line <= 0) return;
-    if (!looksLikeFilePath(file)) return;
-    const key = `${file}:${line}`;
+    if (candidate.length === 0 || candidate.length > 1024) return;
+    // One grammar authority: parse, never re-validate here.
+    const loc = parseCitationLocation(candidate);
+    if (loc === null) return;
+    // Prose discovery stays conservative: only path-shaped candidates count,
+    // so ordinary words and tool ids never settle anything from prose.
+    if (!looksLikeFilePath(loc.file)) return;
+    const key = `${loc.file}:${loc.line}`;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ file, line });
+    out.push(loc);
   };
-  for (const match of input.matchAll(PROSE_CITATION_RE)) {
-    // Skip the path part of a URL: `http://host/x.ts:80` names a host, not a
-    // repository file, even though the suffix looks like a line number.
-    if (input.slice(Math.max(0, match.index - 3), match.index) === "://") continue;
-    const groups = match.groups ?? {};
-    const file = groups.path ?? "";
-    const line = groups.line !== undefined ? Number(groups.line) : Number(groups.kwline);
-    push(file, line);
+  // Historical `path … line N` lexical form FIRST, and each matched path is
+  // RESERVED: the keyword is precisely what disambiguates a bare filename
+  // from ordinary prose, so a keyword-bound token must not also emit the
+  // file-level line-1 fallback for the same path.
+  const reserved = new Set<string>();
+  for (const match of input.matchAll(LINE_KEYWORD_RE)) {
+    if (out.length >= MAX_EXTRACTED_LOCATIONS) break;
+    const path = stripEdgePunctuation(match[1]!);
+    if (!looksLikeFilePath(path)) continue;
+    reserved.add(path);
+    push(`${path}:${match[2]}`);
   }
-  // Directory-qualified bare path tokens (no `:line`, no "line N"): a repo
-  // path in prose is file-level provenance (`src/x/y.ts`); a bare filename
-  // or a sentence fragment like "e.g." names no location.
+  // Colon form: whitespace-delimited tokens, cut at every interior colon so
+  // a trailing sentence period or a URL fragment never hides a valid ref
+  // (`src/a.ts:12.` → `src/a.ts:12` + `.`; `http://h/x.ts:80` → a URL the
+  // parser refuses). A colon-free token IS the file-level canonical form
+  // (`README.md`) and goes to the parser as-is; the discovery heuristic
+  // (extension dot, non-relative) keeps ordinary prose words out.
   for (const raw of input.split(/\s+/)) {
     if (out.length >= MAX_EXTRACTED_LOCATIONS) break;
     const token = stripEdgePunctuation(raw);
-    if (token === "" || hasControlBytes(token)) continue;
-    if (token.includes(":") || !token.includes("/") || !looksLikeFilePath(token)) continue;
-    push(token, 1);
+    if (token === "" || token.length > 1024 || hasControlBytes(token)) continue;
+    const parts = token.split(":");
+    let path = parts[0]!;
+    for (let i = 1; i < parts.length; i += 1) {
+      // Try the full ref first; the path prefix only becomes a file-level
+      // candidate when no full ref from this token named a location (so
+      // `README.md:12` yields ONE citation, not line 1 AND line 12, while
+      // `README.md:12x` still falls back to the file-level form).
+      const before = out.length;
+      push(`${path}:${parts[i]}`);
+      if (out.length > before) {
+        path = `${path}:${parts[i]}`;
+      } else if (parseCitationLocation(`${path}:${parts[i]}`) === null && parseCitationLocation(path) !== null) {
+        push(path);
+      }
+      if (out.length >= MAX_EXTRACTED_LOCATIONS) break;
+    }
+    if (parts.length === 1 && !reserved.has(path)) push(path);
   }
   return out;
 }

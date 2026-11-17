@@ -6659,6 +6659,9 @@ test("#1681 r6: settled human concerns outrank a contradicting duplicate human-r
     outdated: false,
     comments: [{
       id: Number(id.slice(-1)) + 20,
+      // #1681 r7: the forge-proven owning submission, as GitHub's
+      // `pullRequestReview.databaseId` projects it.
+      parent_review_id: "5931073237",
       user: { login: "joryirving", type: "User" },
       created_at: "2026-11-17T01:26:24Z",
       updated_at: "2026-11-17T01:26:24Z",
@@ -6707,4 +6710,60 @@ test("#1681 r6: settled human concerns outrank a contradicting duplicate human-r
   assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id), false);
   assert.deepEqual(result.finalDisposition?.materialUnknowns ?? [], [], "physical open threads gate nothing");
   assert.match(String(result.finalDisposition?.recommendation), /APPROVE/);
+});
+
+test("#1681 r7: two human change requests settle independently through the real engine", async () => {
+  // Review A (carol): two inline concerns, both proven fixed at head.
+  // Review B (bob): one inline concern, still present. Ownership rides the
+  // forge-proven parent review id on each thread's root comment; the
+  // published report answers each request from ITS OWN settled concerns.
+  const human = (id: string, reviewId: string, login: string, body: string): Record<string, unknown> => ({
+    thread_id: id,
+    path: "src/engine/review.ts",
+    line: 10,
+    original_line: 10,
+    resolved: false,
+    outdated: false,
+    comments: [{
+      id: Number(id.slice(-1)) + 40,
+      parent_review_id: reviewId,
+      user: { login, type: "User" },
+      created_at: "2026-11-18T01:26:24Z",
+      updated_at: "2026-11-18T01:26:24Z",
+      body,
+    }],
+  });
+  const { artifact, threadView, result } = await runStaleThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Both prior change requests re-evaluated at this head.\n",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "PRRT_stale1", disposition: "fixed", evidence: "README.md:1 the carried bot concern is fixed too" },
+      { thread_id: "PRRT_a1", disposition: "fixed", evidence: "src/engine/review.ts:+10-14:1 concern A1 is closed" },
+      { thread_id: "PRRT_a2", disposition: "fixed", evidence: "src/engine/review.ts:+20-24:2 concern A2 is closed" },
+      { thread_id: "PRRT_b1", disposition: "open", evidence: "still present at this head: src/engine/review.ts:30 keeps the old path" },
+    ],
+  }, {
+    identity: "alice",
+    headFiles: { "README.md": "x\n", "src/engine/review.ts": "x\n".repeat(40) },
+    extraThreads: [
+      human("PRRT_a1", "111", "carol", "Major: first A concern.\n"),
+      human("PRRT_a2", "111", "carol", "Major: second A concern.\n"),
+      human("PRRT_b1", "222", "bob", "Major: B concern still live.\n"),
+    ],
+    reviews: [
+      { id: 111, user: { login: "carol", type: "User" }, state: "CHANGES_REQUESTED", body: "A blockers.\n", commit_id: "a".repeat(40), submitted_at: "2026-11-18T01:26:24Z" },
+      { id: 222, user: { login: "bob", type: "User" }, state: "CHANGES_REQUESTED", body: "B blockers.\n", commit_id: "a".repeat(40), submitted_at: "2026-11-18T01:27:24Z" },
+    ],
+  });
+  const viewA = threadView.find((row) => row.thread_id === "PRRT_a1");
+  assert.equal(viewA?.parent_review_id, "111", "the enforcement view carries the forge-proven owner");
+  const settled = new Map((artifact.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
+  assert.equal(settled.get("111")!.disposition, "addressed", "A's own concerns are all fixed — B's live defect must not drag A");
+  assert.equal(settled.get("222")!.disposition, "not_addressed", "B's proven-present concern settles B, not A");
+  const markdown = String(artifact.review_markdown);
+  assert.ok(markdown.includes("@carol") && markdown.includes("judged addressed at this head"));
+  assert.ok(markdown.includes("@bob") && markdown.includes("not shown addressed at this head"));
+  assert.equal((artifact.findings as Array<{ thread_id?: string }>).some((item) => item.thread_id === "PRRT_a1"), false, "A's settled concerns never re-enter the findings set");
+  assert.match(String(result.finalDisposition?.recommendation), /APPROVE/, "the human-side severities stay non-blocking as before");
 });

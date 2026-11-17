@@ -1818,7 +1818,14 @@ test("#1681 r6: a human change request `addressed` requires a resolving citation
 
 test("#1681 r6: the human change request aggregates the settled thread concerns — addressed", () => {
   const threads = ["h1", "h2", "h3"].map((id) =>
-    botMajor(id, { severity: "blocker", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+    botMajor(id, {
+      severity: "blocker",
+      category: "bug",
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: "5931073237",
+    }));
   const a = artifact({
     verdict: "approve",
     findings: [],
@@ -1838,6 +1845,8 @@ test("#1681 r6: the human change request aggregates the settled thread concerns 
   const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "addressed", "every settled concern addressed → the request is addressed");
   assert.equal(record.basis, "thread-settlement", "the answer rides the settled concerns, not the duplicate claim");
+  const settledThreads = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settledThreads[0]!.parent_review_id, "5931073237", "the forge-proven owner rides the settled record");
   const markdown = String(a.review_markdown);
   assert.ok(markdown.includes("judged addressed at this head"));
   assert.ok(!markdown.includes("not shown addressed"), "one answer — never addressed AND not-addressed");
@@ -1846,7 +1855,14 @@ test("#1681 r6: the human change request aggregates the settled thread concerns 
 
 test("#1681 r6: a still-present human concern makes the change request not addressed", () => {
   const threads = ["h1", "h2", "h3"].map((id) =>
-    botMajor(id, { severity: "major", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+    botMajor(id, {
+      severity: "major",
+      category: "bug",
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: "r1",
+    }));
   const a = artifact({
     verdict: "approve",
     findings: [],
@@ -1867,7 +1883,14 @@ test("#1681 r6: a still-present human concern makes the change request not addre
 
 test("#1681 r6: a genuinely un-reassessed concern yields unresolved, never a collapsed addressed", () => {
   const threads = ["h1", "h2", "h3"].map((id) =>
-    botMajor(id, { severity: "major", category: "bug", own_finding: false, authorship: "human", message: `human concern ${id}` }));
+    botMajor(id, {
+      severity: "major",
+      category: "bug",
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: "r1",
+    }));
   const a = artifact({
     verdict: "approve",
     findings: [],
@@ -1900,4 +1923,128 @@ test("#1681 r6: with no settled human threads the model claim remains the answer
   const record = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
   assert.equal(record.disposition, "addressed");
   assert.equal(record.basis, "model-claim", "no concerns settled ⇒ nothing to aggregate, the claim stands");
+});
+
+// ---------------------------------------------------------------------------
+// #1681 r7: the human change-request aggregation is PER REVIEW. Ownership
+// rides the forge-proven parent review id only — never login, timing, text
+// or thread path — so two outstanding change requests can settle
+// differently, and a body-only request keeps its own grounded claim.
+// ---------------------------------------------------------------------------
+
+test("#1681 r7: two human reviews settle independently — A addressed, B not addressed", () => {
+  const owned = (id: string, review: string) =>
+    botMajor(id, {
+      severity: "major",
+      category: "bug",
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: review,
+    });
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "a1", disposition: "fixed", evidence: "src/a.ts:9 closes it" },
+      { thread_id: "a2", disposition: "fixed", evidence: "src/a.ts:21 closes it too" },
+      { thread_id: "b1", disposition: "open", evidence: "still present at this head: the guard is missing exactly as the thread says" },
+    ],
+  });
+  applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB")], "strict",
+    liveListing("a1", "a2", "b1"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+    { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
+  assert.equal(settled.get("revA")!.disposition, "addressed", "A's own threads are all fixed — B's defect must not drag it down");
+  assert.equal(settled.get("revB")!.disposition, "not_addressed", "B's proven-present concern settles B, not A");
+  assert.equal(settled.get("revA")!.basis, "thread-settlement");
+  assert.equal(settled.get("revB")!.basis, "thread-settlement");
+});
+
+test("#1681 r7: a body-only human review keeps its grounded model claim; A keeps its threads", () => {
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "a1", disposition: "fixed", evidence: "src/a.ts:9 closes it" },
+    ],
+    human_review_dispositions: [
+      { review_id: "revB", disposition: "not_addressed", evidence: "the body-only complaint still stands; src/a.ts:40 proves nothing here" },
+    ],
+  });
+  applyReviewThreadEnforcement(a, [
+    botMajor("a1", { severity: "major", category: "bug", own_finding: false, authorship: "human", message: "A's concern", parent_review_id: "revA" }),
+  ], "strict", liveListing("a1"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+    { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
+  assert.equal(settled.get("revA")!.disposition, "addressed");
+  assert.equal(settled.get("revA")!.basis, "thread-settlement");
+  assert.equal(settled.get("revB")!.disposition, "not_addressed", "A's fixed thread may never overwrite B's own claim");
+  assert.equal(settled.get("revB")!.basis, "model-claim", "no attributable thread ⇒ the grounded claim stands");
+});
+
+test("#1681 r7: unknown parent-review identity is never guessed onto a review", () => {
+  // A forge (Forgejo/Gitea, or a GitHub read without the parent field)
+  // provides no ownership link. The settled concern stays unassociated: no
+  // outstanding review is overridden by it, and the model claims stand.
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "u1", disposition: "fixed", evidence: "src/a.ts:9 closes it" },
+    ],
+    human_review_dispositions: [
+      { review_id: "revA", disposition: "not_addressed", evidence: "unrelated prose src/a.ts:40" },
+    ],
+  });
+  applyReviewThreadEnforcement(a, [
+    botMajor("u1", { severity: "major", category: "bug", own_finding: false, authorship: "human", message: "unowned concern" }),
+  ], "strict", liveListing("u1"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "revA", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const settledThread = (a.thread_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.ok(!("parent_review_id" in settledThread), "no forge link ⇒ nothing is stamped, nothing is guessed");
+  const settled = (a.human_review_dispositions as Array<Record<string, unknown>>)[0]!;
+  assert.equal(settled.disposition, "not_addressed", "the unassociated thread never becomes somebody's answer");
+  assert.equal(settled.basis, "model-claim");
+});
+
+test("#1681 r7: per-review unknown is not dragged by another review's fixed threads", () => {
+  const owned = (id: string, review: string) =>
+    botMajor(id, {
+      severity: "major",
+      category: "bug",
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: review,
+    });
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "a1", disposition: "fixed", evidence: "src/a.ts:9 closes it" },
+      // a2: genuinely never reassessed.
+      { thread_id: "b1", disposition: "fixed", evidence: "src/a.ts:21 closes it" },
+      { thread_id: "b2", disposition: "fixed", evidence: "src/a.ts:33 closes it" },
+    ],
+    // An optimistic global claim may not collapse A's real unknown.
+    human_review_dispositions: [{ review_id: "revA", disposition: "addressed", evidence: "src/a.ts:1" }],
+  });
+  applyReviewThreadEnforcement(a, [owned("a1", "revA"), owned("a2", "revA"), owned("b1", "revB"), owned("b2", "revB")], "strict",
+    liveListing("a1", "a2", "b1", "b2"), headGrounding(["src/a.ts"]));
+  applyHumanReviewEnforcement(a, [
+    { review_id: "revA", login: "carol", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+    { review_id: "revB", login: "bob", commit_id: "a".repeat(40), head_moved: false, submitted_at: null },
+  ], headGrounding(["src/a.ts"]));
+  const settled = new Map((a.human_review_dispositions as Array<Record<string, unknown>>).map((r) => [String(r.review_id), r]));
+  assert.equal(settled.get("revA")!.disposition, "unresolved", "one un-reassessed own concern keeps A unresolved");
+  assert.equal(settled.get("revB")!.disposition, "addressed", "B's own threads are all settled — A's gap must not drag it down");
 });

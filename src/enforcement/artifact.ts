@@ -97,6 +97,9 @@ export interface ArtifactThreadDisposition {
   evidence: string | null;
   /** Downgrade note recorded by enforcement ("no disposition given", …). */
   enforced?: string;
+  /** #1681 round 7: forge-proven review submission owning the thread,
+   * carried through settlement for per-review human aggregation. */
+  parent_review_id?: string;
 }
 
 export interface ArtifactHumanReviewDisposition {

@@ -164,6 +164,9 @@ export interface EnforcementThread {
   /** #1663: what the forge metadata proves about the root author. Absent for
    * legacy callers, which keep the historical body-marker reading. */
   authorship?: ThreadAuthorship;
+  /** #1681 round 7: the forge-proven review submission owning this thread,
+   * when the read carries one (GitHub). Absent means unassociated. */
+  parent_review_id?: string;
   replies: number;
   category?: string | null;
 }
@@ -461,6 +464,13 @@ export function applyReviewThreadEnforcement(
     // ran — a legacy caller (no input) keeps byte-identical settled records.
     const record: Record<string, unknown> = { thread_id: threadId, disposition, evidence };
     if (reconciliation !== null && reconciliation !== undefined) record.reconciliation = state;
+    // #1681 round 7: carry the forge-proven owning review submission
+    // through settlement so the human-change-request pass can aggregate
+    // PER review. A forge without the link records nothing here — the
+    // concern stays unassociated rather than being guessed onto a review.
+    if (typeof thread.parent_review_id === "string" && thread.parent_review_id !== "") {
+      record.parent_review_id = thread.parent_review_id;
+    }
     if (note) {
       record.enforced = note;
       downgraded += 1;
