@@ -121,6 +121,18 @@
  * code obligation, a mandatory test, or any row with a code-action/enforcement
  * verb is vetoed out of the domain and stays on the strict `unverifiable`-blocks
  * path, and the model can never claim `pending` to escape a code proof.
+ *
+ * #1690 (the organic #1695 re-review): the domain also recognizes EXTERNAL
+ * PROJECT-BOOKKEEPING subjects — the state of an issue/umbrella record
+ * itself (boxes ticked, a follow-up note, an umbrella reopened) and the
+ * recorded release surface (release follow-up notes). These appear in
+ * docs/PR context, but they are facts about project management, not
+ * runtime predicates of the reviewed diff: they must never become
+ * merge-gating material requirements merely because a ledger text names a
+ * documentation path. A prose-document reference (including the
+ * line-suffixed `README.md:151` ledger shape) is therefore a recording
+ * surface, never a named source path; and the tracker/release classes are
+ * deterministic subject-shaped signals, never issue-specific.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { type ReviewArtifact } from "./artifact.js";
@@ -917,7 +929,7 @@ export type NonCodeProofDomain = "external_state" | "documentation";
  * The veto is safe in only the fail-closed direction: it can keep a genuinely
  * external criterion strict (it stays blocking, the conservative outcome), never
  * the reverse. */
-const NON_CODE_VETO_RE = /\b(implement[sd]?|compar\w+|hash(?:es|ing)?|encod\w+|decod\w+|authenticat\w+|authori[sz]\w+|redact\w*|saniti[sz]\w*|escap\w+|signature|fingerprint|tokens?|secrets?|credentials?|validat\w*|verif\w+|enforce\w+|assert\w*|throw\w*|reject\w*|guard\w*|allow\w*|deny\w*|permit\w*|forbid\w*|prevent[s]?|report[s]?|publish(?:es|ed|ing)?|pos(?:t|ts|ted|ting)|deploy(?:s|ed|ing)?|print(?:s|ed|ing)?|emit(?:s|ted|ting)?|upload(?:s|ed|ing)?|ship(?:s|ped|ping)?|releas\w+|pars(?:e|es|ed|ing))\b/i;
+const NON_CODE_VETO_RE = /\b(implement[sd]?|compar\w+|hash(?:es|ing)?|encod\w+|decod\w+|authenticat\w+|authori[sz]\w+|redact\w*|saniti[sz]\w*|escap\w+|signature|fingerprint|tokens?|secrets?|credentials?|validat\w*|verif\w+|enforce\w+|assert\w*|throw\w*|reject\w*|guard\w*|allow\w*|deny\w*|permit\w*|forbid\w*|prevent[s]?|report[s]?|publish(?:es|ed|ing)?|pos(?:t|ts|ted|ting)|deploy(?:s|ed|ing)?|print(?:s|ed|ing)?|emit(?:s|ted|ting)?|upload(?:s|ed|ing)?|ship(?:s|ped|ping)?\b(?!\s+this\b)|releas\w+\b(?![\s-]+notes?\b)|pars(?:e|es|ed|ing))\b/i;
 
 /** #1095: a TEST-EXECUTION OUTCOME demand — the requirement asks whether tests
  * pass (or the suite is green), not that code enforce something. This is the
@@ -969,6 +981,30 @@ const DOC_TARGET_RE = /\b(PR description|pull[\s-]request description|PR body|pu
 /** A recording verb, required alongside {@link DOC_TARGET_RE}. */
 const DOC_VERB_RE = /\b(document(?:ed|ation|s)?|record(?:ed|s|ing)?|inventor(?:y|ied|ies)|captured?|note(?:d|s)?)\b/i;
 
+/** #1690 (organic #1695 re-review): the two halves of the tracker-bookkeeping
+ * subject — a REFERENCE to a tracked record (an issue/umbrella/epic/tracker
+ * noun, an acceptance-box/checklist surface) and a BOOKKEEPING-state word
+ * (reopened, boxes ticked or unchecked, a follow-up note, umbrella
+ * accounting). Both must occur within one bounded clause span, so a runtime
+ * obligation that merely mentions a tracker noun in another sentence stays
+ * strict; `ticket` is deliberately absent (this product's own forge
+ * vocabulary uses it for real entities). */
+const TRACKER_NOUN_SRC = String.raw`(?:issues?|umbrellas?|epics?|trackers?|backlog|acceptance\s+(?:boxes?|criteria|checklists?)|check-?boxes?|checklists?|boxes?)`;
+const TRACKER_STATE_SRC = String.raw`(?:re-?open\w*|tick(?:ed|s)?|untick\w*|unchecked|checked[- ]?off|follow[- ]?up(?:\s+notes?)?|bookkeep\w*)`;
+const TRACKER_BOOKKEEPING_RE = new RegExp(
+  `\\b(?:${TRACKER_NOUN_SRC})\\b[^.;]{0,120}?\\b${TRACKER_STATE_SRC}\\b|\\b${TRACKER_STATE_SRC}\\b[^.;]{0,120}?\\b(?:${TRACKER_NOUN_SRC})\\b`,
+  "i",
+);
+
+/** #1690 (organic #1695 re-review): the recorded RELEASE surface — "release
+ * notes" / "release-notes". A release follow-up lives in the post-merge
+ * release record, not in the reviewed checkout, so it is external state and
+ * stays advisory. The code-verb veto's `releas`/`ship` groups carry
+ * lookaheads for exactly these noun shapes, so an ACTION demand ("ship the
+ * release once CI is green") keeps its veto while the recorded-surface
+ * subject classifies. */
+const RELEASE_NOTES_RE = /\brelease[\s-]+notes?\b/i;
+
 /**
  * Classify a requirement into a non-code proof domain, or `null` when it is a
  * code/test-verifiable implementation obligation (the strict path). Fail-closed:
@@ -995,8 +1031,18 @@ export function nonCodeProofDomain(text: string): NonCodeProofDomain | null {
   // CLOSED (the row stays strict), never pends.
   const pathish = (token: string): boolean =>
     looksLikePath(token) || (token.includes(".") && detectLanguage(token) !== "non_source");
-  const namesSourcePath = namedTokens.some((token) =>
-    pathish(token) && !isTestPath(token) && detectLanguage(token) !== "non_source");
+  const namesSourcePath = namedTokens.some((token) => {
+    if (!pathish(token) || isTestPath(token)) return false;
+    // #1690 (the organic #1695 re-review): a PROSE-document reference names a
+    // recording surface, not an implementation obligation — the same class
+    // `isProseDocumentPath` draws for #1600. The line-suffixed ledger shape
+    // (`README.md:151`) is the exact organic failure: without stripping the
+    // suffix, `detectLanguage` reads the extension as `md:151` ("unknown") and
+    // misclassifies the doc reference as a source path, vetoing a
+    // bookkeeping criterion into strict proof.
+    if (isProseDocumentPath(token.replace(/:\d+$/, ""))) return false;
+    return detectLanguage(token) !== "non_source";
+  });
   if (namesSourcePath) return null;
   // #1095: a test-execution outcome ("tests/... pass with only import-path
   // updates") is external state — observable only by running the tests — and
@@ -1005,6 +1051,18 @@ export function nonCodeProofDomain(text: string): NonCodeProofDomain | null {
   if (TEST_EXECUTION_OUTCOME_RE.test(text)) return "external_state";
   // Naming a test path with no test-execution outcome is a test demand.
   if (namedTokens.some((token) => looksLikePath(token) && isTestPath(token))) return null;
+  // #1690 (the organic #1695 re-review): ISSUE/UMBRELLA BOOKKEEPING and the
+  // RELEASE FOLLOW-UP are external state. The requirement governs the state
+  // of a tracked record itself (acceptance boxes ticked, a follow-up note
+  // left on the issue, an umbrella reopened) or the recorded release surface
+  // — facts observable only in the tracker/release surface, never from the
+  // head checkout, so they stay advisory (`pending`) and can never become
+  // merge-gating material unknowns merely because the requirement names a
+  // documentation path. Deterministic and subject-shaped (a tracker
+  // reference near a bookkeeping-state word; the release-notes record) —
+  // never an issue number or a specific phrase, and the code-verb/test
+  // vetoes above still keep a genuine code obligation strict.
+  if (TRACKER_BOOKKEEPING_RE.test(text) || RELEASE_NOTES_RE.test(text)) return "external_state";
   // External/future state: an explicitly-external system subject AND a state/outcome word.
   if (EXTERNAL_SUBJECT_RE.test(text) && EXTERNAL_OUTCOME_RE.test(text)) return "external_state";
   // Documentation: a recording verb INTO a named documentation/metadata artifact.
