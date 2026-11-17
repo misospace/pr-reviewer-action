@@ -42,7 +42,7 @@
 
 import { parse as parseYaml } from "yaml";
 import { parseRepoRef } from "../platform/repo-ref.js";
-import { forgeWireFamily, type ForgeId } from "../platform/resolve.js";
+import { forgeWireFamily, isForgeId, type ForgeId } from "../platform/resolve.js";
 import type { ActionContract } from "./contract.js";
 import type { AdoptionPolicy } from "./adoption.js";
 import { validateNamespacePolicies, type NamespacePolicy } from "./namespace-policy.js";
@@ -400,7 +400,9 @@ function validateForgeIntegration(value: unknown, path: string): ForgeIntegratio
   const item = objectAt(value, path);
   rejectUnknown(item, ["name", "kind", "endpoint", "credential"], path);
   const kind = item.kind;
-  if (kind !== "github" && kind !== "forgejo" && kind !== "gitea") {
+  // The closed declared-forge vocabulary is the platform seam's (`isForgeId`),
+  // not a second list here (#1683).
+  if (!isForgeId(kind)) {
     fail(`${path}.kind`, "must be 'github', 'forgejo', or 'gitea'");
   }
   return Object.freeze({

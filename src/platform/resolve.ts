@@ -21,8 +21,10 @@ export type GiteaFamilyForge = Extract<ForgeId, "forgejo" | "gitea">;
 
 /** The declared forge ids as a CLOSED set: the one membership test every
  * boundary that accepts a declared id from an untyped caller uses, so the
- * vocabulary cannot be spelled two ways (#1682). */
-export function isForgeId(value: string): value is ForgeId {
+ * vocabulary cannot be spelled two ways (#1682). The value is `unknown`
+ * because every real caller holds parsed/JS-supplied input, not a typed
+ * string (#1683). */
+export function isForgeId(value: unknown): value is ForgeId {
   return value === "github" || value === "forgejo" || value === "gitea";
 }
 

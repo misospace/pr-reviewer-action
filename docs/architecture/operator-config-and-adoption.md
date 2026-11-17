@@ -121,8 +121,10 @@ The Gitea intake answers on the canonical Gitea route `/webhooks/gitea`
 (`GITEA_WEBHOOK_PATH`, named by the ingress seam `ingressWebhookPath`). The
 controller daemon reports that route in its startup summary. The host still
 runs one router, one follow-up consumer, and one durable Q&A budget, and the
-webhook port answers every path it answered before, so an existing
-deployment's webhook URL does not break. See
+route is the ENFORCED mount: the daemon answers the intake only on that
+exact path, and a delivery addressed anywhere else gets a fixed 404 before
+the webhook processing. A Gitea-family operator mounts the forge webhook at
+the reported route. See
 [controller-daemon.md](controller-daemon.md).
 
 `reviewer-defaults` keys must be `repo-configurable` contract inputs
