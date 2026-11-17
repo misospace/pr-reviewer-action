@@ -2048,3 +2048,33 @@ test("#1681 r7: per-review unknown is not dragged by another review's fixed thre
   assert.equal(settled.get("revA")!.disposition, "unresolved", "one un-reassessed own concern keeps A unresolved");
   assert.equal(settled.get("revB")!.disposition, "addressed", "B's own threads are all settled — A's gap must not drag it down");
 });
+
+test("#1681 r7: a disclosure note is not a downgrade — proven-addressed human threads settle without downgraded telemetry", () => {
+  // The proven-addressed human branch keeps the model's `fixed` and stamps
+  // a DISCLOSURE note; the settlement must not bill it as a disposition
+  // downgrade, while the physical-open disclosure still renders.
+  const threads = ["h1", "h2"].map((id) =>
+    botMajor(id, {
+      severity: "minor",
+      category: null,
+      own_finding: false,
+      authorship: "human",
+      message: `human concern ${id}`,
+      parent_review_id: "revA",
+    }));
+  const a = artifact({
+    verdict: "approve",
+    findings: [],
+    thread_dispositions: [
+      { thread_id: "h1", disposition: "fixed", evidence: "src/a.ts:9 closes it" },
+      { thread_id: "h2", disposition: "fixed", evidence: "src/a.ts:21 closes it" },
+    ],
+  });
+  const settlement = applyReviewThreadEnforcement(a, threads, "strict", liveListing("h1", "h2"), headGrounding(["src/a.ts"]));
+  assert.equal(settlement.applied, true, "the disclosure section still renders");
+  assert.ok(settlement.reason.startsWith("review threads: 0 disposition(s) downgraded"), `no downgrade billed: ${settlement.reason}`);
+  assert.match(String(a.review_markdown), /human-authored thread stays open on the forge/);
+  const settled = a.thread_dispositions as Array<Record<string, unknown>>;
+  assert.equal(settled.length, 2);
+  assert.ok(settled.every((record) => record.disposition === "fixed" && typeof record.enforced === "string"));
+});

@@ -304,6 +304,12 @@ export function applyReviewThreadEnforcement(
 
   const settled: Array<Record<string, unknown>> = [];
   let downgraded = 0;
+  // #1681 r7 review: a note that only DISCLOSES state (a human `fixed`
+  // settled at head whose thread stays physically open; an `open` flagged
+  // without a current-head reason) never changed the model's disposition
+  // and must not be billed as a downgrade. It still marks the settlement
+  // as having something to disclose, so the section renders.
+  let disclosed = 0;
   let settledWithdrawn = 0;
   let invalidated = 0;
   const counted = new Set<string>();
@@ -473,7 +479,10 @@ export function applyReviewThreadEnforcement(
     }
     if (note) {
       record.enforced = note;
-      downgraded += 1;
+      // Only a note that CHANGED the model's disposition is a downgrade;
+      // a note that merely annotates the settled reading is a disclosure.
+      if (entry.disposition === disposition) disclosed += 1;
+      else downgraded += 1;
     }
     // #1681 r6: a human-authored thread additionally carries its SEMANTIC
     // concern state at this head — the single current-head answer the
@@ -604,7 +613,7 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0
+  const changed = downgraded > 0 || disclosed > 0 || reemitted.length > 0 || settledWithdrawn > 0
     || invalidated > 0 || unreassessed.size > 0;
   // #1645: the incompleteness disclosure must not hinge on a settlement
   // change — when every carried thread was already dispositioned, the human
