@@ -181,6 +181,78 @@ export const ANTHROPIC_VERDICT_OUTPUT_FORMAT: Record<string, unknown> = {
   schema: (OPENAI_VERDICT_JSON_SCHEMA.json_schema as { schema: Record<string, unknown> }).schema,
 };
 
+/** #1678 hardening: the canonical requirement-decision status enum, mirrored
+ * from the frozen base schema's `requirement_coverage.items.status` (a test
+ * pins the mirror against the single contract-module list, so neither can
+ * drift). Lives here because the run-specific pinning below is the wire
+ * layer's own job and `verdict-contract.ts` imports this module, never the
+ * other way around. */
+const REQUIREMENT_DECISION_WIRE_STATUSES = ["satisfied", "violated", "unknown"] as const;
+
+/**
+ * #1678 hardening: the run-specific strict verdict schema — the pinned
+ * verdict schema with `requirement_coverage` narrowed from nullable to an
+ * EXACT-N array whose `requirement_id` is enum-pinned to the expected set.
+ * Schema support is an aid, never the authority: the deterministic
+ * pre-acceptance validator stays the gate for prompt-only and
+ * capability-stripped providers. The base {@link OPENAI_VERDICT_JSON_SCHEMA}
+ * object is NEVER mutated (its byte pin is a separate, frozen contract).
+ * A base schema without the canonical `requirement_coverage` shape is
+ * returned unpinned — no invented property, fail-soft.
+ */
+export function buildRunVerdictSchema(
+  expectedIds: readonly string[],
+  baseSchema: Record<string, unknown> = OPENAI_VERDICT_JSON_SCHEMA,
+): Record<string, unknown> {
+  const asObject = (value: unknown): Record<string, unknown> | null =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  const schema = structuredClone(baseSchema) as Record<string, unknown>;
+  const inner = (schema.json_schema as { schema: Record<string, unknown> } | undefined)?.schema;
+  const properties = (asObject(inner)?.properties as Record<string, unknown> | undefined) ?? null;
+  const baseCoverage = properties === null ? null : asObject(properties.requirement_coverage);
+  const baseItems = baseCoverage === null ? null : asObject(baseCoverage.items);
+  if (properties === null || baseCoverage === null || baseItems === null) return schema;
+  const coverage = structuredClone(baseCoverage) as Record<string, unknown>;
+  const count = expectedIds.length;
+  coverage.type = "array";
+  coverage.minItems = count;
+  coverage.maxItems = count;
+  coverage.description = `Exactly ${count} requirement decision row(s): one per required requirement ID, no others. satisfied = current-head evidence establishes the requirement; violated = current-head evidence establishes it is not met; unknown = neither conclusion can be established. Unknown is always preferable to omission.`;
+  const items = structuredClone(baseItems) as Record<string, unknown>;
+  const itemProps: Record<string, unknown> = asObject(items.properties) ?? {};
+  itemProps.requirement_id = {
+    type: "string",
+    enum: [...expectedIds],
+    description: "The requirement ID this row decides. Must be one of the required IDs; echo it exactly.",
+  };
+  const itemStatus = asObject(itemProps.status);
+  if (itemStatus !== null) {
+    itemStatus.enum = [...REQUIREMENT_DECISION_WIRE_STATUSES];
+  } else {
+    itemProps.status = { type: "string", enum: [...REQUIREMENT_DECISION_WIRE_STATUSES] };
+  }
+  items.properties = itemProps;
+  coverage.items = items;
+  properties.requirement_coverage = coverage;
+  return schema;
+}
+
+/** #1678 hardening: the Anthropic `output_config.format` envelope for the
+ * run-specific schema, mirroring {@link ANTHROPIC_VERDICT_OUTPUT_FORMAT}'s
+ * shape (the inner schema, not the OpenAI wrapper). */
+export function buildRunVerdictOutputFormat(
+  expectedIds: readonly string[],
+  baseSchema: Record<string, unknown> = OPENAI_VERDICT_JSON_SCHEMA,
+): Record<string, unknown> {
+  const schema = buildRunVerdictSchema(expectedIds, baseSchema);
+  return {
+    type: "json_schema",
+    schema: (schema.json_schema as { schema: Record<string, unknown> }).schema,
+  };
+}
+
 /**
  * #998: build Anthropic's `output_config` object — the ONE place the wire
  * family merges its keys. `format` (#1047) and `effort` are siblings of the
@@ -330,8 +402,13 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
     const effort = config.anthropicEffortSupported ? config.reasoningEffort : "";
     const format = config.anthropicStructuredOutputSupported && config.responseFormat === "json_schema"
       ? (config.responseSchema !== undefined
+          // #1678 hardening: a run with in-scope requirements pins the
+          // verdict envelope exactly like the OpenAI arm and the native
+          // lane; prompt-only / unasserted endpoints stay byte-identical.
           ? { type: "json_schema", schema: config.responseSchema }
-          : ANTHROPIC_VERDICT_OUTPUT_FORMAT)
+          : (config.verdictRequirementIds?.length ?? 0) > 0
+            ? buildRunVerdictOutputFormat(config.verdictRequirementIds ?? [])
+            : ANTHROPIC_VERDICT_OUTPUT_FORMAT)
       : undefined;
     const outputConfig = buildAnthropicOutputConfig(effort, format);
     if (outputConfig !== null) body.output_config = outputConfig;
@@ -356,6 +433,15 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
     body.response_format = config.responseSchema !== undefined
       ? { type: "json_schema", json_schema: { name: "confidence_review", strict: true, schema: config.responseSchema } }
       : OPENAI_VERDICT_JSON_SCHEMA;
+    // #1678 hardening: with an in-scope requirement set the verdict schema is
+    // the run-specific pinning (non-null coverage, exactly N items, enum
+    // IDs) — same builder the native lane uses, so every lane teaches the
+    // schema the ONE contract. `responseSchema` (the scorer's own contract)
+    // is the deliberate exception and never gets pinned. Absent IDs keep the
+    // base wrapper byte-for-byte.
+    if (config.responseSchema === undefined && (config.verdictRequirementIds?.length ?? 0) > 0) {
+      body.response_format = buildRunVerdictSchema(config.verdictRequirementIds ?? []);
+    }
   }
   if (config.stream) body.stream_options = { include_usage: true };
   // #998: the protocol-native effort field, verbatim.

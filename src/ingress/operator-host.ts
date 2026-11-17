@@ -198,13 +198,12 @@ function createDurableRateLimitStore(
 export interface OperatorHostOptions {
   /** The forge platform this host's INTAKE serves: `github` binds the GitHub
    * App intake (`X-Hub-Signature-256`), `forgejo` the native Forgejo intake
-   * (`X-Gitea-Signature`), and `gitea` (#1678) the SAME native intake with the
-   * Gitea payload projection — Gitea signs and headers identically over the
-   * same raw body, so the `gitea` identity selects ONE verified intake with a
-   * different vocabulary projection, never a second intake. One platform per
-   * host: the operator's forge capability is a single per-platform capability,
-   * so an intake that served both families would accept deliveries for a
-   * platform the instance cannot act on. Absent → `forgejo`. */
+   * (`X-Gitea-Signature`), and `gitea` (#1678) the same native intake with the
+   * Gitea payload projection — Gitea signs and headers identically, so only the
+   * vocabulary projection differs. One platform per host: the operator's forge
+   * capability is a single per-platform capability, so an intake that served
+   * both would accept deliveries for a platform the instance cannot act on.
+   * Absent → `forgejo`. */
   readonly platform?: "github" | "forgejo" | "gitea" | undefined;
   /** The webhook HMAC-SHA256 secret; the signature is verified over the raw
    * body before anything else (the handler's fail-closed boundary). */

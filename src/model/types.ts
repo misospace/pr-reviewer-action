@@ -78,6 +78,14 @@ export interface ModelRequestConfig {
    * verdict schema wrapper, Anthropic the verdict output format, exactly as
    * before. */
   responseSchema?: Record<string, unknown>;
+  /** #1678 hardening: the run's exact in-scope requirement IDs. When present
+   * (and no `responseSchema` override claims the slot), the `json_schema`
+   * response format carries the run-specific pinning — coverage non-null,
+   * exactly N items, enum-pinned IDs — built by the ONE owner builder
+   * (`buildRunVerdictSchema` / `buildRunVerdictOutputFormat`). Absent keeps
+   * the base verdict wrapper byte-for-byte; prompt-only formats ignore it
+   * entirely (the deterministic validator carries the contract there). */
+  verdictRequirementIds?: readonly string[];
 }
 
 /**

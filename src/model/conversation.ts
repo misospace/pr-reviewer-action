@@ -35,6 +35,14 @@
  */
 import { provenanceAttributes, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig } from "./request.js";
+// #1678 hardening: the closing-verdict requirement-decision contract has ONE
+// owner — the shared row-rule sentence and the run-specific schema come from
+// the contract module, never restated here.
+import {
+  REQUIREMENT_DECISION_ROW_RULE,
+  buildRunVerdictOutputFormat,
+  buildRunVerdictSchema,
+} from "../requirements/verdict-contract.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -404,11 +412,14 @@ export const APPROX_BYTES_PER_TOKEN = 4;
 
 /** Closing user turn for the collapsed verdict request: the prior history is
  * folded into the system note, but both APIs still need a non-empty messages
- * array (Anthropic 400s without a leading user message). */
+ * array (Anthropic 400s without a leading user message). #1678 hardening: the
+ * requirement-decision sentence is the shared contract constant — this
+ * instruction and the corpus instruction can no longer carry different
+ * vocabularies. */
 export const VERDICT_USER_INSTRUCTION =
   "Produce the final review verdict now as a single JSON object. " +
   "Do not issue any tool calls. " +
-  "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Answer satisfied only when your assessment of the relevant current-head evidence supports that the required behavior actually holds — a file or test citation identifies the evidence you relied on, but it does not establish semantic correctness by itself; answer violated when you have a supported counterexample or evidence that the requirement is not met; answer unknown when you cannot establish whether the requirement holds, including when you located a likely implementation or test but cannot establish its adequacy. One genuine observation may support several requirements; cite it for each. " +
+  REQUIREMENT_DECISION_ROW_RULE + " " +
   "Emit 'required_check_dispositions' as null unless required checks appear in the context; then one disposition entry per required check, echoing the check text exactly, with status satisfied, not_applicable, unresolved, or unmet. Use not_applicable only when you can ground it in the actual change (a concise rationale is required); unmet means you performed the check and confirmed the requirement is NOT satisfied (a grounded rationale is required there too); do not request changes merely because a checklist names a test that is absent — request changes only when the underlying applicable risk is unresolved; never invent additional checks. When a 'Required Review Evidence' section is present in the provided review context, emit one disposition per listed obligation — must_check rows by echoing the exact check text, trusted_base_guidance rows by echoing 'obligation-<n>' (or the exact text) as check — with status satisfied, not_applicable, unresolved, or unmet and a grounded rationale. When a derived architectural obligation row is present (id 'derived-<n>'), emit one disposition per such row by echoing the row id, and a satisfied derived row's rationale must name one of that row's listed locations. When a risk evidence obligation row is present (id 'risk-<n>'), emit one disposition per such row by echoing the row id; a satisfied risk row's rationale must name one of that row's listed locations and state the risk-specific counterexample considered with the source or test evidence that the property holds under it.";
 
 /** Placeholder emitted for a corpus section dropped by dedupeVerdictCorpus.
@@ -1373,6 +1384,11 @@ export class Conversation {
       /** #1047: Anthropic `output_config.format` opt-in for the verdict
        * schema; ignored by OpenAI and by non-verdict turns. */
       anthropicStructuredOutputSupported?: boolean;
+      /** #1678 hardening: the run's exact in-scope requirement IDs. On the
+       * closing turn they pin the structured schema's `requirement_coverage`
+       * to exactly these rows (empty/absent = the unpinned base schema, so
+       * every run without in-scope requirements is byte-identical). */
+      verdictRequirementIds?: readonly string[];
     } = {},
   ): Record<string, unknown> {
     const stream = options.stream ?? false;
@@ -1390,6 +1406,7 @@ export class Conversation {
     const reasoningEffort = options.reasoningEffort ?? "";
     const anthropicEffortSupported = options.anthropicEffortSupported ?? false;
     const anthropicStructuredOutputSupported = options.anthropicStructuredOutputSupported ?? false;
+    const verdictRequirementIds = options.verdictRequirementIds ?? [];
     if (apiFormat === "anthropic") {
       return this.toAnthropicPayload({
         model,
@@ -1404,6 +1421,7 @@ export class Conversation {
         reasoningEffort,
         anthropicEffortSupported,
         anthropicStructuredOutputSupported,
+        verdictRequirementIds,
       });
     }
     return this.toOpenAiPayload({
@@ -1417,6 +1435,7 @@ export class Conversation {
       tokensParam,
       includeTurnNotes,
       reasoningEffort,
+      verdictRequirementIds,
     });
   }
 
@@ -1432,6 +1451,9 @@ export class Conversation {
     includeTurnNotes: boolean;
     /** #998: the tier's resolved reasoning effort ("" = omit). */
     reasoningEffort: string;
+    /** #1678 hardening: exact in-scope requirement IDs for the run-specific
+     * closing schema (empty = the unpinned base schema). */
+    verdictRequirementIds?: readonly string[];
   }): Record<string, unknown> {
     let system = this.system;
     let messages = this.renderOpenAiMessages(options.includeTurnNotes);
@@ -1472,7 +1494,14 @@ export class Conversation {
       if (options.responseFormat === "json_object") {
         payload.response_format = { type: "json_object" };
       } else if (options.responseFormat === "json_schema") {
-        payload.response_format = OPENAI_VERDICT_JSON_SCHEMA;
+        // #1678 hardening: with an in-scope requirement set the closing
+        // verdict carries the run-specific schema — coverage non-null,
+        // exactly N items, enum-pinned IDs. Schema support is an aid, not
+        // the authority: the deterministic pre-acceptance validator still
+        // gates every provider (prompt-only and capability-stripped included).
+        payload.response_format = (options.verdictRequirementIds?.length ?? 0) > 0
+          ? buildRunVerdictSchema(options.verdictRequirementIds ?? [])
+          : OPENAI_VERDICT_JSON_SCHEMA;
       }
     } else if (this.toolSchemas.length > 0) {
       // #1043 (review): omitted entirely when the conversation advertises no
@@ -1505,6 +1534,9 @@ export class Conversation {
     anthropicEffortSupported: boolean;
     /** #1047: the operator's `output_config.format` opt-in for this endpoint. */
     anthropicStructuredOutputSupported: boolean;
+    /** #1678 hardening: exact in-scope requirement IDs for the run-specific
+     * closing schema (empty = the unpinned base schema). */
+    verdictRequirementIds?: readonly string[];
   }): Record<string, unknown> {
     let system = this.system;
     let messages = this.renderAnthropicMessages(options.includeTurnNotes);
@@ -1539,7 +1571,11 @@ export class Conversation {
     const structuredFormat = options.verdictTurn
       && options.anthropicStructuredOutputSupported
       && options.responseFormat === "json_schema"
-      ? ANTHROPIC_VERDICT_OUTPUT_FORMAT
+      ? ((options.verdictRequirementIds?.length ?? 0) > 0
+        // #1678 hardening: same run-specific pinning as the OpenAI arm — the
+        // prompt-only and strict-schema lanes keep the SAME semantic contract.
+        ? buildRunVerdictOutputFormat(options.verdictRequirementIds ?? [])
+        : ANTHROPIC_VERDICT_OUTPUT_FORMAT)
       : undefined;
     // #998: Anthropic carries the effort in its own `output_config` object,
     // never as OpenAI's `reasoning_effort`, and only under the operator's

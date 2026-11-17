@@ -9,6 +9,7 @@
 
 import { fenceDelimiterFor } from "./fence.js";
 import { redactPrTextLines } from "./redact.js";
+import { usableReviewId } from "../platform/normalize.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_COMMENTS_DEFAULT = 50;
@@ -37,6 +38,12 @@ export interface PrThreadComment {
    * deployment returns it). Absent or empty means the forge did not report a
    * type — authorship then stays unproven, never inferred from the body. */
   userType?: string;
+  /** #1681 round 7: the forge-proven id of the review submission that
+   * created this inline comment, when the read carries one (GitHub GraphQL
+   * `pullRequestReview.databaseId`). The ONLY authority for attributing a
+   * thread to a human change request — Forgejo/Gitea REST reports no such
+   * link, and it is never guessed from login, timing or text. */
+  parentReviewId?: string;
   createdAt: string;
   updatedAt: string;
   body: string;
@@ -115,6 +122,13 @@ export function normalizeComment(raw: unknown): PrThreadComment | null {
     id: rec.id ?? null,
     user: headerField(name) || "unknown",
     ...(reportedType !== undefined ? { userType: headerField(reportedType) } : {}),
+    ...(() => {
+      // #1681 round 7: carry the forge-proven parent review id through the
+      // normalization seam (accepting either the snake_case projection or a
+      // camelCase caller), or stay silent — never guessed.
+      const proven = usableReviewId(rec.parent_review_id) ?? usableReviewId(rec.parentReviewId);
+      return proven !== null ? { parentReviewId: proven } : {};
+    })(),
     createdAt: headerField(rec.created_at),
     updatedAt: headerField(rec.updated_at),
     body: typeof body === "string" ? body : "",

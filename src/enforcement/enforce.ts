@@ -12,6 +12,7 @@ import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.j
 import { applyReviewObligationEnforcement, isForcingObligation, type ReviewObligation } from "./review-obligations.js";
 import { applyReviewThreadEnforcement, type EnforcementThread, type ThreadReconciliationInput } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
+import { type EvidenceGrounding } from "./citations.js";
 import { harnessExecutionCounts, harnessFailuresAllDeadlineClamps } from "../tools/execution-counts.js";
 
 export interface EvidenceProviderArtifact {
@@ -297,6 +298,11 @@ export interface EnforcementInputs {
    * time. Absent when the caller could not serve one (unit callers,
    * replay) — the enforcement view is then trusted as today. */
   threadReconciliation?: ThreadReconciliationInput | null;
+  /** #1681 r6: exact-head citation provenance shared by thread and
+   * human-review settlement (the same head the requirement trace
+   * validates). Absent for legacy/replay callers, which keep the
+   * historical lexical reading. */
+  citationGrounding?: EvidenceGrounding | null;
 }
 
 /**
@@ -402,7 +408,7 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
   }
 
   const verdictBeforeThreads = artifact.verdict;
-  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy, inputs.threadReconciliation);
+  const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy, inputs.threadReconciliation, inputs.citationGrounding);
   if (threads.applied) {
     applied += 1;
     // Settlement is bookkeeping, except under findings_severity_gated where a
@@ -412,7 +418,7 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
     }
   }
 
-  const humanReviews = applyHumanReviewEnforcement(artifact, inputs.humanReviews);
+  const humanReviews = applyHumanReviewEnforcement(artifact, inputs.humanReviews, inputs.citationGrounding, threads.settled);
   if (humanReviews.applied) {
     applied += 1;
     // Human change-request settlement never forces a verdict, so it never

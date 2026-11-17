@@ -19,10 +19,10 @@ import { createGiteaIngressClient, ForgejoIngressClient } from "../src/ingress/a
 import { GITEA_CAPABILITIES, capabilitiesFor, requireCapability } from "../src/ingress/capabilities.js";
 import { GITEA_INTEGRATION_REFUSAL, type ForgejoAdapter } from "../src/platform/index.js";
 import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
+import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { actionStageEnv } from "../src/run/action.js";
 import { buildChildEnv } from "../src/runtime/env.js";
 import { CI_GATE_ENV_KEYS } from "../src/gates/env.js";
-import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite } from "../src/platform/forgejo-ancillary.js";
 
 const INSTANCE = "https://git.example.internal:3000";
@@ -117,10 +117,12 @@ test("giteaTokenFromEnv uses the family chain, with GITEA_TOKEN as an alias", ()
 });
 
 test("bindForgejoToken binds the family's chain in the resolver's own order", () => {
-  // The binding is the resolver's chain, bound where the resolver reads it
-  // first: a `FORGEJO_TOKEN` already in the target (the config-projected
-  // secret) wins, then the ambient family's own name, then the ambient
-  // `GITEA_TOKEN` alias, then the runner's GitHub credential.
+  // The binding is the resolver's chain — identity scope included — bound
+  // where the resolver reads it first: a `FORGEJO_TOKEN` already in the
+  // target (the config-projected secret) wins, then the ambient family's
+  // own name, then the ambient `GITEA_TOKEN` alias (ONLY for a declared
+  // Gitea identity, decided by the resolver itself over the merged
+  // `PLATFORM`), then the runner's GitHub credential.
   const bind = (
     target: Record<string, string | undefined>,
     ambient: Record<string, string | undefined>,
@@ -130,15 +132,22 @@ test("bindForgejoToken binds the family's chain in the resolver's own order", ()
     return target.FORGEJO_TOKEN;
   };
 
-  assert.equal(bind({}, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }), "family-pat");
-  assert.equal(bind({}, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  assert.equal(bind({ PLATFORM: "gitea" }, { FORGEJO_TOKEN: "family-pat", GITEA_TOKEN: "alias-pat" }), "family-pat");
+  assert.equal(bind({ PLATFORM: "gitea" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // The declaration may come from the ambient record too — the merged view
+  // is the resolver's own input.
+  assert.equal(bind({}, { PLATFORM: "gitea", GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  // NO declared Gitea identity: the alias stays out and the pre-#1678
+  // chain holds — the binding cannot swap a plain run's credential.
+  assert.equal(bind({}, { GITEA_TOKEN: "alias-pat" }), "gh");
+  assert.equal(bind({ PLATFORM: "forgejo" }, { GITEA_TOKEN: "alias-pat" }), "gh");
   assert.equal(bind({}, {}), "gh");
   assert.equal(bind({ FORGEJO_TOKEN: "projected-pat" }, { FORGEJO_TOKEN: "family-pat" }), "projected-pat");
   // An empty value is no value: the chain moves on to the next candidate.
-  assert.equal(bind({ FORGEJO_TOKEN: "" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
+  assert.equal(bind({ PLATFORM: "gitea", FORGEJO_TOKEN: "" }, { GITEA_TOKEN: "alias-pat" }), "alias-pat");
   // No credential anywhere binds NOTHING — undefined, not "": absent is the
   // honest unset every stage sweep and resolver-side `||` already treats so.
-  assert.equal(bind({}, {}, ""), undefined);
+  assert.equal(bind({ PLATFORM: "gitea" }, {}, ""), undefined);
 
   // Authorized Integration binds NO token: the OIDC exchange supplies the
   // credential, and a bound token would be a second, wrong one.
@@ -302,13 +311,28 @@ test("omitting the forge option keeps the Forgejo client's fixed error text", as
   assert.deepEqual(result, { ok: false, error: "forgejo ingress request failed" });
 });
 
-test("#1678: the family token resolver accepts the GITEA_TOKEN alias too", () => {
+test("#1678: GITEA_TOKEN alias is identity-scoped — plain Forgejo precedence never moves", () => {
   // Every Forgejo/Gitea-family call site (read adapter, publish API, CI-wait
-  // gate, ancillary clients) resolves through forgejoTokenFromEnv, so an alias
-  // honored only on the Gitea-named path would leave those sites unauthenticated.
-  assert.equal(forgejoTokenFromEnv({ GITEA_TOKEN: "gt" }), "gt");
-  assert.equal(forgejoTokenFromEnv({ FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
-  assert.equal(forgejoTokenFromEnv({ GITHUB_TOKEN: "ght", GITEA_TOKEN: "gt" }), "gt");
+  // gate, ancillary clients) resolves through forgejoTokenFromEnv, so the
+  // alias must follow ONE rule for the whole run — decided by the declared
+  // identity, never by which variable the host happens to export:
+  // - a declared Gitea run honors GITEA_TOKEN after FORGEJO_TOKEN;
+  // - a plain (or auto-detected) Forgejo run keeps its pre-#1678 chain
+  //   FORGEJO_TOKEN > GITHUB_TOKEN > GH_TOKEN and ignores GITEA_TOKEN, so a
+  //   host exporting GITEA_TOKEN cannot silently change which credential an
+  //   ordinary Forgejo review authenticates with.
+  assert.equal(forgejoTokenFromEnv({ GITEA_TOKEN: "gt" }), undefined);
+  assert.equal(forgejoTokenFromEnv({ GITHUB_TOKEN: "ght", GITEA_TOKEN: "gt" }), "ght");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "forgejo", GH_TOKEN: "gh", GITEA_TOKEN: "gt" }), "gh");
+  // A declared Gitea identity (via PLATFORM) honors the alias at the family position.
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", GITEA_TOKEN: "gt" }), "gt");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
+  assert.equal(forgejoTokenFromEnv({ PLATFORM: "gitea", GITEA_TOKEN: "gt", GITHUB_TOKEN: "ght" }), "gt");
+  // The Gitea-named resolver applies the alias explicitly, independent of ambient
+  // PLATFORM spelling, and keeps the family's FORGEJO_TOKEN precedence.
+  assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "gt" }), "gt");
+  assert.equal(giteaTokenFromEnv({ FORGEJO_TOKEN: "ft", GITEA_TOKEN: "gt" }), "ft");
+  assert.equal(giteaTokenFromEnv({ GITEA_TOKEN: "gt", GITHUB_TOKEN: "ght" }), "gt");
 });
 
 // --- env boundary: the refusal is reachable without loadConfig -------------
@@ -366,6 +390,48 @@ test("#1678: the env-built lanes carry the Gitea identity on a token-mode config
   // The publish lane resolves the same identity, so the read and write sides
   // cannot disagree about which product's capabilities apply.
   assert.equal(buildPublishApi(env).platform, "forgejo");
+});
+
+test("#1681 review: the orchestrator read lane refuses integration config before construction", () => {
+  // `buildPlatformReadAdapter` is the adapter every context producer reads
+  // through; it must fail closed on the Forgejo-only auth settings exactly
+  // like `buildAdapter`, not silently construct a token-mode adapter.
+  const integration = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTH_METHOD: "authorized_integration",
+  } as never;
+  assert.throws(
+    () => buildPlatformReadAdapter(integration),
+    /Gitea does not support auth method 'authorized_integration'/,
+  );
+  const audienceOnly = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    FORGEJO_TOKEN: "gt",
+    FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: "https://gitea.test",
+  } as never;
+  assert.throws(
+    () => buildPlatformReadAdapter(audienceOnly),
+    /forgejo-authorized-integration-audience/,
+  );
+  // Positive lane: a token-mode config still yields the family adapter with
+  // the Gitea identity; the refused settings above are exactly what excluded.
+  const tokenMode = {
+    PLATFORM: "gitea",
+    REPO: "acme/widgets",
+    PR_NUMBER: "7",
+    FORGEJO_API_URL: INSTANCE,
+    GITEA_TOKEN: "gt",
+  } as never;
+  const adapter = buildPlatformReadAdapter(tokenMode);
+  assert.equal(adapter.platform, "forgejo");
+  assert.equal((adapter as ForgejoAdapter).forge, "gitea");
 });
 
 test("#1678: the CI-wait gate and ancillary writes thread the identity too", async () => {

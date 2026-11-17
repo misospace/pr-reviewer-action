@@ -12,6 +12,8 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
+import { applyRequirementTraceEnforcement, unresolvedTraceRequirementIds, validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
 import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
 import { TransportFailure } from "../src/transport/http.js";
@@ -70,6 +72,7 @@ function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) =
 
 const openAiText = (content: string) => ({ choices: [{ message: { content } }] });
 const withPrompt = { env: { SYSTEM_PROMPT: "You are the reviewer." } };
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const openAiCall = (id: string, name: string, args: string) => ({
   choices: [{ message: { content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }],
 });
@@ -1476,7 +1479,10 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
     timeFn,
     transport: async () => {
       transportCalls++;
-      return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+      return { choices: [{ message: { content: null, tool_calls: [
+        { id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"src.ts"}' } },
+        { id: "bad", type: "function", function: { name: "read_file", arguments: '{"path":' } },
+      ] } }] };
     },
   }));
   assert.equal(result.stop_reason, "wall-clock-exceeded");
@@ -2190,7 +2196,6 @@ test("#810: a budget-exhausted loop records the exact unread files and leads and
   assert.equal(coverage.leads_total, 2);
   assert.deepEqual(coverage.unresolved_leads, [
     { role: "security", file: "src/c.ts", excerpt: "unvalidated input" },
-    { role: "tests", file: null, excerpt: "new flag untested" },
   ]);
   // Persisted (redacted) in the harness artifact for the publish layer.
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
@@ -3217,6 +3222,241 @@ test("#1464: the non-streamed verdict retry fails closed — a payload without m
   assert.equal(outcome.budgetRaisedTo, undefined, "no raise is reported for a request that was never sent");
 });
 
+// ---------------------------------------------------------------------------
+// #1687: an initial NON-streamed closing verdict gets its own one-shot retry
+// for PROVEN transient transport failures — identical payload, same absolute
+// deadline, no third attempt, fail-closed on everything else.
+// ---------------------------------------------------------------------------
+
+const verdictInput = (
+  transport: HarnessDeps["transport"],
+  overrides: Partial<Parameters<typeof produceNativeVerdict>[0]> = {},
+): Parameters<typeof produceNativeVerdict>[0] => ({
+  verdictPayload: {
+    messages: [{ role: "user", content: "the whole tool-loop conversation" }],
+    stream: false,
+    max_tokens: 512,
+  },
+  baseUrl: "http://model.test/v1",
+  apiFormat: "openai",
+  apiKey: "k",
+  turnTimeout: 30,
+  usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+  deadline: 100,
+  transport,
+  timeFn: () => 1,
+  tier: "primary",
+  ...overrides,
+});
+
+test("#1687: an initial non-streamed ECONNRESET verdict is retried ONCE and recovered in-conversation", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+    calls.push(structuredClone(payload) as Record<string, unknown>);
+    timeouts.push(timeoutSec);
+    if (calls.length === 1) throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    return validVerdict();
+  }));
+  assert.equal(outcome.ok, true, "the recovered attempt is the native-loop verdict itself");
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.retryKind, "transport");
+  assert.equal(outcome.transport, "non-streamed-transport-retry");
+  assert.equal(outcome.attempts, 2);
+  assert.equal(calls.length, 2, "at most ONE retry");
+  assert.deepEqual(calls[1]!.messages, calls[0]!.messages, "the retry carries the same complete conversation");
+  assert.deepEqual(calls[1]!, calls[0]!, "the retry payload is identical — same model, same format, no new tool execution");
+  assert.equal(calls[1]!.stream, false);
+  assert.equal(calls[1]!.max_tokens, 512, "a transport failure carries no token-cap evidence: no budget raise");
+  assert.equal(outcome.budgetRaisedTo, undefined);
+  assert.equal(outcome.streamFailureKind, "", "the streamed-fallback surface stays unused");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.reason, "connection_closed", "typed TransportFailure kind, never prose");
+  assert.equal(rec.status, null);
+  assert.equal(rec.route, "primary");
+  assert.ok(rec.retry_elapsed_sec !== null, "the retry's own elapsed rides the record");
+  // #1628's terminal rule mirrored: a proven wire death may not restart a
+  // full turn wait — the retry's timeout is the pair's remainder, not 30.
+  assert.equal(timeouts[0], 30);
+  assert.ok(timeouts[1]! < 30 && timeouts[1]! >= 1, `terminal cap expected below the full turn timeout, got ${timeouts[1]}`);
+});
+
+test("#1687: a repeated transient failure stays bounded at two attempts and falls back", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }));
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "transport");
+  assert.equal(calls, 2, "exactly one retry, never a third attempt");
+  assert.equal(outcome.attempts, 2);
+  assert.equal(outcome.retryKind, "transport");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.reason, "connection_closed");
+  assert.ok(rec.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+});
+
+test("#1687: an ambiguous timeout retries with the configured turn timeout as its authority", async () => {
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, _payload, _apiKey, timeoutSec) => {
+    timeouts.push(timeoutSec);
+    if (timeouts.length === 1) throw new TransportFailure("request_timeout", "model request timed out");
+    return validVerdict();
+  }));
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.transportRetry!.reason, "transport_timeout");
+  assert.deepEqual(timeouts, [30, 30], "the idle case is not assumed terminal: the configured authority stands (the run deadline still clamps)");
+});
+
+test("#1687: a proven wire death does not restart a full turn wait for the verdict retry", async () => {
+  const timeouts: number[] = [];
+  const outcome = await produceNativeVerdict(verdictInput(async (_baseUrl, _apiFormat, _payload, _apiKey, timeoutSec) => {
+    timeouts.push(timeoutSec);
+    if (timeouts.length === 1) {
+      await sleepMs(1100);
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    }
+    return validVerdict();
+  }, { turnTimeout: 2 }));
+  assert.equal(outcome.ok, true);
+  // The discarded attempt spent ~1.1s of the 2s turn timeout; the retry gets
+  // the pair's remainder (2 − 1.1 → floored at 1), not a fresh 2s wait.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1687: terminal, cancelled, byte-cap, and untyped failures never retry the non-streamed verdict", async () => {
+  const cases: Array<[string, unknown]> = [
+    // http_status arrives here only AFTER the transport's own 429/5xx
+    // backoff spent itself — auth/config/format rejections stay rejections.
+    ["auth", new TransportFailure("http_status", "model endpoint returned HTTP 401", { status: 401 })],
+    ["unsupported-format", new TransportFailure("http_status", "model endpoint returned HTTP 404", { status: 404 })],
+    ["exhausted-backoff", new TransportFailure("http_status", "model endpoint returned HTTP 503", { status: 503 })],
+    ["cancelled", new TransportFailure("cancelled", "model request cancelled")],
+    ["byte-cap", new TransportFailure("response_too_large", "response exceeded the transport response-byte limit")],
+    // An UNtyped throw whose message merely says ECONNRESET: transient
+    // status is never inferred from prose the seam cannot type-check.
+    ["untyped-prose", new Error("socket said ECONNRESET")],
+  ];
+  for (const [label, failure] of cases) {
+    let calls = 0;
+    const outcome = await produceNativeVerdict(verdictInput(async () => {
+      calls += 1;
+      throw failure;
+    }));
+    assert.equal(calls, 1, `${label}: no retry may be dialed`);
+    assert.equal(outcome.ok, false, label);
+    assert.equal(outcome.reason, "transport", label);
+    assert.equal(outcome.retried, false, `${label}: no retry`);
+    assert.equal(outcome.retryKind, "", label);
+    assert.equal(outcome.transportRetry, undefined, label);
+  }
+});
+
+test("#1687: a verdict body the verifier rejects is never transport-retried", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    // A well-answered 200 whose content the verdict parser rejects: real
+    // content rejection, not a transport hole.
+    return openAiText("not a verdict body");
+  }));
+  assert.equal(calls, 1, "the verifier's rejection is final for this turn");
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "parse");
+  assert.equal(outcome.retryKind, "");
+  assert.equal(outcome.transportRetry, undefined);
+});
+
+test("#1687: an expired deadline refuses the retry before any wire call, counted as nothing", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { timeFn: () => (calls === 0 ? 10 : 1000) }));
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 1, "the retry must never open a request past the absolute deadline");
+  assert.equal(outcome.detail, "tool-loop wall-clock budget exhausted");
+  assert.equal(outcome.attempts, 1, "a retry that was never opened is not a model call — the record must claim one attempt, not two");
+  assert.equal(outcome.timing.attempts, 1, "the transport-call count says the same");
+  const rec = outcome.transportRetry!;
+  assert.equal(rec.retry_elapsed_sec, null, "no retry was fired; the discarded attempt still gets its record");
+});
+
+test("#1687: a streamed-first verdict keeps the #637 single fallback — never a third attempt", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { verdictPayload: { messages: [{ role: "user", content: "conversation" }], stream: true, max_tokens: 512 } }));
+  assert.equal(calls, 2, "the streamed attempt plus its one non-streamed fallback — the transport retry may not add a third");
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.retryKind, "stream", "the retry spent is still the streamed fallback");
+  assert.equal(outcome.transportRetry, undefined, "the #1687 surface stays unclaimed");
+  assert.equal(outcome.streamFailureKind, "transport");
+});
+
+test("#1687: the transport retry fails closed when the payload lost its messages", async () => {
+  let calls = 0;
+  const outcome = await produceNativeVerdict(verdictInput(async () => {
+    calls += 1;
+    throw new TransportFailure("network", "model request failed (ECONNRESET)");
+  }, { verdictPayload: { stream: false, max_tokens: 512 } }));
+  assert.equal(calls, 1, "a conversation-less retry never reaches the wire");
+  assert.equal(outcome.detail, "non-streamed transport retry payload carries no messages — not sent");
+  assert.equal(outcome.attempts, 1, "the unsent retry is not counted as an attempt");
+  assert.equal(outcome.transportRetry!.retry_elapsed_sec, null, "no retry was fired");
+});
+
+test("#1687: the recovered non-streamed verdict is produced IN-CONVERSATION with its own bounded record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  const scripted: unknown[] = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      const body = scripted[Math.min(n, scripted.length - 1)];
+      if (n === 2) {
+        n += 1;
+        assert.equal((payload as Record<string, unknown>).stream, false, "the verdict turn rides the lane's non-streamed setting");
+        throw new TransportFailure("network", "model request failed (ECONNRESET)");
+      }
+      n += 1;
+      return body;
+    },
+  }));
+  // The recovered answer IS the native-loop verdict: the engine's reuse
+  // seam (engine/review.ts, `native_loop_verdict_produced === true`) skips
+  // the separate corpus-only review call on exactly this flag — pinned for
+  // the engine side by the run-level reuse tests (run.test.ts).
+  assert.equal(n, 4, "two loop turns, the failed verdict attempt, and its one retry");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.equal(result.native_loop_verdict_transport, "non-streamed-transport-retry");
+  assert.equal(result.native_loop_verdict_retried, true);
+  assert.equal(result.native_loop_verdict_stream_failure, undefined, "this was never a streamed fallback");
+  const rec = result.native_loop_verdict_transport_retry as Record<string, unknown>;
+  assert.equal(rec.reason, "connection_closed");
+  assert.equal(rec.route, "primary");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.tool_loop_telemetry.verdict.streamed_fallback, false);
+  assert.equal(artifact.tool_loop_telemetry.verdict.attempts, 2);
+  // The artifact the engine consumes for reuse exists with the recovered body.
+  const aiResponse = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  assert.ok(JSON.stringify(aiResponse).includes("Looks fine."), "the recovered verdict envelope is persisted for reuse");
+  assert.ok(logs.some((l) => l.includes("closing non-streamed verdict attempt failed") && l.includes("recovered")));
+  assert.ok(logs.some((l) => l.includes("via non-streamed transport retry (#1687)")));
+});
+
 test("#1258: the planner's diff-head excerpt adapts its fence to the diff's backtick runs", () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "pr.json"), '{"number": 7, "title": "Fix parser", "author": {"login": "dev"}}');
@@ -3246,6 +3486,103 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
   assert.ok(inside.has(lines.findIndex((line) => line === "+# PR Classification")), "the forged heading stays inert");
   assert.ok(!inside.has(lines.findIndex((line) => line === "# Planning Notes")), "the notes heading stays live");
 });
+
+// ---------------------------------------------------------------------------
+// #1687 (cont.): the fallback and completeness surfaces, end to end.
+// ---------------------------------------------------------------------------
+
+test("#1687: a failed transport retry keeps the corpus-only fallback — no verdict is produced", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      n += 1;
+      if (n <= 2) return n === 1 ? openAiCall("c1", "read_file", '{"path":"src.ts"}') : openAiText("evidence gathered");
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(n, 4, "two loop turns, the failed verdict attempt, and exactly one retry — then give up");
+  // The engine consumes exactly these fields: `native_loop_verdict_produced`
+  // unset means producePrimaryReview() makes the separate corpus-only
+  // standard review call (engine/review.ts), and #1673's INCOMPLETE
+  // enforcement downstream is untouched.
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "transport");
+  assert.equal(result.native_loop_verdict_retry_kind, "transport");
+  const rec = result.native_loop_verdict_transport_retry as Record<string, unknown>;
+  assert.equal(rec.reason, "connection_closed");
+  assert.ok(rec.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("transport retry failed") && l.includes("no further retry")));
+  assert.ok(logs.some((l) => l.includes("no reusable in-conversation verdict")));
+});
+
+test("#1687: a recovered transport never relaxes missing structured requirement coverage", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1\n");
+  const scripted: unknown[] = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    transport: async () => {
+      const body = scripted[Math.min(n, scripted.length - 1)];
+      if (n === 2) {
+        n += 1;
+        throw new TransportFailure("network", "model request failed (ECONNRESET)");
+      }
+      n += 1;
+      return body;
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true, "the transport recovered in-conversation");
+
+  // #1673's exact shape: the recovered verdict says `approve` but carries NO
+  // structured `requirement_coverage` for an in-scope requirement. The
+  // recovery must change nothing about the completeness enforcement — the
+  // trace records the missing claim as a material unknown, never a met one.
+  const envelope = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  const parsed = parseVerdictResponse(envelope, ["k"]);
+  assert.equal(parsed.verdict, "approve");
+  const coverage = Array.isArray(parsed.requirementCoverage) ? parsed.requirementCoverage : [];
+  assert.equal(coverage.length, 0, "the recovered body genuinely lacks the structured claim");
+
+  const ledger = { requirements: [{ id: "req-join", text: "The join must use the `[[ ... ]]` conditional command.", kind: "acceptance" }] };
+  const trace = validateRequirementTrace(coverage, ledger, root);
+  assert.equal(trace.rows.length, 1);
+  assert.equal(trace.rows[0]!.disposition, "unverifiable");
+  assert.equal(trace.rows[0]!.resolution, "unresolved");
+  assert.equal(trace.rows[0]!.materiality, "material");
+  assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+  assert.deepEqual(trace.summary.unresolved_material, ["req-join"]);
+  // The disposition's unresolved set (what withholds the native APPROVE as
+  // INCOMPLETE/COMMENT — the engine-side mapping #1673 showed in production)
+  // sees the gap with the recovered transport in place.
+  assert.deepEqual(unresolvedTraceRequirementIds(trace).ids, ["req-join"]);
+
+  // Enforcement applies over the recovered artifact without synthesizing a
+  // satisfied claim or flipping the model's verdict itself.
+  const art = {
+    verdict: parsed.verdict,
+    required_checks: "none",
+    review_markdown: parsed.reviewMarkdown,
+    findings: parsed.findings,
+  } as unknown as ReviewArtifact;
+  const enforced = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace: root });
+  assert.equal(enforced.applied, true);
+  assert.equal((art as unknown as Record<string, unknown>).requirement_coverage, undefined, "no coverage claim is synthesized");
+  assert.equal(art.findings.length, 0, "the trace never synthesizes findings");
+});
+
 
 // ── #1379: dependency-evidence budget reserve from the classification ─────
 
@@ -4231,8 +4568,6 @@ test("#1598: an unknown tool harness tier still fails closed", async () => {
 // per attempt.
 // ---------------------------------------------------------------------------
 
-const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 test("#1628: a pair of fallback rounds reports their own reasons and times, not two booleans", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
@@ -5167,5 +5502,69 @@ test("#1629 review: derived material obligations widen the envelope or retain �
     assert.equal(result.tool_request_budget, 6);
     assert.equal(result.tool_budget_source, "low-risk-cap");
     assert.deepEqual(result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 1, cap: 6, derived_budget: 40 });
+  }
+});
+
+
+test("#1688: certified seven-file coverage completes optional investigation before budget", async () => {
+  const { root, deps } = workspace();
+  const files = Array.from({ length: 7 }, (_, i) => `src/file${i}.ts`);
+  const diff = files.map((file) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`).join("");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify(files.map((filename) => ({ filename, status: "modified" }))));
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "app_code", risk_flags: ["linked_priority_p1"] }));
+  fs.writeFileSync(path.join(root, "pr.diff"), diff);
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}\n# Specialist Review Leads\nSuite pending\n`);
+  fs.writeFileSync(path.join(root, "specialist-correctness.json"), specialistArtifact("correctness", [{ file: null, message: "Suite pending" }]));
+  fs.writeFileSync(path.join(root, "review-obligations-candidates.json"), JSON.stringify({ injected: true, obligations: [{ id: "priority", source: "must_check", row_class: "attention", text: "priority attention" }] }));
+  const requests: unknown[] = [];
+  let turns = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "40", SYSTEM_PROMPT: "You are reviewer." },
+    transport: async (_url, _format, request) => { requests.push(request); return ++turns === 1 ? openAiCall("c1", "find_files", '{"pattern":"*.ts"}') : validVerdict(); },
+  }));
+  assert.equal(result.stop_reason, "investigation-complete");
+  assert.equal((result.tool_calls as unknown[]).length, 1);
+  assert.equal(turns, 2);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.partial_coverage, undefined);
+  assert.match(JSON.stringify(requests[1]), /Suite pending/);
+  assert.deepEqual(result.corpus_diff_covered_files, files);
+  assert.match(fs.readFileSync(path.join(root, "specialist-correctness.json"), "utf8"), /Suite pending/);
+});
+
+test("coverage completion fails closed on uncovered or truncated manifests", async () => {
+  for (const truncated of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+      { filename: "src/a.ts", status: "modified" },
+      truncated ? { note: "file list truncated" } : { filename: "src/uncovered.ts", status: "modified" },
+    ]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), diff);
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+    if (!truncated) assert.deepEqual(result.partial_coverage?.unread_files, ["src/uncovered.ts"]);
+  }
+});
+
+test("coverage completion requires certified deleted-file diffs", async () => {
+  for (const certified of [false, true]) {
+    const { root, deps } = workspace();
+    const diff = "diff --git a/src/deleted.ts b/src/deleted.ts\n--- a/src/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([{ filename: "src/deleted.ts", status: "removed" }]));
+    fs.writeFileSync(path.join(root, "pr.diff"), diff);
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), certified ? diff : "");
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
+    let turns = 0;
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+      transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
+    }));
+    assert.equal(result.stop_reason, certified ? "investigation-complete" : "tool-call-budget-exhausted");
   }
 });

@@ -31,12 +31,19 @@ A Gitea instance still uses the existing `forgejo-api-url` and
 no new action input. This is a known naming wart.
 
 For self-hosted runs the token may also come from the environment.
-`GITEA_TOKEN` is an alias. The family's own `FORGEJO_TOKEN` still wins over
-it, then `GITHUB_TOKEN`, then `GH_TOKEN`. The alias is honored by the shared
-family token resolver, not only by the Gitea-named entry point: every family
-call site (read adapter, publish client, CI-wait gate, ancillary clients)
-resolves through that one resolver, so an alias honored in only one place
-would leave the others unauthenticated.
+`GITEA_TOKEN` is an alias, honored only for a run that explicitly declares the
+Gitea identity (`platform: gitea`). For such a run the family's own
+`FORGEJO_TOKEN` still wins over it, then `GITHUB_TOKEN`, then `GH_TOKEN`. A
+plain Forgejo run keeps its historical chain (`FORGEJO_TOKEN`, `GITHUB_TOKEN`,
+`GH_TOKEN`) and ignores `GITEA_TOKEN` entirely: sharing a wire family must not
+let a host that happens to export `GITEA_TOKEN` silently change which
+credential an ordinary Forgejo review authenticates with. The rule lives in
+the shared family token resolver, not in the Gitea-named entry point: every
+family call site (read adapter, publish client, CI-wait gate, ancillary
+clients) resolves through that one resolver with the run's declared identity,
+so one run can never authenticate the review with one credential and the CI
+lane with another.
+
 
 ## Refused: authorized_integration
 
@@ -50,7 +57,11 @@ Forgejo. On Gitea every way of selecting that mode is refused:
   method would let that configuration degrade silently into token mode.
 - The read adapter and the publish client repeat the refusal at construction,
   so a direct caller that skips config validation cannot bypass it. The
-  construction refusal says:
+  direct-environment read lanes (`buildAdapter`, `buildPlatformReadAdapter`)
+  construct through `giteaAdapterFromEnv`, which resolves the token via
+  `giteaTokenFromEnv` and therefore refuses before any adapter object exists.
+  The construction refusal says:
+
 
 ```text
 Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token
@@ -75,7 +86,10 @@ never rewrite one.
 
 The Gitea intake route is `/webhooks/gitea` (`GITEA_WEBHOOK_PATH`,
 `src/ingress/endpoints.ts`). The controller daemon reports that route in
-its startup summary, so you do not have to guess it. Set a webhook secret
+its startup summary, so you do not have to guess it, and it enforces it:
+a Gitea-family daemon answers the intake only on that exact path, and a
+delivery addressed anywhere else gets a fixed 404 before the signature is
+ever checked. Set a webhook secret
 on the instance and on the controller. An empty secret accepts nothing:
 the handler fails closed, and it verifies the signature over the raw body
 before parsing any JSON.
@@ -94,6 +108,7 @@ schedules a follow-up.
 The Action runtime does not use this projection. It reads the event the
 forge sends to the runner and normalizes it with the shared normalizer, so
 the raw body projection has no place there.
+
 
 Subscribe the webhook to the events that schedule reviews:
 
@@ -122,6 +137,7 @@ mint a different generation than the webhook delivery for the same head,
 and the two would never converge.
 
 ## Not covered by this change
+
 
 - No new `gitea-*` action inputs. The shared `forgejo-*` settings stay.
 - No separate Gitea REST client class. The Forgejo client serves both.

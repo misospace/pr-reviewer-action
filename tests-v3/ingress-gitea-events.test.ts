@@ -13,6 +13,7 @@ import {
   type GiteaWebhookDelivery,
 } from "../src/ingress/gitea-events.js";
 import { createForgejoWebhookHandler } from "../src/ingress/webhook-handler.js";
+import { projectForgejoWebhookPayload } from "../src/ingress/forgejo-events.js";
 import { normalizeGitHubEvent } from "../src/events/normalize.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 
@@ -445,18 +446,61 @@ test("createGiteaWebhookHandler is the shared native intake with the Gitea proje
 });
 
 test("the Gitea projection and the Forgejo projection agree outside the two Gitea-shaped families", () => {
+  // Change-sensitive parity, not a self-comparison: the Gitea side runs
+  // `projectGiteaWebhookPayload` and the Forgejo side runs the REAL
+  // `projectForgejoWebhookPayload` on the same payload. Fixtures carry full
+  // `repository`/`pull_request` shape, so the PR lines normalize to live
+  // canonical events — a parity regression that nulls both sides cannot
+  // hide behind two nulls comparing equal.
+  const synced = JSON.parse(SYNCED) as Record<string, unknown>;
   const bodies: Array<[string, string, Record<string, unknown>]> = [
-    ["pull_request", "pull_request_sync", { action: "synchronized" }],
-    ["pull_request", "", { action: "reopened", pull_request: { number: 1 } }],
-    ["pull_request", "", { action: "opened", pull_request: { number: 1 } }],
-    ["check_run", "", { action: "completed" }],
-    ["push", "", { action: "created" }],
+    ["pull_request", "pull_request_sync", synced],
+    ["pull_request", "", { ...synced, action: "reopened" }],
+    ["pull_request", "", { ...synced, action: "opened" }],
+    ["check_run", "", { action: "completed", repository: { full_name: "acme/widgets" } }],
+    ["push", "", { ref: "refs/heads/main", repository: { full_name: "acme/widgets" }, after: HEAD }],
   ];
+  let liveEvents = 0;
   for (const [eventHeader, typeHeader, payload] of bodies) {
-    const gitea = normalizeGitHubEvent(projectGiteaWebhookPayload(eventHeader, typeHeader, payload));
-    const forgejo = normalizeGitHubEvent(projectGiteaWebhookPayload(eventHeader, typeHeader, payload));
+    const giteaEnvelope = projectGiteaWebhookPayload(eventHeader, typeHeader, structuredClone(payload));
+    const forgejoEnvelope = projectForgejoWebhookPayload(eventHeader, typeHeader, structuredClone(payload));
+    assert.deepEqual(giteaEnvelope, forgejoEnvelope, `${eventHeader}/${typeHeader} envelopes diverged`);
+    const gitea = normalizeGitHubEvent(giteaEnvelope);
+    const forgejo = normalizeGitHubEvent(forgejoEnvelope);
     assert.deepEqual(gitea, forgejo, `${eventHeader}/${typeHeader} diverged`);
+    if (gitea !== null) liveEvents += 1;
   }
+  // Liveness guard: the PR fixtures must still project to real canonical
+  // events, or the parity loop above is comparing dead envelopes again.
+  assert.ok(liveEvents >= 3, `expected at least 3 live canonical events, got ${liveEvents}`);
+  assert.equal(normalizeGitHubEvent(projectGiteaWebhookPayload("pull_request", "pull_request_sync", structuredClone(synced)))?.kind, "synchronize");
+  assert.equal(normalizeGitHubEvent(projectGiteaWebhookPayload("pull_request", "", { ...synced, action: "reopened" }))?.kind, "pr_reopened");
+  // The excluded families: where Gitea's payload shape truly diverges
+  // (number-less issue.pull_request on PR comments) the two projections MUST
+  // differ; where Gitea re-decides but semantics agree (label trigger) they
+  // MUST converge. Together these prove the parity loop above exercises live
+  // payloads rather than inputs both sides ignore.
+  const commentBody = {
+    action: "created",
+    repository: { full_name: "acme/widgets" },
+    issue: { number: 12, pull_request: { merged: false, draft: false, html_url: "https://gitea.test/x" } },
+    pull_request: { number: 12, head: { sha: HEAD }, base: { repo: { full_name: "acme/widgets" } } },
+    comment: { id: 91, user: { login: "asker" } },
+  };
+  assert.notDeepEqual(
+    projectGiteaWebhookPayload("issue_comment", "", structuredClone(commentBody)),
+    projectForgejoWebhookPayload("issue_comment", "", structuredClone(commentBody)),
+    "Gitea's number-less issue.pull_request re-decision must not silently become shared",
+  );
+  // Label delivery re-decides in code but CONVERGES on output: Gitea's
+  // `label_updated` projection must stay byte-identical to Forgejo's, or the
+  // two forges have grown different trigger semantics for one setting.
+  const labelBody = { action: "label_updated", repository: { full_name: "acme/widgets" }, pull_request: { number: 5, head: { sha: HEAD }, base: { repo: { full_name: "acme/widgets" } }, labels: [{ name: "ai-review" }] } };
+  assert.deepEqual(
+    projectGiteaWebhookPayload("pull_request", "", structuredClone(labelBody), { rereviewLabel: "ai-review" }),
+    projectForgejoWebhookPayload("pull_request", "", structuredClone(labelBody), { rereviewLabel: "ai-review" }),
+    "label trigger synthesis must not diverge between the two forges",
+  );
 });
 
 // --- HTTP intake (socket-level, the security boundary) --------------------

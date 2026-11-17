@@ -317,6 +317,7 @@ unresolved blocker hypotheses and verdict evidence.
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
 | `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
+| `investigation-complete` | Successful deterministic completion after a round with no refused or failed calls, all changed files and file-bound specialist leads covered by successful reads or certified complete corpus diffs, and no outstanding material evidence acquisition. It precedes same-round budget exhaustion and proceeds to the in-conversation verdict; it is not a budget stop and does not produce partial coverage. No-file specialist leads remain advisory reviewer context. |
 | `obligations-settled` | The deterministic early stop (#1627): the run carried an active required-evidence obligation surface and every tracked row settled — discharged by an admitted call or cap-released as unprovable — with budget still unspent, so further rounds could only be optional exploration. A normal, verdict-producing completion: never a harness error, never a fallback trigger, and deliberately not a budget stop (no Partial Coverage Notice, no `coverage_stop_reason`). |
 
 `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and
@@ -324,7 +325,7 @@ unresolved blocker hypotheses and verdict evidence.
 off, not finished by choice. On any
 budget stop, the harness folds its own call log against the changed-file
 manifest and the specialist-lead artifacts to compute which changed files
-were never read and which specialist leads were never resolved. If that gap
+were never read and which file-bound specialist leads were never resolved. No-file leads remain advisory context rather than file-coverage gaps. If that gap
 is non-empty, the published review carries a **Partial Coverage Notice**
 listing the unread files and unresolved leads (capped at 20 each, with a
 count for the rest), closing with "Absence of findings in the unread paths

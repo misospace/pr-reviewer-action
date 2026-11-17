@@ -81,6 +81,16 @@ export interface DispositionEvidenceParts {
    * `out-of-scope-reported-unmet` marker), so a scope-settled claim can
    * never independently prevent APPROVE. */
   traceUnmetClaimed: boolean;
+  /** #1678 hardening: the authoritative closing verdict's
+   * `requirement_coverage` failed the exact-set requirement-decision contract
+   * (rows missing, duplicated, unexpected, malformed, or absent while
+   * in-scope requirements exist) even after that lane's single bounded
+   * correction. An invalid serialization withholds approval as its own
+   * material code — distinct from the trace's per-row
+   * `mandatory_requirement_unresolved`, so the INCOMPLETE reason names the
+   * serialization failure instead of pretending seven semantic unknowns were
+   * ever answered. Optional so pre-#1678 callers compile; absent = no signal. */
+  verdictContractIncomplete?: boolean;
   /** The harness's recorded zero-evidence degradation reason
    * (`native_loop_degraded` — the loop ran and the model issued no tool
    * calls), or null. A recorded zero-evidence degradation is MATERIAL in
@@ -300,6 +310,14 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   }
   if (parts.traceUnmetClaimed) {
     evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace:unmet-claimed"));
+  }
+  // #1678 hardening: the exact-set verdict-contract failure is its OWN
+  // material reason — the serialization broke, the semantics were never
+  // claimed. Deterministic validator over the authoritative artifact; never
+  // synthesized, never advisory: a closing verdict that did not decide every
+  // required requirement can never certify an approval.
+  if (parts.verdictContractIncomplete === true) {
+    evidence.push(dispositionEvidence("verdict_contract_incomplete", "deterministic", "material", "verdict-contract:requirement-rows-incomplete"));
   }
 
   // The exact-head CI floor (#1656 audit delta): a KNOWN failing conclusion

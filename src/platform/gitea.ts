@@ -29,12 +29,16 @@ import { GITEA_INTEGRATION_REFUSAL } from "./resolve.js";
 
 /** A Gitea API token from the environment.
  *
- * `GITEA_TOKEN` is an alias for a self-hosted Gitea deployment. The family's
- * own order stays definitive — `FORGEJO_TOKEN`, then `GITEA_TOKEN`, then the
- * runner's GitHub token — because every Forgejo/Gitea-family call site (the read
+ * `GITEA_TOKEN` is an alias, applied by the shared family resolver ONLY for a
+ * run that declares the Gitea identity. For that run the family's own order
+ * stays definitive — `FORGEJO_TOKEN`, then `GITEA_TOKEN`, then the runner's
+ * GitHub token — because every Forgejo/Gitea-family call site (the read
  * adapter, the publish API, the CI-wait gate, the ancillary clients) resolves
- * through `forgejoTokenFromEnv`. A Gitea-specific precedence would let one run
- * authenticate the review with one credential and the CI read with another.
+ * through `forgejoTokenFromEnv` with the run's declared identity. A
+ * Gitea-specific precedence would let one run authenticate the review with one
+ * credential and the CI read with another; a Gitea alias honored for PLAIN
+ * Forgejo runs would let a host exporting `GITEA_TOKEN` silently move an
+ * ordinary Forgejo run's credential off its historical chain.
  *
  * The auth METHOD has no alias on purpose: `FORGEJO_AUTH_METHOD` is the family's
  * single method variable, exactly as `forgejo-api-url` and `forgejo-token` are
@@ -58,7 +62,7 @@ export function giteaTokenFromEnv(
       "Gitea does not support 'forgejo-authorized-integration-audience'; remove it and use a Gitea access token",
     );
   }
-  return forgejoTokenFromEnv(env);
+  return forgejoTokenFromEnv(env, "gitea");
 }
 
 /** Options for {@link createGiteaPlatform}: the same shape as the Forgejo
@@ -76,9 +80,15 @@ export function createGiteaPlatform(options: GiteaPlatformOptions): ForgejoAdapt
   return new ForgejoAdapter({ ...options, forge: "gitea" });
 }
 
-/** The Gitea read adapter built from the run environment. `baseUrl` is the
- * instance's API base (`FORGEJO_API_URL` is the family's configured variable and
- * stays authoritative for a Gitea instance too). */
+/** The Gitea read adapter built from the run environment — the canonical
+ * direct-env construction for the Gitea identity, used by both `buildAdapter`
+ * and `buildPlatformReadAdapter`. Its first act is `giteaTokenFromEnv(env)`,
+ * which fails closed on the Forgejo-only auth settings (declared
+ * `authorized_integration` method OR a set audience) BEFORE any adapter is
+ * built, so an omitted method/audience in the options is structurally a
+ * refusal, never a downgrade to token mode. `baseUrl` is the instance's API
+ * base (`FORGEJO_API_URL` is the family's configured variable and stays
+ * authoritative for a Gitea instance too). */
 export function giteaAdapterFromEnv(
   env: Readonly<Record<string, string | undefined>>,
   repo: string,

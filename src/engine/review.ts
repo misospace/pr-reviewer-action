@@ -53,6 +53,17 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { buildTracePlan, TRACE_PLAN_ARTIFACT } from "../requirements/trace-plan.js";
+// #1678 hardening: one owner for the closing-verdict requirement-decision
+// contract (artifact, closing block, pre-acceptance validator, correction).
+import {
+  VERDICT_CONTRACT_ARTIFACT,
+  buildVerdictContract,
+  describeVerdictContractDiagnostics,
+  renderRequiredRequirementDecisionsBlock,
+  renderVerdictContractArtifact,
+  renderVerdictContractCorrectionMessage,
+  validateVerdictRequirementContract,
+} from "../requirements/verdict-contract.js";
 import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
@@ -123,7 +134,7 @@ import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2232,6 +2243,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     scopeIds: requirementTraceEnabled ? traceScopeIds : [],
     distributedHints,
   }))}\n`, "utf8"));
+  // #1678 hardening: the closing-verdict requirement-decision contract,
+  // derived from the SAME deterministic trace scope the validator uses (never
+  // a separately reconstructed list) and written beside the trace plan so
+  // every authoritative verdict lane — the native tool loop, the corpus
+  // review calls, and the disposition feed — consumes one expected set.
+  // Written even when the feature is disabled (ZERO rows) so a stale contract
+  // can never survive into a later run; a zero-row contract keeps every lane
+  // byte-identical to the pre-#1678 behavior.
+  const verdictContract = buildVerdictContract(ledgerValue, traceScopeIds);
+  ws.write(VERDICT_CONTRACT_ARTIFACT, Buffer.from(renderVerdictContractArtifact(verdictContract), "utf8"));
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   // #1003 human-review triage: an operator-only, review-only opt-in. The
   // fragment adds ONE question to the reviewer and nothing else — no tool,
@@ -2280,16 +2301,33 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // before it can reach the escalation, repair or enforcement stages.
   checkpoint();
   const userMessage = buildUserMessage(ws, "classification.json");
+  // #1678 hardening: the closing-local restatement of the exact in-scope
+  // requirement decisions rides at the END of the corpus user message — the
+  // last trusted text before the model answers — derived from the same
+  // deterministic trace scope the validator will use. An empty contract
+  // leaves the message byte-identical.
+  const requiredDecisionsBlock = renderRequiredRequirementDecisionsBlock(verdictContract);
+  const closingUserMessage = requiredDecisionsBlock === ""
+    ? userMessage
+    : `${userMessage}\n\n${requiredDecisionsBlock}`;
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
+    env, ws, profiles, streamBool, userMessage: closingUserMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
     signal: cancellation.scope.signal,
     generatedPaths, standards, runDir, workspace,
     ghApi: adapter.ghApi.bind(adapter),
+    verdictContractIds: traceScopeIds,
   });
   checkpoint();
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
   let artifact = primary.artifact;
+  // #1678 hardening: a corpus lane that produced a parseable-but-contract-
+  // invalid closing verdict failed CLOSED (`ok: false`, `contractFailed`):
+  // the rejected serialization never became `ai-output.json`, so the notice
+  // below carries no verdict to validate. The flag keeps the deterministic
+  // disposition feed naming the serialization failure as the material reason
+  // instead of silently downgrading to a generic model-unavailable notice.
+  let contractLaneRejectedSerialization = primary.contractFailed === true;
 
   // ── Escalation (#721: reviewer-requested only) ───────────────────────
   let escalationReasons = "";
@@ -2318,10 +2356,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ws.write("ai-output.primary.json", ws.read("ai-output.json") ?? new Uint8Array(0));
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
-      env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
+      env, ws, profiles, streamBool, userMessage: closingUserMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
       signal: cancellation.scope.signal,
       ghApi: adapter.ghApi.bind(adapter),
+      verdictContractIds: traceScopeIds,
     });
     delete env.TOOL_ESCALATION;
     checkpoint();
@@ -2525,6 +2564,27 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       context.headSha || String(pr.headRefOid ?? ""),
     );
   }
+  // #1681 r6: one citation provenance contract across the settlement
+  // channels. Thread `fixed` and human-review `addressed` settle against the
+  // SAME exact-head checkout the requirement trace validates, and the same
+  // head-bound acquisition record (#1657 receipts: successful tool reads plus
+  // assembler-certified corpus-diff payloads) the obligation folds use — a
+  // reviewer's re-evaluation of a historical concern is proven by evidence
+  // this run actually holds, never by restating a citation in a private
+  // per-channel syntax.
+  enforcementInputs.citationGrounding = {
+    resolveLocation: createHeadLocationValidator(workspace),
+    acquiredPaths: riskEvidenceReadPaths({
+      harness: enforcementInputs.toolHarness,
+      rawDiff: ws.readText("pr.diff"),
+      certifiedDiffPayloads: [
+        ws.readText(CORPUS_DIFF_SECTION_ARTIFACT),
+        ws.readText(CORPUS_DIFF_SECTION_SMART_ARTIFACT),
+        ws.readText(CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT),
+      ].filter((payload): payload is string => payload !== null && payload !== ""),
+      candidatePaths: loadChangedFilePaths((name) => ws.readText(name)),
+    }),
+  };
   // #1381: the folded review-owned obligation rows ride the enforcement
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.
@@ -2971,6 +3031,21 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // independently prevent APPROVE.
     traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
     traceUnmetClaimed: traceUnmetClaimed,
+    // #1678 hardening: an authoritative closing verdict whose
+    // requirement_coverage is not EXACTLY the run's in-scope requirement set
+    // (after that lane's single bounded correction, if one ran) is an invalid
+    // SERIALIZATION, not seven semantic unknowns. Withheld as its own
+    // machine-readable material code so the INCOMPLETE reason names the
+    // contract failure, distinct from the trace's per-row
+    // `mandatory_requirement_unresolved`. The verdict lanes gate acceptance
+    // on this same validator; this feed is the deterministic backstop over
+    // whichever artifact ended up authoritative. A model-unavailable notice
+    // never carries a closing verdict, so it is exempt (it fails closed
+    // through its own path).
+    verdictContractIncomplete: contractLaneRejectedSerialization
+      || (analysisEngine !== MODEL_UNAVAILABLE_ENGINE
+        && traceScopeIds.length > 0
+        && !validateVerdictRequirementContract(reviewRecord.requirement_coverage, traceScopeIds).ok),
     // The exact-head CI floor: the CI gate's already-paid conclusion — a
     // KNOWN failure can never certify an approval; a PENDING one withholds
     // only when the #1594 head-bound evidence contract proves CI materially
@@ -3017,6 +3092,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const finalDisposition: FinalDisposition = computeFinalDisposition({
     reviewProduced: analysisEngine !== MODEL_UNAVAILABLE_ENGINE,
     validVerdict: outputVerdict === "approve" || outputVerdict === "request_changes",
+    // #1678 round 3: a contract-CLOSED lane settles INCOMPLETE over the
+    // serialization code, not as a generic capability abstention.
+    verdictContractFailed: contractLaneRejectedSerialization,
     verdict: outputVerdict,
     degraded: degradedGateBypass,
     exactHead: dispositionExactHead,
@@ -4120,6 +4198,11 @@ interface ReviewCallInput {
    * request this input produces so an aborted caller tears the in-flight
    * provider request down instead of abandoning it. */
   readonly signal?: AbortSignal;
+  /** #1678 hardening: the run's exact in-scope requirement IDs (from the
+   * deterministic trace scope). A corpus closing verdict whose
+   * `requirement_coverage` is not exactly this set gets ONE bounded
+   * no-evidence correction before acceptance. Empty = no contract. */
+  readonly verdictContractIds?: readonly string[];
 }
 
 export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
@@ -4169,6 +4252,40 @@ export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallb
   };
 }
 
+/** #1678 hardening: the DISCARDED-diagnostic sibling of a lane's request
+ * artifact (`ai-request.primary.json` →
+ * `ai-request.primary.contract-discarded.json`). The rejected
+ * serialization never shares a name with any authoritative artifact. */
+function diagnosticArtifactName(requestArtifact: string): string {
+  return requestArtifact.replace(/\.json$/, ".contract-discarded.json");
+}
+
+/** #1678 round 3: the fixed notice a contract-failed corpus lane emits —
+ * deliberately NOT the availability notice. The endpoint WORKED and
+ * produced a parseable verdict whose closing requirement table failed the
+ * exact-set contract even after its one allowed correction; an "endpoint
+ * unreachable, re-run later" body would misattribute a deterministic
+ * quality stop to infrastructure. The notice-surface guarantees are the
+ * same: `request_changes` step verdict on a COMMENT event, the
+ * `(model unavailable)` engine marker (never approval-bearing), and the
+ * machine reason `verdict_contract_incomplete` rides the authoritative
+ * disposition. */
+function contractNotice(ws: RunWorkspace, reason: string): ReturnType<typeof noticeResult> {
+  const markdown =
+    "## AI review incomplete: closing verdict contract failure\n\n"
+    + "The model endpoint responded, but the closing verdict did not decide every required "
+    + `requirement (reason: ${reason}) — not even after the one allowed serialization `
+    + "correction. The rejected serialization was discarded and is never treated as a review "
+    + "verdict.\n\n"
+    + "This is an automated INCOMPLETE notice, not a substantive review. Machine reason: "
+    + "`verdict_contract_incomplete`; a partial requirement table can never certify an "
+    + "approval.\n";
+  return noticeResult(ws, {
+    aiOutputJson: JSON.stringify({ verdict: "request_changes", review_markdown: markdown }),
+    analysisEngine: MODEL_UNAVAILABLE_ENGINE,
+  });
+}
+
 async function callTier(
   tier: "primary" | "fallback" | "smart",
   profile: TierProfile,
@@ -4177,6 +4294,13 @@ async function callTier(
   requestArtifact: string,
   responseArtifact: string,
 ): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown; terminal?: TerminalProviderReason;
+  /** #1678 hardening: the lane produced a parseable verdict whose closing
+   * requirement-decision serialization failed the exact-set contract even
+   * after its ONE bounded correction. This is NOT an availability failure:
+   * the caller must not spend another model lane on it — the run settles
+   * deterministically through the disposition feed
+   * (`verdict_contract_incomplete`). */
+  contractFailed?: boolean;
   attempts?: number; elapsedSec?: number; lastFailure?: string }> {
   const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
@@ -4242,6 +4366,9 @@ async function callTier(
     system: env.SYSTEM_PROMPT ?? "",
     user: input.userMessage,
     corpus: corpusText,
+    // #1678: every attempt of this tier asks for the run-specific pinned
+    // verdict schema where the lane sends structured output at all.
+    verdictRequirementIds: input.verdictContractIds ?? [],
   }, {
     ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
     // #1515: the primary review is the authoritative class; the fallback and
@@ -4348,9 +4475,127 @@ async function callTier(
     // published output whenever the configured key is short (legal — `k` masks
     // every `k` in `blockers: 1`). The provider REFLECTION surface is the raw
     // body above, which is masked; the model never sees a header value.
-    const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
+    let artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
+    let acceptedRaw = outcome.rawResponse;
+    // #1678 hardening — PRE-ACCEPTANCE verdict-contract validation on the
+    // corpus lane (the sibling of `produceNativeVerdict`'s gate on the
+    // native lane). A closing verdict whose `requirement_coverage` is not
+    // EXACTLY the run's in-scope requirement IDs is an invalid
+    // serialization, never a semantic answer, and must not become the
+    // authoritative artifact unseen: the first verdict is discarded from
+    // authority, ONE no-tools, no-new-evidence correction request reuses
+    // the same system prompt + corpus with the deterministic structural
+    // error appended, and the corrected verdict is accepted ONLY if it
+    // passes the entire contract. Still-invalid (or a failed/unparseable
+    // correction) fails the tier CLOSED: the rejected serialization is
+    // persisted ONLY as a bounded, DISCARDED diagnostic (`discarded: true`
+    // + machine reason, counts and ID hashes only — never the model's
+    // prose), the lane never writes `ai-output.json`, and the lane returns
+    // `ok: false` with the dedicated `contractFailed` flag — so the
+    // rejected verdict can never drive verdict, findings, review prose,
+    // escalation or enforcement as semantic authority. The run then
+    // follows the lane's ordinary failure route (fallback is availability
+    // recovery, never a quality loop; escalation requires a primary-
+    // produced artifact, which this lane by construction never authored),
+    // and the disposition feed keeps the machine-readable
+    // `verdict_contract_incomplete` reason over whatever artifact ends up
+    // authoritative. No second correction, ever.
+    const contractIds = input.verdictContractIds ?? [];
+    const contractCheck = validateVerdictRequirementContract(artifact.requirement_coverage, contractIds);
+    if (!contractCheck.ok && contractIds.length > 0) {
+      errorLog(
+        `${profile.label}: closing verdict failed the requirement-decision contract (${describeVerdictContractDiagnostics(contractCheck)}); re-asking ONCE for a complete serialization — same conversation, no new evidence`,
+      );
+      const correctionUser = `${input.userMessage}\n\n${renderVerdictContractCorrectionMessage(contractCheck)}`;
+      const correctionRequestArtifact = requestArtifact.replace(/\.json$/, ".contract-correction.json");
+      const correctionResponseArtifact = responseArtifact.replace(/\.json$/, ".contract-correction.json");
+      ws.write(correctionRequestArtifact, pyJsonDumps(buildModelRequest({
+        apiFormat: profile.apiFormat,
+        model: profile.model,
+        system: env.SYSTEM_PROMPT ?? "",
+        user: correctionUser,
+        corpus: corpusText,
+        stream: profile.stream,
+        shape: profile.shape,
+        maxTokens: profile.maxTokens,
+        temperature: profile.temperature,
+        responseFormat: profile.responseFormat,
+        tokensParam: profile.tokensParam,
+        reasoningEffort: profile.reasoningEffort,
+        anthropicEffortSupported: profile.anthropicEffortSupported,
+        anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
+        anthropicCacheCheckpoint: true,
+        // #1678: the correction asks for the SAME exact-set shape — the one
+        // run-specific schema, never the base wrapper.
+        verdictRequirementIds: contractIds,
+      }).body));
+      const correction = await callModelTier(profile, {
+        system: env.SYSTEM_PROMPT ?? "",
+        user: correctionUser,
+        corpus: corpusText,
+        verdictRequirementIds: contractIds,
+      }, {
+        ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
+        priority: tier === "primary" ? GOVERNOR_PRIORITY_AUTHORITATIVE : GOVERNOR_PRIORITY_RECOVERY,
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+        call: async (chatInput) => {
+          const result = await runChatRequest({
+            ...chatInput,
+            ...(input.sleep !== undefined ? { sleep: (ms: number) => input.sleep!(ms / 1000) } : {}),
+            ...(input.signal !== undefined ? { signal: input.signal } : {}),
+          });
+          if (result.status === "failure") return result;
+          ws.write(correctionResponseArtifact, pyJsonDumps(redactTextDeep(result.raw, knownSecrets)));
+          return result;
+        },
+      });
+      let contractRecovered = false;
+      let failDetail = "";
+      if (correction.status === "ok") {
+        try {
+          const correctionParsed = parseVerdictResponse(correction.rawResponse, knownSecrets);
+          const correctionArtifact = reviewArtifactFromParsed(correctionParsed) as unknown as Record<string, unknown>;
+          const recheck = validateVerdictRequirementContract(correctionArtifact.requirement_coverage, contractIds);
+          if (recheck.ok) {
+            contractRecovered = true;
+            artifact = correctionArtifact;
+            acceptedRaw = correction.rawResponse;
+            // The response artifact must carry the SAME body the engine
+            // accepted (deep-redacted exactly like the primary write), so a
+            // debugging operator never reads a discarded serialization as
+            // the published verdict.
+            ws.write(responseArtifact, pyJsonDumps(redactTextDeep(correction.rawResponse, knownSecrets)));
+            log(`${profile.label}: the single verdict-contract correction returned a complete requirement table; the corrected serialization is authoritative`);
+          } else {
+            failDetail = `correction stayed invalid (${describeVerdictContractDiagnostics(recheck)})`;
+          }
+        } catch (exc) {
+          failDetail = `correction did not parse as a verdict (${exc instanceof Error ? exc.message : "unknown"})`;
+        }
+      } else {
+        failDetail = `correction request failed (${correction.status})`;
+      }
+      if (!contractRecovered) {
+        // Fail CLOSED: bounded, content-free diagnostic of the REJECTED
+        // serialization (counts + capped ID hashes only — never the model's
+        // prose, so this artifact can neither leak review content nor be
+        // mistaken for one), written beside the lane's own artifacts. The
+        // rejected artifact is NEVER persisted as `ai-output.json` and never
+        // returned: diagnostic state and authoritative semantic state are
+        // physically separate files.
+        const rejectedDiags = validateVerdictRequirementContract(artifact.requirement_coverage, contractIds);
+        ws.write(diagnosticArtifactName(requestArtifact), pyJsonDumps({
+          discarded: true,
+          reason: "verdict_contract_incomplete",
+          detail: `closing verdict failed the requirement-decision contract (${describeVerdictContractDiagnostics(rejectedDiags)}); ${failDetail} — the rejected serialization is diagnostic only, never authoritative`,
+          no_further_correction: true,
+        }));
+        errorLog(`${profile.label}: ${failDetail} — the rejected serialization is DISCARDED (diagnostic only), the lane produces no authoritative verdict, and approval is withheld as a verdict-contract failure; no further correction`);
+        return { ok: false, artifact: null, rawResponse: null, contractFailed: true };
+      }
+    }
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-    return { ok: true, artifact, rawResponse: outcome.rawResponse };
+    return { ok: true, artifact, rawResponse: acceptedRaw };
   }
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
@@ -4504,6 +4749,13 @@ async function producePrimaryReview(input: ReviewCallInput & {
   /** #1598: the fallback tier's evidence harness ran (its outcome — verdict
    * or recorded failure — lives in tool-harness.fallback.json). */
   fallbackNativeLoopRan: boolean;
+  /** #1678 hardening: a corpus lane ended CLOSED on the exact-set
+   * requirement-decision contract (parseable verdict, invalid
+   * serialization, one correction spent or refused) and the run produced no
+   * authoritative artifact. NOT availability failure: the caller keeps the
+   * deterministic `verdict_contract_incomplete` reason instead of a generic
+   * model-unavailable one. */
+  contractFailed?: boolean;
 }> {
   const { env, ws, profiles, log, errorLog, budgets } = input;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
@@ -4582,7 +4834,22 @@ async function producePrimaryReview(input: ReviewCallInput & {
       fromFallback: false,
       nativeLoopVerdict: false,
       fallbackNativeLoopRan: false,
+      contractFailed: false,
     };
+  }
+  // #1678 hardening: the lane produced a parseable verdict whose closing
+  // serialization failed the exact-set contract even after its ONE bounded
+  // correction. Fail CLOSED without spending another model lane: a fixed
+  // request_changes notice carries no semantic verdict, so the rejected
+  // serialization cannot drive anything downstream; the disposition feed
+  // names the machine reason `verdict_contract_incomplete` (the
+  // contract-failure flag outlives the notice path), and the operator's
+  // on-model-failure policy never reroutes a serialization failure into a
+  // hard run failure. This is NOT availability recovery: a contract failure
+  // is a deterministic quality stop, so no fallback lane runs for it.
+  if (primary.contractFailed === true) {
+    errorLog(`${firstProfile.label}: closing verdict failed the requirement-decision contract; the rejected serialization is discarded — no further lane runs, the review settles INCOMPLETE with the verdict-contract reason`);
+    return { ...contractNotice(ws, "closing verdict failed the requirement-decision contract"), contractFailed: true };
   }
 
   // Fallback is availability recovery, never quality escalation.
@@ -4694,7 +4961,15 @@ async function producePrimaryReview(input: ReviewCallInput & {
       fromFallback: true,
       nativeLoopVerdict: false,
       fallbackNativeLoopRan: fallbackHarnessRan,
+      contractFailed: false,
     };
+  }
+  // #1678 hardening: the fallback lane closed on the contract (only possible
+  // when it ran because the PRIMARY lane failed for availability). Same
+  // fail-closed stop: no third corpus lane, notice + the machine reason.
+  if (fallback.contractFailed === true) {
+    errorLog("fallback: closing verdict failed the requirement-decision contract; the rejected serialization is discarded — the review settles INCOMPLETE with the verdict-contract reason");
+    return { ...contractNotice(ws, "fallback closing verdict failed the requirement-decision contract"), contractFailed: true };
   }
   const outcome = handleModelFailure("Fallback model failed", env.ON_MODEL_FAILURE ?? "fail");
   if (outcome.action === "fail") throw new RunReviewError(outcome.reason);

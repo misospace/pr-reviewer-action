@@ -174,3 +174,38 @@ fail-on-request-changes gate reads the disposition kind.
   commit-bound native event actually landed).
 - Handoff/bundle: verdict-level words and the additive
   `disposition_kind`/`disposition_reason` fields.
+
+## Evidence provenance for settlements (#1681 r6/r7)
+
+Detail behind the AGENTS.md #1663 invariant; the normative rules stay there.
+
+- **One citation grammar** (`src/enforcement/citations.ts`): `path`,
+  `path:LINE`, `path:LINE-END`, and the corpus diff anchor
+  `path:+START-END[:INDEX]` (`+` = new-side numbering = head numbering; the
+  trailing ordinal is evidence-entry metadata, never a line). Citations are
+  repository-relative: absolute, drive-shaped and traversal paths are
+  refused at the parse door; the exact-head checkout resolver keeps its
+  containment/symlink/existence/line guards as defense-in-depth. Parsing is
+  syntax only; resolution against the reviewed head is provenance truth.
+  The free-text extractor only discovers candidate spans and delegates
+  every one to the canonical parser, so structured requirement refs and
+  prose evidence can never drift into two vocabularies.
+- **Thread/human-review grounding** consumes the same grammar plus the
+  engine-supplied `EvidenceGrounding` (the requirement trace's own head
+  validator, plus the run's head-bound acquisition receipts that let a bot
+  `fixed` rest on evidence the run already holds when no citation was
+  attempted). An attempted-but-unresolvable citation is never rescued by
+  acquisition.
+- **Per-review human aggregation**: settled human-thread records carry the
+  semantic concern state (`addressed`/`present`/`unresolved`) and the
+  forge-proven `parent_review_id` (GitHub `pullRequestReview.databaseId`;
+  platforms without the link leave every concern unassociated). The
+  human-change-request pass aggregates only the settlement's OWN records,
+  filtered to the review that provably owns them — never the artifact
+  field (which can still hold raw model rows), never by login/timing/text
+  guesses. A review with no attributable concerns keeps its own grounded
+  model claim.
+- **Disclosure vs downgrade**: settlement notes that overwrite the model's
+  disposition count as downgrades; annotation-only notes (e.g. a
+  proven-addressed human thread that stays physically open) count as
+  disclosures — the section still renders, the telemetry does not lie.

@@ -32,6 +32,7 @@ import {
 // stripped from the deterministic message extraction below exactly as the
 // finding trailer is.
 import { FEEDBACK_AFFORDANCE, stripRejectionCarryover } from "../publish/inline-findings.js";
+import { usableReviewId } from "../platform/normalize.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { stripFindingIdentityMarkers } from "../outcomes/identity.js";
 
@@ -107,6 +108,11 @@ export interface ReviewThread {
    * a legacy caller that supplied no identity at all, which keeps the
    * historical body-marker reading. */
   authorship?: ThreadAuthorship;
+  /** #1681 round 7: the forge-proven review submission that created the
+   * thread root — the ONLY authority binding a thread to a human change
+   * request. GitHub's GraphQL read carries it; Forgejo/Gitea REST does not,
+   * and it is never guessed. Absent means unassociated. */
+  parentReviewId?: string;
 }
 
 export interface ReviewThreadView {
@@ -122,6 +128,10 @@ export interface ReviewThreadView {
   own_finding: boolean;
   /** #1663: what the forge metadata proves about the root author. */
   authorship: ThreadAuthorship;
+  /** #1681 round 7: the forge-proven review submission owning this thread,
+   * when the read carries one. The settlement keys per-review concern
+   * aggregation on it; absent means unassociated, never guessed. */
+  parent_review_id?: string;
   replies: number;
 }
 
@@ -265,6 +275,19 @@ export function normalizeThread(
     return idA < idB ? -1 : idA > idB ? 1 : 0;
   });
   const root = comments[0]!;
+  // #1681 round 7: the thread's owning review submission is the parent of
+  // its ROOT comment (the reply that opened the conversation). Locate the
+  // raw comment that normalized into the root by the same (id) identity the
+  // sort applied, and read the forge-proven id off it — nothing else may
+  // attribute a thread to a human change request.
+  let parentReviewId: string | null = null;
+  for (const entry of rec.comments) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const rawEntry = entry as Record<string, unknown>;
+    if (idSortString(rawEntry.id ?? null) !== idSortString(root.id)) continue;
+    parentReviewId = usableReviewId(rawEntry.parent_review_id) ?? usableReviewId(rawEntry.parentReviewId);
+    break;
+  }
   return {
     threadId,
     path: headerField(rec.path),
@@ -277,6 +300,7 @@ export function normalizeThread(
     // caller that supplies no identity at all keeps the historical
     // body-marker reading (the `authorship` field stays absent).
     ...(botIdentity === undefined ? {} : { authorship: classifyAuthorship(root, botIdentity) }),
+    ...(parentReviewId !== null ? { parentReviewId } : {}),
   };
 }
 
@@ -432,6 +456,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       category,
       own_finding: root.own,
       authorship,
+      ...(thread.parentReviewId !== undefined ? { parent_review_id: thread.parentReviewId } : {}),
       replies: thread.comments.length - 1,
     };
   });

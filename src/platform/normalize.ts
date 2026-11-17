@@ -21,6 +21,20 @@ import { pyCompareTuples, pyDict, pyGet, pyIsInt, pyOr, PyError, pyStr, pyTruthy
 import type { ExternalCheck } from "./types.js";
 export type { ExternalCheck } from "./types.js";
 
+/** #1681 round 7: normalize a forge-reported review-submission id into the
+ * same string spelling `headerField` gives review ids elsewhere (the human
+ * review side keys on that), or null when the forge reported nothing
+ * usable. GitHub GraphQL can surface `databaseId` as a numeric JSON value
+ * or a scalar string; a float/boolean/negative is not an id. */
+export function usableReviewId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed === "" || !/^\d+$/.test(trimmed) ? null : trimmed;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return null;
+}
+
 // ── GraphQL queries (ports of the v2 scripts/platform_api.sh programs;
 //    #1662: the review-threads document is forward-paginated and no longer
 //    verbatim) ─────────────
@@ -44,7 +58,7 @@ export const MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS = 1024;
  * and #1654's completeness contract decides whether the merged listing may
  * claim completeness. */
 export const GITHUB_REVIEW_THREADS_QUERY =
-  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { __typename login } } } } } } } }`;
+  `query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: ${GITHUB_REVIEW_THREADS_WINDOW}, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { __typename login } pullRequestReview { databaseId } } } } } } } }`;
 
 /** Pagination state of ONE review-threads page, read fail closed.
  *
@@ -168,6 +182,12 @@ export const CONVERSATION_COMMENTS_SNAPSHOT_CAP = 100;
 
 function conversationNode(node: unknown): Record<string, unknown> {
   const actorType = jqPath(node, "author", "__typename");
+  // #1681 round 7: the review submission that CREATED this inline comment,
+  // when the document selected it (the review-threads query does; plain
+  // conversation reads do not). A human thread's owning change request can
+  // only be attributed through this forge-proven id — never guessed from
+  // login, timing or text. Absent means unassociated, never inferred.
+  const parentReviewId = jqPath(node, "pullRequestReview", "databaseId");
   return {
     id: jqField(node, "databaseId"),
     user: jqAlt(jqPath(node, "author", "login"), ""),
@@ -175,6 +195,7 @@ function conversationNode(node: unknown): Record<string, unknown> {
     // document asked for it. Omitted when the document only selected `login`
     // — a missing type means unproven authorship, never an inferred one.
     ...(typeof actorType === "string" && actorType !== "" ? { user_type: actorType } : {}),
+    ...(usableReviewId(parentReviewId) !== null ? { parent_review_id: usableReviewId(parentReviewId) } : {}),
     created_at: jqAlt(jqField(node, "createdAt"), ""),
     updated_at: jqAlt(jqField(node, "updatedAt"), ""),
     body: jqAlt(jqField(node, "body"), ""),

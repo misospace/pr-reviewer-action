@@ -17,6 +17,7 @@ import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
+import { enforcementView, prepareThreads } from "../src/context/review-threads.js";
 
 interface Seen {
   url: string;
@@ -1848,4 +1849,36 @@ test("#1663: the review-thread GraphQL seam carries author.__typename into the n
   assert.ok(group);
   assert.equal(group.comments[0]!.user_type, "bot");
   assert.equal("user_type" in group.comments[1]!, false);
+});
+
+// #1681 r7: the review-thread seam carries the forge-proven PARENT REVIEW
+// id — the only authority binding a human thread to the change request that
+// raised it. A document that did not select it projects nothing; the
+// normalization seam carries it through to the enforcement view.
+test("#1681 r7: the review-thread seam carries pullRequestReview.databaseId through to the enforcement view", () => {
+  assert.match(GITHUB_REVIEW_THREADS_QUERY, /pullRequestReview \{ databaseId \}/,
+    "the shipped query selects the owning review submission beside the comment author");
+  const page = { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+    { id: "PRRT_p", isResolved: false, isOutdated: false, path: "a.ts", line: 1, originalLine: 1,
+      comments: { nodes: [
+        { databaseId: 10, body: "root", createdAt: "2026-11-13T00:00:00Z", updatedAt: "", author: { __typename: "User", login: "joryirving" }, pullRequestReview: { databaseId: 5931073237 } },
+        { databaseId: 11, body: "reply", createdAt: "2026-11-13T01:00:00Z", updatedAt: "", author: { __typename: "User", login: "alice" }, pullRequestReview: null },
+      ] } },
+    { id: "PRRT_q", isResolved: false, isOutdated: false, path: "b.ts", line: 2, originalLine: 2,
+      comments: { nodes: [
+        { databaseId: 20, body: "no parent", createdAt: "2026-11-13T00:00:00Z", updatedAt: "", author: { __typename: "User", login: "bob" } },
+      ] } },
+  ] } } } } };
+  const threads = normalizeGithubReviewThreads(page) as Array<{ thread_id: string; comments: Array<Record<string, unknown>> }>;
+  assert.equal(threads[0]!.comments[0]!.parent_review_id, "5931073237", "a numeric GraphQL databaseId projects to the review-id string spelling");
+  assert.ok(!("parent_review_id" in threads[0]!.comments[1]!), "a reply without a parent stays unprojected");
+  assert.ok(!("parent_review_id" in threads[1]!.comments[0]!), "a document that selected no parent projects none — never a guessed one");
+  // The context seam carries it: normalize → enforcement view keys on the
+  // root comment's parent only.
+  const prepared = prepareThreads(threads, undefined, "run-bot");
+  assert.equal(prepared[0]!.parentReviewId, "5931073237");
+  assert.ok(!("parentReviewId" in prepared[1]!));
+  const view = enforcementView(prepared);
+  assert.equal(view[0]!.parent_review_id, "5931073237");
+  assert.ok(!("parent_review_id" in view[1]!));
 });
