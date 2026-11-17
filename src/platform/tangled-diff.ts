@@ -64,10 +64,9 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  * through to `fetchAtprotoBlob`: production resolves with
  * `systemResolver` + `isPublicAddress` from the shared SSRF infrastructure.
  *
- * Pipeline wiring is deliberately absent: `tangled.ts`'
- * `requireImplementedBackend` guard stays in force, and no review-pipeline
- * code path may call this for a `tangled`-resolved environment until the
- * later #564 tickets connect it.
+ * Production wiring (#1690): `TangledAdapter.getPrDiff`/`listPrFiles` drive
+ * this chain against the adapter's resolved pull identity, so a real
+ * Tangled run reaches the review engine with the latest round's patch.
  */
 
 export interface TangledRoundDiffOptions {

@@ -3,6 +3,7 @@ import {
   type ResolveTangledPullOptions,
   type TangledPullIdentity,
 } from "./tangled-bobbin.js";
+import { fetchTangledPullRoundDiff, type TangledPullRoundDiff, type TangledRoundDiffOptions } from "./tangled-diff.js";
 import { tangledCapabilityError, type TangledContext } from "./tangled.js";
 import type { FetchLike } from "./http.js";
 import type {
@@ -16,27 +17,36 @@ import type {
 } from "./types.js";
 
 /**
- * Tangled read adapter (#585) — the first real Tangled backend, and it is
- * deliberately narrow: read-only and metadata-only.
+ * Tangled read adapter (#585, diff wiring #1690) — the first real Tangled
+ * backend: read-only, and narrow on purpose.
  *
  * The adapter resolves the run's canonical Tangled pull through the read-side
  * Bobbin resolver (`resolveTangledPull`) and projects it into the same
  * GitHub-REST pull shape the precheck/fingerprint and context consumers read
  * from GitHub and Forgejo, so downstream code cannot tell which forge served
  * the metadata. The pull's identity (AT-URI / CID / rkey) is retained on the
- * adapter for the later #564 tickets but is never embedded into the
+ * adapter for the diff chain below but is never embedded into the
  * normalized payload or the shared `PlatformAdapter` interface.
  *
- * Only `getPr` is implemented. Everything beyond metadata reads fails
- * closed: the diff read throws (the patch decode lands in #586), the
- * comment/review reads throw, `ghApi` returns an error, and the
- * `ReadResult`-shaped reads return `{ ok: false, error }` — no capability
- * silently degrades to a guess.
+ * The diff/files reads (#586) run the real round-diff chain
+ * (`fetchTangledPullRoundDiff`: Bobbin record → author-PDS blob → gunzip →
+ * `normalizeGitFormatPatch`) on the resolved identity, memoized so every
+ * stage of one run reads the SAME reviewed round. Every chain failure
+ * propagates as the typed error of the step that produced it — no empty
+ * success, no silent degradation (#1690).
+ *
+ * The remaining capability surface stays honest about what Tangled has no
+ * source for: `ghApi` returns an error, the `ReadResult`-shaped reads
+ * return `{ ok: false, error }`, and `externalChecks` fails loud — no
+ * capability silently degrades to a guess. `listIssueComments` /
+ * `listPrReviews` return the empty truth (Tangled has no native comment or
+ * review surfaces to list), which can never fabricate a skip.
  */
 export interface TangledAdapterOptions {
   /** The Spindle runtime context (owner/repo DID, branch tuple, Bobbin URL). */
   context: TangledContext;
-  /** Transport override for tests; defaults to the global `fetch`. */
+  /** Transport override for tests; defaults to the global `fetch`. Covers
+   * both the Bobbin reads and the PDS blob chain of the diff read. */
   fetchImpl?: FetchLike | undefined;
   /** Optional credential, sent only as the Authorization header to the
    * validated Bobbin origin (never in the URL, argv, or diagnostics). */
@@ -60,6 +70,9 @@ export class TangledAdapter implements PlatformReadAdapter {
    * the resolution settles: a success binds `identity`, a failure clears the
    * slot so a later call retries. */
   private inFlight: Promise<TangledPullIdentity> | null = null;
+  /** The memoized round-diff chain (below). `null` until the first diff or
+   * files read. */
+  private roundPending: Promise<TangledPullRoundDiff> | null = null;
 
   constructor(options: TangledAdapterOptions) {
     this.context = options.context;
@@ -69,20 +82,18 @@ export class TangledAdapter implements PlatformReadAdapter {
   }
 
   /** The cached canonical pull identity (uri/cid/rkey), or `null` until a
-   * resolution succeeds. Internal to the #586+ follow-on work; it is never
+   * resolution succeeds. Internal to the adapter's diff chain; it is never
    * part of the normalized PR object or the shared adapter interface. */
   get pullIdentity(): TangledPullIdentity | null {
     return this.identity;
   }
 
-  /** Resolve the canonical pull once, project it into the GitHub-REST shape,
-   * and cache both. Concurrency-safe: the first `getPr` starts the single
-   * `resolveTangledPull` round-trip and concurrent calls await that same
-   * in-flight promise, so only one Bobbin call happens. Any resolver or
-   * transport failure resolves to `null` (the `getPr` contract) rather than
-   * throwing, and clears the in-flight slot so a later call retries. */
-  async getPr(): Promise<unknown | null> {
-    if (this.identity !== null) return this.project(this.identity);
+  /** Resolve (or return the cached) canonical pull identity, THROWING on
+   * failure — the diff/files chain needs the identity to complete and must
+   * fail closed rather than degrade. Shares the same in-flight slot and
+   * cache as `getPr`, so a run pays at most one Bobbin resolution. */
+  private async resolveIdentity(): Promise<TangledPullIdentity> {
+    if (this.identity !== null) return this.identity;
     if (this.inFlight === null) {
       const options: ResolveTangledPullOptions = { fetchImpl: this.fetchImpl };
       if (this.token !== undefined) options.token = this.token;
@@ -97,13 +108,42 @@ export class TangledAdapter implements PlatformReadAdapter {
         }
       })();
     }
-    const pending = this.inFlight;
+    return await this.inFlight;
+  }
+
+  /** Resolve the canonical pull once, project it into the GitHub-REST shape,
+   * and cache both. Concurrency-safe: the first `getPr` starts the single
+   * `resolveTangledPull` round-trip and concurrent calls await that same
+   * in-flight promise, so only one Bobbin call happens. Any resolver or
+   * transport failure resolves to `null` (the `getPr` contract) rather than
+   * throwing, and clears the in-flight slot so a later call retries. */
+  async getPr(): Promise<unknown | null> {
     try {
-      await pending;
+      const resolved = await this.resolveIdentity();
+      return this.project(resolved);
     } catch {
       return null;
     }
-    return this.identity !== null ? this.project(this.identity) : null;
+  }
+
+  /** The pull's latest-round diff chain (#586), consumed by the diff and
+   * files reads (#1690 wires it into the production path). Memoized per
+   * adapter: one run reads the diff several times (precheck, engine corpus,
+   * publish anchoring) and every read must present the SAME reviewed round —
+   * a pull that gains a round mid-run must never let a later stage read
+   * content the precheck did not review. A failed chain is memoized too, so
+   * the run's later stages cannot quietly retry past a failure that the
+   * precheck already saw; the next run builds a fresh adapter. */
+  private roundDiff(): Promise<TangledPullRoundDiff> {
+    this.roundPending ??= (async () => {
+      const identity = await this.resolveIdentity();
+      const options: TangledRoundDiffOptions = {
+        fetchImpl: this.fetchImpl,
+        ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
+      };
+      return fetchTangledPullRoundDiff(identity, options);
+    })();
+    return this.roundPending;
   }
 
   /** Project a resolved pull into the GitHub-REST pull shape consumed by
@@ -151,25 +191,40 @@ export class TangledAdapter implements PlatformReadAdapter {
     // identity, and `canonicalPullRequest` already coerces a missing number
     // to 0 — we never synthesize one. The draft flag is written only when
     // the record carries a real boolean; an honest absence means
-    // `deriveDraftState` returns "unknown" (the later precheck-integration
-    // ticket decides which side that fails to), and the precheck guard still
-    // rejects tangled today.
+    // `deriveDraftState` returns "unknown", which the precheck draft gate
+    // fails closed on.
     const draft = record.draft;
     if (typeof draft === "boolean") pr.draft = draft;
     return pr;
   }
 
-  /** The diff is the pull's patch blob, decoded in #586 — not available yet. */
+  /** The pull's latest round as a reviewable diff: the memoized #586 chain
+   * (Bobbin identity → author-PDS blob → gunzip → mail-envelope
+   * normalization), wired into the production path by #1690. Every failure
+   * propagates as the typed error of the step that produced it —
+   * "no-round"/"invalid-round" (before the network), "undecodable-blob"/
+   * "patch-too-large" (blob decode), "malformed-patch"/"empty-patch"
+   * (normalization), or TangledBlobError/TangledResolverError (transport).
+   * The chain's `declaredHeadSha` is advisory untrusted-patch metadata and
+   * is deliberately not exposed here — the trusted current head comes only
+   * from the knot read the publish boundary re-checks (#1165). */
   async getPrDiff(): Promise<string> {
-    throw tangledCapabilityError("pull diff reads (#586)");
+    return (await this.roundDiff()).diff;
   }
 
+  /** Tangled has no native issue-comment or pull-review surfaces to list —
+   * the only managed-review state is the bot-owned AT-Proto record the
+   * publish seam reads and updates in place (#588). The honest answer is
+   * the empty truth: `[]` can never fabricate a skip or a carried verdict
+   * (those require an authenticated managed body, which an empty list can
+   * never supply), while throwing here killed every real run in precheck
+   * before the engine started (#1690). */
   async listIssueComments(): Promise<ManagedComment[]> {
-    throw tangledCapabilityError("issue comment reads");
+    return [];
   }
 
   async listPrReviews(): Promise<ManagedReview[]> {
-    throw tangledCapabilityError("PR review reads");
+    return [];
   }
 
   /** The validated read-only API seam: unavailable, so it reports an error
@@ -190,8 +245,16 @@ export class TangledAdapter implements PlatformReadAdapter {
     return "unknown";
   }
 
-  listPrFiles(): Promise<ReadResult<unknown>> {
-    return Promise.resolve({ ok: false, error: tangledCapabilityError("changed-file reads").message });
+  /** The memoized round diff's files, the same reviewed round `getPrDiff`
+   * presents (#1690). The `ReadResult` contract reports failure in-band:
+   * a failed chain maps to `{ ok: false, error }` (the same typed step
+   * error `getPrDiff` throws), never a fabricated empty file list. */
+  async listPrFiles(): Promise<ReadResult<unknown>> {
+    try {
+      return { ok: true, data: (await this.roundDiff()).files };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async getIssue(_repo: string, _issueNumber: string): Promise<ReadResult<unknown>> {

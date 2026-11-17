@@ -7,13 +7,12 @@
 # Status: Tangled support is experimental. The review runs on the
 # host-neutral Node runner added in #590 — `node dist/index.js tangled` —
 # not on `action.yml` (that is the GitHub Actions invocation surface) and
-# not through any shell or Python orchestration. End-to-end Tangled
-# pipeline enablement is still landing (issue #564): released builds
-# before the round-diff reads are connected to the runner fail closed at
-# the diff read, and publication itself stays fail-closed until a
-# trustworthy current-head read lands (#1165) — a run that cannot prove
-# the pull has not advanced refuses to publish and exits non-zero, by
-# design. Expect green runs only once those releases are in place.
+# not through any shell or Python orchestration. Since #1690 the runner
+# completes a full precheck → review → publish round on the stock adapter:
+# the diff and changed files come from the pull's latest round patch, and
+# the managed AT-Proto review record is published. Publication stays
+# fail-closed (#1165): a run that cannot prove the pull has not advanced
+# refuses to publish and exits non-zero, by design.
 #
 # What Spindle provides
 #
@@ -24,10 +23,9 @@
 # `TANGLED_PR_SOURCE_SHA` tuple. Steps run with the pull request's round
 # checked out; set `TANGLED_BOBBIN_URL` to your knot's Bobbin endpoint
 # (shown below for the hosted tangled.sh knot). The review's diff and
-# changed files are designed to be read from the pull's latest round
-# patch over Bobbin and ATProto — not from local git history (that
-# connection is part of the enablement work noted above) — while the file
-# content around each diff hunk is read from this checkout.
+# changed files are read from the pull's latest round patch over Bobbin
+# and ATProto — not from local git history — while the file content
+# around each diff hunk is read from this checkout.
 #
 # Private values
 #

@@ -10,13 +10,13 @@ Three rules hold on every Tangled run:
 
 ## Current status
 
-A Tangled run does not complete today. The run stops at the first step that Tangled cannot serve:
+A Tangled run completes end-to-end on the stock adapter: precheck, review over the pull's latest round diff, and managed-record publication ([#1690](https://github.com/misospace/pr-reviewer-action/issues/1690) wired the last unwired step).
 
-1. The pull metadata read works. The diff read does not. The read adapter refuses the diff, so the precheck stops the run before the review engine starts.
-2. The round-diff read is implemented in `src/platform/tangled-diff.ts`. It is not connected to the read adapter yet, so the wiring lands with the remaining work of [#564](https://github.com/misospace/pr-reviewer-action/issues/564).
+1. The pull metadata read works (`resolveTangledPull`, #584).
+2. The diff and changed-file reads run the real round-diff chain (`src/platform/tangled-diff.ts`, #586) through `TangledAdapter.getPrDiff`/`listPrFiles`: Bobbin record → author-PDS blob → gunzip → `normalizeGitFormatPatch`. Every no-round, undecodable, or over-cap outcome fails closed.
 3. The publication step's #451 exact-head re-check reads the trusted current head from the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`, #1165): the newest patch revision's `head.oid` for the pull's ticket, correlated by source branch and bound to the repository account. Publication runs only when that head matches the reviewed head; an unknown, malformed, or ambiguous head fails closed. A review that cannot prove the pull did not advance is never published.
 
-The runner exits with code 1 at the first stop. Read the [support matrix](#support-matrix) before you plan a Tangled rollout.
+The runner exits with code 1 whenever a step fails closed — an unreadable round patch, or a knot that cannot prove the current head. Read the [support matrix](#support-matrix) before you plan a Tangled rollout.
 
 ## Runtime surface
 
@@ -103,10 +103,10 @@ The matrix uses three words:
 |---|---|---|
 | Platform detection | Supported | `auto` selects Tangled when `TANGLED_REPO_DID` is set. An explicit `tangled` requires it. |
 | Pull identity and metadata read | Supported | The Bobbin appview answers without a credential. |
-| Normal review engine | Degraded | The same engine runs on GitHub and Forgejo, but a Tangled run stops at the diff read before the engine starts. |
-| Verdict policy and required-check policy | Degraded | The same deterministic policy runs on every platform, but a Tangled run reaches no verdict. |
-| Latest-round diff and changed files | Degraded | The round-diff read is implemented in `src/platform/tangled-diff.ts`, but the read adapter still refuses the diff. The run stops there. |
-| Managed top-level review record | Degraded | The record client writes one record per pull and updates it in place on a re-review. The run stops at the diff read today. The publication head re-check reads the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`) and fails closed on an unknown, malformed, or ambiguous head. |
+| Normal review engine | Supported | The same engine runs on GitHub and Forgejo; the stock adapter's wired diff read (#1690) lets a Tangled run reach a verdict. |
+| Verdict policy and required-check policy | Supported | The same deterministic policy runs on every platform. |
+| Latest-round diff and changed files | Supported | The round-diff chain (`src/platform/tangled-diff.ts`, #586) runs through `TangledAdapter.getPrDiff`/`listPrFiles` and fails closed on a no-round, undecodable, or over-cap patch. |
+| Managed top-level review record | Supported | The record client writes one record per pull and updates it in place on a re-review. The publication head re-check reads the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`) and fails closed on an unknown, malformed, or ambiguous head. |
 | Inline findings on a diff line | Unsupported | Tangled has no inline review object. The findings stay in the review body. |
 | Native approve or request-changes objects | Unsupported | Tangled has no native review verdict object. The verdict stays in the review body. |
 | Review dismissal and minimization | Unsupported | The managed record is updated in place instead. |

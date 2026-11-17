@@ -1,17 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
-import { TangledCapabilityError, TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledResolverError } from "../src/platform/tangled-bobbin.js";
+import { TangledPatchError } from "../src/platform/tangled-patch.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import { deriveDraftState, deriveIsFork, normalizePrIdentity } from "../src/platform/pr.js";
 
 /**
- * Tangled read adapter (#585): the first Tangled backend, read-only and
- * metadata-only. Exercised through an injected mock Bobbin transport — no
- * network. The resolver (`resolveTangledPull`) is #584's done work; this file
- * pins the projection of the resolved pull into the GitHub-REST pull shape
- * and the fail-closed behavior of every unimplemented capability.
+ * Tangled read adapter (#585, diff wiring #1690): the first Tangled backend,
+ * read-only. Exercised through injected mock transports — no network. This
+ * file pins the projection of the resolved pull into the GitHub-REST pull
+ * shape, the wired #586 round-diff chain behind `getPrDiff`/`listPrFiles`,
+ * and the fail-closed behavior of every capability Tangled has no source
+ * for.
  */
 
 /** One XRPC call captured by the mock transport. */
@@ -84,6 +88,76 @@ function listOne(over: Record<string, unknown> = {}): Record<string, unknown> {
 
 function recordOf(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
+}
+
+// ── the #586 round-diff chain behind getPrDiff/listPrFiles (#1690) ──────
+
+const BLOB_CID = "bafyreiblobcid00000000000000000000000000000000000000000000";
+const AUTHOR_DID = "did:plc:author";
+/** The mock PDS endpoint: a PUBLIC IP LITERAL so the blob chain's SSRF gate
+ * (the real `isPublicAddress` policy) validates it directly with no DNS —
+ * the only mock is the fetch wire boundary itself. */
+const PDS_HOST = "93.184.216.34";
+
+/** One `git format-patch` mail envelope, gzipped — the round patch blob. */
+function patchBytes(): Buffer {
+  return gzipSync(Buffer.from([
+    // The envelope sha is the patch grammar's 40-hex boundary id.
+    `From ${SOURCE_SHA.slice(0, 40)} Mon Sep 17 00:00:00 1997 +0000`,
+    "From: Ada <ada@example.com>",
+    "Date: Mon, 17 Sep 2026 10:00:00 +0000",
+    "Subject: [PATCH] Add a line to the README",
+    "",
+    "Add the greeting the review asks about.",
+    "",
+    "diff --git a/README.md b/README.md",
+    "index 1111111..2222222 100644",
+    "--- a/README.md",
+    "+++ b/README.md",
+    "@@ -1 +1,2 @@",
+    " hello",
+    "+world",
+    "-- ",
+    "2.47.0",
+    "",
+  ].join("\n"), "utf8"));
+}
+
+/** A pull record carrying one round whose patch blob is `BLOB_CID`. */
+function roundPatchValue(): Record<string, unknown> {
+  return matchValue({
+    rounds: [{
+      createdAt: "2026-01-02T03:04:05Z",
+      patchBlob: { $link: BLOB_CID, mimeType: "application/gzip", size: 128 },
+    }],
+  });
+}
+
+/** A transport serving the whole chain at its wire boundaries: Bobbin
+ * listPulls (the given pull record), the author's PLC DID document, and the
+ * PDS getBlob. The PDS host is a public IP literal, so the production
+ * public-address policy validates it with no DNS emulation. */
+function makeChainFetch(
+  bytes: Buffer,
+  record: Record<string, unknown> = roundPatchValue(),
+): { fetchImpl: FetchLike; hosts: Map<string, number> } {
+  const hosts = new Map<string, number>();
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    hosts.set(url.hostname, (hosts.get(url.hostname) ?? 0) + 1);
+    if (url.hostname === "plc.directory") {
+      if (url.pathname !== `/${AUTHOR_DID}`) return json({ error: "not found" }, 404);
+      return json({
+        id: AUTHOR_DID,
+        service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: `https://${PDS_HOST}` }],
+      });
+    }
+    if (url.hostname === PDS_HOST && url.pathname === "/xrpc/com.atproto.sync.getBlob") {
+      return new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": "application/octet-stream" } });
+    }
+    return json(listOne(record));
+  };
+  return { fetchImpl, hosts };
 }
 
 // ── getPr: projection of the resolved pull ─────────────────────────────
@@ -230,29 +304,99 @@ test("a record missing optional fields projects empty/null values, never guesses
   assert.equal("updated_at" in pr, false);
 });
 
-// ── unimplemented capabilities ───────────────────────────────────────────
+// ── capabilities ────────────────────────────────────────────────────────
 
-test("every non-metadata read fails closed with a capability-scoped error", async () => {
+test("getPrDiff and listPrFiles run the #586 round-diff chain on the stock adapter (#1690)", async () => {
+  const bytes = patchBytes();
+  const chain = makeChainFetch(bytes);
+  const adapter = new TangledAdapter({
+    context: makeCtx(),
+    fetchImpl: chain.fetchImpl,
+  });
+  const diff = await adapter.getPrDiff();
+  assert.match(diff, /\+world/, "the round patch content is the diff");
+  assert.match(diff, /README\.md/, "the diff names the changed file");
+
+  const files = await adapter.listPrFiles();
+  assert.equal(files.ok, true, "listPrFiles serves the same round's files");
+  if (!files.ok) assert.fail("files read must succeed here");
+  const names = (files.data as Array<{ filename?: string }>).map((f) => f.filename);
+  assert.deepEqual(names, ["README.md"]);
+
+  // The blob chain never carries a credential: no Authorization header is
+  // defined for it, and the adapter's token belongs to the Bobbin origin only.
+  assert.deepEqual(
+    [...chain.hosts.keys()].sort(),
+    ["93.184.216.34", "bobbin.test", "plc.directory"].sort(),
+  );
+});
+
+test("getPrDiff and listPrFiles share one memoized chain: one Bobbin, one DID doc, one blob", async () => {
+  const chain = makeChainFetch(patchBytes());
+  const adapter = new TangledAdapter({
+    context: makeCtx(),
+    fetchImpl: chain.fetchImpl,
+  });
+  await adapter.getPrDiff();
+  await adapter.listPrFiles();
+  await adapter.listPrFiles();
+  assert.equal(chain.hosts.get("bobbin.test"), 1, "one Bobbin resolution");
+  assert.equal(chain.hosts.get("plc.directory"), 1, "one DID document read");
+  assert.equal(chain.hosts.get(PDS_HOST), 1, "one blob read");
+});
+
+test("getPrDiff fails closed with the typed error of the failing chain step", async () => {
+  // A record without rounds: the chain rejects before any blob fetch.
+  const noRound = makeChainFetch(patchBytes(), matchValue());
+  const noRoundAdapter = new TangledAdapter({
+    context: makeCtx(),
+    fetchImpl: noRound.fetchImpl,
+  });
+  await assert.rejects(
+    () => noRoundAdapter.getPrDiff(),
+    (e: unknown) => e instanceof TangledPatchError && e.kind === "no-round",
+  );
+  assert.equal(noRound.hosts.get(PDS_HOST), undefined, "no blob is fetched for an unusable record");
+
+  // A non-gzip blob: the decode step fails closed.
+  const corrupt = makeChainFetch(Buffer.from("not a gzip stream"));
+  const corruptAdapter = new TangledAdapter({
+    context: makeCtx(),
+    fetchImpl: corrupt.fetchImpl,
+  });
+  await assert.rejects(
+    () => corruptAdapter.getPrDiff(),
+    (e: unknown) => e instanceof TangledPatchError,
+    "a non-gzip blob fails closed at the decode step",
+  );
+  const corruptFiles = await corruptAdapter.listPrFiles();
+  assert.equal(corruptFiles.ok, false, "listPrFiles surfaces the same failed chain (memoized)");
+  if (!corruptFiles.ok) assert.match(corruptFiles.error, /gzip/i, "the ReadResult error carries the typed failure");
+});
+
+test("getPrDiff fails closed when the pull cannot be resolved (no blob fetch attempted)", async () => {
+  const noMatch = makeFetch(() =>
+    json({ items: [listItem({ ...matchValue(), source: { branch: "feat/other" } }, "open")], cursor: null }),
+  );
+  const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl: noMatch.fetchImpl });
+  await assert.rejects(
+    () => adapter.getPrDiff(),
+    (e: unknown) => e instanceof TangledResolverError,
+  );
+  const files = await adapter.listPrFiles();
+  assert.equal(files.ok, false, "the memoized failure surfaces as ok:false");
+});
+
+test("listIssueComments and listPrReviews return the empty truth (#1690)", async () => {
+  const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl: makeFetch(() => json(listOne())).fetchImpl });
+  assert.deepEqual(await adapter.listIssueComments(), []);
+  assert.deepEqual(await adapter.listPrReviews(), []);
+});
+
+test("every capability Tangled has no source for keeps its fail-closed answer", async () => {
   const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl: makeFetch(() => json(listOne())).fetchImpl });
   assert.equal(adapter.platform, "tangled");
 
-  // Throwing reads name the capability and stay in the TangledNotImplementedError family.
-  await assert.rejects(
-    () => adapter.getPrDiff(),
-    (e: unknown) =>
-      e instanceof TangledCapabilityError &&
-      e instanceof TangledNotImplementedError &&
-      /diff/.test(e.message) && /#585 wires metadata reads only/.test(e.message),
-    "getPrDiff must reject with the diff capability",
-  );
-  await assert.rejects(
-    () => adapter.listIssueComments(),
-    (e: unknown) => e instanceof TangledNotImplementedError && /issue comment/.test(e.message),
-  );
-  await assert.rejects(
-    () => adapter.listPrReviews(),
-    (e: unknown) => e instanceof TangledNotImplementedError && /PR review/.test(e.message),
-  );
   // ghApi never throws; it reports the error in-band.
   const gh = await adapter.ghApi("/repos/o/r");
   assert.ok(gh.error !== undefined && /gh_api/.test(gh.error), "gh_api reports its capability error in-band");
@@ -261,7 +405,6 @@ test("every non-metadata read fails closed with a capability-scoped error", asyn
   assert.equal(await adapter.repoPermission(), "unknown");
   // ReadResult-shaped reads return { ok: false, error }.
   const reads = [
-    adapter.listPrFiles(),
     adapter.getIssue("o/r", "9"),
     adapter.listPrConversationComments(),
     adapter.listReviewThreads(),

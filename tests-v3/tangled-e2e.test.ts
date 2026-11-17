@@ -1,5 +1,5 @@
 /**
- * #591: end-to-end Tangled smoke test.
+ * #591: end-to-end Tangled smoke test, production wiring (#1690).
  *
  * Drives the host-neutral runner (`platformActionMain`) through one full
  * offline round — pull resolution, metadata, diff/files, model review, and
@@ -7,37 +7,37 @@
  * managed review instead of duplicating it.
  *
  * Unlike the #590 runner suite (which injects whole fake read/write seams to
- * prove the orchestration), this smoke runs the REAL Tangled capability
+ * prove the orchestration), this smoke runs the REAL production capability
  * stack and mocks only the services the Tangled host would provide, each at
  * its own wire boundary:
  * - the Spindle runtime variables come from the real `tangledContextFromEnv`
  *   over a plain `TANGLED_*` environment (no GitHub Actions bookkeeping);
- * - Bobbin reads are a real `startMockServer` serving
- *   `sh.tangled.repo.listPulls`, consumed by the real `TangledAdapter` /
- *   `resolveTangledPull` over real HTTP to loopback;
- * - the pull round diff runs the real #586 chain (round selection →
- *   `fetchAtprotoBlob` two-hop → gunzip → `normalizeGitFormatPatch`) with
- *   the documented `fetchImpl`/`resolver` transport seams pointed at a
- *   mocked PLC directory and PDS blob store;
- * - publication goes through the real `TangledAtprotoClient` +
- *   `TangledPublishApi` against a stateful mock PDS (session, listRecords,
- *   createRecord, putRecord), so the managed-record update semantics under
- *   test are production code; the fail-closed round leaves the `publishApi`
- *   seam unset, so the PRODUCTION `buildPublishApi` factory — reading the
- *   same `ATPROTO_*` environment the Spindle example relies on — is the
- *   code path that builds the capability and refuses it;
+ * - the read capability is the STOCK `TangledAdapter` (no method overrides)
+ *   with only its documented `fetchImpl` transport seam pointed at the wire
+ *   mocks: Bobbin reads are a real `startMockServer` serving
+ *   `sh.tangled.repo.listPulls`, and the pull round diff runs the real #586
+ *   chain (round selection → `fetchAtprotoBlob` two-hop → gunzip →
+ *   `normalizeGitFormatPatch`) against a mocked PLC directory and PDS blob
+ *   store. The PDS endpoint is a PUBLIC IP LITERAL, so the production
+ *   `systemResolver`/`isPublicAddress` SSRF gate validates it directly with
+ *   no DNS emulation;
+ * - publication goes through the PRODUCTION `buildPublishApi` factory (no
+ *   `publishApi` seam): the real `TangledAtprotoClient` + `TangledPublishApi`
+ *   against a stateful mock PDS (session, listRecords, createRecord,
+ *   putRecord), and the real #1165 current-head re-check
+ *   (`readTangledCurrentHeadForContext`) against a mocked knot
+ *   `com.atproto.repo.listRecords`. The knot host is intercepted by a
+ *   scoped `globalThis.fetch` stub — the one wire the production factory
+ *   builds without an injectable transport — and passes every other request
+ *   through untouched;
  * - the model is a local mock serving one OpenAI-style chat completion.
  *
- * The runner itself wires `getPrDiff`/`listPrFiles` from the round-diff
- * chain here because the stock `TangledAdapter` still fails those reads
- * closed until the #586 pipeline wiring lands; the context reads Tangled
- * has no source for answer with the same empty contract the #590 runner
- * suite pins. The trusted current-head read the publish boundary re-checks
- * (#1165) is emulated by injecting a fresh `currentHeadSha` reader — and a
- * dedicated test proves publication still fails closed when it is absent.
+ * So the success path exercises exactly what a real run would: stock adapter
+ * diff wiring, production publish factory, trusted knot current-head read —
+ * with no capability seam overridden anywhere.
  *
- * Everything stays offline: the only network targets are the three loopback
- * mock servers and the two hosts the blob transport seam intercepts.
+ * Everything stays offline: the only network targets are the loopback mock
+ * servers and the hosts the transport seams intercept.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -48,13 +48,9 @@ import { gzipSync } from "node:zlib";
 import type { IncomingMessage } from "node:http";
 import { platformActionMain } from "../src/run/platform-action.js";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
-import { fetchTangledPullRoundDiff, type TangledPullRoundDiff } from "../src/platform/tangled-diff.js";
-import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
-import { TangledPublishApi, TANGLED_MANAGED_REVIEW_COLLECTION } from "../src/platform/tangled-publish.js";
+import { TANGLED_MANAGED_REVIEW_COLLECTION } from "../src/platform/tangled-publish.js";
 import { tangledContextFromEnv, type TangledContext } from "../src/platform/tangled.js";
-import type { Resolver } from "../src/platform/safe-fetch.js";
 import type { FetchLike } from "../src/platform/http.js";
-import type { GhApiResult, ManagedComment, ManagedReview, ReadResult } from "../src/platform/types.js";
 import { startMockServer, type MockServer } from "./helpers.js";
 
 const OWNER_DID = "did:plc:owner00000000000000000000000000000000000000000000000";
@@ -66,6 +62,11 @@ const PULL_RKEY = "3jqpullrkey000000000000000000000000000000000000000000000";
 const PULL_URI = `at://${AUTHOR_DID}/sh.tangled.repo.pull/${PULL_RKEY}`;
 const PULL_CID = "bafyreipullcid000000000000000000000000000000000000000000000";
 const BLOB_CID = "bafyreiblobcid00000000000000000000000000000000000000000000";
+/** The mock PDS endpoint: a PUBLIC IP LITERAL so the production SSRF gate
+ * (`isPublicAddress`) validates it directly with no DNS. */
+const PDS_HOST = "93.184.216.34";
+const TICKET_RKEY = "3jqticket000000000000000000000000000000000000000000000";
+const KNOT_HOST = "knot.test";
 
 /** One `git format-patch` mail envelope whose latest boundary declares the
  * reviewed head; gzipped, it is exactly the round patch blob a real Tangled
@@ -116,102 +117,89 @@ const json = (body: unknown, status = 200): Response =>
 /** The blob transport seam: a mocked PLC directory (DID document → PDS
  * endpoint) and a mocked PDS `getBlob` returning the gzipped round patch.
  * `hosts` records every intercepted hostname, pinning the blob chain's two
- * network targets (offline-ness itself comes from the sealed env and the
- * loopback mock URLs). */
+ * network targets; every other request (the adapter's Bobbin reads, the
+ * loopback model/PDS servers) passes through to the real fetch untouched —
+ * the seam mocks the two wire boundaries it owns and nothing else. */
 function mockBlobTransport(patchBytes: Buffer): { fetchImpl: FetchLike; hosts: string[] } {
   const hosts: string[] = [];
-  const fetchImpl: FetchLike = async (input) => {
+  const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
-    hosts.push(url.hostname);
     if (url.hostname === "plc.directory") {
+      hosts.push(url.hostname);
       if (url.pathname !== `/${AUTHOR_DID}`) return json({ error: "not found" }, 404);
       return json({
         id: AUTHOR_DID,
         service: [
-          { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds.test" },
+          { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: `https://${PDS_HOST}` },
         ],
       });
     }
-    if (url.hostname === "pds.test" && url.pathname === "/xrpc/com.atproto.sync.getBlob") {
+    if (url.hostname === PDS_HOST && url.pathname === "/xrpc/com.atproto.sync.getBlob") {
+      hosts.push(url.hostname);
       return new Response(new Uint8Array(patchBytes), { status: 200, headers: { "content-type": "application/octet-stream" } });
     }
-    return json({ error: "unmocked host" }, 500);
+    return fetch(input, init);
   };
   return { fetchImpl, hosts };
 }
 
-/** Real round-diff chain over the mocked blob transport. */
-const publicResolver: Resolver = async () => ["93.184.216.34"];
+/** The public PLC/PDS hosts the blob chain must touch (offline-ness itself
+ * comes from the sealed env and the loopback mock URLs). */
+const BLOB_WIRE_HOSTS = [PDS_HOST, "plc.directory"];
 
-/**
- * The read capability the runner drives: real `TangledAdapter` metadata
- * reads over real HTTP (Bobbin), `getPrDiff`/`listPrFiles` backed by the
- * real #586 round-diff pipeline (the stock adapter still fails those closed
- * until the #586 pipeline wiring lands), and — exactly as the #590 runner
- * contract pins — the empty answers for context reads Tangled has no source
- * for yet. Everything else keeps the adapter's honest fail-closed behavior.
- */
-class RoundDiffTangledAdapter extends TangledAdapter {
-  private roundPending: Promise<TangledPullRoundDiff> | null = null;
-
-  constructor(context: TangledContext, blobTransport: FetchLike) {
-    super({ context });
-    this.blobTransport = blobTransport;
-  }
-
-  private readonly blobTransport: FetchLike;
-
-  private roundDiff(): Promise<TangledPullRoundDiff> {
-    this.roundPending ??= (async () => {
-      await this.getPr();
-      const identity = this.pullIdentity;
-      if (identity === null) throw new Error("Tangled pull resolution failed before the diff read");
-      return fetchTangledPullRoundDiff(identity, {
-        fetchImpl: this.blobTransport,
-        resolver: publicResolver,
+/** The knot wire boundary: the production `buildPublishApi` wires
+ * `readTangledCurrentHeadForContext(context, {})` with no injectable
+ * transport, so the knot's `com.atproto.repo.listRecords` read is mocked by
+ * a scoped `globalThis.fetch` stub that intercepts ONLY the knot host and
+ * passes everything else through. `calls` records every intercepted URL so
+ * the test proves the trusted head came from the knot records. */
+async function withKnotStub<T>(run: () => Promise<T>): Promise<{ result: T; knotCalls: string[] }> {
+  const calls: string[] = [];
+  const original = globalThis.fetch;
+  const stubbed: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname !== KNOT_HOST || url.pathname !== "/xrpc/com.atproto.repo.listRecords") {
+      return original(input, init);
+    }
+    calls.push(String(url.searchParams.get("collection")));
+    if (url.searchParams.get("repo") !== REPO_DID) return json({ error: "unknown repo" }, 400);
+    if (url.searchParams.get("collection") === "org.tangled.track.ticket") {
+      return json({
+        records: [{
+          uri: `at://${REPO_DID}/org.tangled.track.ticket/${TICKET_RKEY}`,
+          cid: "bafyreiticket",
+          value: {
+            $type: "org.tangled.track.ticket",
+            state: "open",
+            targetBranch: "main",
+            title: "Tangled pull under review",
+          },
+        }],
       });
-    })();
-    return this.roundPending;
-  }
-
-  override async getPrDiff(): Promise<string> {
-    return (await this.roundDiff()).diff;
-  }
-
-  override async listPrFiles(): Promise<ReadResult<unknown>> {
-    return { ok: true, data: (await this.roundDiff()).files };
-  }
-
-  override listIssueComments(): Promise<ManagedComment[]> {
-    return Promise.resolve([]);
-  }
-
-  override listPrReviews(): Promise<ManagedReview[]> {
-    return Promise.resolve([]);
-  }
-
-  override listPrConversationComments(): Promise<ReadResult<unknown[]>> {
-    return Promise.resolve({ ok: true, data: [] });
-  }
-
-  override listReviewThreads(): Promise<ReadResult<unknown[]>> {
-    return Promise.resolve({ ok: true, data: [] });
-  }
-
-  override listPrReviewsPaginated(): Promise<ReadResult<unknown[]>> {
-    return Promise.resolve({ ok: true, data: [] });
-  }
-
-  override getIssue(): Promise<ReadResult<unknown>> {
-    return Promise.resolve({ ok: false, error: "linked-issue reads are not served on Tangled" });
-  }
-
-  override async ghApi(): Promise<GhApiResult> {
-    return { error: "gh_api reads are not served on Tangled" };
-  }
-
-  override async externalChecks(): Promise<never[]> {
-    return [];
+    }
+    if (url.searchParams.get("collection") === "org.tangled.review.patch") {
+      return json({
+        records: [{
+          uri: `at://${REPO_DID}/org.tangled.review.patch/patch1`,
+          cid: "bafyreipatch",
+          value: {
+            $type: "org.tangled.review.patch",
+            ticket: TICKET_RKEY,
+            source: { branch: "feature" },
+            createdAt: "2026-11-17T09:00:00.000Z",
+            head: { oid: HEAD },
+          },
+        }],
+      });
+    }
+    return json({ records: [] });
+  };
+  globalThis.fetch = stubbed;
+  try {
+    const result = await run();
+    return { result, knotCalls: calls };
+  } finally {
+    globalThis.fetch = original;
   }
 }
 
@@ -304,14 +292,14 @@ interface TangledWorld {
   markdown: { current: string };
   workspace: string;
   runsRoot: string;
-  blobFetch: FetchLike;
-  blobHosts: string[];
+  wireFetch: FetchLike;
+  wireHosts: string[];
   close(): Promise<void>;
 }
 
 async function startTangledWorld(): Promise<TangledWorld> {
   const patchBytes = gzipSync(Buffer.from(formatPatchText(), "utf8"));
-  const blob = mockBlobTransport(patchBytes);
+  const wire = mockBlobTransport(patchBytes);
   const markdown = { current: "First review: looks fine.\n" };
 
   const bobbin = await startMockServer((req, _body, res) => {
@@ -364,8 +352,8 @@ async function startTangledWorld(): Promise<TangledWorld> {
     markdown,
     workspace,
     runsRoot,
-    blobFetch: blob.fetchImpl,
-    blobHosts: blob.hosts,
+    wireFetch: wire.fetchImpl,
+    wireHosts: wire.hosts,
     async close() {
       await Promise.all([bobbin.close(), pds.server.close(), model.close()]);
       rmSync(workspace, { recursive: true, force: true });
@@ -376,11 +364,17 @@ async function startTangledWorld(): Promise<TangledWorld> {
 
 /** A Spindle host environment: contract inputs plus the runtime variables
  * Spindle injects (see examples/tangled-workflow.yml), with Bobbin pointed
- * at the local mock. NO `GITHUB_EVENT_PATH`, `GITHUB_OUTPUT`,
- * `GITHUB_STEP_SUMMARY`, `GITHUB_TOKEN`, or `RUNNER_TEMP` — only
- * `GITHUB_WORKSPACE`, which the runner reads as the plain checkout
- * directory. */
-function tangledEnv(world: TangledWorld, runDir: string, atprotoPdsUrl?: string): NodeJS.ProcessEnv {
+ * at the local mock and the knot at the stubbed host. NO `GITHUB_EVENT_PATH`,
+ * `GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY`, `GITHUB_TOKEN`, or `RUNNER_TEMP` —
+ * only `GITHUB_WORKSPACE`, which the runner reads as the plain checkout
+ * directory. `productionPublish` adds the `ATPROTO_*` credentials the
+ * production `buildPublishApi` factory reads and the knot host the #1165
+ * current-head re-check reads. */
+function tangledEnv(
+  world: TangledWorld,
+  runDir: string,
+  options: { productionPublish?: boolean } = {},
+): NodeJS.ProcessEnv {
   mkdirSync(runDir, { recursive: true });
   return {
     PATH: process.env.PATH,
@@ -399,13 +393,14 @@ function tangledEnv(world: TangledWorld, runDir: string, atprotoPdsUrl?: string)
     TANGLED_PR_TARGET_BRANCH: "main",
     TANGLED_PR_SOURCE_SHA: HEAD,
     TANGLED_BOBBIN_URL: world.bobbin.url,
-    ...(atprotoPdsUrl === undefined
-      ? {}
-      : {
-        ATPROTO_HOST: atprotoPdsUrl,
+    ...(options.productionPublish
+      ? {
+        ATPROTO_HOST: world.pds.server.url,
         ATPROTO_HANDLE: "reviewer.bot.test",
         ATPROTO_APP_PASSWORD: "app-password-value",
-      }),
+        TANGLED_REPO_KNOT: KNOT_HOST,
+      }
+      : {}),
     GITHUB_WORKSPACE: world.workspace,
   } as NodeJS.ProcessEnv;
 }
@@ -414,43 +409,33 @@ function smokeContext(world: TangledWorld): TangledContext {
   return tangledContextFromEnv(tangledEnv(world, join(world.runsRoot, "ctx")));
 }
 
-/** Real publish capability against the mock PDS. `withCurrentHead` emulates
- * the trustworthy current-head read #1165 will provide: publication is
- * expected to succeed with it and to fail closed without it. */
-function makePublishApi(world: TangledWorld, withCurrentHead: boolean): TangledPublishApi {
-  const atproto = new TangledAtprotoClient({
-    host: world.pds.server.url,
-    handle: "reviewer.bot.test",
-    appPassword: "app-password-value",
-    timeoutMs: 5000,
-  });
-  return new TangledPublishApi({
-    context: smokeContext(world),
-    atproto,
-    ...(withCurrentHead ? { currentHeadSha: async () => HEAD } : {}),
-  });
-}
-
-/** One runner round against the shared world, with fresh runner state.
- * `productionPublish` leaves the `publishApi` seam unset so the run takes
- * the production `buildPublishApi` factory from the `ATPROTO_*`
- * environment (which then has no current-head reader — the fail-closed
- * shape). */
+/** One runner round against the shared world, with fresh runner state. The
+ * read capability is the STOCK `TangledAdapter` (its `fetchImpl` transport
+ * seam is the ONLY injection: it covers the adapter's Bobbin reads and the
+ * PDS blob chain, mocking those two wire boundaries), and no publish seam is
+ * provided — the run takes the production `buildPublishApi` factory from the
+ * `ATPROTO_*`/`TANGLED_*` environment, including its real #1165
+ * current-head re-check. When `withKnot` is set the run executes under the
+ * knot stub; without it the knot read fails closed, as on a host with no
+ * reachable knot. */
 async function runTangledSmokeRound(
   world: TangledWorld,
   runDirName: string,
-  options: { withCurrentHead?: boolean; productionPublish?: boolean } = {},
+  options: { productionPublish?: boolean; withKnot?: boolean } = {},
 ): Promise<number> {
-  const { withCurrentHead = true, productionPublish = false } = options;
+  const { productionPublish = true, withKnot = productionPublish } = options;
   const runDir = join(world.runsRoot, runDirName);
-  return platformActionMain(
-    tangledEnv(world, runDir, productionPublish ? world.pds.server.url : undefined),
-    {
-      platformAdapter: new RoundDiffTangledAdapter(smokeContext(world), world.blobFetch),
-      ...(productionPublish ? {} : { publishApi: makePublishApi(world, withCurrentHead) }),
+  const execute = (): Promise<number> =>
+    platformActionMain(tangledEnv(world, runDir, { productionPublish }), {
+      platformAdapter: new TangledAdapter({
+        context: smokeContext(world),
+        fetchImpl: world.wireFetch,
+      }),
       runDir,
-    },
-  );
+    });
+  if (!withKnot) return execute();
+  const { result } = await withKnotStub(execute);
+  return result;
 }
 
 function soleManagedRecord(world: TangledWorld): { uri: string; value: Record<string, unknown> } {
@@ -467,8 +452,9 @@ test("one offline round drives the runner from pull resolution to a created mana
     const code = await runTangledSmokeRound(world, "run-1");
     assert.equal(code, 0, "a published review exits 0");
 
-    // Pull resolution went through the real Bobbin resolver.
-    assert.ok(world.bobbin.requests.length >= 1, "the runner read the pull from Bobbin");
+    // Pull resolution went through the real Bobbin resolver (twice: the read
+    // adapter and the publish seam resolve independently).
+    assert.ok(world.bobbin.requests.length >= 2, "the runner read the pull from Bobbin");
 
     // The model saw the real metadata and round-diff content in its prompt.
     assert.ok(world.model.requests.length >= 1, "the model was consulted");
@@ -477,7 +463,8 @@ test("one offline round drives the runner from pull resolution to a created mana
     assert.match(prompt, /README\.md/, "the changed file reached the prompt");
     assert.match(prompt, /\+world/, "the round patch reached the prompt");
 
-    // The managed record is the real TangledPublishApi's output.
+    // The managed record is the real TangledPublishApi's output, published
+    // through the production buildPublishApi factory.
     const { value } = soleManagedRecord(world);
     assert.equal(value.$type, TANGLED_MANAGED_REVIEW_COLLECTION);
     assert.equal(value.pull, PULL_URI, "the record is bound to the resolved pull");
@@ -489,8 +476,9 @@ test("one offline round drives the runner from pull resolution to a created mana
     assert.equal(world.pds.creates, 1, "the first round creates the record");
     assert.equal(world.pds.puts, 0);
 
-    // Offline: the blob chain only touched its two intercepted hosts.
-    assert.deepEqual([...new Set(world.blobHosts)].sort(), ["pds.test", "plc.directory"]);
+    // Offline: the adapter transport only touched its two intercepted wire
+    // boundaries (the rest went to the loopback servers).
+    assert.deepEqual([...new Set(world.wireHosts)].sort(), [...BLOB_WIRE_HOSTS].sort());
     assert.deepEqual(world.bobbin.handlerErrors, []);
     assert.deepEqual(world.pds.server.handlerErrors, []);
     assert.deepEqual(world.model.handlerErrors, []);
@@ -521,7 +509,7 @@ test("a re-review updates the existing managed review instead of duplicating it"
   }
 });
 
-test("publication still fails closed without a trustworthy current-head read", async () => {
+test("publication still fails closed when the knot cannot prove the current head", async () => {
   const world = await startTangledWorld();
   const stderr: string[] = [];
   const originalWrite = process.stderr.write.bind(process.stderr);
@@ -530,10 +518,10 @@ test("publication still fails closed without a trustworthy current-head read", a
     return true;
   }) as typeof process.stderr.write;
   try {
-    // No publishApi seam: the production `buildPublishApi` factory builds
-    // the Tangled capability from the ATPROTO_* environment — and, with no
-    // trustworthy current-head read wired yet (#1165), must refuse.
-    const code = await runTangledSmokeRound(world, "run-no-head", { productionPublish: true });
+    // Production publish factory, but NO knot stub: the #1165 current-head
+    // re-check reads a knot that cannot answer, must fail closed, and the
+    // run must refuse to publish.
+    const code = await runTangledSmokeRound(world, "run-no-head", { withKnot: false });
     assert.equal(code, 1, "a review whose publication is refused exits non-zero");
     assert.ok(world.model.requests.length >= 1, "the review itself still ran");
     assert.equal(world.pds.records.size, 0, "nothing was published");
