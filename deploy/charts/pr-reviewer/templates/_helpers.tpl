@@ -65,10 +65,15 @@ templates that render outside the component-scoped context).
 {{/*
 #735 credential env name: exactly `credentialEnvName` in
 src/controller/main.ts — the reference uppercased with every
-non-alphanumeric character mapped to `_`.
+non-alphanumeric character mapped to `_`. The subject is passed as
+regexReplaceAll's explicit SECOND argument: piped usage appends the
+piped value last, so `upper . | regexReplaceAll "[^A-Z0-9]" "_"`
+matches the regex against the literal "_" replacement instead and
+emits the reference verbatim (#1710: 'model-key' rendered
+PR_REVIEWER_CREDENTIAL_MODEL-KEY, unreadable by the runtime).
 */}}
 {{- define "pr-reviewer.credential-env-name" -}}
-{{- printf "PR_REVIEWER_CREDENTIAL_%s" (upper . | regexReplaceAll "[^A-Z0-9]" "_") -}}
+{{- printf "PR_REVIEWER_CREDENTIAL_%s" (regexReplaceAll "[^A-Z0-9]" (upper .) "_") -}}
 {{- end -}}
 
 {{/*

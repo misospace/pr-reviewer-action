@@ -175,6 +175,31 @@ jobs:
             echo "::error::expected 2 opt-in policies for Kubernetes executor; found $policy_count" >&2
             exit 1
           fi
+          # #1710: the credential env name must be derived exactly like the
+          # runtime's credentialEnvName — upper + [^A-Z0-9] → _ — so the
+          # example's hyphenated 'model-key' reference names the variable the
+          # controller actually reads, backed by the documented Secret.
+          grep -q -- "- name: PR_REVIEWER_CREDENTIAL_MODEL_KEY" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q -- "- name: PR_REVIEWER_CREDENTIAL_MODEL-KEY" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "::error::credential env name must be sanitized exactly like the runtime's credentialEnvName" >&2
+            exit 1
+          fi
+          grep -A4 -- "- name: PR_REVIEWER_CREDENTIAL_MODEL_KEY" /var/tmp/render-kubernetes-executor.yaml | grep -q 'name: model-credentials'
+          grep -A4 -- "- name: PR_REVIEWER_CREDENTIAL_MODEL_KEY" /var/tmp/render-kubernetes-executor.yaml | grep -q 'key: model-key'
+          # Property-style references sanitize identically (deliberately
+          # many-to-one, like the runtime): 'a-b', 'a.b' and 'a_b' all name
+          # PR_REVIEWER_CREDENTIAL_A_B.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set 'controller.credentials.a-b.value=x' \
+            --set 'controller.credentials.a\.b.value=y' \
+            --set 'controller.credentials.a_b.value=z' \
+            > /var/tmp/render-credential-names.yaml
+          credential_env_count="$(grep -c -- '- name: PR_REVIEWER_CREDENTIAL_A_B' /var/tmp/render-credential-names.yaml || true)"
+          if [ "$credential_env_count" -ne 3 ]; then
+            echo "::error::expected 3 credential refs (a-b, a.b, a_b) to sanitize to PR_REVIEWER_CREDENTIAL_A_B; found $credential_env_count" >&2
+            exit 1
+          fi
 
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned

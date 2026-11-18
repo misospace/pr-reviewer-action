@@ -175,6 +175,10 @@ accordingly.
   instance; run one controller instance per forge platform.
 - `PR_REVIEWER_CREDENTIAL_<REF>` material is provided through
   `controller.credentials` (each reference the model profiles name).
+  `<REF>` is the reference uppercased with every non-alphanumeric
+  character mapped to `_` — the runtime's `credentialEnvName`
+  derivation — so the reference `model-key` is provided as
+  `PR_REVIEWER_CREDENTIAL_MODEL_KEY`.
 - The admin listener is served on `controller.admin.port`, guarded by the
   admin bearer token and bound pod-wide (`PR_REVIEWER_ADMIN_BIND=0.0.0.0`)
   when enabled; `kubectl exec` + loopback also works for local debugging.
