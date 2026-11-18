@@ -157,6 +157,45 @@ test("#1702: an unrelated read never settles mandatory trace test evidence", asy
   assert.equal(outcome.requiredEvidenceSettlements[0]?.acquisition, "unavailable");
 });
 
+test("#1702: trace and prose evidence remain visible together in reserved-window notes/refusals", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const responses = [
+    openAiCall("optional-first", "read_file", '{"path":"src/other.ts"}'),
+    openAiCall("optional-second", "read_file", '{"path":"src/unrelated.ts"}'),
+    openAiText("evidence remains unresolved"),
+  ];
+  const requests: string[] = [];
+  let turn = 0;
+  const result = await driveToolLoop(
+    conversation,
+    async (payload) => {
+      requests.push(JSON.stringify(payload));
+      return responses[turn++];
+    },
+    async (name) => ({ tool: name, status: "ok", result: { content: "source read" } }),
+    {
+      apiFormat: "openai", model: "m",
+      budgets: { ...adaptiveLoopBudgets(3, 3, 120), maxRounds: 4 },
+      reserveForRequiredEvidence: 2,
+      requiredEvidence: [
+        { id: "trace:test-read-1", tokens: ["tests-v3/ci-wait.test.ts"], tools: ["read_file"] },
+        { id: "obligation-1", tokens: ["upstream", "matrix"], source: "must_check" },
+      ],
+      coverageComplete: () => false,
+      timeFn: () => 0,
+    },
+  );
+  assert.equal(requests.length, 3);
+  assert.match(requests[1]!, /Requirement Trace Plan/);
+  assert.match(requests[1]!, /Required Review Evidence/);
+  assert.equal(result.requiredEvidenceRefusals, 1);
+  const refusal = conversation.events.find((event) =>
+    event.kind === "tool_result" && JSON.stringify(event).includes("Reserved required-evidence budget"));
+  assert.ok(refusal, "a refused optional call still names the prose requirement alongside trace evidence");
+  assert.match(JSON.stringify(refusal), /Requirement Trace Plan/);
+});
+
 test("executor provenance rides through the loop into the rendered tool result", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
