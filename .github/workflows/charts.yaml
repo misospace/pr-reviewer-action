@@ -84,10 +84,8 @@ jobs:
           github_example=deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
           # The Forgejo example supplies trusted repo targets but no opt-in:
           # it must poll every 15m by default.
-          echo "Forgejo example polling environment:"
-          grep -A1 'name: PR_REVIEWER_RECONCILE_' /var/tmp/render-controller-only.yaml || true
           grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-controller-only.yaml | grep -q 'value: "900000"'
-          grep -A1 'name: PR_REVIEWER_RECONCILE_REPOS' /var/tmp/render-controller-only.yaml | grep -q 'value: "example-org/example-repo"'
+          grep -A1 'name: PR_REVIEWER_RECONCILE_REPOS' /var/tmp/render-controller-only.yaml | grep -q 'value: example-org/example-repo'
           # No configured targets => no polling, not a chart failure.
           helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
             --set-json 'controller.reconcile.repos=[]' > /var/tmp/render-no-targets.yaml
