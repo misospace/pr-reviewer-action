@@ -6,6 +6,7 @@ import {
   STOP_BUDGET,
   STOP_MAX_ROUNDS,
   STOP_MODEL_DONE,
+  STOP_INVESTIGATION_COMPLETE,
   STOP_NO_TOOL_CALLS,
   STOP_OBLIGATIONS_SETTLED,
   STOP_REQUEST_ERROR,
@@ -81,6 +82,59 @@ test("model stops voluntarily after gathering evidence", async () => {
   assert.equal(outcome.finalText, "done");
   assert.equal(outcome.executed.length, 1);
   assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("#1702: explicit trace test reads block premature investigation-complete until acquired", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("code", "read_file", '{"path":"src/enforcement/required-check-ci.ts"}'),
+    openAiCall("test1", "read_file", '{"path":"tests-v3/required-check-ci.test.ts"}'),
+    openAiCall("test2", "read_file", '{"path":"tests-v3/requirement-trace.test.ts"}'),
+  ], [
+    { tool: "read_file", status: "ok", result: { content: "production code" } },
+    { tool: "read_file", status: "ok", result: { content: "CI matching regression tests" } },
+    { tool: "read_file", status: "ok", result: { content: "trace regression tests" } },
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [
+      { id: "trace:test-read-1", tokens: ["tests-v3/required-check-ci.test.ts"], tools: ["read_file"] },
+      { id: "trace:test-read-2", tokens: ["tests-v3/requirement-trace.test.ts"], tools: ["read_file"] },
+    ],
+    coverageComplete: () => true,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_INVESTIGATION_COMPLETE);
+  assert.equal(outcome.executed.length, 3,
+    "source-only evidence must not end an investigation that has explicit test demands");
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["trace:test-read-1", "trace:test-read-2"]);
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((r) => [r.kind, r.evidenceState, r.successfulAttempt]), [
+    ["trace", "acquired", true], ["trace", "acquired", true],
+  ]);
+});
+
+test("#1702: an unrelated read never settles mandatory trace test evidence", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("code", "read_file", '{"path":"src/other.ts"}'),
+    openAiText("cannot verify the tests"),
+  ], [{ tool: "read_file", status: "ok", result: { content: "unrelated code" } }]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 1,
+    requiredEvidence: [{ id: "trace:test-read-1", tokens: ["tests-v3/required-check-ci.test.ts"], tools: ["read_file"] }],
+    coverageComplete: () => true,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(outcome.requiredEvidenceCredits, []);
+  assert.equal(outcome.requiredEvidenceSettlements[0]?.evidenceState, "open");
+  assert.equal(outcome.requiredEvidenceSettlements[0]?.acquisition, "unavailable");
 });
 
 test("executor provenance rides through the loop into the rendered tool result", async () => {
