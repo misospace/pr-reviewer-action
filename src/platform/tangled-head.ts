@@ -52,6 +52,50 @@ function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** A Tangled context that can never produce a trusted current head for
+ * publication (#1692). Distinct from a failed read of a configured knot: the
+ * configuration itself is missing, so a run would waste the full review and
+ * then be refused at the publication boundary. */
+export class TangledHeadReadConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TangledHeadReadConfigError";
+  }
+}
+
+/**
+ * Fail fast when a publishing Tangled run lacks the configuration the trusted
+ * current-head read needs (#1692).
+ *
+ * `readTangledCurrentHeadForContext` queries the knot's
+ * `org.tangled.review.patch` records in the repository account, so it needs
+ * `TANGLED_REPO_KNOT` (the bare knot hostname) and `TANGLED_REPO_REPO_DID`
+ * (the repository DID) exactly as `knotBase` and `listCollectionRecords`
+ * consume them. Without either, the read returns `null` for every publication
+ * and the #451 boundary refuses the review at the END of the run — after the
+ * full model review was already paid for. Callers that intend to publish run
+ * this guard BEFORE the review, with an error that names the missing variable.
+ * The caller applies it only when the pull metadata shows that the run is not
+ * a known skip.
+ *
+ * The variable names and the message are the contract this guard pins.
+ */
+export function requireTangledHeadReadConfig(ctx: TangledContext): void {
+  const missing: string[] = [];
+  if (ctx.knotHost === undefined || ctx.knotHost.trim() === "") {
+    missing.push("TANGLED_REPO_KNOT (the bare knot hostname)");
+  }
+  if (ctx.repoDid === undefined || ctx.repoDid.trim() === "") {
+    missing.push("TANGLED_REPO_REPO_DID (the repository DID)");
+  }
+  if (missing.length === 0) return;
+  throw new TangledHeadReadConfigError(
+    `tangled publication requires ${missing.join(" and ")}: the #1165 current-head read at the publication `
+    + "boundary queries the knot's org.tangled.review.patch records in the repository account, and publication "
+    + "fails closed when that read cannot produce a trustworthy current head",
+  );
+}
+
 export interface TangledPatchRecordItem {
   uri: string;
   cid: string | undefined;

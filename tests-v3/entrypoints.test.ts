@@ -184,9 +184,13 @@ test("a resolved tangled platform uses the Tangled publish seam and never the Gi
   // Publish seam (#588): the dedicated Tangled ATProto API is constructed —
   // GitHubPublishApi/ForgejoPublishApi are never built for Tangled, so no
   // GitHub/Forgejo API request can be assembled as a fallback, and no
-  // Python subprocess is involved anywhere in the path.
+  // Python subprocess is involved anywhere in the path. The knot host and
+  // repository DID (#1692) are part of the config this seam requires; the
+  // reserved `.invalid` TLD keeps the read un-dialable in tests.
   const seam = buildPublishApi({
     ...env,
+    TANGLED_REPO_REPO_DID: "did:plc:repo",
+    TANGLED_REPO_KNOT: "knot.invalid",
     TANGLED_PR_SOURCE_BRANCH: "feature",
     TANGLED_PR_TARGET_BRANCH: "main",
     ATPROTO_HOST: "http://127.0.0.1:9999",
@@ -195,6 +199,56 @@ test("a resolved tangled platform uses the Tangled publish seam and never the Gi
   });
   assert.equal(seam.platform, "tangled");
   assert.equal(seam.api.platform, "tangled");
+});
+
+test("#1692: the tangled publish seam refuses construction without the knot read config", () => {
+  // The #1165 current-head read is the seam's own publication gate: without
+  // the knot host or the repository DID it can only ever answer "unknown",
+  // so the capability is never constructed and the error names the missing
+  // variable instead.
+  const base = {
+    REPO: "o/r",
+    PR_NUMBER: "9",
+    PLATFORM: "tangled",
+    TANGLED_REPO_DID: "did:plc:repo",
+    TANGLED_PR_SOURCE_BRANCH: "feature",
+    TANGLED_PR_TARGET_BRANCH: "main",
+    ATPROTO_HOST: "http://127.0.0.1:9999",
+    ATPROTO_HANDLE: "bot.test",
+    ATPROTO_APP_PASSWORD: "secret-app-password",
+  } as NodeJS.ProcessEnv;
+  assert.throws(
+    () => buildPublishApi({ ...base, TANGLED_REPO_REPO_DID: "did:plc:repo" }),
+    (e: unknown) =>
+      e instanceof Error && /TANGLED_REPO_KNOT/.test(e.message) && !e.message.includes("TANGLED_REPO_REPO_DID"),
+  );
+  assert.throws(
+    () => buildPublishApi({ ...base, TANGLED_REPO_KNOT: "knot.invalid" }),
+    (e: unknown) =>
+      e instanceof Error && /TANGLED_REPO_REPO_DID/.test(e.message) && !e.message.includes("TANGLED_REPO_KNOT"),
+  );
+});
+
+test("#1692: a configured-but-unreachable knot still refuses publication at the boundary (fail closed)", async () => {
+  // The construction guard only proves the config SHAPE. A knot that is set
+  // but never answers must keep the pre-existing behavior: the current-head
+  // read yields null and the #451 boundary refuses. `.invalid` is reserved
+  // (RFC 6761) and can never resolve, so this pins the unreachable knot
+  // without a mock server standing in for one.
+  const seam = buildPublishApi({
+    REPO: "o/r",
+    PR_NUMBER: "9",
+    PLATFORM: "tangled",
+    TANGLED_REPO_DID: "did:plc:repo",
+    TANGLED_REPO_REPO_DID: "did:plc:repo",
+    TANGLED_REPO_KNOT: "knot.invalid",
+    TANGLED_PR_SOURCE_BRANCH: "feature",
+    TANGLED_PR_TARGET_BRANCH: "main",
+    ATPROTO_HOST: "http://127.0.0.1:9999",
+    ATPROTO_HANDLE: "bot.test",
+    ATPROTO_APP_PASSWORD: "secret-app-password",
+  } as NodeJS.ProcessEnv);
+  assert.equal(await seam.api.getHeadSha(), null, "an unreachable knot yields no trustworthy head");
 });
 
 test("explicit tangled without its identity fails with the resolver diagnostic", () => {
@@ -206,11 +260,16 @@ test("explicit tangled without its identity fails with the resolver diagnostic",
 });
 
 test("tangled publish seam fails closed when ATProto configuration is missing (#588)", () => {
+  // Knot config (#1692) is present so this reaches the ATProto guard: the
+  // head-read config check does not displace the credential diagnostic, it
+  // precedes it.
   const env = {
     REPO: "o/r",
     PR_NUMBER: "9",
     PLATFORM: "tangled",
     TANGLED_REPO_DID: "did:plc:repo",
+    TANGLED_REPO_REPO_DID: "did:plc:repo",
+    TANGLED_REPO_KNOT: "knot.invalid",
     TANGLED_PR_SOURCE_BRANCH: "feature",
     TANGLED_PR_TARGET_BRANCH: "main",
   } as NodeJS.ProcessEnv;

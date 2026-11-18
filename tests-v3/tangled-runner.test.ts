@@ -22,6 +22,16 @@
  *   - an explicitly configured GitHub/Forgejo platform is refused rather than
  *     routed to that forge (the config input cannot re-resolve the platform
  *     behind the runner's Tangled pin);
+ *   - #1692: a publishing run whose context lacks the knot host or the
+ *     repository DID is refused BEFORE the model review with a diagnostic
+ *     naming the missing variable, while a run whose pull is closed or a
+ *     proven draft skips without needing either;
+ *   - #1696: that named diagnostic comes BEFORE the Tangled diff-read
+ *     refusal, so an operator sees the missing variable and not the generic
+ *     capability refusal;
+ *   - #1696 review: the missing knot config also surfaces the named
+ *     diagnostic when it is itself the gap that made the pull's metadata
+ *     unreadable, instead of being bypassed by that failure;
  *   - the shipped bundle dispatches the `tangled` command and maps its exit
  *     code (the public entry, not only the library call).
  */
@@ -32,7 +42,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { platformActionMain, PlatformActionError } from "../src/run/platform-action.js";
-import { tangledContextFromEnv } from "../src/platform/tangled.js";
+import { tangledCapabilityError, tangledContextFromEnv } from "../src/platform/tangled.js";
+import { TangledHeadReadConfigError } from "../src/platform/tangled-head.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import {
@@ -157,6 +168,12 @@ function tangledEnv(modelUrl: string, workspace: string): NodeJS.ProcessEnv {
     // The Tangled/Spindle context consumed through the typed platform modules.
     TANGLED_REPO_DID: "did:plc:owner",
     TANGLED_REPO_REPO_DID: "did:plc:repo",
+    // The knot host the #1165 current-head read queries. `.invalid` is the
+    // RFC 6761 reserved TLD: a host that can never resolve or answer, so a
+    // test that misconfigured this could never reach a real knot. Every
+    // publish in this file goes through the injected write seam, so this host
+    // is configuration the guard (#1692) reads, never a dial target.
+    TANGLED_REPO_KNOT: "knot.invalid",
     TANGLED_REPO_NAME: "tangled.example/repo",
     TANGLED_PR_SOURCE_BRANCH: "feature",
     TANGLED_PR_TARGET_BRANCH: "main",
@@ -328,6 +345,211 @@ test("#590: a publish failure propagates as a non-zero exit (Tangled head unavai
   }
 });
 
+test("#1692: publishing without TANGLED_REPO_KNOT fails fast before the review, not at the end of it", async () => {
+  // The knot host is what the #1165 current-head read queries, so a publishing
+  // run without it can only ever be refused at the publication boundary. The
+  // guard turns that end-of-run generic refusal into an early, named one: the
+  // model is never consulted, and the diagnostic names the missing variable
+  // and why publication needs it.
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_KNOT;
+      await assert.rejects(
+        platformActionMain(env, { platformAdapter: tangledReadCapability(), publishApi }),
+        (error: unknown) =>
+          error instanceof Error
+          && /TANGLED_REPO_KNOT/.test(error.message)
+          && !error.message.includes("TANGLED_REPO_REPO_DID")
+          && /current[- ]head/i.test(error.message)
+          && /publication/i.test(error.message),
+      );
+      assert.equal(model.requests.length, 0, "the review never reached the model");
+      assert.equal(publishApi.upserts, 0, "a refused run publishes nothing");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
+test("#1696 review: an unreadable pull with a missing knot config still gets the named diagnostic", async () => {
+  // The production stack reads the pull's metadata FROM the knot, so a
+  // missing knot host makes the metadata read itself fail — an unknown
+  // reading must not silently bypass the config guard (#1696 review,
+  // major). The fake seam pins the runner-side contract: the named config
+  // error replaces the generic read failure, before the model and before
+  // publication. (The stock-stack shape is pinned in
+  // tests-v3/tangled-e2e.test.ts.) With the config complete the probe is
+  // a no-op, so an unreadable pull still proves nothing and the admission
+  // path fails closed unchanged.
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_KNOT;
+      const unreadable = tangledReadCapability({
+        getPr: () => Promise.reject(new Error("knot identity resolution failed")),
+      });
+      await assert.rejects(
+        platformActionMain(env, { platformAdapter: unreadable, publishApi }),
+        (error: unknown) =>
+          error instanceof TangledHeadReadConfigError
+          && /TANGLED_REPO_KNOT/.test(error.message)
+          && !/identity resolution failed/.test(error.message),
+      );
+      assert.equal(model.requests.length, 0, "the review never reached the model");
+      assert.equal(publishApi.upserts, 0, "a refused run publishes nothing");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
+test("#1692: publishing without TANGLED_REPO_REPO_DID names that variable", async () => {
+  // The knot read is bound to the repository account, so the repository DID is
+  // the other thing the current-head read cannot do without.
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_REPO_DID;
+      await assert.rejects(
+        platformActionMain(env, { platformAdapter: tangledReadCapability(), publishApi }),
+        (error: unknown) =>
+          error instanceof Error
+          && /TANGLED_REPO_REPO_DID/.test(error.message)
+          && !error.message.includes("TANGLED_REPO_KNOT"),
+      );
+      assert.equal(model.requests.length, 0, "the review never reached the model");
+      assert.equal(publishApi.upserts, 0, "a refused run publishes nothing");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
+test("#1692: a run that only skips is unaffected by a missing TANGLED_REPO_KNOT", async () => {
+  // The guard reads the pull's own metadata: a CLOSED pull never reaches it.
+  // A closed pull skips, publishes nothing, and must still exit green with
+  // the knot unset — the config error belongs to the runs whose pull is open.
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const closed = await tangledReadCapability({
+        getPr: () => Promise.resolve({
+          state: "closed",
+          draft: false,
+          head: { sha: HEAD, ref: "feature", repo: { full_name: "did:plc:repo" } },
+          base: { sha: BASE, ref: "main", repo: { full_name: "did:plc:repo" } },
+          user: { login: "did:plc:author" },
+          title: "Closed", body: "",
+        }),
+      });
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_KNOT;
+      const stderr = captureStderr();
+      let code: number;
+      try {
+        code = await platformActionMain(env, { platformAdapter: closed, publishApi });
+      } finally {
+        stderr.restore();
+      }
+      assert.equal(code, 0, "the skip is unaffected by the missing knot");
+      assert.match(stderr.lines.join(""), /pr-closed/);
+      assert.equal(publishApi.upserts, 0, "a skip never publishes");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
+test("#1696: a proven draft pull skips without the knot config", async () => {
+  // A PROVEN draft is a proven skip, so the publication-config guard does
+  // not fire for it: a missing knot stays irrelevant and the run skips
+  // cleanly. An UNPROVEN draft bit is not a proven skip — the production
+  // adapter emits `draft` only when the upstream record carries a boolean
+  // (see the production-shaped case in tests-v3/tangled-e2e.test.ts).
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const draft = tangledReadCapability({
+        getPr: () => Promise.resolve({
+          state: "open",
+          draft: true,
+          head: { sha: HEAD, ref: "feature", repo: { full_name: "did:plc:repo" } },
+          base: { sha: BASE, ref: "main", repo: { full_name: "did:plc:repo" } },
+          user: { login: "did:plc:author" },
+          title: "Draft", body: "",
+        }),
+      });
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_KNOT;
+      const stderr = captureStderr();
+      let code: number;
+      try {
+        code = await platformActionMain(env, { platformAdapter: draft, publishApi });
+      } finally {
+        stderr.restore();
+      }
+      assert.equal(code, 0, "the proven draft skips green");
+      assert.match(stderr.lines.join(""), /pr-draft/);
+      assert.equal(model.requests.length, 0, "a skip never reaches the model");
+      assert.equal(publishApi.upserts, 0, "a skip never publishes");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
+test("#1696: the knot diagnostic precedes the Tangled diff-read refusal for a publishable pull", async () => {
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv(model.url, workspace);
+      delete env.TANGLED_REPO_KNOT;
+      const capability = tangledReadCapability({
+        getPrDiff: () => Promise.reject(tangledCapabilityError("pull diff reads (#586)")),
+      });
+      await assert.rejects(
+        platformActionMain(env, { platformAdapter: capability, publishApi }),
+        (error: unknown) =>
+          error instanceof Error
+          && /TANGLED_REPO_KNOT/.test(error.message)
+          && !/pull diff reads/.test(error.message),
+      );
+      assert.equal(model.requests.length, 0, "the review never reached the model");
+      assert.equal(publishApi.upserts, 0, "a refused run publishes nothing");
+    });
+  } finally {
+    await model.close();
+  }
+});
+
 test("#590: a newer head supersedes the publication and exits 0 (parity with the Action)", async () => {
   const model = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -390,7 +612,8 @@ test("#590: with no injected seams the engine still routes to the Tangled read c
   // Locks the production no-seam path: the engine rebuilds its stage from
   // the contract config (where the runner pinned `platform` to `tangled`) and
   // reaches Tangled only through the resolved DID. The real `TangledAdapter`
-  // then fails closed at its own unimplemented read (#586) — it never
+  // then fails closed reading its review identity from the unreachable knot
+  // (#1690) — it never
   // constructs or reads through a GitHub or Forgejo client, and never dies on a
   // missing GitHub token.
   await withTemp(async (workspace) => {
@@ -398,7 +621,7 @@ test("#590: with no injected seams the engine still routes to the Tangled read c
       platformActionMain(tangledEnv("http://127.0.0.1:1", workspace), {}),
       (error: unknown) =>
         error instanceof Error
-        && /tangled|Bobbin/i.test(error.message)
+        && /tangled|knot/i.test(error.message)
         && !/GitHub|GH_TOKEN|GITHUB_TOKEN|Forgejo/i.test(error.message),
     );
   });
@@ -453,7 +676,7 @@ test("#590: an explicit 'auto' platform still resolves to Tangled through the DI
         platformActionMain(env, {}),
         (error: unknown) =>
           error instanceof Error
-          && /tangled|Bobbin/i.test(error.message)
+          && /tangled|knot/i.test(error.message)
           && !/GitHub|GH_TOKEN|GITHUB_TOKEN|Forgejo/i.test(error.message),
       );
     });

@@ -4,12 +4,16 @@ import { randomBytes } from "node:crypto";
 import { validateContract } from "../config/contract.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
+import { requireTangledHeadReadConfig } from "../platform/tangled-head.js";
+import { derivePrStateReading } from "../platform/pr.js";
 import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { buildPublishApi, publishEnvFromReview, publishInputFromEnv, publishWithOutcome, reviewDerivedPublishFields } from "./entrypoints.js";
 import { actionStageEnv, createRunDir, failOnRequestChanges } from "./action.js";
+import type { StageEnv } from "./env.js";
+import { buildPlatformReadAdapter } from "./platform.js";
 import { nonEmpty } from "./run-dir.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 
@@ -35,18 +39,26 @@ import { rawInputsFromEnv, runReview } from "./review.js";
  * through the platform read adapter and every write through the publish API
  * the seam selects.
  *
-  * The Tangled MVP deliberately leaves CI-waiting unsupported (no real Tangled
-  * pipeline-status seam exists): the CI gate is forced off here rather than
-  * spawning a child the platform guard would refuse, exactly as the issue
-  * permits. The read capability is fully wired since #1690: a real run
-  * completes precheck → review over the stock `TangledAdapter`'s current-
-  * record-model resolution (ticket + newest immutable patch revision from
-  * the repository account on the knot, diff derived over the Git read
-  * surface) and publishes through the production `buildPublishApi` —
-  * which stays fail-closed at the #451 current-head re-check (the #1165
-  * knot patch-record read) whenever the knot cannot prove the current head.
-  * That refusal is propagated as a non-zero outcome — a review that cannot
-  * prove the pull has not advanced is never published.
+ * The Tangled MVP deliberately leaves CI-waiting unsupported (no real Tangled
+ * pipeline-status seam exists): the CI gate is forced off here rather than
+ * spawning a child the platform guard would refuse, exactly as the issue
+ * permits. The read capability is fully wired since #1690: a real run
+ * completes precheck → review over the stock `TangledAdapter`'s current-
+ * record-model resolution (ticket + newest immutable patch revision from
+ * the repository account on the knot, diff derived over the Git read
+ * surface) and publishes through the production `buildPublishApi`, which
+ * stays fail-closed at the #451 current-head re-check (the #1165 knot
+ * patch-record read) whenever the knot cannot prove the current head.
+ * A publish-mode run whose context can never satisfy that read (no knot
+ * host or repository DID) is refused BEFORE the review engine starts
+ * (#1692), naming the missing variable instead of spending a full model
+ * review on a doomed publication; a closed or proven-draft skip is
+ * unaffected. The check runs before the review engine starts (#1696), so
+ * the named diagnostic always comes first, and it fires for every pull that
+ * is not a proven skip — including an unreadable one, because the metadata
+ * read itself needs the knot, and the very config gap that breaks that read
+ * must not bypass the guard. Failures propagate as a non-zero outcome: a
+ * review that cannot prove the pull has not advanced is never published.
  */
 
 /** Optional host seams. A Spindle operator wires the real Tangled adapters
@@ -55,8 +67,9 @@ import { rawInputsFromEnv, runReview } from "./review.js";
  * falls through to the production capability factory, so the injected and
  * real paths share one code path. */
 export interface PlatformActionSeams {
-  /** The forge READ capability (defaults to `buildPlatformReadAdapter` via the
-   * engine — which returns a `TangledAdapter` for a resolved Tangled run). */
+  /** The forge READ capability (defaults to `buildPlatformReadAdapter`, which
+   * the runner builds for this host — it returns a `TangledAdapter` for a
+   * resolved Tangled run). */
   platformAdapter?: PlatformReadAdapter;
   /** The forge WRITE capability (defaults to `buildPublishApi` → the Tangled
    * AT-Proto record client). */
@@ -193,15 +206,56 @@ export async function platformActionMain(
   const runDir = nonEmpty(seams.runDir) ?? createRunDir(temp);
   stage.PR_REVIEWER_RUN_DIR = runDir;
 
-  // Precheck + review through the shared engine (manual semantics: no event).
-  // The read capability is the injected seam when provided, else the engine
-  // builds the Tangled adapter from the stage env.
+  // The forge READ capability for this host: the injected seam when one is
+  // provided, else the production factory (the Tangled adapter for a
+  // Tangled-resolved stage). ONE adapter for the whole run — the
+  // publication-config probe below and the engine read through the same
+  // configured capability, and the production Tangled adapter serves its
+  // cached metadata read to both.
+  const readAdapter: PlatformReadAdapter = seams.platformAdapter
+    ?? buildPlatformReadAdapter(stage as StageEnv, seams.fetchImpl);
+
+  // #1692 (#1696): a publishing run whose Tangled context can never satisfy
+  // the #1165 current-head read is refused BEFORE the review engine starts.
+  // The old placement (after admission) let the Tangled diff-read refusal
+  // win, so an operator never saw the named diagnostic. The publish mode
+  // enables the check; the pull metadata decides whether it applies.
+  if (publishStepRuns(stage.PUBLISH_MODE)) {
+    // Without the repository DID no pull can be resolved at all, so there is
+    // no skip-only case to protect: check the configuration right away.
+    if (context.repoDid === undefined || context.repoDid.trim() === "") {
+      requireTangledHeadReadConfig(context);
+    } else {
+      // The pull's own metadata decides. A closed pull and a PROVEN draft
+      // pull are proven skips and stay protected. An open pull whose draft
+      // bit is UNPROVEN is not a proven skip: the production adapter emits
+      // `draft` only when the upstream record carries a boolean, so a
+      // normal record leaves it unknown (#1696 review).
+      const reading = derivePrStateReading(await readAdapter.getPr().catch(() => null));
+      const provenSkip = reading.state === "closed"
+        || (reading.state === "open" && reading.draft === "draft");
+      // An UNREADABLE pull (unknown state) runs the probe too (#1696
+      // review, major): the stock adapter's own review-identity resolution
+      // needs the knot host and the repository account, so when THOSE are
+      // what is missing, `getPr()` yields null and the guard must not be
+      // bypassed by the very config gap that made the read fail — the
+      // named diagnostic replaces the generic resolver failure. With the
+      // config complete the probe is a no-op, so an unreadable pull still
+      // proves nothing and the admission path fails closed unchanged.
+      if (!provenSkip) {
+        requireTangledHeadReadConfig(context);
+      }
+    }
+  }
+
+  // Precheck + review through the shared engine (manual semantics: no event),
+  // reading through the ONE capability built above.
   const review = await runReview({
     env: stage as NodeJS.ProcessEnv,
     inputs,
     runDir,
     workspace: env.GITHUB_WORKSPACE ?? process.cwd(),
-    ...(seams.platformAdapter !== undefined ? { platformAdapter: seams.platformAdapter } : {}),
+    platformAdapter: readAdapter,
     ...(seams.fetchImpl !== undefined ? { fetchImpl: seams.fetchImpl } : {}),
   });
 
