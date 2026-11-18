@@ -85,6 +85,53 @@ jobs:
             exit 1
           fi
 
+      - name: Render (polling first, optional webhook)
+        run: |
+          set -euo pipefail
+          example=deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+          github_example=deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+          # The Forgejo example supplies trusted repo targets but no opt-in:
+          # it must poll every 15m by default.
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-controller-only.yaml | grep -q 'value: "900000"'
+          grep -A1 'name: PR_REVIEWER_RECONCILE_REPOS' /var/tmp/render-controller-only.yaml | grep -q 'value: example-org/example-repo'
+          # No configured targets => no polling, not a chart failure.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set-json 'controller.reconcile.repos=[]' > /var/tmp/render-no-targets.yaml
+          if grep -q 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-no-targets.yaml; then
+            echo "reconcile env must be absent without trusted repository targets" >&2
+            exit 1
+          fi
+          # Polling works without a webhook listener or its secret.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set controller.webhook.enabled=false > /var/tmp/render-poll-only.yaml
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-poll-only.yaml | grep -q 'value: "900000"'
+          if grep -q 'name: PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-poll-only.yaml; then
+            echo "webhook must be optional when reconciliation is configured" >&2
+            exit 1
+          fi
+          # Custom interval and explicit opt-out.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set controller.reconcile.intervalMs=60000 > /var/tmp/render-poll-override.yaml
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-poll-override.yaml | grep -q 'value: "60000"'
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set controller.reconcile.enabled=false > /var/tmp/render-no-poll.yaml
+          if grep -q 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-no-poll.yaml; then
+            echo "explicitly disabled reconciliation still rendered" >&2
+            exit 1
+          fi
+          # A configured GitHub target must carry an exact App installation ID.
+          if helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+            --set 'controller.reconcile.repos[0]=owner/name' >/dev/null 2>&1; then
+            echo "GitHub polling must require a pinned installation identity" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+            --set 'controller.reconcile.repos[0]=owner/name' \
+            --set-string controller.reconcile.githubInstallationId=4242 \
+            --set controller.webhook.enabled=false > /var/tmp/render-github-poll.yaml
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-github-poll.yaml | grep -q 'value: "900000"'
+          grep -A1 'name: PR_REVIEWER_GITHUB_APP_INSTALLATION_ID' /var/tmp/render-github-poll.yaml | grep -q 'value: "4242"'
+
       - name: Render (kubernetes-executor example)
         run: |
           set -euo pipefail

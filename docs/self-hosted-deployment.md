@@ -223,6 +223,26 @@ a model credential, roll/restart the controller before expecting new reviews to
 use the new material. Hot Secret watching is not part of this deployment
 contract.
 
+## Polling-first PR discovery
+
+When `controller.reconcile.repos` is configured, the self-hosted chart
+runs an open-PR reconciliation sweep every **15 minutes** by default
+(`controller.reconcile.intervalMs: 900000`). GitHub needs the explicit
+`controller.reconcile.githubInstallationId`; forge credentials and
+repository targets are operator-owned. If no repo list is supplied, no
+poll runs; there is no implicit App-wide repository discovery. An explicit
+`controller.reconcile.enabled: false` disables polling. The runtime also
+accepts `PR_REVIEWER_RECONCILE_REPOS` with an omitted
+`PR_REVIEWER_RECONCILE_INTERVAL_MS` and uses the same 15-minute default.
+
+Webhooks can stay **disabled** and review discovery still works; when
+enabled, they provide faster hints but converge with polling through the
+same generation ledger. The sweep fetches **all currently open PRs** per
+configured repository on each pass, bounded by the adapter's paging
+limits; installation startup is not automatically a new-PR-only backfill.
+Be mindful of outstanding PR volume and configured review concurrency,
+especially when a new installation begins polling.
+
 ## Metrics and health
 
 The #737 admin listener serves `/healthz`, `/readyz`, and `/metrics` with

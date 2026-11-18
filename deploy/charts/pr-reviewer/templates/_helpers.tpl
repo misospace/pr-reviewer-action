@@ -147,7 +147,7 @@ genuinely absent — an empty value is never emitted (unset is OFF) */}}
   value: "true"
 {{- end }}
 {{- end }}
-{{- if $v.reconcile.enabled }}
+{{- if and $v.reconcile.enabled (not (empty $v.reconcile.repos)) }}
 - name: PR_REVIEWER_RECONCILE_INTERVAL_MS
   value: {{ $v.reconcile.intervalMs | quote }}
 - name: PR_REVIEWER_RECONCILE_REPOS
@@ -266,13 +266,11 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if and $v.admin.dashboard (not $v.admin.enabled) -}}
 {{- fail "controller.admin.dashboard requires controller.admin.enabled (the dashboard is served on the admin listener)" -}}
 {{- end -}}
-{{- if $v.reconcile.enabled -}}
+{{- if and $v.reconcile.enabled (not (empty $v.reconcile.repos)) -}}
 {{- if and (eq $v.forgeAuth.platform "github") (empty $v.reconcile.githubInstallationId) -}}
 {{- fail "controller.reconcile.githubInstallationId is required when reconciliation is enabled and forgeAuth.platform is github" -}}
 {{- end -}}
-{{- if empty $v.reconcile.repos -}}
-{{- fail "controller.reconcile.repos must be a non-empty list when reconciliation is enabled" -}}
-{{- end -}}
+
 {{- end -}}
 {{- if eq $v.forgeAuth.platform "github" -}}
 {{- if empty $v.forgeAuth.github.appId -}}

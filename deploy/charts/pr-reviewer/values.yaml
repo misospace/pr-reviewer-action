@@ -67,12 +67,15 @@ controller:
     # the NetworkPolicy's call. Requires admin.enabled.
     dashboard: false
 
-  # Missed-webhook reconciliation (PR_REVIEWER_RECONCILE_INTERVAL_MS/_REPOS).
-  # With `forgeAuth.platform: github` the reconciliation poll also needs
-  # `githubInstallationId` (PR_REVIEWER_GITHUB_APP_INSTALLATION_ID).
+  # Poll configured repositories for open PR heads every 15 minutes by
+  # default, independently of webhook delivery. Webhooks are optional,
+  # faster hints; both paths deduplicate to the same review generation.
+  # No repos configured => no sweep is started. Never discover repos beyond
+  # this trusted list; disabling explicitly also turns off the sweep.
+  # GitHub polls additionally require the App installation identity.
   reconcile:
-    enabled: false
-    intervalMs: 300000
+    enabled: true
+    intervalMs: 900000
     repos: []
     githubInstallationId: ""
 
