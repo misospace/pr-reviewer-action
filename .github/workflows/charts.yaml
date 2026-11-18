@@ -77,6 +77,49 @@ jobs:
             exit 1
           fi
 
+      - name: Render (polling first, optional webhook)
+        run: |
+          set -euo pipefail
+          example=deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+          # No configured repository means no scanning or installation requirement.
+          if grep -q PR_REVIEWER_RECONCILE_INTERVAL_MS /var/tmp/render-controller-only.yaml; then
+            echo "reconcile env must be absent without trusted repository targets" >&2
+            exit 1
+          fi
+          # Repo-scoped default 15-minute poll works with no webhook listener.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set 'controller.reconcile.repos[0]=owner/name' \
+            --set-string controller.reconcile.githubInstallationId=4242 \
+            --set controller.webhook.enabled=false \
+            > /var/tmp/render-poll.yaml
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-poll.yaml | grep -q 'value: "900000"'
+          grep -A1 'name: PR_REVIEWER_RECONCILE_REPOS' /var/tmp/render-poll.yaml | grep -q 'value: "owner/name"'
+          if grep -q 'name: PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-poll.yaml; then
+            echo "webhook must be optional when reconciliation is configured" >&2
+            exit 1
+          fi
+          # Operator override and explicit disable both work.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set 'controller.reconcile.repos[0]=owner/name' \
+            --set-string controller.reconcile.githubInstallationId=4242 \
+            --set controller.reconcile.intervalMs=60000 \
+            > /var/tmp/render-poll-override.yaml
+          grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-poll-override.yaml | grep -q 'value: "60000"'
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set 'controller.reconcile.repos[0]=owner/name' \
+            --set controller.reconcile.enabled=false \
+            > /var/tmp/render-no-poll.yaml
+          if grep -q 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-no-poll.yaml; then
+            echo "explicitly disabled reconciliation still rendered" >&2
+            exit 1
+          fi
+          # A configured GitHub target without installation identity is an error.
+          if helm template pr-reviewer deploy/charts/pr-reviewer -f "$example" \
+            --set 'controller.reconcile.repos[0]=owner/name' >/dev/null 2>&1; then
+            echo "GitHub polling must require a pinned installation identity" >&2
+            exit 1
+          fi
+
       - name: Render (kubernetes-executor example)
         run: |
           set -euo pipefail
