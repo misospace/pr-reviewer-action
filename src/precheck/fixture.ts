@@ -63,12 +63,12 @@ export interface PrecheckFixture {
 }
 
 export class FixtureAdapter implements PlatformAdapter {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   private readonly spec: PrecheckFixture["platform"];
   /** #1341: the cause of the most recent `getPr()` failure, or null. */
   private lastPrReadFailure: PlatformRequestError | null = null;
 
-  constructor(platform: "github" | "forgejo", spec: PrecheckFixture["platform"]) {
+  constructor(platform: "github" | "forgejo" | "gitlab", spec: PrecheckFixture["platform"]) {
     this.platform = platform;
     this.spec = spec;
   }

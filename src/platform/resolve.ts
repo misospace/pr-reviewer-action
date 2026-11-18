@@ -1,4 +1,4 @@
-export type ResolvedPlatform = "github" | "forgejo" | "tangled";
+export type ResolvedPlatform = "github" | "forgejo" | "gitlab" | "tangled";
 
 /** The forge an operator declares they run (#1678).
  *
@@ -14,10 +14,17 @@ export type ResolvedPlatform = "github" | "forgejo" | "tangled";
  * configured, so a Forgejo-only capability can be refused on upstream Gitea.
  * Today exactly one is — `authorized_integration` (Authorized OAuth
  * Integrations with an OIDC-asserted JWT exist only on Forgejo). */
-export type ForgeId = "github" | "forgejo" | "gitea";
+export type ForgeId = "github" | "forgejo" | "gitea" | "gitlab";
 
 /** The two products that speak the Forgejo/Gitea wire protocol (#1678). */
 export type GiteaFamilyForge = Extract<ForgeId, "forgejo" | "gitea">;
+
+/** The wire families a declared forge id resolves to (#740): GitHub's REST,
+ * the Forgejo/Gitea `/api/v1` family, and GitLab's `/api/v4` family. GitLab is
+ * a FAMILY of its own — different webhook auth, event vocabulary, MR head-ref
+ * naming (`refs/merge-requests/<n>/head`) and publish surface — so it shares
+ * no protocol with the other two and never projects onto them. */
+export type ForgeFamilyName = "github" | "forgejo" | "gitlab";
 
 /** The declared forge ids as a CLOSED set: the one membership test every
  * boundary that accepts a declared id from an untyped caller uses, so the
@@ -25,7 +32,7 @@ export type GiteaFamilyForge = Extract<ForgeId, "forgejo" | "gitea">;
  * because every real caller holds parsed/JS-supplied input, not a typed
  * string (#1683). */
 export function isForgeId(value: unknown): value is ForgeId {
-  return value === "github" || value === "forgejo" || value === "gitea";
+  return value === "github" || value === "forgejo" || value === "gitea" || value === "gitlab";
 }
 
 /** The single refusal text for a Forgejo-only auth configuration on Gitea
@@ -36,9 +43,18 @@ export function isForgeId(value: unknown): value is ForgeId {
 export const GITEA_INTEGRATION_REFUSAL =
   "Gitea does not support auth method 'authorized_integration'; use 'token' mode with a Gitea access token";
 
+/** The wire family a declared forge id resolves to — precise per input:
+ * `gitea` resolves to `forgejo`, `gitlab` to itself (#740), the rest to
+ * themselves. */
+export type WireFamilyOf<F extends ForgeId> = F extends "gitea"
+  ? "forgejo"
+  : F extends "gitlab"
+    ? "gitlab"
+    : F;
+
 /** The wire family that serves a declared forge id. */
-export function forgeWireFamily(forge: ForgeId): "github" | "forgejo" {
-  return forge === "gitea" ? "forgejo" : forge;
+export function forgeWireFamily<F extends ForgeId>(forge: F): WireFamilyOf<F> {
+  return (forge === "gitea" ? "forgejo" : forge) as WireFamilyOf<F>;
 }
 
 /** The forge the operator DECLARED, as opposed to the family that serves it.
@@ -53,10 +69,14 @@ export function forgeWireFamily(forge: ForgeId): "github" | "forgejo" {
  * declared id can never override a resolved protocol. */
 export function declaredForgeId(
   platform: string | undefined,
-  family: "github" | "forgejo",
+  family: ForgeFamilyName,
 ): ForgeId {
   const normalized = (platform ?? "").trim().toLowerCase();
-  return normalized === "gitea" && family === "forgejo" ? "gitea" : family;
+  if (normalized === "gitea" && family === "forgejo") return "gitea";
+  // #740: GitLab declares its own family, so the declared id and the family
+  // coincide; a `gitlab` declaration paired with a family the resolver did
+  // not select as GitLab is read as that family, exactly as for `gitea`.
+  return family;
 }
 
 /** {@link declaredForgeId} for a call site that is already on the Forgejo/Gitea
@@ -68,7 +88,7 @@ export function declaredFamilyForge(platform: string | undefined): GiteaFamilyFo
 }
 
 /**
- * Resolve PLATFORM (github|forgejo|gitea|tangled|auto) to a concrete backend name.
+ * Resolve PLATFORM (github|forgejo|gitea|gitlab|tangled|auto) to a concrete backend name.
  *
  * `gitea` resolves to the `forgejo` family: it is the same protocol, so the
  * family is what every downstream consumer needs, and `declaredForgeId` reports
@@ -113,5 +133,11 @@ export function resolvePlatform(
   // #1678: Gitea is the Forgejo/Gitea wire family. `declaredForgeId` keeps the
   // declaration so a Forgejo-only capability can still be refused.
   if (normalized === "gitea") return "forgejo";
-  throw new Error(`unsupported PLATFORM '${normalized}' (expected github|forgejo|gitea|tangled|auto)`);
+  // #740: GitLab is its own wire family. `auto` never selects it: nothing the
+  // resolver reads (server URL, Tangled DID) distinguishes a self-hosted
+  // GitLab from any other host, so it requires an explicit declaration.
+  if (normalized === "gitlab") return "gitlab";
+  throw new Error(
+    `unsupported PLATFORM '${normalized}' (expected github|forgejo|gitea|gitlab|tangled|auto)`,
+  );
 }

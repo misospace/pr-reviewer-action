@@ -114,7 +114,7 @@ export interface ReconcileOptions {
    * mislabelled as the other platform would mint a DIFFERENT generation
    * than the webhook delivery of the same head, and the two would never
    * converge. */
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly listOpenPullRequests: (repo: string) => Promise<ReadResult<unknown[]>>;
   readonly repos: readonly string[];
   readonly ledger: GenerationLedger;

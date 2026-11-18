@@ -28,11 +28,11 @@ export interface SemanticFixtureAdapterOptions {
   dir: string;
   /** Which forge the run is configured for; reads are identical either
    * way, only `repoPermission` differs (the shell does not intercept it). */
-  platform?: "github" | "forgejo" | undefined;
+  platform?: "github" | "forgejo" | "gitlab" | undefined;
 }
 
 export class SemanticFixtureAdapter implements PlatformReadAdapter {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   private readonly dir: string;
 
   constructor(options: SemanticFixtureAdapterOptions) {

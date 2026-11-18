@@ -160,7 +160,7 @@ test("#1247: the typed platform enum accepts every documented platform value, an
   // The platform vocabulary the contract documents and `resolvePlatform`
   // implements. The typed enum is the vocabulary gate only: resolution (and
   // the Tangled identity requirement) belongs to the platform seam.
-  const supported = ["auto", "forgejo", "gitea", "github", "tangled"];
+  const supported = ["auto", "forgejo", "gitea", "gitlab", "github", "tangled"];
   const platformInput = contract.inputs.find((input) => input.id === "platform");
   assert.ok(platformInput, "the contract declares the platform input");
   const documented = documentedPlatformValues(platformInput.description);
@@ -183,6 +183,9 @@ test("#1247: the typed platform enum accepts every documented platform value, an
     // #1678: 'gitea' is accepted by the typed vocabulary and resolves to the
     // Forgejo/Gitea wire family — the resolver, not the enum, owns that mapping.
     ["gitea", "forgejo"],
+    // #740: 'gitlab' is accepted too and resolves to its own family (explicit
+    // only — auto never selects it).
+    ["gitlab", "gitlab"],
     ["github", "github"],
     ["tangled", "tangled"],
   ] as const) {
@@ -214,7 +217,7 @@ test("#1247: the typed platform enum accepts every documented platform value, an
 
   // A value outside the documented vocabulary still fails at the config boundary.
   assert.throws(
-    () => loadConfig(contract, { ...required, platform: "gitlab" }),
+    () => loadConfig(contract, { ...required, platform: "stash" }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /Input 'platform' must be one of:/);

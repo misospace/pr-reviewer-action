@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import { gitCredentialEnv, gitEnv, gitInvocationEnv, safeCloneUrl, toFetchCredentials } from "../src/acquisition/git-env.js";
 import { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from "../src/platform/head-ref.js";
 
-test("pullRequestHeadRef: canonical head ref for both platforms", () => {
+test("pullRequestHeadRef: canonical head ref per platform", () => {
   assert.equal(pullRequestHeadRef("github", 7), "refs/pull/7/head");
   assert.equal(pullRequestHeadRef("forgejo", 7), "refs/pull/7/head");
   assert.equal(pullHeadRefspec("github"), "+refs/pull/*:refs/pull/*");
   assert.equal(pullHeadRefspec("forgejo"), "+refs/pull/*:refs/pull/*");
-  assert.equal(pullHeadRefspec("gitlab" as AcquisitionPlatform), null);
+  // #740: GitLab names the same forge-maintained coordinate in its own ref
+  // namespace; the wildcard refspec is forced for the same overwrite reason.
+  assert.equal(pullRequestHeadRef("gitlab", 7), "refs/merge-requests/7/head");
+  assert.equal(pullHeadRefspec("gitlab"), "+refs/merge-requests/*:refs/merge-requests/*");
+  assert.equal(pullRequestHeadRef("bitbucket" as AcquisitionPlatform, 7), null);
+  assert.equal(pullHeadRefspec("bitbucket" as AcquisitionPlatform), null);
 });
 
 test("pullRequestHeadRef: fails closed on invalid input", () => {
@@ -17,7 +22,12 @@ test("pullRequestHeadRef: fails closed on invalid input", () => {
   assert.equal(pullRequestHeadRef("github", 1.5), null);
   assert.equal(pullRequestHeadRef("github", Number.NaN), null);
   assert.equal(pullRequestHeadRef("github", Number.MAX_SAFE_INTEGER + 1), null);
-  assert.equal(pullRequestHeadRef("gitlab" as AcquisitionPlatform, 7), null);
+  // The GitLab ref is built from the validated number alone — the same
+  // invalid inputs must fail closed there too.
+  assert.equal(pullRequestHeadRef("gitlab", 0), null);
+  assert.equal(pullRequestHeadRef("gitlab", -3), null);
+  assert.equal(pullRequestHeadRef("gitlab", 1.5), null);
+  assert.equal(pullRequestHeadRef("gitlab", "7" as unknown as number), null);
   assert.equal(pullRequestHeadRef("github", "7" as unknown as number), null);
 });
 

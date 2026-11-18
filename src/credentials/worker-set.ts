@@ -60,7 +60,7 @@ export type WorkerModelMode = "direct_worker";
 export interface WorkerCredentialPlanInput {
   readonly jobId: string;
   readonly runId: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly repoFullName: string;
   readonly installationId: string;
   /** The producing job's fork flag. Fork policy: the `evidence` reference

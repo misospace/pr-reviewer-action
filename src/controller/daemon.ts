@@ -115,7 +115,16 @@ import type { CredentialRef } from "../credentials/types.js";
 import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.js";
 import { ingressWebhookPath } from "../ingress/endpoints.js";
 import { forgeEnforcesWebhookRoute } from "../platform/forge-identity.js";
-import { isForgeId } from "../platform/resolve.js";
+
+/** The forge labels THIS daemon can serve at its intake/reconcile boundary.
+ * The declared vocabulary is the platform seam's (`isForgeId`, #1682); this
+ * is what the controller can COMPOSE today — GitHub plus the two Gitea-family
+ * identities. `gitlab` (#740) is deliberately absent until the GitLab
+ * capability composition lands (#1677), so it is refused by name rather than
+ * mapped onto another family. */
+function isDaemonServedPlatform(value: unknown): value is "github" | "forgejo" | "gitea" {
+  return value === "github" || value === "forgejo" || value === "gitea";
+}
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -1150,17 +1159,28 @@ export async function startControllerDaemon(
   // BEFORE the family comparisons below, so an unknown label surfaces as an
   // unknown label instead of a misleading family-mismatch message against a
   // correctly labelled integration.
-  if (options.webhook !== undefined && !isForgeId(options.webhook.platform)) {
+  // `gitlab` is in the declared vocabulary (#740) but NOT in what this daemon
+  // can serve: the controller composes GitHub and Gitea-family capabilities,
+  // and a GitLab capability composition has not landed (#1677). A label the
+  // seam knows but the daemon cannot serve is refused by name here — never
+  // silently mapped onto another family's adapters.
+  if (options.webhook !== undefined && !isDaemonServedPlatform(options.webhook.platform)) {
     throw new TypeError(
-      "ControllerDaemonOptions.webhook.platform must be 'github', 'forgejo', or 'gitea'",
+      "ControllerDaemonOptions.webhook.platform must be 'github', 'forgejo', or 'gitea'" +
+        ((options.webhook.platform as string) === "gitlab"
+          ? " (gitlab intake composition is not wired into the daemon yet, #1677)"
+          : ""),
     );
   }
   if (
     options.reconcile?.platform !== undefined &&
-    !isForgeId(options.reconcile.platform)
+    !isDaemonServedPlatform(options.reconcile.platform)
   ) {
     throw new TypeError(
-      "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'",
+      "ControllerDaemonOptions.reconcile.platform must be 'github', 'forgejo', or 'gitea'" +
+        ((options.reconcile.platform as string) === "gitlab"
+          ? " (gitlab reconciliation composition is not wired into the daemon yet, #1677)"
+          : ""),
     );
   }
   // When the daemon binds an integration name, the name must name exactly

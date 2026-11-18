@@ -153,8 +153,8 @@ function isReviewTrigger(value: unknown): value is ReviewTrigger {
   return value === "webhook" || value === "poll" || value === "manual";
 }
 
-function isJobPlatform(value: unknown): value is "github" | "forgejo" {
-  return value === "github" || value === "forgejo";
+function isJobPlatform(value: unknown): value is "github" | "forgejo" | "gitlab" {
+  return value === "github" || value === "forgejo" || value === "gitlab";
 }
 
 /** Fail-closed validation of a `ReviewJob` — the ONE definition of what

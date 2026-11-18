@@ -212,7 +212,7 @@ export interface ControlPlaneStore {
   heartbeatRun(runId: string, owner: string, nowMs: number, ttlMs: number): Promise<boolean>;
   getInstallation(installationId: string): Promise<InstallationRecord | null>;
   getAdoptedRepository(
-    platform: "github" | "forgejo",
+    platform: "github" | "forgejo" | "gitlab",
     installationId: string,
     repoFullName: string,
   ): Promise<AdoptedRepositoryRecord | null>;
@@ -394,7 +394,7 @@ function cloneTables(tables: StateTables): StateTables {
 }
 
 function adoptedRepositoryKey(
-  platform: "github" | "forgejo",
+  platform: "github" | "forgejo" | "gitlab",
   installationId: string,
   repoFullName: string,
 ): string {
@@ -769,7 +769,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   }
 
   async getAdoptedRepository(
-    platform: "github" | "forgejo",
+    platform: "github" | "forgejo" | "gitlab",
     installationId: string,
     repoFullName: string,
   ): Promise<AdoptedRepositoryRecord | null> {

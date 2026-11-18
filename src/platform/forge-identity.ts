@@ -56,11 +56,13 @@ export function forgeRefusesAuthMethod(
  * through a path the operator never mounted. The Forgejo intake predates
  * the route and keeps its historical path-agnostic surface (its canonical
  * route is REPORTED, not enforced), and GitHub's App intake is
- * path-agnostic by design. Every consumer that serves an intake asks THIS
- * rule; nothing outside the seam branches on the product name to decide
- * it. */
+ * path-agnostic by design. A GitLab intake (#740) enforces its canonical
+ * route exactly like Gitea's: it was introduced WITH the route, so it has no
+ * historical path-agnostic surface to preserve. Every consumer that serves
+ * an intake asks THIS rule; nothing outside the seam branches on the product
+ * name to decide it. */
 export function forgeEnforcesWebhookRoute(forge: ForgeId): boolean {
-  return forge === "gitea";
+  return forge === "gitea" || forge === "gitlab";
 }
 
 /** The token reader for a declared Gitea-family identity.

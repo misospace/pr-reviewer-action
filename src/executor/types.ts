@@ -242,7 +242,7 @@ export interface ExecutionRequest {
   /** 1-based attempt number within the job generation. */
   readonly attempt: number;
   readonly kind: ReviewJobKind;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   /** The non-secret forge API base URL coordinate (like `platform`, never
    * credential material — secrets travel only on the #735 broker path).
    * A containerized worker has no ambient forge environment, so the
@@ -729,15 +729,17 @@ export function forgeApiUrlProblem(value: string): string {
 /** Fail-closed check of the non-secret forge API base coordinate (#1433).
  *
  * Absent ("") is legal ONLY where the platform itself carries a default
- * endpoint (GitHub's `api.github.com`); a Forgejo request without one can
- * never construct its adapter, so the envelope refuses it at validation.
+ * endpoint (GitHub's `api.github.com`); a Forgejo or GitLab request without
+ * one can never construct its adapter (#740: a GitLab run may target
+ * gitlab.com or any self-hosted instance, so there is no default to fall
+ * back to), so the envelope refuses it at validation.
  * A present value must satisfy `forgeApiUrlProblem` above. */
-function requireForgeApiUrl(platform: "github" | "forgejo", value: string): void {
+function requireForgeApiUrl(platform: "github" | "forgejo" | "gitlab", value: string): void {
   const path = "execution request.forgeApiUrl";
   if (value === "") {
-    if (platform === "forgejo") {
+    if (platform === "forgejo" || platform === "gitlab") {
       throw new ExecutionRequestError(
-        `${path} must be non-empty for forgejo (no default forge endpoint exists to fall back to)`,
+        `${path} must be non-empty for ${platform} (no default forge endpoint exists to fall back to)`,
       );
     }
     return;

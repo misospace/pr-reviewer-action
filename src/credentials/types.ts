@@ -68,7 +68,7 @@ export interface SecretMaterial {
  * multi-installation / cross-repo / cross-profile isolation mechanism
  * (#735). */
 export interface SecretScope {
-  readonly platform: "" | "github" | "forgejo";
+  readonly platform: "" | "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly repoFullName: string;
   /** The model/evidence profile identity the credential belongs to; bound
@@ -83,7 +83,7 @@ export interface SecretScope {
  * context the caller is acting on — the broker never infers it. */
 export interface ResolutionRequest {
   readonly purpose: SecretPurpose;
-  readonly platform: "" | "github" | "forgejo";
+  readonly platform: "" | "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly repoFullName: string;
   /** The model/evidence profile the run claims to use; "" for purposes
@@ -195,8 +195,8 @@ export function isSecretPurpose(value: unknown): value is SecretPurpose {
   );
 }
 
-export function isPlatformName(value: unknown): value is "" | "github" | "forgejo" {
-  return value === "" || value === "github" || value === "forgejo";
+export function isPlatformName(value: unknown): value is "" | "github" | "forgejo" | "gitlab" {
+  return value === "" || value === "github" || value === "forgejo" || value === "gitlab";
 }
 
 export function isScopeDimension(value: unknown): value is ScopeDimension {
@@ -275,7 +275,7 @@ export type ForkEvidencePolicy = "off" | "allowed";
 export interface WorkerCredentialPlan {
   readonly jobId: string;
   readonly runId: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly repoFullName: string;
   readonly installationId: string;
   /** The producing job's fork flag (#730/#725 trust metadata). */
