@@ -2696,8 +2696,8 @@ function allFilesAreLockfiles(filenames: string[]): boolean {
  * unchanged version value (#1595) — while a changed structural opener like
  * `"engines": {` is shape, not a value, and stays digest-only. */
 function hasVersionBump(diffText: string): boolean {
-  if (/^[+-]\s*(?!"(?:integrity|resolved)"\s*:)"[^"]*"\s*:\s*"/m.test(diffText)) return true;
-  if (/^[+-]\s*(?:app)?[Vv]ersion:\s*\S+/m.test(diffText)) return true;
+  if (/^[+-][ \t]*(?!"(?:integrity|resolved)"\s*:)"[^"]*"\s*:\s*"/m.test(diffText)) return true;
+  if (/^[+-][ \t]*(?:app)?[Vv]ersion:\s*\S+/m.test(diffText)) return true;
   return false;
 }
 
