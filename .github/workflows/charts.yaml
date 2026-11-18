@@ -112,6 +112,10 @@ jobs:
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
             --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
           # Print the rendered policy identities if this assertion ever fails.
+          echo "opt-in Kubernetes-executor rendered bytes:"
+          wc -c /var/tmp/render-kubernetes-executor-netpol.yaml
+          echo "rendered object kinds:"
+          grep -n '^kind:' /var/tmp/render-kubernetes-executor-netpol.yaml | tail -n 35 || true
           grep -n 'kind: NetworkPolicy' /var/tmp/render-kubernetes-executor-netpol.yaml || true
           [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml)" -eq 2 ]
 
