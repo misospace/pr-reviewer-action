@@ -137,8 +137,16 @@ helm install pr-reviewer \
   -f values-controller-only.yaml
 ```
 
-Upgrade follows the same shape (`helm upgrade pr-reviewer
-oci://ghcr.io/misospace/charts/pr-reviewer --version <new release> ...`).
+Upgrade follows the same shape — pin the version of the release you are
+upgrading to:
+
+```sh
+helm upgrade pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -n pr-reviewer \
+  -f values-controller-only.yaml
+```
 
 How the chart artifact relates to the release:
 

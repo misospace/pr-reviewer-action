@@ -890,8 +890,18 @@ test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate
   assert.equal(tagInput.required, true, "the recovery tag is required, never implicit");
   assert.equal(tagInput.type, "string");
   // A canceled run would silently skip publishing the release's chart, so
-  // runs serialize per ref and never cancel.
-  assert.match(parsed.concurrency.group, /publish-chart-\$\{\{ github\.ref \}\}/);
+  // runs serialize per coordinate and never cancel. The group keys on the
+  // release TAG — not github.ref: a release event (refs/tags/vX.Y.Z) and a
+  // manual dispatch (a branch ref) would otherwise land in DIFFERENT
+  // groups and could race between the absence probe and the push,
+  // overwriting the same chart version. PR validation (publishes nothing)
+  // is keyed by PR number so it does not queue behind releases.
+  assert.match(
+    parsed.concurrency.group,
+    /publish-chart-\$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.number \|\| \(github\.event_name == 'release' && github\.event\.release\.tag_name \|\| inputs\.tag\) \}\}/,
+    "publish runs must share one concurrency group per release tag, closing the probe/push race between release and dispatch runs",
+  );
+  assert.doesNotMatch(parsed.concurrency.group, /github\.ref/, "the group must not key on github.ref (release and dispatch refs differ)");
   assert.equal(parsed.concurrency["cancel-in-progress"], false);
 
   // ── Two jobs, split by trust: publish (release/dispatch only) and the
@@ -995,8 +1005,8 @@ test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate
   assert.match(coordsRun, /version="\$\{TAG#v\}"/, "the version is stripped of its v prefix");
   assert.match(
     coordsRun,
-    /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\(\[-\+\]\[0-9A-Za-z\.\-\]\+\)\?\$/,
-    "publication requires a strict X.Y.Z semver check",
+    /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/,
+    "publication requires a strict plain X.Y.Z semver check (no prerelease/build suffixes)",
   );
   assert.match(coordsRun, /refusing to publish/);
   // The tagged-tree assertion: the packaged tree must be the tag's commit.
@@ -1120,13 +1130,34 @@ test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate
 test("#1708 chart OCI coordinates are documented for release and dev paths", () => {
   const deploymentDoc = read("docs/self-hosted-deployment.md");
   // The released OCI coordinate with a copy/paste-ready install command.
-  assert.match(deploymentDoc, /oci:\/\/ghcr\.io\/misospace\/charts\/pr-reviewer/);
-  assert.match(
-    deploymentDoc,
-    /helm install pr-reviewer \\\n\s*oci:\/\/ghcr\.io\/misospace\/charts\/pr-reviewer \\\n\s*--version \d+\.\d+\.\d+/,
+  // Literal substring assertions, not URL regexes: an unanchored
+  // `oci://...` regex can match anywhere in a URL-shaped string (the
+  // CodeQL missing-anchor class flagged on this PR) and a substring check
+  // pins the exact coordinate more tightly than a loose regex anyway.
+  assert.ok(
+    deploymentDoc.includes("oci://ghcr.io/misospace/charts/pr-reviewer"),
+    "docs must name the released OCI coordinate",
+  );
+  assert.ok(
+    deploymentDoc.includes(
+      "helm install pr-reviewer \\\n  oci://ghcr.io/misospace/charts/pr-reviewer \\\n  --version 3.9.1",
+    ),
     "docs must contain a copy/paste-ready OCI install command",
   );
-  assert.match(deploymentDoc, /helm upgrade pr-reviewer\s*\n?\s*oci:\/\/ghcr\.io\/misospace\/charts\/pr-reviewer/, "docs must document the OCI upgrade path");
+  assert.ok(
+    deploymentDoc.includes(
+      "helm upgrade pr-reviewer \\\n  oci://ghcr.io/misospace/charts/pr-reviewer \\\n  --version 3.9.1",
+    ),
+    "docs must contain a copy/paste-ready OCI upgrade command",
+  );
+  // The upgrade example must be copy/paste-ready too: no `<new release>`
+  // placeholder and no ellipsis inside the upgrade command block itself
+  // (the doc keeps pre-existing image-ref ellipses elsewhere, so the check
+  // is scoped to the block).
+  const upgradeBlock = /```sh\nhelm upgrade pr-reviewer[\s\S]*?```/.exec(deploymentDoc)?.[0] ?? "";
+  assert.notEqual(upgradeBlock, "", "docs must contain an OCI upgrade command block");
+  assert.doesNotMatch(upgradeBlock, /<new release>|\.\.\./, "the upgrade example must be copy/paste-ready: no placeholder or ellipsis");
+  assert.ok(upgradeBlock.includes("--version 3.9.1"), "the upgrade example pins a concrete release version");
   // chart version == application release version, tied to the #1704 images.
   assert.match(deploymentDoc, /ghcr\.io\/misospace\/pr-reviewer-controller:X\.Y\.Z/);
   // Digest overrides remain the exact immutable production pin.
@@ -1138,7 +1169,10 @@ test("#1708 chart OCI coordinates are documented for release and dev paths", () 
   assert.match(deploymentDoc, /publish-chart\.yaml/);
   assert.doesNotMatch(deploymentDoc, /charts\/pr-reviewer:latest/, "no latest chart alias may be documented");
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");
-  assert.match(chartReadme, /oci:\/\/ghcr\.io\/misospace\/charts\/pr-reviewer/);
+  assert.ok(
+    chartReadme.includes("oci://ghcr.io/misospace/charts/pr-reviewer"),
+    "the chart README must name the released OCI coordinate",
+  );
   assert.match(chartReadme, /helm install pr-reviewer/);
   assert.match(
     chartReadme,

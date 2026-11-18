@@ -54,7 +54,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-chart-${{ github.ref }}
+  # Key publish runs on the release TAG, not on github.ref: a release event
+  # (refs/tags/vX.Y.Z) and a manual dispatch (a branch ref) would otherwise
+  # land in DIFFERENT groups and could race — one run passing the
+  # absence probe while the other pushes — and overwrite the same chart
+  # version. Both paths that publish a given chart version share one group,
+  # so runs for the same version serialize and a second run's guard sees
+  # the version already published. PR validation runs (which publish
+  # nothing) are keyed by PR number so they do not queue behind releases.
+  group: publish-chart-${{ github.event_name == 'pull_request' && github.event.pull_request.number || (github.event_name == 'release' && github.event.release.tag_name || inputs.tag) }}
   cancel-in-progress: false
 
 jobs:
@@ -97,8 +105,12 @@ jobs:
                exit 1 ;;
           esac
           version="${TAG#v}"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "::error::release tag ${TAG} is not vX.Y.Z SemVer; refusing to publish."
+          # Strict plain X.Y.Z: prerelease (-rc.1) and build (+build) suffixes
+          # are REFUSED — the release contract is a vX.Y.Z release, and a
+          # pre-release chart publish would be a deliberate separate
+          # versioning design, never an implicit alias of this guard.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release tag ${TAG} is not a plain vX.Y.Z SemVer release (no prerelease/build suffixes); refusing to publish."
             exit 1
           fi
 
