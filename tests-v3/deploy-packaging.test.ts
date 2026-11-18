@@ -227,6 +227,51 @@ test("chart env names never drift from the controller entrypoint", () => {
   assert.ok(mainSource.includes("PR_REVIEWER_CREDENTIAL_"));
 });
 
+test("credential env name: chart helper sanitizes exactly like credentialEnvName (#1710)", () => {
+  const mainSource = read("src/controller/main.ts");
+  // The runtime derivation, pinned literally: the reference uppercased
+  // with every non-alphanumeric character mapped to `_` (deliberately
+  // many-to-one — colliding references share one operator Secret).
+  assert.match(
+    mainSource,
+    /return `PR_REVIEWER_CREDENTIAL_\$\{reference\.toUpperCase\(\)\.replaceAll\(\/\[\^A-Z0-9\]\/g, "_"\)\}`;/,
+    "credentialEnvName must keep the upper + [^A-Z0-9] → _ derivation",
+  );
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  const helperBlock =
+    /\{\{- define "pr-reviewer\.credential-env-name"[\s\S]*?\{\{- end -\}\}/.exec(helpers)?.[0] ?? "";
+  assert.ok(helperBlock, "the credential-env-name helper must stay defined");
+  // The chart derivation: same character class, same replacement, and the
+  // subject passed as regexReplaceAll's explicit SECOND argument. Piped
+  // usage appends the piped value last, so `upper . | regexReplaceAll
+  // "[^A-Z0-9]" "_"` matches the regex against the literal "_" and emits
+  // the reference verbatim (#1710: 'model-key' rendered
+  // PR_REVIEWER_CREDENTIAL_MODEL-KEY, unreadable by the runtime).
+  assert.match(
+    helperBlock,
+    /regexReplaceAll "\[\^A-Z0-9\]" \(upper \.\) "_"/,
+    "the chart credential-env-name helper must sanitize with the runtime's exact transform, subject as regexReplaceAll's second argument",
+  );
+  assert.doesNotMatch(
+    helperBlock,
+    /upper \.[^}]*\|\s*regexReplaceAll/,
+    "never pipe into regexReplaceAll — the subject lands last and swaps with the replacement (#1710)",
+  );
+  // Both sides sanitize the SAME character class — the agreement itself.
+  const chartClass = /regexReplaceAll "(\[\^A-Z0-9\])" \(upper \.\) "_"/.exec(helperBlock)?.[1];
+  const runtimeClass = /replaceAll\(\/(\[\^A-Z0-9\])\/g/.exec(mainSource)?.[1];
+  assert.ok(chartClass, "chart helper sanitize class must be extractable");
+  assert.ok(runtimeClass, "runtime sanitize class must be extractable");
+  assert.equal(chartClass, runtimeClass, "chart and runtime must sanitize the same character class");
+  // Property-style references name exactly what the runtime reads; these
+  // are the names the charts.yaml render assertions pin end to end.
+  const envName = (reference: string) =>
+    `PR_REVIEWER_CREDENTIAL_${reference.toUpperCase().replaceAll(/[^A-Z0-9]/g, "_")}`;
+  assert.equal(envName("a-b"), "PR_REVIEWER_CREDENTIAL_A_B");
+  assert.equal(envName("a.b"), "PR_REVIEWER_CREDENTIAL_A_B");
+  assert.equal(envName("a_b"), "PR_REVIEWER_CREDENTIAL_A_B");
+});
+
 test("admin bind: chart sets the pod-wide wildcard, entrypoint allowlists literal addresses", () => {
   const mainSource = read("src/controller/main.ts");
   // The entrypoint accepts only literal loopback/wildcard addresses — a
