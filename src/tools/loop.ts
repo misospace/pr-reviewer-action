@@ -2019,7 +2019,15 @@ export async function driveToolLoop(
     // among its admitting calls, was seeded discharged by the repair seam
     // (the prior loop's settlement), or was cap-released with a successful
     // in-window evidence execution on record.
-    if (obligationsSeenActive && !hasActiveRow()) {
+    // #1702: a trace admission means "test file was read", not "the PR is
+    // fully investigated". The pre-#1702 obligations-settled shortcut is
+    // allowed for ordinary required checks and dependency rows unchanged,
+    // but trace reads may invoke it only once the existing changed-file /
+    // specialist coverage predicate is also satisfied.
+    const traceNeedsCoverage = pendingRows.some((row) =>
+      row.tools !== undefined && row.obligation === undefined);
+    if (obligationsSeenActive && !hasActiveRow()
+      && (!traceNeedsCoverage || options.coverageComplete?.(outcome) === true)) {
       const strandedSettlement = pendingRows.some((row) => {
         if (discharged.has(row.id)) {
           return !seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id);
