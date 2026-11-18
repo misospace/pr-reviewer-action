@@ -15,12 +15,14 @@
  */
 import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
+import { gitlabFetch } from "./gitlab.js";
+import { gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
 import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 
-export type PublishPlatformName = "github" | "forgejo" | "tangled";
+export type PublishPlatformName = "github" | "forgejo" | "tangled" | "gitlab";
 
 export interface PublishCommentRef {
   id: number | string;
@@ -1430,5 +1432,667 @@ export class ForgejoPublishApi implements PublishPlatformApi {
    * trusts nobody. */
   async reviewCommentFeedback(_commentIds: readonly string[]): Promise<CommentFeedbackResult> {
     return { supported: false, complete: false, records: [] };
+  }
+}
+
+/** Map a raw GitLab MR-review row onto the GitHub-shaped review-state
+ * vocabulary the forge-agnostic cleanup layer speaks (the
+ * {@link forgejoReviewState} analogue). GitLab review states are
+ * `approved` / `requested_changes` / `commented`; an unknown or missing
+ * state is `""`, which the cleanup layer fails closed on. Exported for
+ * tests. */
+export function gitlabReviewState(raw: unknown): string {
+  if (raw === null || typeof raw !== "object") return "";
+  const state = typeof (raw as { state?: unknown }).state === "string"
+    ? ((raw as { state: string }).state).trim().toLowerCase()
+    : "";
+  if (state === "approved") return "APPROVED";
+  if (state === "requested_changes") return "CHANGES_REQUESTED";
+  if (state === "commented") return "COMMENTED";
+  return "";
+}
+
+const GITLAB_SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
+
+/**
+ * GitLab publication seam (#740), following {@link ForgejoPublishApi}'s
+ * structure: every operation reports failure instead of throwing where the
+ * caller logs a warning and continues, and capabilities that GitLab's REST
+ * v4 surface genuinely does not map degrade explicitly (`supported:false` /
+ * empty / `ok:false`) — never a faked success.
+ *
+ * Credential: `PRIVATE-TOKEN` header only ({@link gitlabFetch}), bound to the
+ * validated base origin by the shared transport; never in a URL or body.
+ *
+ * Endpoint-family notes (where GitLab differs structurally from GitHub):
+ * - MR notes ARE the conversation comments; the sticky upsert uses the
+ *   marker-semantics of `DEFAULT_MANAGED_MARKER` with PUT/POST on
+ *   `/merge_requests/:iid/notes`.
+ * - inline findings are positioned discussion notes (`POST /discussions`
+ *   with a `position` built from the MR's current `diff_refs`), retired via
+ *   `DELETE /discussions/:did/notes/:nid`. They are NOT children of a review
+ *   row, so the review-id-keyed seams that cannot be attributed degrade
+ *   ({@link listManagedInlineComments}).
+ * - the native review + verdict is `POST /merge_requests/:iid/reviews` plus
+ *   `POST /approve` / `POST /request_changes`. The REST reviews endpoint is
+ *   recent: on instances without it the create call is a bounded failure
+ *   (`ok:false`, status in the error), never a silent success.
+ * - resolving a thread resolves the DISCUSSION (`PUT /discussions/:did?
+ *   resolved=true`); {@link reviewThreadStates} projects positioned
+ *   discussions to `{threadId, resolved, firstCommentId}` and consumers join
+ *   by `firstCommentId` — GitLab discussions are not grouped under review
+ *   ids, so the managedReviewIds filter cannot apply here and is documented
+ *   as unused rather than approximated.
+ * - GraphQL-only features (minimization) are declared false in
+ *   `GITLAB_CAPABILITIES` and degrade exactly like Forgejo's.
+ */
+export class GitLabPublishApi implements PublishPlatformApi {
+  readonly platform = "gitlab" as const;
+  /** GitLab hosts native MR review events (`/reviews` + approve /
+   * request_changes) and positioned inline notes, so the publish step takes
+   * the native path; an instance too old for the REST reviews endpoint gets
+   * a bounded createReview failure, not a faked success. */
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
+  /** GitHub hides superseded review bodies with GraphQL minimization and
+   * Forgejo deletes the review row outright. GitLab's review-deletion
+   * endpoint is recent and its side effects on the MR's approval state are
+   * unverified here, so the whole-review cleanup surface stays declared
+   * unsupported: the dismissal path ({@link dismissReview}, the same DELETE
+   * on a verdict row the cleanup layer already targets) is the reviewed
+   * route. */
+  readonly supersededReviewDeletion: NativeReviewSurface = {
+    supported: false,
+    reason: "GitLab review deletion (DELETE /reviews/:id) is recent and its approval-state side effects are unverified; only the verdict dismissal path is relied upon",
+  };
+  private readonly base: string;
+  private readonly origin: string;
+  private readonly repo: string;
+  private readonly prNumber: string;
+  private readonly timeoutMs: number;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(options: {
+    repo: string;
+    prNumber: string;
+    token?: string | undefined;
+    baseUrl?: string | undefined;
+    timeoutMs?: number | undefined;
+    fetchImpl?: FetchLike | undefined;
+  }) {
+    // No default endpoint: an empty/invalid base fails at construction
+    // (#674 SSRF boundary), before any credential exists.
+    const parsed = parsePlatformBaseUrl(options.baseUrl ?? "", "GitLab API base URL");
+    this.base = parsed.base;
+    this.origin = parsed.origin;
+    const path = parseGitLabProjectPath(options.repo);
+    if (path === null) throw new Error(`Invalid GitLab project path: ${options.repo}`);
+    this.repo = path;
+    this.prNumber = options.prNumber;
+    this.timeoutMs = options.timeoutMs ?? 25_000;
+    this.fetchImpl = gitlabFetch(options.token, options.fetchImpl ?? fetch);
+  }
+
+  /** A project-scoped /api/v4 URL, refused (throws) when the project path is
+   * invalid or the normalized path escapes the intended prefix. */
+  private url(staticTail: string, dynamicTail = ""): string {
+    const url = gitlabProjectScopedUrl(`${this.base}/api/v4`, this.repo, staticTail, dynamicTail);
+    if (url === null) throw new Error(`Refusing a request outside project ${this.repo}`);
+    return url;
+  }
+
+  private opts(method: string, body?: unknown): Parameters<typeof requestJson>[1] {
+    return {
+      method,
+      // The credential is the PRIVATE-TOKEN header attached by
+      // `this.fetchImpl`; the Authorization channel stays unused.
+      token: undefined,
+      timeoutMs: this.timeoutMs,
+      fetchImpl: this.fetchImpl,
+      allowedOrigin: this.origin,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    };
+  }
+
+  /** `GET /user` → `username`; any failure is null (fail closed). */
+  async authenticatedIdentity(): Promise<string | null> {
+    try {
+      const { status, data } = await requestJson(`${this.base}/api/v4/user`, this.opts("GET"));
+      if (status !== 200 || data === null || typeof data !== "object") return null;
+      const username = (data as { username?: unknown }).username;
+      return typeof username === "string" && username.trim() !== "" ? username : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** MR read → `diff_refs.head_sha`, the current MR head for the #451
+   * publication-boundary re-check. */
+  async getHeadSha(): Promise<string | null> {
+    try {
+      const { status, data } = await requestJson(this.url("/merge_requests/", this.prNumber), this.opts("GET"));
+      if (status !== 200 || data === null || typeof data !== "object") return null;
+      const diffRefs = (data as { diff_refs?: unknown }).diff_refs;
+      const sha = diffRefs !== null && typeof diffRefs === "object"
+        ? (diffRefs as { head_sha?: unknown }).head_sha
+        : undefined;
+      return typeof sha === "string" && sha !== "" ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** MR notes, system notes excluded — the managed conversation surface.
+   * The strict read either enumerates to a proven end or throws, so
+   * completeness is exactly "it did not throw" (Forgejo's #1027 posture). */
+  private async listNotesStrict(): Promise<PublishCommentRef[]> {
+    const comments: PublishCommentRef[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const { status, data } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/notes?sort=asc&per_page=100&page=${page}`),
+        this.opts("GET"),
+      );
+      if (status !== 200 || !Array.isArray(data)) throw new Error(`GitLab MR notes read failed (status ${status})`);
+      for (const note of data) {
+        if (note === null || typeof note !== "object") continue;
+        const row = note as {
+          id?: number | string; body?: unknown; created_at?: unknown; updated_at?: unknown; system?: unknown;
+          author?: { id?: number | string; username?: unknown } | null;
+        };
+        if (row.system === true) continue;
+        comments.push({
+          id: row.id as number | string,
+          body: typeof row.body === "string" ? row.body : "",
+          ...(typeof row.updated_at === "string" ? { updated_at: row.updated_at } : {}),
+          user: row.author !== null && typeof row.author === "object"
+            ? {
+              ...(row.author.id !== undefined ? { id: row.author.id } : {}),
+              ...(typeof row.author.username === "string" ? { login: row.author.username } : {}),
+            }
+            : null,
+        });
+      }
+      if (data.length < 100) return comments;
+    }
+    throw new Error("GitLab MR notes exceeded the pagination limit");
+  }
+
+  async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
+    try {
+      return { complete: true, comments: await this.listNotesStrict() };
+    } catch {
+      return { complete: false, comments: [] };
+    }
+  }
+
+  async listIssueComments(): Promise<PublishCommentRef[]> {
+    try {
+      return await this.listNotesStrict();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Sticky managed-comment upsert on the MR note surface. Same
+   * DEFAULT_MANAGED_MARKER semantics as the GitHub adapter: the PATCH target
+   * is the newest marker-bearing note AND must be proven owned by this run's
+   * authenticated identity (a foreign-authored or unattributable marker is
+   * never overwritten; an unprovable identity fails closed). Creation needs
+   * no proof — creating never destroys anything. */
+  async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
+    let comments: PublishCommentRef[];
+    try {
+      comments = await this.listNotesStrict();
+    } catch (error) {
+      return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
+    matching.sort((a, b) => {
+      const updated = String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+      if (updated !== 0) return updated;
+      const aId = Number(a.id);
+      const bId = Number(b.id);
+      return Number.isSafeInteger(aId) && Number.isSafeInteger(bId) ? bId - aId : 0;
+    });
+    let target = matching[0];
+    if (target !== undefined) {
+      const login = await this.authenticatedIdentity();
+      if (login === null) return { ok: false, created: false, error: "GitLab sticky comment owner could not be verified" };
+      const identity: TrustedOwnerIdentity = { kind: "login", login };
+      target = matching.find((comment) => ownerMatchesIdentity(comment.user, identity));
+      if (target === undefined
+        && matching.some((comment) => typeof comment.user?.login !== "string" || comment.user.login.trim() === "")) {
+        return { ok: false, created: false, error: "GitLab sticky comment ownership is unknown" };
+      }
+    }
+    try {
+      if (target === undefined) {
+        const { status, data } = await requestJson(
+          this.url("/merge_requests/", `${this.prNumber}/notes`),
+          this.opts("POST", { body }),
+        );
+        if (status !== 200 && status !== 201) return { ok: false, created: false, error: `status ${status}` };
+        const created = data as { id?: number | string; updated_at?: unknown } | null;
+        const updatedAt = typeof created?.updated_at === "string" ? created.updated_at : undefined;
+        return created?.id === undefined
+          ? { ok: true, created: true, ...(updatedAt === undefined ? {} : { updatedAt }) }
+          : { ok: true, created: true, commentId: created.id, ...(updatedAt === undefined ? {} : { updatedAt }) };
+      }
+      const { status, data } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/notes/${target.id}`),
+        this.opts("PUT", { body }),
+      );
+      if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
+      const patched = data as { id?: number | string; updated_at?: unknown } | null;
+      const id = patched?.id ?? target.id;
+      const updatedAt = typeof patched?.updated_at === "string" ? patched.updated_at : undefined;
+      return { ok: true, created: false, commentId: id, ...(updatedAt === undefined ? {} : { updatedAt }) };
+    } catch (error) {
+      return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** #763: post one plain top-level note VERBATIM (marker semantics belong
+   * to the caller's renderer). The body is JSON request DATA only; an empty
+   * body is refused before any request. */
+  async postIssueComment(body: string): Promise<CommentPostResult> {
+    if (typeof body !== "string" || body === "") {
+      return { ok: false, created: false, error: "comment body must be a non-empty string" };
+    }
+    try {
+      const { status, data } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/notes`),
+        this.opts("POST", { body }),
+      );
+      if (status !== 200 && status !== 201) return { ok: false, created: false, error: `status ${status}` };
+      const created = data as { id?: number | string } | null;
+      return created?.id === undefined
+        ? { ok: true, created: true }
+        : { ok: true, created: true, commentId: created.id };
+    } catch (error) {
+      return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async listReviews(): Promise<PublishReviewRef[]> {
+    const reviews: PublishReviewRef[] = [];
+    for (let page = 1; page <= 10; page += 1) {
+      const { status, data } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/reviews?per_page=100&page=${page}`),
+        this.opts("GET"),
+      );
+      if (status !== 200 || !Array.isArray(data)) throw new Error("Incomplete review listing; cleanup must fail closed");
+      for (const row of data) {
+        if (row === null || typeof row !== "object") throw new Error("Incomplete review listing; cleanup must fail closed");
+        const review = row as {
+          id?: number | string; state?: unknown; created_at?: unknown;
+          reviewer?: { id?: number | string; username?: unknown } | null;
+        };
+        const user = review.reviewer !== null && typeof review.reviewer === "object"
+          ? {
+            ...(review.reviewer.id !== undefined ? { id: review.reviewer.id } : {}),
+            ...(typeof review.reviewer.username === "string" ? { login: review.reviewer.username } : {}),
+          }
+          : null;
+        reviews.push({
+          id: review.id as number | string,
+          state: gitlabReviewState(review),
+          ...(typeof review.created_at === "string" ? { submitted_at: review.created_at } : {}),
+          user,
+        });
+      }
+      if (data.length < 100) return reviews;
+    }
+    throw new Error("Review listing exceeded pagination cap");
+  }
+
+  /** Degraded: GitLab inline findings are positioned DISCUSSION notes, not
+   * children of a review row, so there is no review-id-keyed comment listing
+   * to enumerate. The cleanup layer's "prove the review carries no inline
+   * findings" step reads this as unsupported and fails closed — retirement
+   * of this action's own inline notes goes through
+   * {@link retireInlineComment} on the note's own discussion id. */
+  async listManagedInlineComments(_reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }> {
+    return { supported: false, complete: false, comments: [] };
+  }
+
+  /** Retire one published inline note:
+   * `DELETE /merge_requests/:iid/discussions/:discussionId/notes/:noteId`.
+   * This action's inline findings are posted as individual discussions,
+   * where the discussion id equals the first note's id, so the seam's
+   * `reviewId` argument carries that discussion id on GitLab. Both ids go
+   * into REST path segments and are refused WITHOUT a request when
+   * malformed; a 404 is a bounded failure, never an idempotent success (a
+   * route-level 404 is indistinguishable from "already gone"). */
+  async retireInlineComment(reviewId: string, commentId: string): Promise<boolean> {
+    if (!/^[1-9]\d*$/.test(reviewId) || !/^[1-9]\d*$/.test(commentId)) return false;
+    try {
+      const { status } = await requestText(
+        this.url("/merge_requests/", `${this.prNumber}/discussions/${reviewId}/notes/${commentId}`),
+        this.opts("DELETE"),
+      );
+      return status === 200 || status === 204;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Anchor the inline comments of a review request against the MR's current
+   * `diff_refs` (GitLab text positions are addressed by
+   * base/start/head sha + new path/line, not GitHub's position index).
+   * Comments without a usable line are DROPPED (the same re-anchor-or-drop
+   * doctrine Forgejo applies via its position map); multi-line suggestion
+   * ranges are not expressible and carry only their end line. */
+  private async positionComments(
+    comments: NativeReviewComment[] | undefined,
+  ): Promise<Array<{ body: string; position: Record<string, unknown> }> | null> {
+    if (!Array.isArray(comments) || comments.length === 0) return [];
+    const { status, data } = await requestJson(this.url("/merge_requests/", this.prNumber), this.opts("GET"));
+    if (status !== 200 || data === null || typeof data !== "object") return null;
+    const diffRefs = (data as { diff_refs?: unknown }).diff_refs;
+    if (diffRefs === null || typeof diffRefs !== "object") return null;
+    const refs = diffRefs as { base_sha?: unknown; start_sha?: unknown; head_sha?: unknown };
+    if (typeof refs.base_sha !== "string" || typeof refs.head_sha !== "string") return null;
+    const startSha = typeof refs.start_sha === "string" ? refs.start_sha : refs.base_sha;
+    const positioned: Array<{ body: string; position: Record<string, unknown> }> = [];
+    for (const comment of comments) {
+      if (!comment || typeof comment.path !== "string" || !comment.path
+        || typeof comment.body !== "string" || !comment.body
+        || typeof comment.line !== "number" || !Number.isInteger(comment.line) || comment.line <= 0) {
+        continue;
+      }
+      positioned.push({
+        body: comment.body,
+        position: {
+          base_sha: refs.base_sha,
+          start_sha: startSha,
+          head_sha: refs.head_sha,
+          position_type: "text",
+          new_path: comment.path,
+          new_line: comment.line,
+        },
+      });
+    }
+    return positioned;
+  }
+
+  /** Create the native review: inline findings first (positioned discussion
+   * notes — the endpoint the GitLab REST surface actually offers for them),
+   * then the review record `POST /merge_requests/:iid/reviews`, then the
+   * verdict: APPROVE → `POST /approve`, REQUEST_CHANGES →
+   * `POST /request_changes`, COMMENT → nothing extra. Every step reports a
+   * bounded failure (`ok:false` with the status) on the first one the
+   * instance refuses — the REST reviews endpoint in particular is recent,
+   * and an instance without it must surface a publication failure, never a
+   * faked success. */
+  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string; reviewId?: number | string }> {
+    try {
+      const positioned = await this.positionComments(request.comments);
+      if (positioned === null) {
+        return { ok: false, error: "could not resolve the MR diff refs for inline comment positions" };
+      }
+      // Inline findings travel as positioned individual discussions so they
+      // anchor on the diff even where the review record itself would not
+      // accept them.
+      for (const comment of positioned) {
+        const { status } = await requestJson(
+          this.url("/merge_requests/", `${this.prNumber}/discussions`),
+          this.opts("POST", { body: comment.body, position: comment.position }),
+        );
+        if (status !== 200 && status !== 201) return { ok: false, error: `inline comment status ${status}` };
+      }
+      const { status, data } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/reviews`),
+        this.opts("POST", { body: request.body }),
+      );
+      if (status !== 200 && status !== 201) return { ok: false, error: `status ${status}` };
+      const reviewId = (data as { id?: number | string } | null)?.id;
+      if (request.event === "APPROVE") {
+        const approve = await requestJson(this.url("/merge_requests/", `${this.prNumber}/approve`), this.opts("POST", {}));
+        if (approve.status !== 200 && approve.status !== 201) {
+          return { ok: false, error: `approve status ${approve.status}`, ...(reviewId !== undefined ? { reviewId } : {}) };
+        }
+      } else if (request.event === "REQUEST_CHANGES") {
+        const reject = await requestJson(
+          this.url("/merge_requests/", `${this.prNumber}/request_changes`),
+          this.opts("POST", {}),
+        );
+        if (reject.status !== 200 && reject.status !== 201) {
+          return { ok: false, error: `request_changes status ${reject.status}`, ...(reviewId !== undefined ? { reviewId } : {}) };
+        }
+      }
+      return status === 200 || status === 201
+        ? { ok: true, ...(reviewId !== undefined ? { reviewId } : {}) }
+        : { ok: false, error: `status ${status}` };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Dismiss a superseded verdict review by deleting it
+   * (`DELETE /merge_requests/:iid/reviews/:id`) — GitLab has no dismissal
+   * record with a message, so the message is deliberately dropped and the
+   * deletion IS the dismissal. The endpoint is recent: a refusal (404/405)
+   * is reported as false, a bounded failure like Forgejo's dismissal. */
+  async dismissReview(reviewId: number | string, _message: string): Promise<boolean> {
+    if (!/^[1-9]\d*$/.test(String(reviewId))) return false;
+    try {
+      const { status } = await requestText(
+        this.url("/merge_requests/", `${this.prNumber}/reviews/${reviewId}`),
+        this.opts("DELETE"),
+      );
+      return status === 200 || status === 204;
+    } catch {
+      return false;
+    }
+  }
+
+  /** GraphQL-only (declared false in GITLAB_CAPABILITIES): degrade exactly
+   * like Forgejo — the caller notes the degradation and continues. */
+  async minimizedReviewIds(): Promise<string[]> {
+    return [];
+  }
+
+  async minimizeReview(_nodeId: string): Promise<boolean> {
+    return false;
+  }
+
+  async unresolvedSupersededThreads(_managedIds: number[]): Promise<ThreadQueryResult> {
+    return { ok: false, threads: [], hasNextPage: false, error: "no GraphQL API" };
+  }
+
+  /** Position-discussion thread states for the #1559 outcome observations:
+   * GitLab resolves DISCUSSIONS, not GitHub review threads, so every
+   * discussion carrying a positioned note is reported as
+   * `{threadId: discussionId, resolved, firstCommentId: first positioned
+   * note id}` and the consumer joins on `firstCommentId` (its own published
+   * note ids). The `managedReviewIds` argument cannot apply — GitLab
+   * discussions are not grouped under review rows — so it is unused rather
+   * than approximated. The read declares `complete:false` on a failed page
+   * or an exhausted page cap: an absent thread is then not proven absent. */
+  async reviewThreadStates(_managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult> {
+    const threads: ReviewThreadState[] = [];
+    try {
+      for (let page = 1; page <= 20; page += 1) {
+        const { status, data } = await requestJson(
+          this.url("/merge_requests/", `${this.prNumber}/discussions?per_page=100&page=${page}`),
+          this.opts("GET"),
+        );
+        if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, threads: [] };
+        for (const discussion of data) {
+          if (discussion === null || typeof discussion !== "object") return { supported: true, complete: false, threads: [] };
+          const row = discussion as { id?: number | string; resolved?: unknown; notes?: unknown };
+          if (!Array.isArray(row.notes)) return { supported: true, complete: false, threads: [] };
+          const positioned = row.notes.filter((note) => note !== null && typeof note === "object"
+            && (note as { position?: unknown }).position !== null
+            && typeof (note as { position?: unknown }).position === "object");
+          if (positioned.length === 0) continue;
+          const first = positioned[0] as { id?: number | string };
+          threads.push({
+            threadId: String(row.id ?? ""),
+            resolved: row.resolved === true,
+            firstCommentId: first.id === undefined ? "" : String(first.id),
+          });
+        }
+        if (data.length < 100) return { supported: true, complete: true, threads };
+        if (page === 20) return { supported: true, complete: false, threads: [] };
+      }
+      return { supported: true, complete: false, threads: [] };
+    } catch {
+      return { supported: true, complete: false, threads: [] };
+    }
+  }
+
+  /** Resolve/reresolve a thread = resolve the DISCUSSION
+   * (`PUT /merge_requests/:iid/discussions/:did?resolved=true`). The thread
+   * id is the discussion id from {@link reviewThreadStates}. A malformed id
+   * is refused without a request. */
+  async resolveThread(threadId: string): Promise<boolean> {
+    if (!/^[1-9]\d*$/.test(threadId)) return false;
+    try {
+      const { status } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/discussions/${encodeURIComponent(threadId)}?resolved=true`),
+        this.opts("PUT", {}),
+      );
+      return status === 200;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Remove a label from the MR by name:
+   * `DELETE /merge_requests/:iid/labels?label_names[]=<label>` — GitLab's
+   * label-removal-by-name endpoint (there is no per-label DELETE route on
+   * the MR side). */
+  async removeLabel(label: string): Promise<boolean> {
+    if (typeof label !== "string" || label === "") return false;
+    try {
+      const { status } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/labels?label_names[]=${encodeURIComponent(label)}`),
+        this.opts("DELETE"),
+      );
+      return status === 200 || status === 204;
+    } catch {
+      return false;
+    }
+  }
+
+  /** #1005: GitLab reviewer requests (`POST /merge_requests/:iid/reviewers`,
+   * `reviewer_ids` of resolved user ids) — supported for USERS. GitHub's
+   * team concept does not map: a non-empty `teams` request is answered with
+   * the not-supported-for-teams failure and NOTHING is mutated, so a team
+   * request is never silently dropped. Idempotent via the current-reviewers
+   * read; username resolution (`GET /users?username=`) must match exactly
+   * one account or the whole request fails closed. */
+  async requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult> {
+    const none = (): Pick<ReviewerRequestResult, "requestedUsers" | "requestedTeams" | "alreadyRequestedUsers" | "alreadyRequestedTeams"> =>
+      ({ requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] });
+    const cleanUsers = [...new Set(users.map((u) => u.trim()))].filter((u) => u !== "");
+    const cleanTeams = [...new Set(teams.map((t) => t.trim()))].filter((t) => t !== "");
+    if (cleanTeams.length > 0) {
+      return {
+        ok: false,
+        supported: true,
+        ...none(),
+        error: "GitLab has no team reviewers; team reviewer requests are not supported and were not sent",
+      };
+    }
+    if (cleanUsers.some((u) => !REQUESTER_USER.test(u))) {
+      return { ok: false, supported: true, ...none(), error: "reviewer request rejected: an identity is not a valid GitLab username" };
+    }
+    if (cleanUsers.length === 0) return { ok: true, supported: true, ...none() };
+    let existing: string[];
+    try {
+      const { status, data } = await requestJson(this.url("/merge_requests/", `${this.prNumber}/reviewers`), this.opts("GET"));
+      if (status !== 200 || !Array.isArray(data)) {
+        return { ok: false, supported: true, ...none(), error: `could not read requested reviewers (status ${status})` };
+      }
+      const logins = data.map((entry) => {
+        const username = (entry as { username?: unknown } | null)?.username;
+        return typeof username === "string" && username !== "" ? username : null;
+      });
+      if (logins.includes(null)) {
+        return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: a reviewer entry lacks a username)" };
+      }
+      existing = logins as string[];
+    } catch (error) {
+      return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
+    }
+    const existingSet = new Set(existing.map((u) => u.toLowerCase()));
+    const newUsers = cleanUsers.filter((u) => !existingSet.has(u.toLowerCase()));
+    const alreadyRequestedUsers = cleanUsers.filter((u) => existingSet.has(u.toLowerCase()));
+    if (newUsers.length === 0) {
+      return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers, alreadyRequestedTeams: [] };
+    }
+    // GitLab adds reviewers by user id; resolve each username through the
+    // instance's user search and fail closed on any name that does not match
+    // exactly one account (never substitute another reviewer).
+    const ids: number[] = [];
+    for (const username of newUsers) {
+      try {
+        const { status, data } = await requestJson(`${this.base}/api/v4/users?username=${encodeURIComponent(username)}`, this.opts("GET"));
+        if (status !== 200 || !Array.isArray(data) || data.length !== 1) {
+          return { ok: false, supported: true, ...none(), error: `could not resolve reviewer username ${username}` };
+        }
+        const match = data[0] as { id?: unknown; username?: unknown };
+        if (typeof match.id !== "number" || typeof match.username !== "string"
+          || match.username.toLowerCase() !== username.toLowerCase()) {
+          return { ok: false, supported: true, ...none(), error: `could not resolve reviewer username ${username}` };
+        }
+        ids.push(match.id);
+      } catch (error) {
+        return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    try {
+      const { status } = await requestJson(
+        this.url("/merge_requests/", `${this.prNumber}/reviewers`),
+        this.opts("POST", { reviewer_ids: ids }),
+      );
+      if (status !== 200 && status !== 201) {
+        return { ok: false, supported: true, ...none(), error: `status ${status}` };
+      }
+      return { ok: true, supported: true, requestedUsers: newUsers, requestedTeams: [], alreadyRequestedUsers, alreadyRequestedTeams: [] };
+    } catch (error) {
+      return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Review-comment feedback (👍/👎) is not ported for GitLab in #740 — the
+   * same explicit degradation Forgejo reports, so the caller reads "no
+   * feedback channel" and never mistakes the absence for "no reaction was
+   * left". `collaboratorPermission` is deliberately absent: with no feedback
+   * reader there is no actor to verify, so this adapter trusts nobody. */
+  async reviewCommentFeedback(_commentIds: readonly string[]): Promise<CommentFeedbackResult> {
+    return { supported: false, complete: false, records: [] };
+  }
+
+  /** Commit status (`POST /projects/:id/statuses/:sha`): GitLab has no
+   * Actions check runs, so the commit status IS the external CI surface
+   * (`GITLAB_CAPABILITIES`). Not part of `PublishPlatformApi` (the publish
+   * flow has no forge-agnostic commit-status call today); the self-hosted
+   * deployment lane calls it directly. A malformed sha is refused without a
+   * request. */
+  async postCommitStatus(
+    sha: string,
+    state: "pending" | "running" | "success" | "failed" | "canceled",
+    options: { name?: string; targetUrl?: string; description?: string } = {},
+  ): Promise<boolean> {
+    if (!GITLAB_SHA_RE.test(sha)) return false;
+    try {
+      const body: Record<string, unknown> = { state };
+      if (options.name !== undefined && options.name !== "") {
+        body.name = options.name;
+        body.context = options.name;
+      }
+      if (options.targetUrl !== undefined && options.targetUrl !== "") body.target_url = options.targetUrl;
+      if (options.description !== undefined && options.description !== "") body.description = options.description;
+      const { status } = await requestJson(
+        this.url("/statuses/", encodeURIComponent(sha)),
+        this.opts("POST", body),
+      );
+      return status === 200 || status === 201;
+    } catch {
+      return false;
+    }
   }
 }
