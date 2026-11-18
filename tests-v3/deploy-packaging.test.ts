@@ -38,25 +38,42 @@ test("chart dependency: bjw-s common pinned to exactly 5.3.0", () => {
   const chart = parse(read("deploy/charts/pr-reviewer/Chart.yaml")) as ChartYaml;
   assert.equal(chart.apiVersion, "v2");
   assert.equal(chart.name, "pr-reviewer");
-  assert.equal(chart.version, "0.1.0");
   const common = chart.dependencies.filter((dep) => dep.name === "common");
   assert.equal(common.length, 1);
   assert.equal(common[0]!.version, "5.3.0");
   assert.equal(common[0]!.repository, "https://bjw-s-labs.github.io/helm-charts");
 });
 
-test("chart appVersion tracks the release manifest version", () => {
+test("#1708: chart release coordinates equal the application release (version, appVersion, manifest)", () => {
   const chart = parse(read("deploy/charts/pr-reviewer/Chart.yaml")) as ChartYaml;
   const manifest = JSON.parse(read(".release-please-manifest.json")) as Record<string, string>;
-  assert.equal(chart.appVersion, manifest["."]);
+  const version = manifest["."];
+  assert.match(
+    version ?? "",
+    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/,
+    "the manifest must carry a plain semver release version",
+  );
+  // Helm OCI artifacts are tagged by Chart.yaml.version, so the chart's
+  // own version is the OCI artifact tag: a constant chart version would
+  // collide with the already-published artifact on every release. Both
+  // coordinates equal the application release (one release, one
+  // coordinate), and release-please bumps them together (pinned by the
+  // release-please synchronization test below).
+  assert.equal(
+    chart.version,
+    version,
+    "Chart.yaml.version is the OCI artifact tag and must equal the application release",
+  );
+  assert.equal(chart.appVersion, version);
 });
 
 /** Deployment files whose version fields release-please must bump in the
- * release PR, and the number of annotated fields each one carries. The
- * chart's own `version` is intentionally excluded: it is the independent
- * Helm chart version, not the application release. */
+ * release PR, and the number of annotated fields each one carries. Since
+ * #1708 the chart's own `version` is bound too: Helm OCI artifacts are
+ * tagged by Chart.yaml.version, so it must equal the application release
+ * alongside `appVersion`. */
 const VERSION_BOUND_DEPLOY_FILES = new Map<string, number>([
-  ["deploy/charts/pr-reviewer/Chart.yaml", 1],
+  ["deploy/charts/pr-reviewer/Chart.yaml", 2],
   ["deploy/charts/pr-reviewer/examples/values-controller-only.yaml", 1],
   ["deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml", 2],
 ]);
@@ -814,4 +831,353 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(deploymentDoc, /sha-<commit>/);
   assert.match(deploymentDoc, /X\.Y\.Z/);
   assert.match(deploymentDoc, /[Ff]ork/);
+});
+
+test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate-only, coordinates fail closed", () => {
+  const path = ".github/workflows/publish-chart.yaml";
+  const workflow = read(path);
+  const parsed = parse(workflow) as {
+    on: {
+      release?: { types?: string[] };
+      pull_request?: { branches?: string[] };
+      push?: unknown;
+      workflow_dispatch?: {
+        inputs?: Record<string, { required?: boolean; type?: string }>;
+      };
+    };
+    permissions: { contents: string };
+    concurrency: { group: string; "cancel-in-progress": boolean };
+    jobs: Record<
+      string,
+      {
+        if?: string;
+        permissions: { contents: string; packages?: string };
+        steps: {
+          uses?: string;
+          run?: string;
+          env?: Record<string, unknown>;
+          with?: Record<string, unknown>;
+        }[];
+      }
+    >;
+  };
+
+  // ── Triggers: GitHub Release publications (the Dispatch org pattern,
+  // the trusted release lifecycle of this repo), pull requests
+  // (validate-only), and a manual dispatch carrying an explicit release
+  // tag as the recovery path. A `push` trigger is deliberately absent:
+  // this repository's release pipeline pushes the vX.Y.Z tag AND then
+  // publishes the Release, so a tag-push trigger would push the same
+  // chart version twice.
+  assert.ok(parsed.on, "triggers must parse");
+  assert.deepEqual(
+    Object.keys(parsed.on).sort(),
+    ["pull_request", "release", "workflow_dispatch"],
+  );
+  assert.deepEqual(
+    parsed.on.release?.types,
+    ["published"],
+    "the automatic publish trigger is the trusted release publication",
+  );
+  assert.deepEqual(parsed.on.pull_request?.branches, ["main"]);
+  assert.equal(
+    parsed.on.push,
+    undefined,
+    "no push trigger: the release event is the single publish moment for a version",
+  );
+  const tagInput = parsed.on.workflow_dispatch?.inputs?.tag;
+  assert.ok(tagInput, "workflow_dispatch must accept an explicit release tag");
+  assert.equal(tagInput.required, true, "the recovery tag is required, never implicit");
+  assert.equal(tagInput.type, "string");
+  // A canceled run would silently skip publishing the release's chart, so
+  // runs serialize per coordinate and never cancel. The group keys on the
+  // release TAG — not github.ref: a release event (refs/tags/vX.Y.Z) and a
+  // manual dispatch (a branch ref) would otherwise land in DIFFERENT
+  // groups and could race between the absence probe and the push,
+  // overwriting the same chart version. PR validation (publishes nothing)
+  // is keyed by PR number so it does not queue behind releases.
+  assert.match(
+    parsed.concurrency.group,
+    /publish-chart-\$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.number \|\| \(github\.event_name == 'release' && github\.event\.release\.tag_name \|\| inputs\.tag\) \}\}/,
+    "publish runs must share one concurrency group per release tag, closing the probe/push race between release and dispatch runs",
+  );
+  assert.doesNotMatch(parsed.concurrency.group, /github\.ref/, "the group must not key on github.ref (release and dispatch refs differ)");
+  assert.equal(parsed.concurrency["cancel-in-progress"], false);
+
+  // ── Two jobs, split by trust: publish (release/dispatch only) and the
+  // credential-free PR validation job.
+  assert.deepEqual(Object.keys(parsed.jobs).sort(), ["publish", "validate"]);
+  const publish = parsed.jobs["publish"]!;
+  const validate = parsed.jobs["validate"]!;
+  // Top-level permissions stay least-privileged; only the publish job
+  // gains packages: write.
+  assert.deepEqual(parsed.permissions, { contents: "read" });
+
+  // ── Publish job: release publications and dispatches; a pull_request
+  // event never enters it, so charts are never published from
+  // pull-request code.
+  assert.match(
+    publish.if ?? "",
+    /github\.event_name != 'pull_request'/,
+    "the publish job must refuse pull_request events outright",
+  );
+  assert.deepEqual(publish.permissions, { contents: "read", packages: "write" });
+
+  // ── Validation job: pull requests only, `contents: read` ONLY
+  // (packages: write is not granted), no GHCR login, no secret, and
+  // nothing pushed — while still validating, linting AND packaging the
+  // chart.
+  assert.match(
+    validate.if ?? "",
+    /github\.event_name == 'pull_request'/,
+    "the credential-free job must cover every pull_request event",
+  );
+  assert.deepEqual(
+    validate.permissions,
+    { contents: "read" },
+    "PRs must not receive packages: write",
+  );
+  assert.ok(
+    !JSON.stringify(validate).includes("secrets."),
+    "no secret may be reachable from pull-request code",
+  );
+  assert.equal(
+    validate.steps.filter((step) => (step.run ?? "").includes("registry login")).length,
+    0,
+    "PR validation must not log in to any registry",
+  );
+  assert.equal(
+    validate.steps.filter((step) => (step.run ?? "").includes("helm push")).length,
+    0,
+    "PR validation must not push any OCI artifact",
+  );
+  const validateRuns = validate.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(validateRuns, /helm dependency build/, "PRs must validate dependency resolution");
+  assert.match(validateRuns, /helm lint/, "PRs must lint the chart");
+  assert.match(validateRuns, /helm package/, "PRs must package the chart");
+
+  // ── Checkout provenance: the publish job packages the TAGGED tree the
+  // release names (never the branch a dispatch was started from), and the
+  // validation job checks out the actual PR HEAD commit, not the
+  // synthetic merge commit. No checkout ever hands its token onward.
+  const checkoutRef = (job: { steps: { uses?: string; with?: Record<string, unknown> }[] }): string => {
+    const step = job.steps.find((entry) => entry.uses?.includes("actions/checkout"));
+    assert.ok(step, "each job must carry a checkout step its provenance can be proven from");
+    return String(step!.with?.["ref"] ?? "");
+  };
+  assert.equal(
+    checkoutRef(publish),
+    "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}",
+    "the publish job must package the exact release tag, never the dispatching branch",
+  );
+  assert.equal(
+    checkoutRef(validate),
+    "${{ github.event.pull_request.head.sha }}",
+    "the validation job must validate the PR head commit, never the merge commit",
+  );
+  for (const job of [publish, validate]) {
+    for (const checkout of job.steps.filter((step) => step.uses?.includes("actions/checkout"))) {
+      assert.equal((checkout.with ?? {})["persist-credentials"], false);
+    }
+    // Every action is pinned by commit SHA (40 hex chars), matching the
+    // repository-wide pinning convention.
+    for (const uses of job.steps.map((step) => step.uses ?? "")) {
+      if (uses) assert.match(uses, /@[0-9a-f]{40}( # |$)/, `${uses} must be pinned by commit SHA`);
+    }
+  }
+
+  // ── Release-coordinate validation: exactly one step resolves the chart
+  // version, from a strictly validated vX.Y.Z tag, requiring the tagged
+  // tree, the committed Chart.yaml version AND appVersion, and the
+  // repository release manifest to agree — failing closed otherwise.
+  assert.equal(
+    publish.steps.filter((step) => (step.run ?? "").includes('echo "CHART_VERSION=')).length,
+    1,
+    "exactly one step resolves the published chart version",
+  );
+  const coordsStep = publish.steps.find((step) => (step.run ?? "").includes('echo "CHART_VERSION='))!;
+  assert.equal(
+    coordsStep.env?.["TAG"],
+    "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}",
+  );
+  const coordsRun = coordsStep.run ?? "";
+  assert.match(coordsRun, /set -euo pipefail/);
+  assert.match(coordsRun, /version="\$\{TAG#v\}"/, "the version is stripped of its v prefix");
+  assert.match(
+    coordsRun,
+    /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/,
+    "publication requires a strict plain X.Y.Z semver check (no prerelease/build suffixes)",
+  );
+  assert.match(coordsRun, /refusing to publish/);
+  // The tagged-tree assertion: the packaged tree must be the tag's commit.
+  assert.match(coordsRun, /git rev-parse HEAD/);
+  assert.match(coordsRun, /\$\{TAG\}\^\{commit\}/, "the checkout must be asserted to be the tag commit");
+  // All three committed coordinates must be read and must agree.
+  assert.match(coordsRun, /deploy\/charts\/pr-reviewer\/Chart\.yaml/, "Chart.yaml is the coordinate source");
+  assert.match(coordsRun, /chart_appversion/, "Chart.yaml appVersion is validated too");
+  assert.match(coordsRun, /release-please-manifest\.json/, "the repository release manifest is validated too");
+  assert.match(
+    coordsRun,
+    /chart_version" != "\$version" \] \|\| \[ "\$chart_appversion" != "\$version" \] \|\| \[ "\$manifest_version" != "\$version"/,
+    "version, appVersion and manifest must all be compared against the tag version",
+  );
+  // The workflow never mutates the chart to make a bad release look valid:
+  // Chart.yaml is only ever read.
+  assert.doesNotMatch(workflow, /sed -i/, "the workflow must never rewrite files in place");
+  assert.doesNotMatch(
+    workflow,
+    /(>|>>)\s*deploy\/charts\/pr-reviewer\/Chart\.yaml/,
+    "Chart.yaml must only ever be read, never written",
+  );
+
+  // ── Helm battery: pinned Helm (the version CI's charts.yaml class of
+  // validation and the org's chart workflows use), dependency build, lint,
+  // package — and the packaged artifact must be the validated version.
+  const helmSetup = publish.steps.find((step) => step.uses?.includes("azure/setup-helm"));
+  assert.ok(helmSetup, "the publish job must set up pinned Helm");
+  assert.equal((helmSetup.with ?? {})["version"], "v4.3.2");
+  assert.match(workflow, /helm dependency build deploy\/charts\/pr-reviewer/);
+  assert.match(workflow, /helm lint/);
+  assert.match(workflow, /helm package deploy\/charts\/pr-reviewer/);
+  assert.match(
+    workflow,
+    /pr-reviewer-\$\{CHART_VERSION\}\.tgz/,
+    "the packaged tgz must be checked against the validated version",
+  );
+  const validateHelmSetup = validate.steps.find((step) => step.uses?.includes("azure/setup-helm"));
+  assert.ok(validateHelmSetup, "the validation job must set up pinned Helm");
+  assert.equal(
+    (validateHelmSetup.with ?? {})["version"],
+    "v4.3.2",
+    "PR validation runs the same pinned Helm as publishing",
+  );
+
+  // ── GHCR: lowercased owner path, the workflow's own GITHUB_TOKEN for the
+  // login, and that token as the only secret in play.
+  assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
+  const login = publish.steps.find((step) => (step.run ?? "").includes("helm registry login"));
+  assert.ok(login, "the publish job must log in to GHCR");
+  assert.equal(login.env?.["GH_TOKEN"], "${{ secrets.GITHUB_TOKEN }}");
+  assert.match(login.run ?? "", /password-stdin/, "the token travels over stdin, never argv");
+  assert.deepEqual(
+    [...workflow.matchAll(/\$\{\{ secrets\.[A-Z_]+ \}\}/g)].map((match) => match[0]),
+    ["${{ secrets.GITHUB_TOKEN }}"],
+    "the workflow's own GITHUB_TOKEN is the only secret in play",
+  );
+
+  // ── The immutability guard: Helm OCI artifacts are tagged by
+  // Chart.yaml.version and GHCR has no registry-side tag immutability, so
+  // the workflow itself must refuse to replace an already-published chart
+  // version: re-publishing would silently move the artifact off the digest
+  // the run summary reports. The guard must fail on a present version,
+  // fail closed on any uncertain registry answer, and run before the push
+  // step.
+  const guardStep = publish.steps.find((step) => (step.run ?? "").includes("helm show chart"));
+  assert.ok(guardStep, "a guard step must inspect the published chart version");
+  const guardRun = guardStep.run ?? "";
+  assert.match(guardRun, /set -euo pipefail/);
+  assert.match(guardRun, /helm show chart "\$CHART_REF" --version "\$CHART_VERSION"/);
+  // A present version refuses the run...
+  assert.match(guardRun, /already exists/);
+  // ...and so does any registry answer that is not an explicit absence.
+  // The colon before `not found` is load-bearing: an authorization failure
+  // reports "basic credential not found", which must never classify as
+  // absence.
+  assert.match(guardRun, /: not found\|/);
+  assert.match(guardRun, /refusing to push over uncertain registry state/);
+  assert.match(guardRun, /exit 1/);
+  const guardIndex = publish.steps.indexOf(guardStep);
+  const pushStep = publish.steps.find((step) => (step.run ?? "").includes("helm push"));
+  assert.ok(pushStep, "the publish job must push the packaged chart");
+  const pushIndex = publish.steps.indexOf(pushStep);
+  assert.ok(
+    guardIndex !== -1 && guardIndex < pushIndex,
+    "the version guard must run before the push step",
+  );
+  // The push goes to the org chart repository (artifact
+  // ghcr.io/<owner>/charts/pr-reviewer); the tag is the packaged chart
+  // version, so there is no `latest` and no alias to assert away.
+  assert.match(pushStep.run ?? "", /oci:\/\/ghcr\.io\/\$\{GHCR_OWNER\}\/charts/);
+  assert.equal(
+    (pushStep.run ?? "").match(/oci:\/\//g)?.length,
+    1,
+    "the push step must name exactly the org chart repository: one artifact, tagged by its own chart version",
+  );
+  assert.doesNotMatch(pushStep.run ?? "", /:latest|:v[0-9]/, "no mutable or non-SemVer alias is pushed");
+  assert.doesNotMatch(workflow, /:latest/, "no mutable latest chart alias");
+  // The digest from the push is surfaced, not silently dropped.
+  const pushDigestOutput = publish.steps.find((step) =>
+    (step.run ?? "").includes('>> "$GITHUB_OUTPUT"'),
+  );
+  assert.ok(pushDigestOutput, "the push step must expose its digest as a step output");
+  assert.match(
+    workflow,
+    /DIGEST: \$\{\{ steps\.push\.outputs\.digest \}\}/,
+    "the summary step must consume the pushed digest",
+  );
+
+  // ── The run summary must carry the exact installable reference and the
+  // source commit — the operator's provenance record of a publish run.
+  const summaryStep = publish.steps.find((step) => (step.run ?? "").includes("GITHUB_STEP_SUMMARY"))?.run ?? "";
+  assert.notEqual(summaryStep, "", "a step must write the run summary");
+  assert.equal(summaryStep.includes("SOURCE_SHA"), true, "the summary step must receive the source commit");
+  const summaryBlock = /\n[ \t]*\{[\s\S]*?\n[ \t]*\} >> "\$GITHUB_STEP_SUMMARY"/.exec(summaryStep)?.[0] ?? "";
+  assert.notEqual(summaryBlock, "", "a brace block must be redirected into GITHUB_STEP_SUMMARY");
+  assert.match(summaryBlock, /oci:\/\/ghcr\.io\/\$\{GHCR_OWNER\}\/charts\/pr-reviewer:\$\{CHART_VERSION\}/);
+  assert.match(summaryBlock, /helm install pr-reviewer/, "the summary carries the install command");
+});
+
+test("#1708 chart OCI coordinates are documented for release and dev paths", () => {
+  const deploymentDoc = read("docs/self-hosted-deployment.md");
+  // The released OCI coordinate with a copy/paste-ready install command.
+  // Literal substring assertions, not URL regexes: an unanchored
+  // `oci://...` regex can match anywhere in a URL-shaped string (the
+  // CodeQL missing-anchor class flagged on this PR) and a substring check
+  // pins the exact coordinate more tightly than a loose regex anyway.
+  assert.ok(
+    deploymentDoc.includes("oci://ghcr.io/misospace/charts/pr-reviewer"),
+    "docs must name the released OCI coordinate",
+  );
+  assert.ok(
+    deploymentDoc.includes(
+      "helm install pr-reviewer \\\n  oci://ghcr.io/misospace/charts/pr-reviewer \\\n  --version 3.9.1",
+    ),
+    "docs must contain a copy/paste-ready OCI install command",
+  );
+  assert.ok(
+    deploymentDoc.includes(
+      "helm upgrade pr-reviewer \\\n  oci://ghcr.io/misospace/charts/pr-reviewer \\\n  --version 3.9.1",
+    ),
+    "docs must contain a copy/paste-ready OCI upgrade command",
+  );
+  // The upgrade example must be copy/paste-ready too: no `<new release>`
+  // placeholder and no ellipsis inside the upgrade command block itself
+  // (the doc keeps pre-existing image-ref ellipses elsewhere, so the check
+  // is scoped to the block).
+  const upgradeBlock = /```sh\nhelm upgrade pr-reviewer[\s\S]*?```/.exec(deploymentDoc)?.[0] ?? "";
+  assert.notEqual(upgradeBlock, "", "docs must contain an OCI upgrade command block");
+  assert.doesNotMatch(upgradeBlock, /<new release>|\.\.\./, "the upgrade example must be copy/paste-ready: no placeholder or ellipsis");
+  assert.ok(upgradeBlock.includes("--version 3.9.1"), "the upgrade example pins a concrete release version");
+  // chart version == application release version, tied to the #1704 images.
+  assert.match(deploymentDoc, /ghcr\.io\/misospace\/pr-reviewer-controller:X\.Y\.Z/);
+  // Digest overrides remain the exact immutable production pin.
+  assert.match(deploymentDoc, /image\.digest/);
+  // Source-checkout installation stays labeled a development path.
+  assert.match(deploymentDoc, /[Ss]ource-checkout install.*development path|development path/);
+  assert.match(deploymentDoc, /helm dependency build deploy\/charts\/pr-reviewer/, "the dev path keeps its dependency-build step");
+  // The workflow's trigger/credential model is documented.
+  assert.match(deploymentDoc, /publish-chart\.yaml/);
+  assert.doesNotMatch(deploymentDoc, /charts\/pr-reviewer:latest/, "no latest chart alias may be documented");
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.ok(
+    chartReadme.includes("oci://ghcr.io/misospace/charts/pr-reviewer"),
+    "the chart README must name the released OCI coordinate",
+  );
+  assert.match(chartReadme, /helm install pr-reviewer/);
+  assert.match(
+    chartReadme,
+    /version.*equal[s]? the application release|chart version equals the application release/i,
+    "the chart version == release contract must be stated",
+  );
+  assert.doesNotMatch(chartReadme, /:latest/);
 });

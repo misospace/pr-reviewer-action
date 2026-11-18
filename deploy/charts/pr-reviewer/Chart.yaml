@@ -6,11 +6,16 @@ description: >
   controller only — PostgreSQL is always operator-provided, never
   deployed by this chart.
 type: application
-version: 0.1.0
-# The controller protocol/app version the chart is built against, from
-# .release-please-manifest.json (the release stamp the bundle carries).
-# release-please bumps this annotated line with the manifest (see
-# release-please-config.json `extra-files`).
+# #1708: the chart is a first-class release artifact published to
+# oci://ghcr.io/misospace/charts/pr-reviewer, and Helm OCI artifacts are
+# tagged by Chart.yaml.version — so the chart release coordinates are the
+# application release coordinates. `version` and `appVersion` both equal
+# the release in .release-please-manifest.json; release-please bumps both
+# annotated lines with the manifest (see release-please-config.json
+# `extra-files`), and .github/workflows/publish-chart.yaml refuses to
+# publish a tag they do not agree with. Independent chart releases would
+# be a deliberate separate versioning design, not implicit drift.
+version: 3.9.0 # x-release-please-version
 appVersion: "3.9.0" # x-release-please-version
 dependencies:
   - name: common

@@ -108,7 +108,12 @@ listener binds loopback by default and the chart sets
   the exact SemVer ref (`X.Y.Z`) and a `X.Y` alias for both images from
   that exact tagged commit, following the same digest-reporting pattern
   (the immutable `sha-<commit>` ref and the run-summary digest remain the
-  provenance anchor behind the aliases).
+  provenance anchor behind the aliases). The release also publishes the
+  Helm chart as `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z`
+  (#1708, `.github/workflows/publish-chart.yaml`): the chart version is
+  the same application release coordinate as these image release tags —
+  one release, one coordinate; the digest-pinned image overrides above
+  stay the exact immutable production pin when desired.
 - The release stamp is not baked by the Dockerfile itself; release
   pipelines should run the build with `PR_REVIEWER_BUILD_STAMP=release`
   available (CI-driven) or accept the unstamped dev bundle for local use.
