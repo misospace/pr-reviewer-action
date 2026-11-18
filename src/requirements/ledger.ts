@@ -152,7 +152,20 @@ const ADVISORY_HEADINGS: ReadonlySet<string> = new Set([
  * "## Risk Notes:" both normalize into the exact-match set. */
 function isAdvisoryHeading(heading: string): boolean {
   const normalized = heading.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  return ADVISORY_HEADINGS.has(normalized);
+  if (ADVISORY_HEADINGS.has(normalized)) return true;
+  // #1702: linked issues often document organic reproductions (with
+  // run/version metadata in the heading). The reproductions are historical
+  // evidence, not fresh acceptance criteria. In particular, a lowercase
+  // "must" describing what an unrelated prior run must not change cannot
+  // become a code-verifiable requirement for the CURRENT PR.
+  //
+  // Match only the exact subject heading, optionally followed by a bounded
+  // parenthetical qualifier. Other headings and the uppercase MUST/SHALL
+  // escape hatch in scanDocument remain untouched.
+  const plain = heading.replace(/\s*\([^()]{0,120}\)\s*$/, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ").trim();
+  return plain === "reproduction" || plain === "reproductions"
+    || plain === "organic reproduction" || plain === "organic reproductions";
 }
 
 // Uppercase normative tokens apply to any line; word boundaries keep

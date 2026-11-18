@@ -5042,6 +5042,54 @@ test("#1629: no classification artifact, an explicit override, or the smart tier
   assert.deepEqual(gatedResult.result.low_risk_budget, { envelope: "capped", basis: "digest-only", mandatory_rows: 0, cap: 6, derived_budget: 40 });
 });
 
+test("#1702: visible trace-plan test demand is wired through the real harness reservation", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ code and tests\n");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "src/gates/ci-wait.ts", status: "modified" },
+    { filename: "tests-v3/ci-wait.test.ts", status: "modified" },
+  ]));
+  fs.writeFileSync(path.join(root, "requirement-trace-plan.json"), JSON.stringify({
+    version: 3,
+    rows: [{
+      id: "req-9d075d469102",
+      text: "Tests for stale/mismatched head, red sibling and neutral sibling.",
+      kind: "acceptance",
+      seams: [],
+      code_verifiable: true,
+      proof_shape: "runtime",
+      required_attempts: 2,
+    }],
+  }));
+  fs.mkdirSync(path.join(root, "src/gates"), { recursive: true });
+  fs.mkdirSync(path.join(root, "tests-v3"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/gates/ci-wait.ts"), "export const guard = true;\n");
+  fs.writeFileSync(path.join(root, "tests-v3/ci-wait.test.ts"), "assert.equal(guard, true);\n");
+  const responses = [
+    openAiCall("c1", "read_file", JSON.stringify({ path: "src/gates/ci-wait.ts" })),
+    openAiCall("c2", "read_file", JSON.stringify({ path: "tests-v3/ci-wait.test.ts" })),
+    validVerdict(),
+  ];
+  let turn = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => responses[turn++] ?? validVerdict(),
+    log: (line) => logs.push(line),
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.executed_request_count, 2,
+    "source-only read must not end investigation-complete before the test was read");
+  assert.ok(logs.some((line) => /trace test evidence reserve: 1 exact changed-file read/.test(line)),
+    "trace plan is represented in the enforced budget, not just the prompt");
+  const telemetry = result.tool_loop_telemetry as Record<string, unknown>;
+  const budget = telemetry.budget as Record<string, unknown>;
+  const rows = budget.required_evidence_settlements as Array<Record<string, unknown>>;
+  assert.deepEqual(rows.map((row) => [row.id, row.kind, row.evidence_state, row.acquisition]), [
+    ["trace:test-read-1", "trace", "acquired", "available"],
+  ]);
+  assert.equal(result.native_loop_verdict_produced, true);
+});
+
 test("#1629: a capped low-risk run whose mandatory row settles stops on obligations, not the envelope", async () => {
   // The completion-aware half of the envelope: once the enforced obligation
   // surface is discharged with a successful in-window-capable attempt, the

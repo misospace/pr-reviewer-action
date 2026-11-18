@@ -293,7 +293,7 @@ export const ARTIFACT_VERSION = 2;
  * group names; only fixed validator diagnostic codes and shape-checked IDs. */
 export const MAX_TRACE_FINAL_DIAGNOSTIC_ROWS = 8;
 const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
-  "not-traced-by-reviewer", "disposition-invalid",
+  "not-traced-by-reviewer", "disposition-invalid", "model-declared-unknown",
   "coverage-status-mapped",
   "missing-reason", "non-code-reported-unmet", "out-of-scope-reported-unmet",
   "distributed-enforcement-group-uncovered",
@@ -303,8 +303,13 @@ const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
 ]);
 
 export function finalTraceFailureLog(trace: RequirementTraceArtifact): string {
-  if (!trace.incomplete) return "";
-  const unresolved = trace.rows.filter((row) => row.disposition === "unverifiable" || row.disposition === "unmet");
+  // #1702/#1703: post-#1658 a material unresolved claim is withheld by final
+  // disposition WITHOUT setting trace.incomplete (reserved for mechanical
+  // refutations). Log it too; otherwise the most common partial has no
+  // actionable validator reason in Actions logs.
+  const unresolved = trace.rows.filter((row) =>
+    (row.disposition === "unverifiable" || row.disposition === "unmet")
+    && (trace.incomplete || (row.materiality === "material" && row.resolution === "unresolved")));
   if (unresolved.length === 0) return "";
   const detail = unresolved.slice(0, MAX_TRACE_FINAL_DIAGNOSTIC_ROWS).map((row) => {
     const id = /^req-[a-z0-9]{1,64}$/.test(row.requirement_id) ? row.requirement_id : "invalid-id";
@@ -886,14 +891,24 @@ function normalizeRepoPath(path: string): string {
 /** The requirement text explicitly demands a test. Detected independently of
  * the structural classification, so a requirement can be BOTH structural and
  * test-demanding — the state check then replaces the predicate requirement and
- * the test evidence is additionally required. Over-eager matching is the safe
- * direction: it can only add a test requirement, never remove one. */
+ * the test evidence is additionally required. A test *artifact* (such as a
+ * CI "test leg") is not itself a demand to author a regression test: treating
+ * it as one adds an artificial proof obligation to unrelated runtime code. */
 export function explicitlyRequiresTest(text: string): boolean {
+  // #1702/#1703 organic review: acceptance bullets also demand tests with
+  // the TEST as grammatical subject, not after the modal: "Tests for stale
+  // heads..." and "Regression tests must cover ...". Without this arm, the
+  // trusted trace plan budgets only an implementation read, so the reviewer
+  // can close without reading any tests and then report the test requirement
+  // unknown. Match a narrow test-first construction, never generic phrases
+  // about a CI "test leg" or tests merely passing.
+  if (/^\s*(?:(?:regression|adversarial|unit|integration|end-to-end|e2e)\s+)?tests?\s+for\b/i.test(text)) return true;
+  if (/\b(?:(?:regression|adversarial|unit|integration|end-to-end|e2e)\s+)?tests?\s+(?:must|shall|should|need(?:s)?\s+to|are\s+required\s+to)\s+(?:cover|exercise|assert|verify|validate|demonstrate|include|test|prove|capture|replay)\b/i.test(text)) return true;
   const demand = /\b(must|shall|should|required?|needs?|requires?|mandatory|have to|has to)\b/i.test(text);
   if (!demand) return false;
   if (/\btests?\s+coverage\b/i.test(text)) return true;
   if (/\bcovered\s+by\s+(a|an|the)?\s*(regression|adversarial|unit|integration|end-to-end|e2e)?\s*tests?\b/i.test(text)) return true;
-  return /\b(must|shall|should|required?|needs?|requires?|have|has|include|includes|add|adds|provide|provides)\b[^.;]{0,60}\b(regression|adversarial|unit|integration|end-to-end|e2e)?\s*tests?\b(?![\s/]*(job|step|fixture|fixtures|data|runner|harness|matrix|dir|directory|folder))/i.test(text);
+  return /\b(must|shall|should|required?|needs?|requires?|have|has|include|includes|add|adds|provide|provides)\b[^.;]{0,60}\b(regression|adversarial|unit|integration|end-to-end|e2e)?\s*tests?\b(?![\s/]*(job|step|fixture|fixtures|data|runner|harness|matrix|legs?|dir|directory|folder))/i.test(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -2684,6 +2699,9 @@ export function validateRequirementTrace(
       const wireDisposition = additiveValid ? null : coverageStatusDisposition(claim);
       disposition = additiveValid ? rawDisposition : wireDisposition !== null ? wireDisposition : "unverifiable";
       if (wireDisposition !== null) notes.push("coverage-status-mapped");
+      if (disposition === "unverifiable" && (additiveValid || wireDisposition === "unverifiable")) {
+        notes.push("model-declared-unknown");
+      }
       if (!additiveValid && wireDisposition === null) notes.push("disposition-invalid");
       const coverage = wireDisposition !== null ? coverageClaimEvidence(claim) : null;
       enforcement = parseLocations(claim.enforcement);

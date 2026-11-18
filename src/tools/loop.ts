@@ -1222,7 +1222,30 @@ export async function driveToolLoop(
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
   const anyActiveProseRow = (): boolean =>
-    pendingRows.some((row) => row.obligation === undefined && rowActive(row));
+    pendingRows.some((row) => row.obligation === undefined && row.tools === undefined && rowActive(row));
+  // #1702: trace reads are explicit acquisition rows, not prose or upstream
+  // dependency obligations. The planner must be directed to their concrete
+  // changed-file targets, not to the unrelated Required Review Evidence list.
+  const activeTraceTargets = (): string[] =>
+    pendingRows.filter((row) => row.tools?.includes("read_file") && rowActive(row))
+      .map((row) => row.tokens[0] ?? "")
+      .filter((path) => /^[A-Za-z0-9._\/-]{1,200}$/.test(path))
+      .slice(0, 4);
+  const traceReadNote = (): string => {
+    const paths = activeTraceTargets();
+    return paths.length === 0 ? "" :
+      "[trace evidence] The Requirement Trace Plan demands test evidence. Before declaring the investigation complete, read these changed test files using read_file: "
+      + paths.map((path) => `\`${path}\``).join(", ")
+      + ". A successful read is NOT semantic proof: assess the tests and report unknown if they do not establish the requirement.";
+  };
+  // #1702: trace-file acquisition and review-owned prose are independent
+  // mandatory evidence surfaces. A trace note cannot replace and hide the
+  // Required Review Evidence window when both have pending rows.
+  const traceAndProseNote = (proseNote: string): string => {
+    const trace = traceReadNote();
+    return trace === "" ? proseNote
+      : anyActiveProseRow() ? `${trace}\n${proseNote}` : trace;
+  };
   const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
     pendingRows
       .filter((row) => row.obligation !== undefined && rowActive(row))
@@ -1505,11 +1528,13 @@ export async function driveToolLoop(
             ? // #1595: names exactly the tracked obligations (byte-for-byte
               // the static note when that set is the full trio).
               dependencyEvidencePriorityTurnNote(outstandingShapeObligations())
-            : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;
-          const otherClause = anyActiveShapeRow()
-            ? (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
-            : "";
-          conversation.addTurnNote(priorityNote + otherClause);
+            : traceReadNote() || REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;
+          const otherClause = [
+            anyActiveShapeRow() ? traceReadNote() : "",
+            anyActiveProseRow() && (anyActiveShapeRow() || traceReadNote() !== "")
+              ? REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE : "",
+          ].filter(Boolean).join("\n");
+          conversation.addTurnNote(priorityNote + (otherClause !== "" ? `\n${otherClause}` : ""));
         }
       } else {
         // #1396: one pass, one note. With a shape row active the redirect
@@ -1535,7 +1560,7 @@ export async function driveToolLoop(
                     roundsLeft,
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   })) + mixedClause
-            : REQUIRED_EVIDENCE_TURN_NOTE
+            : traceAndProseNote(REQUIRED_EVIDENCE_TURN_NOTE)
           : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
             ? LOW_BUDGET_TURN_NOTE
             : BUDGET_TURN_NOTE;
@@ -1783,7 +1808,7 @@ export async function driveToolLoop(
                   formatNote(leadClaimTailNotScarce ? RESERVE_LEAD_CLAIM_REFUSAL_NOTE : RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
-                : REQUIRED_EVIDENCE_REFUSAL_NOTE,
+                : traceAndProseNote(REQUIRED_EVIDENCE_REFUSAL_NOTE),
             },
           });
           roundRefused++;
@@ -2002,7 +2027,15 @@ export async function driveToolLoop(
     // among its admitting calls, was seeded discharged by the repair seam
     // (the prior loop's settlement), or was cap-released with a successful
     // in-window evidence execution on record.
-    if (obligationsSeenActive && !hasActiveRow()) {
+    // #1702: a trace admission means "test file was read", not "the PR is
+    // fully investigated". The pre-#1702 obligations-settled shortcut is
+    // allowed for ordinary required checks and dependency rows unchanged,
+    // but trace reads may invoke it only once the existing changed-file /
+    // specialist coverage predicate is also satisfied.
+    const traceNeedsCoverage = pendingRows.some((row) =>
+      row.tools !== undefined && row.obligation === undefined);
+    if (obligationsSeenActive && !hasActiveRow()
+      && (!traceNeedsCoverage || options.coverageComplete?.(outcome) === true)) {
       const strandedSettlement = pendingRows.some((row) => {
         if (discharged.has(row.id)) {
           return !seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id);

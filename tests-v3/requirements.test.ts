@@ -226,6 +226,33 @@ test("#1095: Dependencies and Notes/Risk sections never become ledger entries", 
   assert.ok(texts.some((text) => text.includes("reject unknown flags")));
 });
 
+test("#1702: version-qualified organic reproductions are historical evidence, not merge gates", () => {
+  const doc = [
+    "## Organic reproductions (exact-head, v3.9.0)",
+    "3. **Dispatch #1658**, historical run",
+    "   - #1629 low-risk budgeting **did work** (10-call cap, 1 executed call, \`investigation-complete\`); its separate advisory evidence gap must remain separate.",
+    "   - Test evidence from the earlier run must not be confused with this head.",
+    "   - Secret-bearing output MUST be masked before publishing.",
+    "## Acceptance criteria",
+    "- [ ] The review action must credit exact-head successful full-suite jobs.",
+    "## Organic reproductions and acceptance criteria",
+    "- This combined heading must not be silently treated as purely historical.",
+  ].join("\n");
+  const ledger = extractRequirementLedger({ linkedIssuesMarkdown:
+    "## o/r#1702\n\`\`\`json\n" + JSON.stringify({
+      number: 1702, title: "P1 reproductions", state: "OPEN",
+      html_url: "https://github.com/o/r/issues/1702", labels: [], body: doc,
+    }) + "\n\`\`\`\n",
+  });
+  const texts = ledger.requirements.map((row) => row.text);
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.ok(texts.some((row) => row.includes("MUST be masked")), JSON.stringify(texts));
+  assert.ok(texts.some((row) => row.includes("credit exact-head successful full-suite")), JSON.stringify(texts));
+  assert.ok(texts.some((row) => row.includes("combined heading must not")), JSON.stringify(texts));
+  assert.ok(texts.every((row) => !row.includes("10-call cap")), JSON.stringify(texts));
+  assert.ok(texts.every((row) => !row.includes("earlier run")), JSON.stringify(texts));
+});
+
 test("#1095: lowercase must is skipped in advisory sections; uppercase MUST keeps its teeth", () => {
   const doc = [
     "## Notes",

@@ -100,6 +100,29 @@ test("#1594 matcher: check names denote test execution only as a delimited word 
   for (const name of no) assert.equal(isTestExecutionCheckName(name), false, name);
 });
 
+// #1702: a combined step-list name runs every listed step, so one clean test
+// step denotes execution even when a sibling step is lint or docs. Only a
+// name whose EVERY component is disqualified (or test-free) keeps failing.
+test("#1702 matcher: combined step-list names keep their test-execution step", () => {
+  const yes = [
+    "Typecheck, lint, test, build", // musebridge#252 organic job name
+    "lint, tests, build",
+    "test & coverage",
+    "build; unit tests; publish artifacts",
+    "typecheck + test + package",
+  ];
+  const no = [
+    "lint tests", // noun phrase: lint RUNS AGAINST tests, no step separator
+    "upload tests",
+    "lint / test", // `/` qualifies rather than enumerates — never splits
+    "unit-test-lint",
+    "docs, test report, upload artifacts",
+    "codeql, build",
+  ];
+  for (const name of yes) assert.equal(isTestExecutionCheckName(name), true, name);
+  for (const name of no) assert.equal(isTestExecutionCheckName(name), false, name);
+});
+
 test("#1594 discharge: the check must prove the requested test scope", () => {
   const green = (name: string) => evidence("success", [{ name, state: "success", conclusion: "success" }]);
 
@@ -117,15 +140,27 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
   // a generic check name cannot PROVE a narrow integration scope
   assert.equal(ciDischargeForCheckText("run integration tests", green("test (24)"), HEAD).reason, "no-matching-test-check");
 
-  // full-suite asks need an explicit exhaustive identity, not one narrow
-  // matrix leg and not a vague generic test name
+  // full-suite asks need an exhaustive identity: an explicit marker OR the
+  // conventional bare-suite name (#1702) — but never one narrow leg.
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Unit Tests"), HEAD).outcome, "unresolved");
   assert.equal(ciDischargeForCheckText("run all tests", green("Unit Tests"), HEAD).outcome, "unresolved");
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).outcome, "unresolved");
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test"), HEAD).outcome, "unresolved");
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("tests"), HEAD).outcome, "unresolved");
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).reason, "no-matching-test-check");
-  // a genuinely exhaustive name is the positive control
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Integration Tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("e2e tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("smoke tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Unit Tests, Integration Tests"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("tests (unit)"), HEAD).outcome, "unresolved");
+  // matrix-parameter suffixes carry the same scope/disqualifier vetoes
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (unit, 24)"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24, smoke)"), HEAD).outcome, "unresolved");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24, lint)"), HEAD).outcome, "unresolved");
+  // #1702: the bare conventional suite identity discharges — repos must not
+  // have to rename their job to `Full Test Suite` to be recognized.
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Tests"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("tests"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test (24)"), HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("Typecheck, lint, test, build"), HEAD).outcome, "satisfied");
+  // a genuinely exhaustive name still discharges (the #1594 positive control)
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("test suite"), HEAD).outcome, "satisfied");
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", green("full test suite"), HEAD).outcome, "satisfied");
   assert.equal(ciDischargeForCheckText("run all tests", green("all tests"), HEAD).outcome, "satisfied");
@@ -181,6 +216,69 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
     { name: "integration-tests", state: "failure", conclusion: "failure" },
   ]);
   assert.equal(ciDischargeForCheckText("run integration tests", inScopeWaitFailure, HEAD).outcome, "contradicted");
+});
+
+// #1702: deterministic positive replay of the three organic head-bound CI
+// job shapes (musebridge#252, dispatch#1659, dispatch#1658): a green
+// `Tests` / combined `Typecheck, lint, test, build` job on the exact head
+// discharges the test-run row through trusted CI provenance ONLY — the row
+// flips via reconcile, never via model prose.
+test("#1702 replay: conventional suite shapes discharge through CI provenance", () => {
+  const ask = "run full test suite after upgrade";
+  for (const name of [
+    "Tests",
+    "tests",
+    "test",
+    "test (24)",
+    "test [node-20]",
+    "test (18.x, ubuntu-latest)", // commas inside the matrix suffix are not an enumeration
+    "Typecheck, lint, test, build",
+  ]) {
+    const green = evidence("success", [
+      { name: "build", state: "success", conclusion: "success" },
+      { name, state: "success", conclusion: "success" },
+    ]);
+    const discharge = ciDischargeForCheckText(ask, green, HEAD);
+    assert.equal(discharge.outcome, "satisfied", name);
+    assert.equal(discharge.reason, "test-check-succeeded", name);
+    assert.equal(discharge.check?.name, name, name);
+
+    const coverage = evaluateRequiredCheckCoverage([ask], null);
+    const reconciled = reconcileRequiredCheckRows(coverage.checks, green, HEAD);
+    assert.equal(reconciled.discharged, 1, name);
+    assert.equal(reconciled.rows[0]!.status, "satisfied", name);
+    assert.equal(reconciled.rows[0]!.reason, "ci-evidence", name);
+    assert.equal(reconciled.rows[0]!.rationale, `trusted CI check "${name}" succeeded on head ${HEAD}`, name);
+
+    const obligations = reconcileObligationsWithCiEvidence(
+      [{ id: "obligation-1", source: "must_check", text: ask, status: "unresolved", cause: "budget-exhausted" }],
+      green, HEAD);
+    assert.equal(obligations[0]!.status, "satisfied", name);
+    assert.deepEqual(obligations[0]!.resolvedBy, { kind: "ci-evidence", check: name, headSha: HEAD }, name);
+    assert.deepEqual(obligations[0]!.evidence?.receipts, [`ci:${name}`], name);
+
+    // the widened matcher keeps its fences around the same shapes:
+    assert.equal(ciDischargeForCheckText(ask, green, STALE).reason, "head-mismatch", name);
+    const redSibling = evidence("success", [
+      { name, state: "success", conclusion: "success" },
+      { name: `${name} (node-20)`, state: "failure", conclusion: "failure" },
+    ]);
+    assert.equal(ciDischargeForCheckText(ask, redSibling, HEAD).outcome, "contradicted", name);
+    const pendingSibling = evidence("failure", [
+      { name, state: "success", conclusion: "success" },
+      { name: `${name} (node-22)`, state: "pending" },
+    ]);
+    assert.equal(ciDischargeForCheckText(ask, pendingSibling, HEAD).reason, "test-check-not-success", name);
+    const skippedSelf = evidence("success", [{ name, state: "success", conclusion: "skipped" }]);
+    assert.equal(ciDischargeForCheckText(ask, skippedSelf, HEAD).reason, "test-check-not-success", name);
+    // #1702/#1703: a neutral *sibling* must not be hidden behind a green
+    // conventional full-suite leg; GitHub may expose neutral as state success.
+    const neutralSibling = evidence("success", [
+      { name, state: "success", conclusion: "success" },
+      { name: `${name} (node-neutral)`, state: "success", conclusion: "neutral" },
+    ]);
+    assert.equal(ciDischargeForCheckText(ask, neutralSibling, HEAD).reason, "test-check-not-success", name);
+  }
 });
 
 test("#1594 discharge: exact-head green test check discharges; stale head does not", () => {

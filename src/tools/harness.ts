@@ -82,6 +82,7 @@ import { settlementsToArtifact } from "../enforcement/settlement.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, TRACE_PLAN_ARTIFACT, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
+import { isTestPath } from "../context/change-anchors.js";
 import {
 DEPENDENCY_EVIDENCE_OBLIGATIONS,
 DEPENDENCY_EVIDENCE_RESERVE,
@@ -1669,6 +1670,45 @@ export function requiredEvidenceSection(
     // of a row — a sliced row would name an id the model cannot discharge.
     derivedRows = derivedRows.slice(0, -1);
   }
+}
+
+/** #1702: bound the additional test-file reads to a tiny slice of the
+ * existing request budget. This is evidence ACQUISITION, not certification:
+ * a successful file read cannot satisfy a requirement without a separate,
+ * reasoned model claim and the existing exact-head validator. */
+export const MAX_TRACE_TEST_READS = 4;
+
+/** Select concrete changed test files when the planner has an IN-SCOPE,
+ * explicitly test-demanding runtime/structural requirement. A trace plan
+ * that was not shown in the planning corpus must NEVER add admission rows.
+ *
+ * Rows use a tool allowlist, so the loop/settlement layers classify them as
+ * trace evidence and never invent a second semantic owner. Exact changed
+ * filenames, not broad token overlap with issue prose, admit the reads.
+ * No per-requirement decision is inferred from these acquisition rows. */
+export function traceTestAdmissionRows(
+  visiblePlanRows: readonly TracePlanRow[],
+  changedPaths: readonly string[],
+  maxRows: number,
+): RequiredEvidenceRow[] {
+  const needsTestEvidence = visiblePlanRows.some((row) =>
+    row.code_verifiable === true
+    && (row.proof_shape === "runtime" || row.proof_shape === "structural")
+    && row.required_attempts >= 2);
+  if (!needsTestEvidence || !Number.isFinite(maxRows) || maxRows < 1) return [];
+  const safePath = (path: string): boolean =>
+    path.length > 0 && path.length <= 200
+    && /^[A-Za-z0-9._\/-]+$/.test(path)
+    && !path.startsWith("/")
+    && !path.split("/").includes("..")
+    && isTestPath(path);
+  const paths = [...new Set(changedPaths.filter(safePath))].sort();
+  return paths.slice(0, Math.min(MAX_TRACE_TEST_READS, Math.floor(maxRows)))
+    .map((path, index) => ({
+      id: `trace:test-read-${index + 1}`,
+      tokens: [path.toLowerCase()],
+      tools: ["read_file"],
+    }));
 }
 
 /** #1381 budget reservation: enough requests that every admission-gated
@@ -5115,6 +5155,33 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   )));
   for (const obligation of trackedDependencyObligations) {
     requiredEvidence.push({ id: obligation, tokens: [], obligation });
+  }
+  // #1702: the plan has long described test-evidence reads, but those
+  // obligations were never represented in the enforced evidence set. A
+  // two-source-read investigation could therefore return
+  // "investigation-complete" without opening any test file. Admit bounded
+  // read_file requests for ACTUALLY SHOWN trace-plan rows, not all linked
+  // issue text. Existing required checks/dependency reservations retain
+  // priority and the optional exploration half of the budget stays intact.
+  const baseProseReserve = computeRequiredEvidenceReservation(
+    requiredEvidence.filter((row) => row.obligation === undefined).length,
+    effectiveMaxRequests,
+  );
+  const availableTraceReserve = Math.max(0,
+    Math.floor(effectiveMaxRequests / 2) - Math.max(baseProseReserve, dependencyReserve));
+  const plan = readTracePlan(deps.readText(TRACE_PLAN_ARTIFACT));
+  const visibleRows = planning.text.includes("# Requirement Trace Plan\n")
+    ? plan.rows.filter((row) => planning.text.includes(`- ${row.id} (`))
+    : [];
+  const traceReads = traceTestAdmissionRows(
+    visibleRows, loadChangedFilePaths(deps.readText), availableTraceReserve,
+  );
+  requiredEvidence.push(...traceReads);
+  if (traceReads.length > 0) {
+    (deps.log ?? (() => {}))(
+      `  trace test evidence reserve: ${traceReads.length} exact changed-file read(s); `
+      + `${visibleRows.filter((row) => row.required_attempts >= 2).length} test-demanding trace row(s) shown`,
+    );
   }
   // #1396: ONE reservation over the shared budget tail — the max of the
   // resolutions, never their sum. Side by side, each held requests back near

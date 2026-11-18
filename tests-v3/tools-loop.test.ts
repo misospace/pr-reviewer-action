@@ -6,6 +6,7 @@ import {
   STOP_BUDGET,
   STOP_MAX_ROUNDS,
   STOP_MODEL_DONE,
+  STOP_INVESTIGATION_COMPLETE,
   STOP_NO_TOOL_CALLS,
   STOP_OBLIGATIONS_SETTLED,
   STOP_REQUEST_ERROR,
@@ -81,6 +82,118 @@ test("model stops voluntarily after gathering evidence", async () => {
   assert.equal(outcome.finalText, "done");
   assert.equal(outcome.executed.length, 1);
   assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("#1702: explicit trace test reads block premature investigation-complete until acquired", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("code", "read_file", '{"path":"src/enforcement/required-check-ci.ts"}'),
+    openAiCall("test1", "read_file", '{"path":"tests-v3/required-check-ci.test.ts"}'),
+    openAiCall("test2", "read_file", '{"path":"tests-v3/requirement-trace.test.ts"}'),
+  ], [
+    { tool: "read_file", status: "ok", result: { content: "production code" } },
+    { tool: "read_file", status: "ok", result: { content: "CI matching regression tests" } },
+    { tool: "read_file", status: "ok", result: { content: "trace regression tests" } },
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [
+      { id: "trace:test-read-1", tokens: ["tests-v3/required-check-ci.test.ts"], tools: ["read_file"] },
+      { id: "trace:test-read-2", tokens: ["tests-v3/requirement-trace.test.ts"], tools: ["read_file"] },
+    ],
+    coverageComplete: () => true,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_INVESTIGATION_COMPLETE);
+  assert.equal(outcome.executed.length, 3,
+    "source-only evidence must not end an investigation that has explicit test demands");
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["trace:test-read-1", "trace:test-read-2"]);
+  assert.deepEqual(outcome.requiredEvidenceSettlements.map((r) => [r.kind, r.evidenceState, r.successfulAttempt]), [
+    ["trace", "acquired", true], ["trace", "acquired", true],
+  ]);
+});
+
+test("#1702: trace acquisition cannot short-circuit missing changed-file coverage", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("test", "read_file", '{"path":"tests-v3/ci-wait.test.ts"}'),
+    openAiText("further code coverage was not established"),
+  ], [{ tool: "read_file", status: "ok", result: { content: "test evidence" } }]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 1,
+    requiredEvidence: [{ id: "trace:test-read-1", tokens: ["tests-v3/ci-wait.test.ts"], tools: ["read_file"] }],
+    coverageComplete: () => false,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE,
+    "acquired trace evidence alone must not signal obligations-settled if the change is still unread");
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["trace:test-read-1"]);
+});
+
+test("#1702: an unrelated read never settles mandatory trace test evidence", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("code", "read_file", '{"path":"src/other.ts"}'),
+    openAiText("cannot verify the tests"),
+  ], [{ tool: "read_file", status: "ok", result: { content: "unrelated code" } }]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 1,
+    requiredEvidence: [{ id: "trace:test-read-1", tokens: ["tests-v3/required-check-ci.test.ts"], tools: ["read_file"] }],
+    coverageComplete: () => true,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(outcome.requiredEvidenceCredits, []);
+  assert.equal(outcome.requiredEvidenceSettlements[0]?.evidenceState, "open");
+  assert.equal(outcome.requiredEvidenceSettlements[0]?.acquisition, "unavailable");
+});
+
+test("#1702: trace and prose evidence remain visible together in reserved-window notes/refusals", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const responses = [
+    openAiCall("optional-first", "read_file", '{"path":"src/other.ts"}'),
+    openAiCall("optional-second", "read_file", '{"path":"src/unrelated.ts"}'),
+    openAiText("evidence remains unresolved"),
+  ];
+  const requests: string[] = [];
+  let turn = 0;
+  const result = await driveToolLoop(
+    conversation,
+    async (payload) => {
+      requests.push(JSON.stringify(payload));
+      return responses[turn++];
+    },
+    async (name) => ({ tool: name, status: "ok", result: { content: "source read" } }),
+    {
+      apiFormat: "openai", model: "m",
+      budgets: { ...adaptiveLoopBudgets(3, 3, 120), maxRounds: 4 },
+      reserveForRequiredEvidence: 2,
+      requiredEvidence: [
+        { id: "trace:test-read-1", tokens: ["tests-v3/ci-wait.test.ts"], tools: ["read_file"] },
+        { id: "obligation-1", tokens: ["upstream", "matrix"], source: "must_check" },
+      ],
+      coverageComplete: () => false,
+      timeFn: () => 0,
+    },
+  );
+  assert.equal(requests.length, 3);
+  assert.match(requests[1]!, /Requirement Trace Plan/);
+  assert.match(requests[1]!, /Required Review Evidence/);
+  assert.equal(result.requiredEvidenceRefusals, 1);
+  const refusal = conversation.events.find((event) =>
+    event.kind === "tool_result" && JSON.stringify(event).includes("Reserved required-evidence budget"));
+  assert.ok(refusal, "a refused optional call still names the prose requirement alongside trace evidence");
+  assert.match(JSON.stringify(refusal), /Requirement Trace Plan/);
 });
 
 test("executor provenance rides through the loop into the rendered tool result", async () => {
