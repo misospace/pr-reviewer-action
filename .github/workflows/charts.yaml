@@ -117,7 +117,11 @@ jobs:
           echo "rendered object kinds:"
           grep -n '^kind:' /var/tmp/render-kubernetes-executor-netpol.yaml | tail -n 35 || true
           grep -n 'kind: NetworkPolicy' /var/tmp/render-kubernetes-executor-netpol.yaml || true
-          [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml)" -eq 2 ]
+          policy_count="$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml || true)"
+          if [ "$policy_count" -ne 2 ]; then
+            echo "::error::expected 2 opt-in policies for Kubernetes executor; found $policy_count"
+            exit 1
+          fi
 
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
