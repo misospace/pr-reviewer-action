@@ -469,8 +469,11 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   // ── reconciliation schedule.
   let reconcile: { readonly intervalMs: number; readonly repos: readonly string[] } | null = null;
   const intervalRaw = env.PR_REVIEWER_RECONCILE_INTERVAL_MS;
-  if (intervalRaw !== undefined) {
-    const intervalMs = Number(intervalRaw);
+  const repoTargetsRaw = env.PR_REVIEWER_RECONCILE_REPOS ?? "";
+  // A trusted repo list alone opts into the default 15-minute sweep.
+  // An explicit interval with no targets remains a startup refusal.
+  if (intervalRaw !== undefined || repoTargetsRaw.trim() !== "") {
+    const intervalMs = intervalRaw === undefined ? 900_000 : Number(intervalRaw);
     if (!Number.isSafeInteger(intervalMs) || intervalMs < 50) {
       throw new StartupRefusal(
         "PR_REVIEWER_RECONCILE_INTERVAL_MS must be an integer >= 50 (milliseconds)",
