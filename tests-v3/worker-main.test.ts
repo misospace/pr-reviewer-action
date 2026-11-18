@@ -278,6 +278,39 @@ test("the envelope's model selection reaches the engine inputs verbatim (#1496)"
   }
 });
 
+test("the worker deliberately consumes no evidence config — the envelope's evidence name is inert identity (#1711)", async () => {
+  // REPRODUCTION of #1711: the empty evidence name (the instance config
+  // declares no providers — Action-mode parity) must validate and run, and
+  // in EITHER state no evidence-provider input may reach the engine: the
+  // executor deliberately does not plumb evidence config into the worker
+  // (#1711) — the envelope's evidence name is identity metadata only.
+  for (const evidence of ["", "default"]) {
+    const fixture = makeRequest({
+      profiles: Object.freeze({ executor: "local-dev", model: "fast", evidence }),
+    });
+    try {
+      const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      assert.equal(await workerMain([fixture.request.requestPath], {}, deps), 0);
+      assertConformingResult(fixture.request, { status: "completed" });
+      const inputs = run.requests[0]?.inputs ?? {};
+      assert.equal(
+        Object.keys(inputs).some((key) => /evidence/i.test(key)),
+        false,
+        `the engine inputs must carry no evidence input (evidence name: '${evidence}')`,
+      );
+      const ambient = run.requests[0]?.ambient ?? {};
+      assert.equal(
+        Object.keys(ambient).some((key) => /evidence/i.test(key)),
+        false,
+        `the engine ambient must carry no evidence variable (evidence name: '${evidence}')`,
+      );
+    } finally {
+      cleanup(fixture);
+    }
+  }
+});
+
 test("the projected model credential becomes the ai-api-key input and never lands in the result (#735/#1496)", async () => {
   const fixture = makeRequest();
   const secret = "sk-test-material";

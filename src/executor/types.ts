@@ -222,7 +222,14 @@ export interface ExecutionModelSelection {
 
 /** The approved profile NAMES an execution runs under. Names only —
  * repository config never carries infrastructure: what these names resolve
- * to (command, image, endpoint, credentials) is operator-side state. */
+ * to (command, image, endpoint, credentials) is operator-side state.
+ *
+ * `evidence` may be "" (#1711): the instance config declares no evidence
+ * providers, so the run carries the not-configured name — Action-mode
+ * parity, where evidence is simply "not configured". The executor
+ * deliberately consumes no evidence config (no providers-file is mapped
+ * into the worker engine): the name is identity metadata, matching the
+ * credential plan's `evidenceProfileName` ("" when none). */
 export interface ExecutionProfiles {
   readonly executor: string;
   readonly model: string;
@@ -831,10 +838,20 @@ function validateProfilesShape(value: unknown, path: string): ExecutionProfiles 
     throw new ExecutionRequestError(`${path} must be a mapping`);
   }
   rejectUnknownFields(value, ["executor", "model", "evidence"], path);
+  // `evidence` is the ONE profile name that may be "" (#1711 — the
+  // not-configured "no providers" state, Action-mode parity). A non-empty
+  // name must stay a bounded control-free identity — the same grammar the
+  // credential plan's `evidenceProfileName` applies downstream.
+  const evidence = requireString(value, "evidence", path);
+  if (evidence.length > 128 || hasControlCharacters(evidence)) {
+    throw new ExecutionRequestError(
+      `${path}.evidence must be "" (not configured) or a bounded control-free profile name`,
+    );
+  }
   return Object.freeze({
     executor: requireString(value, "executor", path, { nonEmpty: true }),
     model: requireString(value, "model", path, { nonEmpty: true }),
-    evidence: requireString(value, "evidence", path, { nonEmpty: true }),
+    evidence,
   });
 }
 
