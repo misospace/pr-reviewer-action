@@ -116,6 +116,26 @@ test("#1702: explicit trace test reads block premature investigation-complete un
   ]);
 });
 
+test("#1702: trace acquisition cannot short-circuit missing changed-file coverage", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("PR corpus and Requirement Trace Plan");
+  const { postFn, executeFn, timeFn } = scriptedLoop([
+    openAiCall("test", "read_file", '{"path":"tests-v3/ci-wait.test.ts"}'),
+    openAiText("further code coverage was not established"),
+  ], [{ tool: "read_file", status: "ok", result: { content: "test evidence" } }]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai", model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    reserveForRequiredEvidence: 1,
+    requiredEvidence: [{ id: "trace:test-read-1", tokens: ["tests-v3/ci-wait.test.ts"], tools: ["read_file"] }],
+    coverageComplete: () => false,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE,
+    "acquired trace evidence alone must not signal obligations-settled if the change is still unread");
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["trace:test-read-1"]);
+});
+
 test("#1702: an unrelated read never settles mandatory trace test evidence", async () => {
   const conversation = new Conversation();
   conversation.addUser("PR corpus and Requirement Trace Plan");
