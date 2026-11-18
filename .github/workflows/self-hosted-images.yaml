@@ -12,7 +12,11 @@ name: Self-hosted images
 #     For pull_request events the ref pins the PR HEAD commit
 #     (`github.event.pull_request.head.sha`), not the merge commit
 #     `github.sha` points at, so a qualification can address the reviewed
-#     head directly.
+#     head directly. The checkout step pins that same ref explicitly — a
+#     default pull_request checkout would otherwise build the synthetic
+#     merge commit while the tags still claim sha-<head> — and the publish
+#     job asserts the checked-out HEAD equals SOURCE_SHA before anything
+#     is tagged.
 #   - `pr-<number>`  — moving ref for same-repository PRs only (the publish
 #     job below refuses fork PRs); each underlying commit stays addressable
 #     by its immutable `sha-<commit>` ref.
@@ -70,6 +74,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Build exactly the commit the tags name. pull_request events
+          # default actions/checkout to the synthetic merge commit
+          # (refs/pull/<n>/merge), which would tag sha-<head> on an
+          # artifact built from the merge commit — so the ref is pinned to
+          # the PR head here, with the pushed commit as the fallback for
+          # push and dispatch events.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Normalize the GHCR image owner
         # GHCR image paths must be lowercase; build the tags from the
@@ -100,6 +111,15 @@ jobs:
           fi
           [ -n "$SOURCE_SHA" ] || { echo "cannot resolve the source commit" >&2; exit 1; }
           echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+
+          # The tags and the build context must name the same commit: the
+          # checkout step above pinned exactly SOURCE_SHA, so assert the
+          # working tree really is that commit before anything is tagged.
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          [ "$CHECKED_OUT_SHA" = "$SOURCE_SHA" ] || {
+            echo "checked-out commit ${CHECKED_OUT_SHA} is not SOURCE_SHA ${SOURCE_SHA}; refusing to tag a mismatched artifact" >&2
+            exit 1
+          }
 
           # Moving PR ref, same-repo PRs only (the job's `if` keeps fork PRs
           # out of this job; this branch can only fire for a same-repo PR).
@@ -276,6 +296,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Validate the actual PR HEAD commit, not the synthetic merge
+          # commit the default pull_request checkout builds: the summary
+          # below reports this commit as the build source.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

@@ -548,13 +548,44 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     "fork PRs must not export the GHA cache",
   );
 
+  // ── Checkout provenance: the default pull_request checkout builds the
+  // synthetic merge commit, which would tag sha-<head> on an artifact
+  // built from the merge commit. Both jobs must pin the checkout ref to
+  // the commit the tags name: the PR head in the publish job (github.sha
+  // as the fallback for push and dispatch events) and the PR head in the
+  // fork job it validates.
+  const checkoutRef = (job: { steps: { uses?: string; with?: Record<string, unknown> }[] }): string => {
+    const step = job.steps.find((entry) => entry.uses?.includes("actions/checkout"));
+    assert.ok(step, "each job must carry a checkout step its provenance can be proven from");
+    return String(step!.with?.["ref"] ?? "");
+  };
+  assert.equal(
+    checkoutRef(publish),
+    "${{ github.event.pull_request.head.sha || github.sha }}",
+    "the publish job must build the tagged commit itself: the PR head, never the merge commit",
+  );
+  assert.equal(
+    checkoutRef(fork),
+    "${{ github.event.pull_request.head.sha }}",
+    "the fork job must validate the PR head commit, never the merge commit",
+  );
+
   // ── Tag contract on the publish job's build steps. The immutable
   // sha-<commit> ref is the UNCONDITIONAL first tag line of both targets;
   // the moving pr-<number> ref and the SemVer + major.minor release
   // aliases are conditional on the resolved coordinates.
   const publishTagBlocks = publish.steps.flatMap(
     (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
-  ).filter((block) => block.includes("ghcr.io"));
+  ).filter((block) =>
+    // Anchor the registry match to the start of a tag line (CodeQL 379,
+    // js/incomplete-url-substring-sanitization: a bare `ghcr.io`
+    // substring can match anywhere in the string, so an arbitrary host
+    // may come before it). A qualifying block must contain a trimmed tag
+    // line that begins with the full registry path template.
+    block.split("\n").map((entry) => entry.trim()).some((entry) =>
+      entry.startsWith("ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-"),
+    ),
+  );
   assert.equal(publishTagBlocks.length, 2, "both publish build steps carry GHCR tags");
   const tagLine = (block: string, marker: string): string => {
     const line = block
