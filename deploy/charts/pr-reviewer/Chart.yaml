@@ -11,7 +11,7 @@ version: 0.1.0
 # .release-please-manifest.json (the release stamp the bundle carries).
 # release-please bumps this annotated line with the manifest (see
 # release-please-config.json `extra-files`).
-appVersion: "3.8.0" # x-release-please-version
+appVersion: "3.9.0" # x-release-please-version
 dependencies:
   - name: common
     repository: https://bjw-s-labs.github.io/helm-charts
