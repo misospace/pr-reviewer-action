@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readTangledCurrentHead, readTangledCurrentHeadForContext, resolveTangledTicketIdentity, selectNewestPatchHead } from "../src/platform/tangled-head.js";
+import { readTangledCurrentHead, readTangledCurrentHeadForContext, requireTangledHeadReadConfig, resolveTangledTicketIdentity, selectNewestPatchHead, TangledHeadReadConfigError } from "../src/platform/tangled-head.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { TangledPullIdentity } from "../src/platform/tangled-bobbin.js";
@@ -379,4 +379,49 @@ test("read: malformed listRecords payloads yield null (hostile boundary)", async
       new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
     assert.equal(await readTangledCurrentHead(makeCtx(), IDENTITY, { fetchImpl }), null);
   }
+});
+
+// ── #1692: publish-config guard (fail fast, not end-of-run refusal) ───────
+
+test("guard: a fully configured publishing context passes", () => {
+  assert.doesNotThrow(() => requireTangledHeadReadConfig(makeCtx()));
+});
+
+test("guard: a missing knot host throws naming TANGLED_REPO_KNOT, never the other variable", () => {
+  assert.throws(
+    () => requireTangledHeadReadConfig(makeCtx({ knotHost: undefined })),
+    (error: unknown) =>
+      error instanceof TangledHeadReadConfigError
+      && /TANGLED_REPO_KNOT/.test(error.message)
+      && !error.message.includes("TANGLED_REPO_REPO_DID")
+      && /current[- ]head/i.test(error.message)
+      && /publication/i.test(error.message),
+  );
+});
+
+test("guard: a whitespace knot host is missing, not a host", () => {
+  assert.throws(
+    () => requireTangledHeadReadConfig(makeCtx({ knotHost: "   " })),
+    (error: unknown) => error instanceof TangledHeadReadConfigError && /TANGLED_REPO_KNOT/.test(error.message),
+  );
+});
+
+test("guard: a missing repository DID throws naming TANGLED_REPO_REPO_DID, never the knot", () => {
+  assert.throws(
+    () => requireTangledHeadReadConfig(makeCtx({ repoDid: undefined })),
+    (error: unknown) =>
+      error instanceof TangledHeadReadConfigError
+      && /TANGLED_REPO_REPO_DID/.test(error.message)
+      && !error.message.includes("TANGLED_REPO_KNOT"),
+  );
+});
+
+test("guard: both missing names both variables in one diagnostic", () => {
+  assert.throws(
+    () => requireTangledHeadReadConfig(makeCtx({ knotHost: undefined, repoDid: undefined })),
+    (error: unknown) =>
+      error instanceof TangledHeadReadConfigError
+      && /TANGLED_REPO_KNOT/.test(error.message)
+      && /TANGLED_REPO_REPO_DID/.test(error.message),
+  );
 });

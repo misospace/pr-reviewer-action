@@ -15,6 +15,7 @@ import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
+import { requireTangledHeadReadConfig } from "../platform/tangled-head.js";
 import { readReviewedTangledIdentityFromRunDir, readReviewedTicketCurrentHead } from "../platform/tangled-ticket.js";
 import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
@@ -802,6 +803,14 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
   // descriptive error naming the missing variable.
   if (platform === "tangled") {
     const context = tangledContextFromEnv(env);
+    // #1692: a Tangled publish capability whose #1165 current-head read can
+    // never succeed is never constructed. The knot host and the repository
+    // DID are what the read consumes; without them every publication would
+    // be refused at the boundary, so the seam refuses here instead — with a
+    // diagnostic naming the missing variable. The Tangled runner refuses the
+    // same configuration even earlier, before it reviews (see
+    // `platform-action.ts`).
+    requireTangledHeadReadConfig(context);
     // #1695 TOCTOU: the identity that was REVIEWED is the identity that is
     // PUBLISHED. The review-side adapter persisted its resolved
     // `TangledReviewIdentity` into this run directory the moment it

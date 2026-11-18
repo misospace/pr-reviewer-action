@@ -15,8 +15,13 @@
 # and changed files from that revision's trusted base/head commits through
 # the Git read surface (this checkout). The managed AT-Proto review record
 # is published bound to the ticket. Publication stays fail-closed (#1165):
-# a run that cannot prove the pull has not advanced refuses to publish and
-# exits non-zero, by design.
+# it proves the current head from this knot's org.tangled.review.patch
+# records, so it needs `TANGLED_REPO_KNOT` below. For an open pull that is
+# not a proven draft, the runner checks this before the review starts: a
+# missing value stops the run with an error naming the missing variable
+# (#1692, #1696). A closed or proven-draft pull does not need that
+# configuration. A run that cannot prove the pull has not advanced refuses
+# to publish and exits non-zero, by design.
 #
 # What Spindle provides
 #
@@ -71,6 +76,14 @@ environment:
 
   # Your knot's Bobbin read endpoint.
   TANGLED_BOBBIN_URL: https://bobbin.tangled.sh
+
+  # Your knot's bare hostname: no scheme, no port, no path. The host
+  # below is a documentation placeholder — replace it with your knot's
+  # real host. The publication boundary reads the current head from
+  # this knot's org.tangled.review.patch records (#1165), so a run that
+  # publishes must set it; without it the run stops before the review
+  # and names this variable (#1692).
+  TANGLED_REPO_KNOT: knot1.tangled.sh
 
   # Model endpoint and model name (OpenAI- or Anthropic-compatible; cloud
   # or self-hosted). The API key is a repository secret, not set here.

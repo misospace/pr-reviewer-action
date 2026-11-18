@@ -54,6 +54,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage } from "node:http";
 import { platformActionMain } from "../src/run/platform-action.js";
+import { TangledHeadReadConfigError } from "../src/platform/tangled-head.js";
 import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
 import { TANGLED_MANAGED_REVIEW_COLLECTION, TangledPublishApi, managedReviewRkey } from "../src/platform/tangled-publish.js";
 import type { TangledReviewIdentity } from "../src/platform/tangled-ticket.js";
@@ -784,6 +785,67 @@ test("publication refuses when the reviewed ticket closes mid-run and a replacem
     assert.equal(world.pds.records.size, 0, "nothing was published");
     assert.equal(world.pds.creates, 0, "no managed record was created — not on T1, not on T2");
     assert.equal(world.pds.puts, 0, "no managed record was updated");
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1696: a publishing run without the repository DID gets the named config refusal before any read, model call or publication", async () => {
+  // The production shape on the current record model: a publishing run whose
+  // Tangled context cannot ever satisfy the #1165 current-head read is
+  // refused by the named guard BEFORE the review engine starts — before the
+  // knot resolution, before the model, before publication. No knot stub is
+  // installed: a run that reached any knot read would hit real DNS for the
+  // stub host and fail with a different error, so the named refusal proves
+  // the guard ordering end to end.
+  const world = await startTangledWorld();
+  try {
+    const runDir = join(world.runsRoot, "run-no-repo-did");
+    const env = tangledEnv(world, runDir);
+    delete env.TANGLED_REPO_REPO_DID;
+    await assert.rejects(
+      platformActionMain(env, { runDir }),
+      (error: unknown) =>
+        error instanceof Error
+        && /TANGLED_REPO_REPO_DID/.test(error.message)
+        && !error.message.includes("TANGLED_REPO_KNOT"),
+    );
+    assert.equal(world.model.requests.length, 0, "the review never reached the model");
+    assert.equal(world.pds.records.size, 0, "nothing was published");
+    assert.equal(world.pds.creates, 0);
+    assert.equal(world.pds.puts, 0);
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1696 review: a publishing run without the knot host gets the named config refusal, not the resolver failure", async () => {
+  // The stock adapter's review-identity resolution itself needs the knot
+  // host, so `getPr()` yields null when it is missing — the config probe
+  // must not be bypassed by that failure. The typed error class is the
+  // discriminator: the resolver error also names TANGLED_REPO_KNOT, so a
+  // message match alone could not tell the early guard from a later
+  // resolution stop. No knot stub is installed and the knot host is unset:
+  // the run issues no knot request at all, and the named refusal proves
+  // the guard ordering end to end.
+  const world = await startTangledWorld();
+  try {
+    const runDir = join(world.runsRoot, "run-no-knot");
+    const env = tangledEnv(world, runDir);
+    delete env.TANGLED_REPO_KNOT;
+    await assert.rejects(
+      platformActionMain(env, { runDir }),
+      (error: unknown) =>
+        error instanceof TangledHeadReadConfigError
+        && /TANGLED_REPO_KNOT/.test(error.message)
+        && !error.message.includes("TANGLED_REPO_REPO_DID")
+        && /current-head/i.test(error.message)
+        && /publication/i.test(error.message),
+    );
+    assert.equal(world.model.requests.length, 0, "the review never reached the model");
+    assert.equal(world.pds.records.size, 0, "nothing was published");
+    assert.equal(world.pds.creates, 0);
+    assert.equal(world.pds.puts, 0);
   } finally {
     await world.close();
   }
