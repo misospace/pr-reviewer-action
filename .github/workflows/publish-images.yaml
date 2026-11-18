@@ -1,4 +1,4 @@
-name: Self-hosted images
+name: Publish images
 
 # #1704: publish the #738 controller and worker runtime images to GHCR for
 # every publishable revision, not just the #1584 manual canary. The workflow
@@ -55,7 +55,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: self-hosted-images-${{ github.ref }}
+  group: publish-images-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

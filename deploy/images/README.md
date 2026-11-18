@@ -21,7 +21,7 @@ docker build -f deploy/images/Dockerfile --target worker      -t <registry>/pr-r
 The dedicated GitHub Actions workflow publishes both images to GHCR from
 one checked-out commit for every publishable revision (#1704):
 
-- workflow: `.github/workflows/self-hosted-images.yaml` — triggered by
+- workflow: `.github/workflows/publish-images.yaml` — triggered by
   pull requests targeting `main`, pushes to `main`, pushes of `v*` release
   tags, and manual `workflow_dispatch` (recovery/testing);
 - published refs (both images, all from the same source commit):

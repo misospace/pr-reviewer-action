@@ -47,7 +47,7 @@ For release publishing, pin the base image digests as described in
 
 ### Published GHCR images (#1704)
 
-The dedicated workflow `.github/workflows/self-hosted-images.yaml` builds
+The dedicated workflow `.github/workflows/publish-images.yaml` builds
 both targets from one checked-out commit and pushes them to GHCR for every
 publishable revision:
 
@@ -73,7 +73,7 @@ How it runs:
 
 - **Triggers.** Pull requests targeting `main`, pushes to `main`, pushes of
   `v*` release tags, and manual `workflow_dispatch` (recovery/testing,
-  from Actions → Self-hosted images).
+  from Actions → Publish images).
 - **Fork boundary.** A fork pull request builds and validates both targets
   locally but receives no GHCR credentials (`contents: read` only) and
   publishes nothing. Only same-repo PRs, `main` pushes, release tags, and
@@ -324,7 +324,7 @@ the harness starts, so the job holds no secret. An operator can
 therefore dispatch it against any ref, a branch that carries an open pull
 request included. It never gates a merge either.
 
-The `.github/workflows/self-hosted-images.yaml` workflow builds and pushes
+The `.github/workflows/publish-images.yaml` workflow builds and pushes
 the controller and worker images to GHCR for PRs, `main` commits, release
 tags, and manual dispatches
 ([Published GHCR images](#published-ghcr-images-1704) above); it also never

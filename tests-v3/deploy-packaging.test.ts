@@ -454,7 +454,7 @@ test("chart keeps dependency artifacts loadable and gitignored; CI gates render"
 });
 
 test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs, fork trust boundary", () => {
-  const path = ".github/workflows/self-hosted-images.yaml";
+  const path = ".github/workflows/publish-images.yaml";
   const workflow = read(path);
   const parsed = parse(workflow) as {
     on: {
@@ -483,7 +483,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.deepEqual(parsed.on.push?.tags, ["v*"], "release tag pushes must publish");
   // A canceled run would silently skip publishing the sha refs of the
   // commit it raced, so runs serialize per ref and never cancel.
-  assert.match(parsed.concurrency.group, /self-hosted-images-\$\{\{ github\.ref \}\}/);
+  assert.match(parsed.concurrency.group, /publish-images-\$\{\{ github\.ref \}\}/);
   assert.equal(parsed.concurrency["cancel-in-progress"], false);
 
   // ── Two jobs, split by trust: publish (same-repo heads) vs. the fork
