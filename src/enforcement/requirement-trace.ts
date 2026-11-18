@@ -895,6 +895,15 @@ function normalizeRepoPath(path: string): string {
  * CI "test leg") is not itself a demand to author a regression test: treating
  * it as one adds an artificial proof obligation to unrelated runtime code. */
 export function explicitlyRequiresTest(text: string): boolean {
+  // #1702/#1703 organic review: acceptance bullets also demand tests with
+  // the TEST as grammatical subject, not after the modal: "Tests for stale
+  // heads..." and "Regression tests must cover ...". Without this arm, the
+  // trusted trace plan budgets only an implementation read, so the reviewer
+  // can close without reading any tests and then report the test requirement
+  // unknown. Match a narrow test-first construction, never generic phrases
+  // about a CI "test leg" or tests merely passing.
+  if (/^\s*(?:(?:regression|adversarial|unit|integration|end-to-end|e2e)\s+)?tests?\s+for\b/i.test(text)) return true;
+  if (/\b(?:(?:regression|adversarial|unit|integration|end-to-end|e2e)\s+)?tests?\s+(?:must|shall|should|need(?:s)?\s+to|are\s+required\s+to)\s+(?:cover|exercise|assert|verify|validate|demonstrate|include|test|prove|capture|replay)\b/i.test(text)) return true;
   const demand = /\b(must|shall|should|required?|needs?|requires?|mandatory|have to|has to)\b/i.test(text);
   if (!demand) return false;
   if (/\btests?\s+coverage\b/i.test(text)) return true;
