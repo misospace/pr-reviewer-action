@@ -2867,13 +2867,22 @@ test("#1703 replay: test-first linked acceptance demands both code and test prov
       ["test_required", "met"], ["test_required", "met"],
     ]);
 
+    // Explicit enforcement/test locations let us test each validator side
+    // independently. The wire's 'test' kind may also be a primary code
+    // provenance for test-only requirements, so using it to simulate a
+    // missing implementation citation would be a false negative control.
+    const additive = (source: string, testPath: string) => ({
+      requirement_id: id, disposition: "met", reason: "claimed implementation and tests",
+      enforcement: source ? [{ file: source.split(":")[0], line: Number(source.split(":")[1]) }] : [],
+      test: testPath ? [{ file: testPath.split(":")[0], line: Number(testPath.split(":")[1]) }] : [],
+    });
     const variants = [
-      ["missing enforcement", coverage("", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
-      ["missing test", coverage("src/gates/ci-wait.ts:2", ""), "downgraded-no-valid-test-location"],
-      ["nonexistent enforcement", coverage("src/gates/absent.ts:2", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
-      ["stale enforcement line", coverage("src/gates/ci-wait.ts:999", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
-      ["nonexistent test", coverage("src/gates/ci-wait.ts:2", "tests/absent.test.ts:1"), "downgraded-no-valid-test-location"],
-      ["stale test line", coverage("src/gates/ci-wait.ts:2", "tests/real.test.ts:999"), "downgraded-no-valid-test-location"],
+      ["missing enforcement", additive("", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["missing test", additive("src/gates/ci-wait.ts:2", ""), "downgraded-no-valid-test-location"],
+      ["nonexistent enforcement", additive("src/gates/absent.ts:2", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["stale enforcement line", additive("src/gates/ci-wait.ts:999", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["nonexistent test", additive("src/gates/ci-wait.ts:2", "tests/absent.test.ts:1"), "downgraded-no-valid-test-location"],
+      ["stale test line", additive("src/gates/ci-wait.ts:2", "tests/real.test.ts:999"), "downgraded-no-valid-test-location"],
     ] as const;
     for (const [label, claim, note] of variants) {
       const result = validateRequirementTrace([claim], ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
