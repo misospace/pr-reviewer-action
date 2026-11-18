@@ -78,6 +78,28 @@ is the independent Helm chart version and is never annotated.
   the admin bearer token and the NetworkPolicy). Requires
   `controller.admin.enabled`.
 
+## PR discovery (polling-first)
+
+The chart defaults to polling **trusted, explicitly listed** repositories every
+**15 minutes** (`controller.reconcile.enabled: true`,
+`controller.reconcile.intervalMs: 900000`). Set
+`controller.reconcile.repos: [owner/repo]` to activate it. With no targets,
+the chart starts no poll and does not scan the App's other repositories.
+For GitHub, also set `controller.reconcile.githubInstallationId` to the
+installation authorized to read those repositories. Forgejo/Gitea reuse their
+configured forge credential. A nonempty repo list without the required GitHub
+installation ID refuses to render, rather than silently skipping reviews.
+
+Webhooks (`controller.webhook.enabled`) are **optional** for low-latency
+delivery; the scheduled sweep discovers missed/new PR heads independently.
+Both paths share generation identity and durable deduplication. To tune the
+interval, set `controller.reconcile.intervalMs` in milliseconds; to stop the
+sweep, set `controller.reconcile.enabled: false`.
+
+**Initial rollout:** the sweep lists all currently open PRs, not only ones
+created after installation. Review the target repository's existing backlog
+and configured concurrency/model costs before first enabling the poll.
+
 ## Security defaults
 
 - `runAsNonRoot`, uid/gid 1000, `fsGroup` 65532, seccomp
