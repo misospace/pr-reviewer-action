@@ -28,7 +28,7 @@
 
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 import { normalizeForgejoConversationComments, normalizeForgejoPrFiles } from "./normalize.js";
-import { gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
+import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import type {
   ExternalCheck,
@@ -217,7 +217,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
     this.baseUrl = parsed.base;
     this.origin = parsed.origin;
     const path = parseGitLabProjectPath(options.repo);
-    if (path === null) throw new Error(`Invalid GitLab project path: ${options.repo}`);
+    if (path === null) throw new Error(`Invalid GitLab project path: ${gitlabProjectPathForDiagnostics(options.repo)}`);
     this.repo = path;
     this.prNumber = options.prNumber;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -234,7 +234,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
    * invalid or the normalized path escapes the intended prefix. */
   private projectUrl(staticTail: string, dynamicTail = ""): string {
     const url = gitlabProjectScopedUrl(this.apiPath(""), this.repo, staticTail, dynamicTail);
-    if (url === null) throw new Error(`Refusing a request outside project ${this.repo}`);
+    if (url === null) throw new Error(`Refusing a request outside project ${gitlabProjectPathForDiagnostics(this.repo)}`);
     return url;
   }
 
@@ -530,7 +530,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
   async getIssue(repo: string, issueNumber: string): Promise<ReadResult<unknown>> {
     if (!NUMBER_RE.test(issueNumber)) return { ok: false, error: "invalid issue reference" };
     const url = gitlabProjectScopedUrl(this.apiPath(""), repo, "/issues/", issueNumber);
-    if (url === null) return { ok: false, error: `Invalid GitLab project path: ${repo}` };
+    if (url === null) return { ok: false, error: `Invalid GitLab project path: ${gitlabProjectPathForDiagnostics(repo)}` };
     return this.read(async () => {
       const { status, data } = await requestJson(url, await this.options());
       return status === 200 ? data : null;

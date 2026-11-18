@@ -52,6 +52,22 @@ export function parseGitLabProjectPath(repo: string): string | null {
   return trimmed;
 }
 
+/** Diagnostic rendering of a raw project-path candidate that may originate
+ * from untrusted payload state (#740 review, #252 doctrine): keep at most
+ * the first 120 characters and replace every byte outside printable ASCII
+ * with `?`, so a hostile value can never inject control or escape sequences
+ * into a thrown message, a log line, or a CI annotation. Never use this for
+ * identity or URL building — only for diagnostics. */
+export function gitlabProjectPathForDiagnostics(value: string): string {
+  const capped = value.length > 120 ? `${value.slice(0, 120)}...` : value;
+  let out = "";
+  for (const ch of capped) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code >= 0x20 && code <= 0x7e ? ch : "?";
+  }
+  return out;
+}
+
 /** `${apiBase}/projects/${encodeURIComponent(path)}${staticTail}${dynamicTail}`
  * as a normalized URL string, or null when the project path is invalid or the
  * normalized path escapes the intended prefix — the same defense-in-depth idea

@@ -551,9 +551,10 @@ function validateCallInput(input: GatewayCallInput): string {
   if (typeof input.reservationId !== "string" || input.reservationId.length === 0 || input.reservationId.length > 128 || input.reservationId !== input.reservationId.trim()) {
     return "gateway call reservation id is malformed";
   }
-  if (input.platform !== "github" && input.platform !== "forgejo") {
-    return "gateway call platform must be 'github' or 'forgejo'";
-  }
+if (input.platform !== "github" && input.platform !== "forgejo") {
+  // #740: 'gitlab' stays refused here until #1677 composition.
+  return "gateway call platform must 'github' or 'forgejo' ('gitlab' is refused until #1677)";
+}
   if (typeof input.installationId !== "string" || input.installationId.length > 128) {
     return "gateway call installation id is malformed";
   }

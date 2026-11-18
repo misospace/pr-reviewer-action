@@ -116,15 +116,6 @@ import { createOperatorHost, type OperatorHost } from "../ingress/operator-host.
 import { ingressWebhookPath } from "../ingress/endpoints.js";
 import { forgeEnforcesWebhookRoute } from "../platform/forge-identity.js";
 
-/** The forge labels THIS daemon can serve at its intake/reconcile boundary.
- * The declared vocabulary is the platform seam's (`isForgeId`, #1682); this
- * is what the controller can COMPOSE today — GitHub plus the two Gitea-family
- * identities. `gitlab` (#740) is deliberately absent until the GitLab
- * capability composition lands (#1677), so it is refused by name rather than
- * mapped onto another family. */
-function isDaemonServedPlatform(value: unknown): value is "github" | "forgejo" | "gitea" {
-  return value === "github" || value === "forgejo" || value === "gitea";
-}
 import type { FollowUpConsumerOptions } from "../ingress/followup-host.js";
 import {
   createControllerRequestBuilder,
@@ -144,6 +135,16 @@ import {
   createSnapshotBackedQueueStore,
   type SnapshotBackedQueueStore,
 } from "./snapshot-adapter.js";
+
+/** The forge labels THIS daemon can serve at its intake/reconcile boundary.
+ * The declared vocabulary is the platform seam's (`isForgeId`, #1682); this
+ * is what the controller can COMPOSE today — GitHub plus the two Gitea-family
+ * identities. `gitlab` (#740) is deliberately absent until the GitLab
+ * capability composition lands (#1677), so it is refused by name rather than
+ * mapped onto another family. */
+function isDaemonServedPlatform(value: unknown): value is "github" | "forgejo" | "gitea" {
+  return value === "github" || value === "forgejo" || value === "gitea";
+}
 
 /** The forge reads and writes the daemon performs, bound by the operator
  * to the platform capability layer (`src/platform/`). No forge CLI. */

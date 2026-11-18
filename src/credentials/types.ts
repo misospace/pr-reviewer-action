@@ -338,10 +338,11 @@ export function validateCredentialPlan(value: unknown): WorkerCredentialPlan {
       throw new CredentialPlanError(`credential plan: unsupported field '${key}'`);
     }
   }
-  const platform = value["platform"];
-  if (platform !== "github" && platform !== "forgejo") {
-    throw new CredentialPlanError("credential plan.platform must be 'github' or 'forgejo'");
-  }
+const platform = value["platform"];
+if (platform !== "github" && platform !== "forgejo") {
+  // #740: 'gitlab' stays refused here until #1677 composition.
+  throw new CredentialPlanError("credential plan.platform must be 'github' or 'forgejo' ('gitlab' is refused until #1677)");
+}
   const fork = value["fork"];
   if (typeof fork !== "boolean") {
     throw new CredentialPlanError("credential plan.fork must be a boolean");

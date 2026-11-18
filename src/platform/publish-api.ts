@@ -16,7 +16,7 @@
 import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
 import { gitlabFetch } from "./gitlab.js";
-import { gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
+import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
 import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
@@ -1525,7 +1525,7 @@ export class GitLabPublishApi implements PublishPlatformApi {
     this.base = parsed.base;
     this.origin = parsed.origin;
     const path = parseGitLabProjectPath(options.repo);
-    if (path === null) throw new Error(`Invalid GitLab project path: ${options.repo}`);
+    if (path === null) throw new Error(`Invalid GitLab project path: ${gitlabProjectPathForDiagnostics(options.repo)}`);
     this.repo = path;
     this.prNumber = options.prNumber;
     this.timeoutMs = options.timeoutMs ?? 25_000;
@@ -1536,7 +1536,7 @@ export class GitLabPublishApi implements PublishPlatformApi {
    * invalid or the normalized path escapes the intended prefix. */
   private url(staticTail: string, dynamicTail = ""): string {
     const url = gitlabProjectScopedUrl(`${this.base}/api/v4`, this.repo, staticTail, dynamicTail);
-    if (url === null) throw new Error(`Refusing a request outside project ${this.repo}`);
+    if (url === null) throw new Error(`Refusing a request outside project ${gitlabProjectPathForDiagnostics(this.repo)}`);
     return url;
   }
 

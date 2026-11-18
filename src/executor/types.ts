@@ -759,10 +759,12 @@ function validateWorkspaceShape(value: unknown, path: string): WorkspaceInfo {
     ["rootPath", "headSha", "mergeBaseSha", "platform", "repoFullName", "createdAtMs"],
     path,
   );
-  const platform = value["platform"];
-  if (platform !== "github" && platform !== "forgejo") {
-    throw new ExecutionRequestError(`${path}.platform must be 'github' or 'forgejo'`);
-  }
+const platform = value["platform"];
+if (platform !== "github" && platform !== "forgejo") {
+  // #740: 'gitlab' is in the widened type but stays refused here — the
+  // daemon rejects gitlab instances until #1677 composition lands.
+  throw new ExecutionRequestError(`${path}.platform must be 'github' or 'forgejo' ('gitlab' is refused until #1677)`);
+}
   const workspace: WorkspaceInfo = Object.freeze({
     rootPath: requireString(value, "rootPath", path, { nonEmpty: true }),
     headSha: requireString(value, "headSha", path, { nonEmpty: true }),
@@ -887,10 +889,11 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
   if (kind !== "review" && kind !== "follow_up") {
     throw new ExecutionRequestError("execution request.kind must be 'review' or 'follow_up'");
   }
-  const platform = value["platform"];
-  if (platform !== "github" && platform !== "forgejo") {
-    throw new ExecutionRequestError("execution request.platform must be 'github' or 'forgejo'");
-  }
+const platform = value["platform"];
+if (platform !== "github" && platform !== "forgejo") {
+  // #740: 'gitlab' stays refused at submission until #1677 composition.
+  throw new ExecutionRequestError("execution request.platform must be 'github' or 'forgejo' ('gitlab' is refused until #1677)");
+}
   const credentialsRaw = value["credentials"];
   if (!Array.isArray(credentialsRaw)) {
     throw new ExecutionRequestError("execution request.credentials must be a list");

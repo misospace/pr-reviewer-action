@@ -52,15 +52,19 @@ the authentication mode, and the mode is exclusive:
   it, constant-time, against the `X-Gitlab-Token` header. A
   `webhook-signature` header alone does not authenticate.
 
-An empty secret accepts nothing. Signatures are compared constant-time, and
-the delivery timestamp must be within five minutes, because an old captured
-delivery must not start a review.
+An empty secret accepts nothing. Signatures are compared constant-time. In
+signing mode the delivery timestamp must be within five minutes, because an
+old captured delivery must not start a review. The legacy secret token has
+no timestamp, so an exact copy of one accepted delivery stays replayable.
+The review queue absorbs the duplicate, and webhook-id dedupe is part of
+the daemon composition (#1677).
 
 The projection maps GitLab actions onto the canonical events: MR `open` and
 `reopen` start a review, a new comment projects to a follow-up, and an
 `update` whose `object_attributes.oldrev` names a commit projects to a
-synchronize. An `update` without that field is a label or metadata edit and
-starts nothing. A comment body is never copied into the job.
+synchronize. An `update` without that field starts nothing, unless it adds
+the configured re-review label, which projects to a labeled re-review. A
+comment body is never copied into the job.
 
 ## What works today, and what does not
 

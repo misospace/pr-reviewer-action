@@ -437,8 +437,11 @@ function projectMergeRequestEvent(
  * The MR reference: the real GitLab note payload carries a top-level
  * `merge_request` object (with `iid`/`id`) while `object_attributes` carries
  * `noteable_id`, NOT the iid — so the number is `object_attributes.iid` when
- * it is a positive safe integer, else `merge_request.iid`, else
- * `merge_request.id`, else the delivery degrades to unknown. The note BODY
+ * it is a positive safe integer, else `merge_request.iid`, else the
+ * delivery degrades to unknown. `merge_request.id` is deliberately NOT a
+ * fallback: it is the instance-GLOBAL identifier, a different id space from
+ * the project-scoped iid the whole downstream chain addresses, and guessing
+ * across id spaces could answer an unrelated merge request. The note BODY
  * (`object_attributes.note`) is untrusted data and is never copied anywhere. */
 function projectNoteEvent(payload: Record<string, unknown>): Record<string, unknown> {
   const attrs = isPlainObject(payload.object_attributes) ? payload.object_attributes : {};
@@ -447,8 +450,7 @@ function projectNoteEvent(payload: Record<string, unknown>): Record<string, unkn
   const mr = isPlainObject(payload.merge_request) ? payload.merge_request : {};
   const iid =
     asPositiveSafeInt(attrs.iid) ||
-    asPositiveSafeInt(mr.iid) ||
-    asPositiveSafeInt(mr.id);
+    asPositiveSafeInt(mr.iid);
   if (iid === 0) return unmappedShape();
 
   // The `issue.pull_request` MUST carry `number` so resolvePr takes the
@@ -653,12 +655,15 @@ export function createGitLabWebhookHandler(
     async function handle(): Promise<void> {
       if (req.method !== "POST") {
         settle(405, '{"status":"method not allowed"}');
+        // Drain so the refused body does not desynchronize a keep-alive socket.
+        req.resume();
         return;
       }
 
       const eventHeader = req.headers["x-gitlab-event"];
       if (typeof eventHeader !== "string" || !GITLAB_EVENT_HEADER.test(eventHeader)) {
         settle(400, '{"status":"invalid event header"}');
+        req.resume();
         return;
       }
 
@@ -666,7 +671,8 @@ export function createGitLabWebhookHandler(
       const chunks: Buffer[] = [];
       let receivedBytes = 0;
       let tooLarge = false;
-      const bodyBuffer = await new Promise<Buffer | null>((resolve, reject) => {
+      let streamError = false;
+      const bodyBuffer = await new Promise<Buffer | null>((resolve) => {
         req.on("data", (chunk: Buffer | string) => {
           if (tooLarge) return;
           const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -679,57 +685,30 @@ export function createGitLabWebhookHandler(
           }
           chunks.push(piece);
         });
-        req.on("error", () => reject(new Error("unreadable body")));
+        // A transport-level stream failure is the client's malformed
+        // delivery, not our internal fault: the fixed 400 below, never the
+        // generic 500 (and the failure text never reaches the response).
+        req.on("error", () => {
+          streamError = true;
+          chunks.length = 0;
+          resolve(null);
+        });
         req.on("end", () => {
-          if (!tooLarge) resolve(Buffer.concat(chunks));
+          if (!tooLarge && !streamError) resolve(Buffer.concat(chunks));
         });
       });
       if (bodyBuffer === null) {
-        settle(413, '{"status":"body too large"}');
+        settle(streamError ? 400 : 413, streamError ? '{"status":"unreadable body"}' : '{"status":"body too large"}');
         // Drop the inbound stream so the client cannot keep pushing bytes into
         // a request we already refused.
         if (!req.destroyed) req.destroy();
         return;
       }
 
-      // Unauthenticated bytes never reach the JSON parser.
-      if (
-        !verifyGitLabWebhookDelivery(
-          options.secret,
-          {
-            tokenHeader: req.headers["x-gitlab-token"],
-            webhookIdHeader: req.headers["webhook-id"],
-            webhookTimestampHeader: req.headers["webhook-timestamp"],
-            webhookSignatureHeader: req.headers["webhook-signature"],
-          },
-          bodyBuffer,
-        )
-      ) {
-        settle(401, '{"status":"invalid signature"}');
-        return;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(bodyBuffer.toString("utf8"));
-      } catch {
-        settle(400, '{"status":"invalid json"}');
-        return;
-      }
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        settle(400, '{"status":"invalid payload"}');
-        return;
-      }
-
-      if (eventHeader === "Ping" || isPingPayload(parsed as Record<string, unknown>)) {
-        settle(200, '{"status":"ignored"}');
-        return;
-      }
-
-      // The header is an unauthenticated hint; the dispatch core's projection
-      // gates it on the signed `object_kind` (a disagreement degrades
-      // fail-closed, never re-routes), and the projection is pure, so the
-      // guarded parsed object passes straight through.
+      // ONE verifier for the HTTP lane: the dispatch core authenticates the
+      // delivery BEFORE it parses, so unauthenticated bytes still never
+      // reach the JSON parser, and the handler cannot fork the auth
+      // decision (or its replay clock) from the core's.
       const outcome = await dispatchGitLabWebhookEvent(
         {
           eventHeader,
@@ -759,7 +738,7 @@ export function createGitLabWebhookHandler(
           settle(401, '{"status":"invalid signature"}');
           return;
         case "invalid-payload":
-          settle(400, '{"status":"invalid json"}');
+          settle(400, '{"status":"invalid payload"}');
           return;
         case "error":
           // Keep the error local — no logging of the event, no echo.

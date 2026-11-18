@@ -108,6 +108,27 @@ test("the constructor refuses an empty base URL and an invalid project path", ()
   assert.throws(() => new GitLabAdapter({ repo: "solo", prNumber: "1", baseUrl: BASE }), /Invalid GitLab project path/);
 });
 
+test("#252: a hostile project path in the invalid-path diagnostic carries no control or escape bytes", () => {
+  const hostile = "acme/widget\u001b]0;pwn\u0007\r\n[ERR] injected\u0000";
+  assert.throws(
+    () => new GitLabAdapter({ repo: hostile, prNumber: "1", baseUrl: BASE }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : "";
+      assert.match(message, /Invalid GitLab project path/);
+      assert.doesNotMatch(message, /[\u0000-\u001f\u007f-\u009f]/, "diagnostic must be printable");
+      assert.ok(message.includes("acme/widget"));
+      assert.ok(message.includes("?"));
+      return true;
+    },
+  );
+  const long = `evil/${"x".repeat(500)}/..`;
+  assert.throws(() => new GitLabAdapter({ repo: long, prNumber: "1", baseUrl: BASE }), (error: unknown) => {
+    const message = error instanceof Error ? error.message : "";
+    assert.ok(message.length < 200, `diagnostic stays bounded, got ${message.length}`);
+    return true;
+  });
+});
+
 // ── MR → GitHub-PR shape ─────────────────────────────────────────────────
 
 const MR_INTERNAL = {

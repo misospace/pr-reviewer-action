@@ -480,9 +480,12 @@ test("note gate: non-MergeRequest noteable, non-create action, or unresolvable i
   assert.equal(parseGitLabWebhookEvent("Note Hook", notePayload({}, { merge_request: { iid: "4" } })), null);
 });
 
-test("note iid precedence: object_attributes.iid, then merge_request.iid, then merge_request.id", () => {
+test("note iid precedence: object_attributes.iid, then merge_request.iid — never the instance-global merge_request.id", () => {
   assert.equal(parseGitLabWebhookEvent("Note Hook", notePayload({ iid: 7 }))?.prNumber, 7);
-  assert.equal(parseGitLabWebhookEvent("Note Hook", notePayload({}, { merge_request: { id: 42 } }))?.prNumber, 42);
+  assert.equal(parseGitLabWebhookEvent("Note Hook", notePayload({}, { merge_request: { iid: 9 } }))?.prNumber, 9);
+  // The global `id` addresses a different id space than the project-scoped
+  // iid; guessing with it could answer an unrelated merge request (#740 r).
+  assert.equal(parseGitLabWebhookEvent("Note Hook", notePayload({}, { merge_request: { id: 42 } })), null);
 });
 
 // --- event-header hint gating ------------------------------------------------
