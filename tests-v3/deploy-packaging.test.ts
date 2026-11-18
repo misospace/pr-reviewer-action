@@ -112,6 +112,12 @@ test("chart default values parse with hardened security defaults", () => {
   const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as Record<string, unknown>;
   const controller = values.controller as Record<string, unknown>;
   assert.equal(controller.enabled, true);
+  const reconcile = controller.reconcile as Record<string, unknown>;
+  assert.equal(reconcile.enabled, true, "polling should not depend on webhook delivery");
+  assert.equal(reconcile.intervalMs, 900_000, "default poll is every 15 minutes");
+  assert.deepEqual(reconcile.repos, [], "default must never scan unapproved repositories");
+  const webhook = controller.webhook as Record<string, unknown>;
+  assert.equal(webhook.enabled, false, "webhook remains optional");
   // defaultPodOptions: non-root pod identity.
   const pod = controller.defaultPodOptions as Record<string, unknown>;
   const podSecurity = pod.securityContext as Record<string, unknown>;
