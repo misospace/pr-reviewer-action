@@ -235,8 +235,8 @@ test("#1702/#1703: test-first P1 acceptance clauses reserve test evidence reads"
     ],
     "test-first acceptance rows need both the implementation AND regression-test evidence; a CI test leg does not",
   );
-  assert.ok(tracePlanSection(plan).includes("req-9d075d469102"));
-  assert.ok(tracePlanSection(plan).includes("req-515fd367d6b3"));
+  assert.ok(tracePlanSection(plan, []).text.includes("req-9d075d469102"));
+  assert.ok(tracePlanSection(plan, []).text.includes("req-515fd367d6b3"));
 });
 
 test("#1519 (review): an overflow-topology requirement plans as distributed, not runtime", () => {
