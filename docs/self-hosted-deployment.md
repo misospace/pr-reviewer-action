@@ -45,35 +45,52 @@ Image properties:
 For release publishing, pin the base image digests as described in
 `deploy/images/README.md`, then push digest-pinned references.
 
-### Published GHCR images (#1584 canary)
+### Published GHCR images (#1704)
 
-The dedicated workflow `.github/workflows/self-hosted-images.yaml` builds
-both targets from one checked-out commit and pushes them to GHCR:
+The dedicated workflow `.github/workflows/publish-images.yaml` builds
+both targets from one checked-out commit and pushes them to GHCR for every
+publishable revision:
 
 | image | reference |
 |-------|-----------|
 | controller | `ghcr.io/misospace/pr-reviewer-controller:sha-<commit>` |
 | worker | `ghcr.io/misospace/pr-reviewer-worker:sha-<commit>` |
 
+The immutable `sha-<commit>` ref exists for every run; two more ref classes
+are published from the same source commit:
+
+- **Pull requests (same-repo).** A moving `pr-<number>` ref for both
+  images (`...:pr-<number>`), so the self-hosted qualification path can
+  consume the current PR's images without a manual dispatch. The PR ref
+  may move as commits are pushed; each underlying commit stays addressable
+  by its immutable `sha-<head-commit>` ref.
+- **Release tags.** A `vX.Y.Z` tag publishes the exact SemVer ref
+  (`X.Y.Z`) and a `X.Y` alias for both images from that exact tagged
+  commit. The immutable `sha-<commit>` ref and digest remain the
+  provenance anchor behind the aliases. No `latest` tag is published.
+
 How it runs:
 
-- **Trigger.** Manual `workflow_dispatch` only; the job fails closed unless
-  it is dispatched from the `main` branch, so the published images always
-  come from the branch the repository protects (branch protection itself is
-  repository configuration, outside the workflow's control). Dispatch it
-  from Actions → Self-hosted images.
+- **Triggers.** Pull requests targeting `main`, pushes to `main`, pushes of
+  `v*` release tags, and manual `workflow_dispatch` (recovery/testing,
+  from Actions → Publish images).
+- **Fork boundary.** A fork pull request builds and validates both targets
+  locally but receives no GHCR credentials (`contents: read` only) and
+  publishes nothing. Only same-repo PRs, `main` pushes, release tags, and
+  manual dispatches reach the publish job.
 - **Provenance.** The run summary reports each image's digest and a
   copy-paste-ready `image@sha256:...` reference plus the exact source
-  commit. No `latest`, no release tag.
+  commit and the trigger. No `latest` anywhere.
 - **Tag immutability.** GHCR has no registry-side immutable-tag setting,
   so the job enforces it before building: it inspects both `sha-<commit>`
   tags and stops the run when one already exists, or when the registry
   state is uncertain (fail closed). Within this workflow a rerun can
-  never move a published tag; publish a new commit instead.
-- **Permissions.** The job runs with `contents: read` and `packages: write`
-  and logs into GHCR with `GITHUB_TOKEN`. Image building is fully separate
-  from the Action release pipeline (which owns tag/release writes) and
-  never runs from pull-request code.
+  never move a published tag; publish a new commit instead. The
+  `pr-<number>` ref is the only intentionally moving ref.
+- **Permissions.** The publish job runs with `contents: read` and
+  `packages: write` and logs into GHCR with `GITHUB_TOKEN`. Image building
+  is fully separate from the Action release pipeline (which owns
+  tag/release writes).
 - **Visibility prerequisite.** A newly created GHCR package starts private.
   Either set the package to public or create a registry pull secret with
   read access and attach it where the chart pulls (controller namespace and
@@ -307,10 +324,11 @@ the harness starts, so the job holds no secret. An operator can
 therefore dispatch it against any ref, a branch that carries an open pull
 request included. It never gates a merge either.
 
-The `.github/workflows/self-hosted-images.yaml` job builds and pushes the
-controller and worker images to GHCR on a manual dispatch from `main`
-([Published GHCR images](#published-ghcr-images-1584-canary) above); it
-also never gates a merge.
+The `.github/workflows/publish-images.yaml` workflow builds and pushes
+the controller and worker images to GHCR for PRs, `main` commits, release
+tags, and manual dispatches
+([Published GHCR images](#published-ghcr-images-1704) above); it also never
+gates a merge.
 
 ## Known limits
 

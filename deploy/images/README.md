@@ -18,22 +18,33 @@ docker build -f deploy/images/Dockerfile --target controller -t <registry>/pr-re
 docker build -f deploy/images/Dockerfile --target worker      -t <registry>/pr-reviewer-worker:<tag> .
 ```
 
-For the operator canary, the dedicated GitHub Actions workflow publishes
-both images to GHCR from one checked-out commit:
+The dedicated GitHub Actions workflow publishes both images to GHCR from
+one checked-out commit for every publishable revision (#1704):
 
-- workflow: `.github/workflows/self-hosted-images.yaml` — manual
-  `workflow_dispatch`, dispatched from the `main` branch (the job refuses
-  any other ref; branch protection itself is repository configuration);
-- published refs:
-  `ghcr.io/misospace/pr-reviewer-controller:sha-<commit>` and
-  `ghcr.io/misospace/pr-reviewer-worker:sha-<commit>`, both tagged with the
-  source commit and reported as exact `image@sha256:...` references in the
-  run summary;
-- platform: `linux/amd64` only in the initial canary scope;
-- permissions: the job runs with `contents: read` + `packages: write` and
-  logs into GHCR with `GITHUB_TOKEN`; image building never shares a job
-  with the Action release pipeline and never runs from pull-request code;
-- no `latest` and no release tag is pushed by this workflow.
+- workflow: `.github/workflows/publish-images.yaml` — triggered by
+  pull requests targeting `main`, pushes to `main`, pushes of `v*` release
+  tags, and manual `workflow_dispatch` (recovery/testing);
+- published refs (both images, all from the same source commit):
+
+  | trigger | refs |
+  |---|---|
+  | pull request (same-repo) | `ghcr.io/misospace/pr-reviewer-<image>:pr-<number>` (moving) and `:sha-<head-commit>` (immutable) |
+  | push to `main` | `ghcr.io/misospace/pr-reviewer-<image>:sha-<commit>` (immutable) |
+  | release tag `vX.Y.Z` | `ghcr.io/misospace/pr-reviewer-<image>:X.Y.Z` and `:X.Y` plus `:sha-<commit>` (immutable) |
+  | manual dispatch | `ghcr.io/misospace/pr-reviewer-<image>:sha-<commit>` (immutable) |
+
+  The exact `image@sha256:...` references for the run are reported in the
+  run summary; the immutable `sha-<commit>` ref is the provenance anchor
+  behind the moving PR ref and the release aliases;
+- platform: `linux/amd64`;
+- permissions: the publish job runs with `contents: read` + `packages:
+  write` and logs into GHCR with `GITHUB_TOKEN`. Image building never
+  shares a job with the Action release pipeline (which owns tag/release
+  writes);
+- fork pull requests build and validate both targets locally but receive
+  no GHCR credentials and publish nothing — the `build-fork-pr` job runs
+  with `contents: read` only;
+- no `latest` tag is pushed by this workflow.
 
 **Package visibility prerequisite:** a newly created GHCR package starts
 private. Before the cluster can pull, either make the package public
@@ -62,7 +73,7 @@ listener binds loopback by default and the chart sets
   The digest the run summary reports for a published image is the only
   exact reference to what that run pushed. Renovate digest pinning keeps
   the base pin current. Never publish from a mutable tag.
-- The canary workflow tags each published image with the source commit
+- The workflow tags each published image with the source commit
   (`sha-<commit>`) and reports its digest in the run summary. GHCR has no
   registry-side tag immutability, so the workflow enforces it: before it
   builds anything, it checks both `sha-<commit>` tags in the registry and
@@ -93,9 +104,11 @@ listener binds loopback by default and the chart sets
   image reference string, so write the digest into the string itself:
   `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest from the run
   summary>`.
-- Release-tagged images (`vX.Y.Z`, from `.release-please-manifest.json`) are
-  out of the initial canary scope; when added, they should follow the same
-  digest-reporting pattern rather than replacing it.
+- Release tags (`vX.Y.Z` — release-please tags the release commit) publish
+  the exact SemVer ref (`X.Y.Z`) and a `X.Y` alias for both images from
+  that exact tagged commit, following the same digest-reporting pattern
+  (the immutable `sha-<commit>` ref and the run-summary digest remain the
+  provenance anchor behind the aliases).
 - The release stamp is not baked by the Dockerfile itself; release
   pipelines should run the build with `PR_REVIEWER_BUILD_STAMP=release`
   available (CI-driven) or accept the unstamped dev bundle for local use.
