@@ -255,7 +255,18 @@ function bareSuiteCandidateIsClean(candidate: string): boolean {
  * remains — refused at discharge by the caller's scope check, not here); the
  * scope veto protects only the new bare-name arms, where commas INSIDE a
  * matrix suffix must not look like an enumeration, so the whole name is
- * matched before any component split. */
+ * matched before any component split.
+ *
+ * Accepted residual risk (#1703 review): one green bare matrix leg —
+ * `test (24)`, `test (18.x, ubuntu-latest)` — certifies an unqualified
+ * full-suite ask, so a repo that splits its suite across several matrix
+ * legs (shards, or legs whose split dimension is not a recognized scope
+ * token) is certified from any one bare-named leg. The failure-first and
+ * every-in-scope-leg-settled-green rules above still require every
+ * test-NAMED leg to finish green, so this only over-credits when part of
+ * the suite runs under a non-test name or outside CI. Deliberate trade:
+ * the alternative demanded repos rename their job to `Full Test Suite`
+ * to be recognized (#1702). */
 function nameProvesFullSuite(name: string): boolean {
   if (FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name))) return true;
   if (testScopesIn(name).length > 0) return false;

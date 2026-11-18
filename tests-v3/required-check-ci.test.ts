@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  ciCheckIdentity,
   ciDischargeForCheckText,
   isTestExecutionCheckName,
   isTestExecutionObligation,
@@ -121,6 +122,18 @@ test("#1702 matcher: combined step-list names keep their test-execution step", (
   ];
   for (const name of yes) assert.equal(isTestExecutionCheckName(name), true, name);
   for (const name of no) assert.equal(isTestExecutionCheckName(name), false, name);
+});
+
+// #1703 review verification: testScopesIn matches whole words across the
+// WHOLE name, so scope tokens inside a matrix parameter suffix are detected
+// (the bare-suite scope veto and these identity rows rely on it).
+test("#1703 verify: scope tokens inside matrix suffixes are detected", () => {
+  assert.equal(ciCheckIdentity("test (unit, 24)"), "test|unit|plain");
+  assert.equal(ciCheckIdentity("test (24, smoke)"), "test|smoke|plain");
+  assert.equal(ciCheckIdentity("test (24, integration)"), "test|integration|plain");
+  // a bare leg with no scope token keeps exhaustive identity
+  assert.equal(ciCheckIdentity("test (24)"), "test||exhaustive");
+  assert.equal(ciCheckIdentity("test (18.x, ubuntu-latest)"), "test||exhaustive");
 });
 
 test("#1594 discharge: the check must prove the requested test scope", () => {
