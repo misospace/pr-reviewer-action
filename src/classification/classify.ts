@@ -2686,10 +2686,17 @@ function allFilesAreLockfiles(filenames: string[]): boolean {
   return filenames.every((name) => matchesAny(name, RENOVATE_DIGEST_FILE_PATTERNS));
 }
 
-/** True when the diff contains a version bump (JSON or changed YAML form), so
- * a digest-only update with a version change is not mislabeled. */
+/** True when the diff contains a version bump (JSON or changed YAML form) on
+ * an actual added/removed line, so a digest-only update with a version change
+ * is not mislabeled. Context (unchanged) lines never count: a digest refresh
+ * leaves the surrounding `"version": "1.2.3"` fields as hunk context. The
+ * JSON branch fires on a changed `"key": "value"` string line that is not the
+ * ordinary integrity/resolved churn (LOCKFILE_IGNORED_CHANGED_KEYS) — a
+ * version pair, or a changed `engines`/relation value riding with an
+ * unchanged version value (#1595) — while a changed structural opener like
+ * `"engines": {` is shape, not a value, and stays digest-only. */
 function hasVersionBump(diffText: string): boolean {
-  if (/"version"\s*:\s*"[^"]+"/.test(diffText)) return true;
+  if (/^[+-]\s*(?!"(?:integrity|resolved)"\s*:)"[^"]*"\s*:\s*"/m.test(diffText)) return true;
   if (/^[+-]\s*(?:app)?[Vv]ersion:\s*\S+/m.test(diffText)) return true;
   return false;
 }

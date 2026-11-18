@@ -34,7 +34,24 @@ test("digest-only lockfile PRs classify as renovate_digest_only", () => {
 });
 
 test("a version bump defeats the digest-only rule", () => {
-  const result = classifyPr({ prFiles: files("package-lock.json"), diffText: '"version": "4.18.0"' });
+  const result = classifyPr({ prFiles: files("package-lock.json"), diffText: '+ "version": "4.18.0"' });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test('unchanged "version" context lines do not defeat digest-only (digest refresh keeps them as context)', () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: '      "name": "pkg",\n      "version": "1.2.3",\n-      "integrity": "sha512-aaa"\n+      "integrity": "sha512-bbb"\n',
+  });
+  assert.equal(result.prKind, "renovate_digest_only");
+});
+
+test('a removed/added "version" line pair defeats digest-only', () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    diffText: '-      "version": "1.2.3",\n+      "version": "1.2.4",\n',
+  });
   assert.equal(result.prKind, "dependency_upgrade");
 });
 
