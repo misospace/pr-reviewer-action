@@ -5156,6 +5156,33 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   for (const obligation of trackedDependencyObligations) {
     requiredEvidence.push({ id: obligation, tokens: [], obligation });
   }
+  // #1702: the plan has long described test-evidence reads, but those
+  // obligations were never represented in the enforced evidence set. A
+  // two-source-read investigation could therefore return
+  // "investigation-complete" without opening any test file. Admit bounded
+  // read_file requests for ACTUALLY SHOWN trace-plan rows, not all linked
+  // issue text. Existing required checks/dependency reservations retain
+  // priority and the optional exploration half of the budget stays intact.
+  const baseProseReserve = computeRequiredEvidenceReservation(
+    requiredEvidence.filter((row) => row.obligation === undefined).length,
+    effectiveMaxRequests,
+  );
+  const availableTraceReserve = Math.max(0,
+    Math.floor(effectiveMaxRequests / 2) - Math.max(baseProseReserve, dependencyReserve));
+  const plan = readTracePlan(deps.readText(TRACE_PLAN_ARTIFACT));
+  const visibleRows = planning.text.includes("# Requirement Trace Plan\n")
+    ? plan.rows.filter((row) => planning.text.includes(`- ${row.id} (`))
+    : [];
+  const traceReads = traceTestAdmissionRows(
+    visibleRows, loadChangedFilePaths(deps.readText), availableTraceReserve,
+  );
+  requiredEvidence.push(...traceReads);
+  if (traceReads.length > 0) {
+    (deps.log ?? (() => {}))(
+      `  trace test evidence reserve: ${traceReads.length} exact changed-file read(s); `
+      + `${visibleRows.filter((row) => row.required_attempts >= 2).length} test-demanding trace row(s) shown`,
+    );
+  }
   // #1396: ONE reservation over the shared budget tail — the max of the
   // resolutions, never their sum. Side by side, each held requests back near
   // the same ceiling, so a dependency-update PR had most of its remaining
