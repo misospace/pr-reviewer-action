@@ -87,6 +87,30 @@ test("a Gitea-declared mirror acquires the family's PR refs and records the fami
   }
 });
 
+test("ensureMirror: a refused git spawn reports the launch reason, not exited unknown (#1722)", async () => {
+  const root = await tempRoot();
+  try {
+    const cache = new MirrorCache({
+      rootDir: root,
+      platform: "github",
+      repoFullName: "owner/repo",
+      cloneUrl: "https://example.com/owner/repo.git",
+      gitBinary: "/definitely-not-installed/pr-reviewer-git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      assert.match(error.message, /git init --bare: spawn refused \(.+\)/);
+      assert.doesNotMatch(error.message, /exited unknown/);
+      // This diagnostic must never print argv, clone URL or other input.
+      assert.doesNotMatch(error.message, /example\.com|owner\/repo|https:\/\//);
+      return true;
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("ensureMirror: init + full fetch, warm ensure is incremental (no rebuild, no reclone)", async () => {
   const fixture = await startGitHttpFixture();
   try {

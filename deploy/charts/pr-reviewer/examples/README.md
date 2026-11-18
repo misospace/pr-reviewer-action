@@ -157,15 +157,33 @@ stringData:
   model-key: REPLACE_ME
 ```
 
+## PR discovery without webhooks
+
+The polling-first chart default runs every 900000 ms (15 minutes) once you
+configure `controller.reconcile.repos` and, for GitHub, the corresponding
+`controller.reconcile.githubInstallationId`. A repo list with no installation
+identity is rejected for GitHub; an empty repo list scans nothing.
+`controller.webhook.enabled: false` is supported: webhook delivery is only
+an optional lower-latency path. Override `controller.reconcile.intervalMs`
+for another interval, or set `controller.reconcile.enabled: false` to opt out.
+A first sweep can enqueue already-open PRs; bound rollout/model spending
+accordingly.
+
 ## Notes
 
 - The instance config must declare forges for exactly ONE platform per
   instance; run one controller instance per forge platform.
 - `PR_REVIEWER_CREDENTIAL_<REF>` material is provided through
   `controller.credentials` (each reference the model profiles name).
+  `<REF>` is the reference uppercased with every non-alphanumeric
+  character mapped to `_` — the runtime's `credentialEnvName`
+  derivation — so the reference `model-key` is provided as
+  `PR_REVIEWER_CREDENTIAL_MODEL_KEY`.
 - The admin listener is served on `controller.admin.port`, guarded by the
   admin bearer token and bound pod-wide (`PR_REVIEWER_ADMIN_BIND=0.0.0.0`)
   when enabled; `kubectl exec` + loopback also works for local debugging.
-- The chart's `networkPolicy` is default-deny; the webhook port accepts
-  ingress from any source by default (the forge delivery path) — narrow
-  it with `networkPolicy.additionalIngress`.
+- The chart's `networkPolicy.enabled` defaults to `false`. Only explicitly
+  enable it after configuring controller/worker ingress and egress for your
+  cluster, including the Kubernetes API, model endpoint and admin listener.
+  With policies enabled the webhook intake permits ingress on its port;
+  operator-specific exceptions go in `networkPolicy.additionalIngress`.

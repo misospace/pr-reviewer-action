@@ -45,35 +45,52 @@ Image properties:
 For release publishing, pin the base image digests as described in
 `deploy/images/README.md`, then push digest-pinned references.
 
-### Published GHCR images (#1584 canary)
+### Published GHCR images (#1704)
 
-The dedicated workflow `.github/workflows/self-hosted-images.yaml` builds
-both targets from one checked-out commit and pushes them to GHCR:
+The dedicated workflow `.github/workflows/publish-images.yaml` builds
+both targets from one checked-out commit and pushes them to GHCR for every
+publishable revision:
 
 | image | reference |
 |-------|-----------|
 | controller | `ghcr.io/misospace/pr-reviewer-controller:sha-<commit>` |
 | worker | `ghcr.io/misospace/pr-reviewer-worker:sha-<commit>` |
 
+The immutable `sha-<commit>` ref exists for every run; two more ref classes
+are published from the same source commit:
+
+- **Pull requests (same-repo).** A moving `pr-<number>` ref for both
+  images (`...:pr-<number>`), so the self-hosted qualification path can
+  consume the current PR's images without a manual dispatch. The PR ref
+  may move as commits are pushed; each underlying commit stays addressable
+  by its immutable `sha-<head-commit>` ref.
+- **Release tags.** A `vX.Y.Z` tag publishes the exact SemVer ref
+  (`X.Y.Z`) and a `X.Y` alias for both images from that exact tagged
+  commit. The immutable `sha-<commit>` ref and digest remain the
+  provenance anchor behind the aliases. No `latest` tag is published.
+
 How it runs:
 
-- **Trigger.** Manual `workflow_dispatch` only; the job fails closed unless
-  it is dispatched from the `main` branch, so the published images always
-  come from the branch the repository protects (branch protection itself is
-  repository configuration, outside the workflow's control). Dispatch it
-  from Actions → Self-hosted images.
+- **Triggers.** Pull requests targeting `main`, pushes to `main`, pushes of
+  `v*` release tags, and manual `workflow_dispatch` (recovery/testing,
+  from Actions → Publish images).
+- **Fork boundary.** A fork pull request builds and validates both targets
+  locally but receives no GHCR credentials (`contents: read` only) and
+  publishes nothing. Only same-repo PRs, `main` pushes, release tags, and
+  manual dispatches reach the publish job.
 - **Provenance.** The run summary reports each image's digest and a
   copy-paste-ready `image@sha256:...` reference plus the exact source
-  commit. No `latest`, no release tag.
+  commit and the trigger. No `latest` anywhere.
 - **Tag immutability.** GHCR has no registry-side immutable-tag setting,
   so the job enforces it before building: it inspects both `sha-<commit>`
   tags and stops the run when one already exists, or when the registry
   state is uncertain (fail closed). Within this workflow a rerun can
-  never move a published tag; publish a new commit instead.
-- **Permissions.** The job runs with `contents: read` and `packages: write`
-  and logs into GHCR with `GITHUB_TOKEN`. Image building is fully separate
-  from the Action release pipeline (which owns tag/release writes) and
-  never runs from pull-request code.
+  never move a published tag; publish a new commit instead. The
+  `pr-<number>` ref is the only intentionally moving ref.
+- **Permissions.** The publish job runs with `contents: read` and
+  `packages: write` and logs into GHCR with `GITHUB_TOKEN`. Image building
+  is fully separate from the Action release pipeline (which owns
+  tag/release writes).
 - **Visibility prerequisite.** A newly created GHCR package starts private.
   Either set the package to public or create a registry pull secret with
   read access and attach it where the chart pulls (controller namespace and
@@ -106,7 +123,63 @@ only for what the common library cannot express: worker RBAC, the
 NetworkPolicy, the ServiceMonitor, and the env wiring that maps values onto
 the controller's fail-closed environment contract.
 
-Install (controller-only mode):
+### Published chart OCI artifact (#1708)
+
+Every release publishes the chart to GHCR as an OCI artifact
+(`.github/workflows/publish-chart.yaml`), so a self-hosted installation
+consumes a stable coordinate instead of a source checkout:
+
+```sh
+helm install pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -n pr-reviewer --create-namespace \
+  -f values-controller-only.yaml
+```
+
+Upgrade follows the same shape — pin the version of the release you are
+upgrading to:
+
+```sh
+helm upgrade pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -n pr-reviewer \
+  -f values-controller-only.yaml
+```
+
+How the chart artifact relates to the release:
+
+- **One release coordinate everywhere.** The chart version equals the
+  application release version: release tag `vX.Y.Z` publishes
+  `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z` alongside
+  `ghcr.io/misospace/pr-reviewer-controller:X.Y.Z` and
+  `pr-reviewer-worker:X.Y.Z` from the same release. There is no `latest`
+  chart alias and no ad-hoc version rewrite; the publish job refuses to
+  replace an already-published chart version.
+- **Fail-closed coordinates.** The publish job runs only for a GitHub
+  Release (plus an explicit-tag manual dispatch recovery path) and fails
+  closed unless the tag is `vX.Y.Z` SemVer, `Chart.yaml.version` and
+  `appVersion` equal `X.Y.Z`, and `.release-please-manifest.json` equals
+  `X.Y.Z`. release-please bumps all of them together in the release PR
+  (`x-release-please-version` annotations); `Chart.yaml` is never mutated
+  during publishing.
+- **Auth prerequisite.** The same GHCR visibility/read-permission policy as
+  the runtime images applies: a newly created `charts/pr-reviewer` package
+  starts private — either make it public or attach a registry pull secret
+  (see `deploy/images/README.md`).
+- **Digest overrides unchanged.** The chart still supports digest-pinned
+  image overrides (`controller.controllers.main.containers.main.image.digest`
+  and the instance-config `kubernetes.image` reference) — those remain the
+  exact immutable production pin when desired.
+- **Source checkout stays a development path.** Installing from
+  `deploy/charts/pr-reviewer/` in a repository checkout (below) is for
+  development and CI validation; the released OCI coordinate is the normal
+  install path. The packaged chart resolves its pinned bjw-s `common`
+  dependency inside the publish job, so no client-side
+  `helm dependency build` is needed.
+
+Source-checkout install (controller-only mode, development path):
 
 ```bash
 helm dependency build deploy/charts/pr-reviewer
@@ -151,8 +224,10 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - service-account token automount off unless a feature needs it (the worker
   ServiceAccount never automounts a token; the controller's is mounted only
   in Kubernetes-executor mode);
-- optional NetworkPolicy (default ON): deny-by-default ingress, egress
-  limited to DNS, the forge API, the model endpoints, and PostgreSQL;
+- optional NetworkPolicy (**default OFF**): no chart-managed traffic restrictions
+  unless explicitly enabled; when enabled it denies ingress by default and
+  limits egress to specified ports, requiring cluster-specific exceptions
+  for the Kubernetes API, model endpoint and admin/dashboard path;
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
 
@@ -221,6 +296,26 @@ a model credential, roll/restart the controller before expecting new reviews to
 use the new material. Hot Secret watching is not part of this deployment
 contract.
 
+## Polling-first PR discovery
+
+When `controller.reconcile.repos` is configured, the self-hosted chart
+runs an open-PR reconciliation sweep every **15 minutes** by default
+(`controller.reconcile.intervalMs: 900000`). GitHub needs the explicit
+`controller.reconcile.githubInstallationId`; forge credentials and
+repository targets are operator-owned. If no repo list is supplied, no
+poll runs; there is no implicit App-wide repository discovery. An explicit
+`controller.reconcile.enabled: false` disables polling. The runtime also
+accepts `PR_REVIEWER_RECONCILE_REPOS` with an omitted
+`PR_REVIEWER_RECONCILE_INTERVAL_MS` and uses the same 15-minute default.
+
+Webhooks can stay **disabled** and review discovery still works; when
+enabled, they provide faster hints but converge with polling through the
+same generation ledger. The sweep fetches **all currently open PRs** per
+configured repository on each pass, bounded by the adapter's paging
+limits; installation startup is not automatically a new-PR-only backfill.
+Be mindful of outstanding PR volume and configured review concurrency,
+especially when a new installation begins polling.
+
 ## Metrics and health
 
 The #737 admin listener serves `/healthz`, `/readyz`, and `/metrics` with
@@ -230,7 +325,8 @@ credentials — bounded counters only); the `/admin/*` API and the MCP mount
 are guarded by a required bearer token. The chart sets
 `PR_REVIEWER_ADMIN_BIND=0.0.0.0` when
 the admin surface is enabled so kubelet probes and Prometheus can reach it;
-the token and the NetworkPolicy remain the guards. Set
+the bearer token remains mandatory for privileged admin endpoints;
+chart-managed NetworkPolicies are opt-in and must not be assumed present. Set
 `serviceMonitor.enabled: true` (requires the admin surface) for the
 ServiceMonitor resource; `admin.enabled: false` keeps the listener
 loopback-only and off the network. The #742 operations dashboard
@@ -284,10 +380,15 @@ the harness starts, so the job holds no secret. An operator can
 therefore dispatch it against any ref, a branch that carries an open pull
 request included. It never gates a merge either.
 
-The `.github/workflows/self-hosted-images.yaml` job builds and pushes the
-controller and worker images to GHCR on a manual dispatch from `main`
-([Published GHCR images](#published-ghcr-images-1584-canary) above); it
-also never gates a merge.
+The `.github/workflows/publish-images.yaml` workflow builds and pushes
+the controller and worker images to GHCR for PRs, `main` commits, release
+tags, and manual dispatches
+([Published GHCR images](#published-ghcr-images-1704) above); it also never
+gates a merge. The `.github/workflows/publish-chart.yaml` workflow publishes
+the Helm chart OCI artifact for release publications (and validates, lints
+and packages the chart on pull requests without publish credentials —
+[Published chart OCI artifact](#published-chart-oci-artifact-1708) above);
+it also never gates a merge.
 
 ## Known limits
 

@@ -33,15 +33,55 @@ common library templates at render time. Run
 
 ## Release version synchronization
 
-The chart's `appVersion` and the controller/worker image tags in
-`examples/*.yaml` track the application release in
+The chart's `version`, the chart's `appVersion`, and the controller/worker
+image tags in `examples/*.yaml` track the application release in
 `.release-please-manifest.json`. Each version field carries an
 `x-release-please-version` annotation and its file is listed under
 `packages["."].extra-files` in `release-please-config.json`, so the standing
 release PR bumps all of them together. `tests-v3/deploy-packaging.test.ts`
 fails when a bound field and the manifest disagree, so a release PR cannot
-land with stale deployment artifacts. The chart's own `version` (`0.1.0`)
-is the independent Helm chart version and is never annotated.
+land with stale deployment artifacts.
+
+Since #1708 the chart's own `version` equals the application release
+version too (no more independent `0.1.0`): Helm OCI artifacts are tagged
+by `Chart.yaml.version`, so publishing application releases while the
+chart stayed at one constant version would collide with the
+already-published artifact. One release, one coordinate everywhere:
+release tag `vX.Y.Z`, `Chart.yaml.version` `X.Y.Z`, `Chart.yaml.appVersion`
+`X.Y.Z`, OCI chart tag `X.Y.Z`, and the `#1704` image tags `X.Y.Z`. If
+independent chart releases are ever needed, that is a deliberate separate
+versioning/release design, not implicit drift.
+
+## Published OCI artifact (#1708)
+
+The chart is published to GHCR as an OCI artifact by
+`.github/workflows/publish-chart.yaml` from the trusted release lifecycle
+(the GitHub Release event, plus a manual dispatch with an explicit release
+tag as the recovery path):
+
+```sh
+helm install pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -f values.yaml
+```
+
+- The chart version to install is the application release version — the
+  same `X.Y.Z` as the `#1704` controller/worker image release tags of that
+  release.
+- The published chart resolves its pinned bjw-s `common` dependency
+  (`helm dependency build` runs in the publish job), so installation needs
+  no source checkout. Installing from `deploy/charts/pr-reviewer/` in a
+  checkout remains the development path, not the normal release path.
+- Digest-pinned image overrides work exactly as before (`image.digest` /
+  the instance-config `kubernetes.image` reference) and remain the exact
+  immutable production pin when desired; the chart does not weaken them.
+- The publish job refuses to replace an already-published chart version
+  (GHCR does not enforce tag immutability) and never mutates `Chart.yaml`
+  to make a mismatched release pass. There is no `latest` chart alias.
+- Package visibility/read permissions follow the self-hosted runtime
+  images (`deploy/images/README.md`): a newly created GHCR package starts
+  private — set it public or attach a pull secret.
 
 ## Values structure
 
@@ -68,15 +108,38 @@ is the independent Helm chart version and is never annotated.
   is the cluster-side guardrail on their shape.
   The Job manifests themselves are built by the executor from the
   instance config's `kubernetes` profile.
-- `networkPolicy` (default ON) — default-deny policies for controller
-  and worker pods; the worker selector matches the executor's
+- `networkPolicy` (default **OFF**) — opt-in default-deny policies for controller
+  and worker pods; configure only after verifying cluster-specific API, model,
+  webhook and admin paths. When disabled the chart renders no NetworkPolicies; the worker selector matches the executor's
   `app.kubernetes.io/managed-by: pr-reviewer-action` pod label
   (WORKER_NETWORK_POSTURE in `src/executor/kubernetes.ts`).
 - `serviceMonitor` (default OFF) — the admin listener serves `/metrics`;
   the chart binds it to the pod-wide wildcard when the admin surface is
   enabled, so a Prometheus scrape works out of the box (still guarded by
-  the admin bearer token and the NetworkPolicy). Requires
+  the admin bearer token; opt-in NetworkPolicies may additionally restrict ingress). Requires
   `controller.admin.enabled`.
+
+## PR discovery (polling-first)
+
+The chart defaults to polling **trusted, explicitly listed** repositories every
+**15 minutes** (`controller.reconcile.enabled: true`,
+`controller.reconcile.intervalMs: 900000`). Set
+`controller.reconcile.repos: [owner/repo]` to activate it. With no targets,
+the chart starts no poll and does not scan the App's other repositories.
+For GitHub, also set `controller.reconcile.githubInstallationId` to the
+installation authorized to read those repositories. Forgejo/Gitea reuse their
+configured forge credential. A nonempty repo list without the required GitHub
+installation ID refuses to render, rather than silently skipping reviews.
+
+Webhooks (`controller.webhook.enabled`) are **optional** for low-latency
+delivery; the scheduled sweep discovers missed/new PR heads independently.
+Both paths share generation identity and durable deduplication. To tune the
+interval, set `controller.reconcile.intervalMs` in milliseconds; to stop the
+sweep, set `controller.reconcile.enabled: false`.
+
+**Initial rollout:** the sweep lists all currently open PRs, not only ones
+created after installation. Review the target repository's existing backlog
+and configured concurrency/model costs before first enabling the poll.
 
 ## Security defaults
 
@@ -91,9 +154,10 @@ is the independent Helm chart version and is never annotated.
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.
-- Worker pods never mount any token, and the worker NetworkPolicy
-  denies all ingress and limits egress to DNS + TLS (the worker's
-  request/result travel over shared volumes, not the network).
+- Worker pods never mount any token. If enabled explicitly, the chart's worker
+  NetworkPolicy denies all ingress and limits egress to DNS + TLS; operators
+  must then allow their configured model endpoint and other required paths.
+  Without opt-in, pod egress follows the cluster's existing policies.
 - Secret material always travels through `secretKeyRef` or secret
   mounts; inline values (`webhook.secret`, `admin.token`,
   `credentials.<ref>.value`) exist only for throwaway environments and
@@ -111,7 +175,8 @@ this chart binds it to the pod-wide wildcard (`0.0.0.0`) so kubelet HTTP
 probes (`/healthz`, `/readyz`) and Prometheus scrapes (`/metrics`) work.
 The surface stays guarded: health and metrics are content-free, the
 `/admin/*` API requires the bearer token (refused at startup without
-one), and the NetworkPolicy bounds which sources may reach the port.
+one). An explicitly enabled NetworkPolicy can further restrict ingress;
+without it, use cluster networking and ingress controls.
 
 The #742 operations dashboard (`GET /dashboard` on the admin listener)
 stays off by default: `controller.admin.dashboard: false` leaves

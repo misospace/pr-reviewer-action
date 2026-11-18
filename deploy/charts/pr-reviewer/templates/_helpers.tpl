@@ -65,10 +65,15 @@ templates that render outside the component-scoped context).
 {{/*
 #735 credential env name: exactly `credentialEnvName` in
 src/controller/main.ts — the reference uppercased with every
-non-alphanumeric character mapped to `_`.
+non-alphanumeric character mapped to `_`. The subject is passed as
+regexReplaceAll's explicit SECOND argument: piped usage appends the
+piped value last, so `upper . | regexReplaceAll "[^A-Z0-9]" "_"`
+matches the regex against the literal "_" replacement instead and
+emits the reference verbatim (#1710: 'model-key' rendered
+PR_REVIEWER_CREDENTIAL_MODEL-KEY, unreadable by the runtime).
 */}}
 {{- define "pr-reviewer.credential-env-name" -}}
-{{- printf "PR_REVIEWER_CREDENTIAL_%s" (upper . | regexReplaceAll "[^A-Z0-9]" "_") -}}
+{{- printf "PR_REVIEWER_CREDENTIAL_%s" (regexReplaceAll "[^A-Z0-9]" (upper .) "_") -}}
 {{- end -}}
 
 {{/*
@@ -147,7 +152,7 @@ genuinely absent — an empty value is never emitted (unset is OFF) */}}
   value: "true"
 {{- end }}
 {{- end }}
-{{- if $v.reconcile.enabled }}
+{{- if and $v.reconcile.enabled (not (empty $v.reconcile.repos)) }}
 - name: PR_REVIEWER_RECONCILE_INTERVAL_MS
   value: {{ $v.reconcile.intervalMs | quote }}
 - name: PR_REVIEWER_RECONCILE_REPOS
@@ -266,13 +271,11 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if and $v.admin.dashboard (not $v.admin.enabled) -}}
 {{- fail "controller.admin.dashboard requires controller.admin.enabled (the dashboard is served on the admin listener)" -}}
 {{- end -}}
-{{- if $v.reconcile.enabled -}}
+{{- if and $v.reconcile.enabled (not (empty $v.reconcile.repos)) -}}
 {{- if and (eq $v.forgeAuth.platform "github") (empty $v.reconcile.githubInstallationId) -}}
 {{- fail "controller.reconcile.githubInstallationId is required when reconciliation is enabled and forgeAuth.platform is github" -}}
 {{- end -}}
-{{- if empty $v.reconcile.repos -}}
-{{- fail "controller.reconcile.repos must be a non-empty list when reconciliation is enabled" -}}
-{{- end -}}
+
 {{- end -}}
 {{- if eq $v.forgeAuth.platform "github" -}}
 {{- if empty $v.forgeAuth.github.appId -}}
@@ -346,7 +349,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if $kubeExecutor -}}
 {{- /* the Kubernetes executor needs the controller's in-cluster identity
        to create/delete worker Jobs; otherwise no token is mounted */ -}}
-{{- $_ := set $main "podOptions" (mustMergeOverwrite ($main.podOptions | default dict) (dict "automountServiceAccountToken" true)) -}}
+{{- $_ := set $main "pod" (mustMergeOverwrite ($main.pod | default dict) (dict "automountServiceAccountToken" true)) -}}
 {{- $sa := index ($v.serviceAccount | default dict) "main" -}}
 {{- if not (empty $sa) -}}
 {{- $_ := set $sa "automountServiceAccountToken" true -}}

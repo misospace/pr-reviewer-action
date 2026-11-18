@@ -1,0 +1,384 @@
+name: Publish images
+
+# #1704: publish the #738 controller and worker runtime images to GHCR for
+# every publishable revision, not just the #1584 manual canary. The workflow
+# runs for pull requests targeting `main`, pushes to protected `main`, pushes
+# of `v*` release tags, and manual dispatch (recovery/testing). Every run
+# builds BOTH targets from ONE checked-out commit so the controller and
+# worker images always share a runtime/protocol revision.
+#
+# Tag scheme (no `latest` anywhere):
+#   - `sha-<commit>` — immutable, published for every run from this workflow.
+#     For pull_request events the ref pins the PR HEAD commit
+#     (`github.event.pull_request.head.sha`), not the merge commit
+#     `github.sha` points at, so a qualification can address the reviewed
+#     head directly. The checkout step pins that same ref explicitly — a
+#     default pull_request checkout would otherwise build the synthetic
+#     merge commit while the tags still claim sha-<head> — and the publish
+#     job asserts the checked-out HEAD equals SOURCE_SHA before anything
+#     is tagged.
+#   - `pr-<number>`  — moving ref for same-repository PRs only (the publish
+#     job below refuses fork PRs); each underlying commit stays addressable
+#     by its immutable `sha-<commit>` ref.
+#   - `<X.Y.Z>` and `<X.Y>` — release aliases, published only for a strictly
+#     validated `vX.Y.Z` tag push, from that exact tagged commit (the same
+#     SemVer aliases the Dispatch/Courier image workflows publish; no
+#     `major`-only and no `latest` tag).
+#
+# Trust boundary (preserved from #1584 and sharpened): fork pull requests
+# never enter the `publish` job — they run `build-fork-pr`, which holds
+# `contents: read` only, never logs in to GHCR, and pushes nothing. Only the
+# `publish` job (same-repo PRs, `main`, release tags, dispatch) carries
+# `packages: write` and the workflow's own GITHUB_TOKEN. This workflow is
+# still entirely separate from the Action release pipeline (release-please /
+# manual-release): it writes no git tags, no releases, and no dist artifacts.
+#
+# GHCR has no registry-side tag-immutability setting, so the publish job
+# itself refuses to replace a `sha-<commit>` tag that already exists (see
+# the pre-push guard below). The `pr-<number>` ref is the only intentionally
+# moving ref.
+#
+# Note on metadata-action: the Dispatch reference workflow tags the SHA ref
+# via docker/metadata-action's `type=sha`, which for pull_request events
+# tags the merge commit. This contract requires `sha-<head>` on PRs, so the
+# tags are computed explicitly below instead of via metadata-action —
+# same trigger/tag model, with the SHA context this contract needs.
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Same-repository pull requests, `main` pushes, `v*` tag pushes and
+    # manual dispatch publish. A fork pull_request event never enters this
+    # job (its head repository differs), so untrusted code can never reach
+    # the GHCR credentials held here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout the source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Build exactly the commit the tags name. pull_request events
+          # default actions/checkout to the synthetic merge commit
+          # (refs/pull/<n>/merge), which would tag sha-<head> on an
+          # artifact built from the merge commit — so the ref is pinned to
+          # the PR head here, with the pushed commit as the fallback for
+          # push and dispatch events.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Normalize the GHCR image owner
+        # GHCR image paths must be lowercase; build the tags from the
+        # lowercased owner so an uppercase owner name can never produce a
+        # tag the registry would reject.
+        run: echo "GHCR_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Resolve publish coordinates
+        # SOURCE_SHA is the immutable-ref anchor: the PR HEAD commit for
+        # pull_request events (github.sha points at the merge commit there),
+        # the pushed/dispatched commit for every other event. The moving
+        # `pr-<number>` ref and the SemVer release aliases are derived from
+        # strictly validated event context; anything that does not parse is
+        # a hard failure, never a silently different tag.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SOURCE_SHA="$PR_HEAD_SHA"
+          else
+            SOURCE_SHA="$DEFAULT_SHA"
+          fi
+          [ -n "$SOURCE_SHA" ] || { echo "cannot resolve the source commit" >&2; exit 1; }
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+
+          # The tags and the build context must name the same commit: the
+          # checkout step above pinned exactly SOURCE_SHA, so assert the
+          # working tree really is that commit before anything is tagged.
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          [ "$CHECKED_OUT_SHA" = "$SOURCE_SHA" ] || {
+            echo "checked-out commit ${CHECKED_OUT_SHA} is not SOURCE_SHA ${SOURCE_SHA}; refusing to tag a mismatched artifact" >&2
+            exit 1
+          }
+
+          # Moving PR ref, same-repo PRs only (the job's `if` keeps fork PRs
+          # out of this job; this branch can only fire for a same-repo PR).
+          PR_REF=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            [ -n "$PR_NUMBER" ] || { echo "pull_request event without a PR number" >&2; exit 1; }
+            PR_REF="pr-$PR_NUMBER"
+          fi
+          echo "PR_REF=$PR_REF" >> "$GITHUB_ENV"
+
+          # Release aliases only from a strict vX.Y.Z tag: anything else
+          # (including v-prefixed non-semver refs) refuses the run rather
+          # than deriving a wrong alias.
+          RELEASE_VERSION=""
+          RELEASE_MAJOR_MINOR=""
+          if [ "$EVENT_NAME" = "push" ]; then
+            case "$GIT_REF" in
+              refs/tags/*)
+                version="${REF_NAME#v}"
+                if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+                  echo "::error::release tag ${REF_NAME} is not v<major>.<minor>.<patch>; refusing to derive release aliases."
+                  exit 1
+                fi
+                RELEASE_VERSION="$version"
+                RELEASE_MAJOR_MINOR="${version%.*}"
+                ;;
+            esac
+          fi
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_MAJOR_MINOR=$RELEASE_MAJOR_MINOR" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to replace a published sha tag
+        # GHCR has no registry-side tag immutability (a push always
+        # overwrites), so immutability is enforced here: a rebuild is not
+        # byte-identical (see the Dockerfile pinning policy), so re-pushing
+        # the same sha-<commit> tag would silently move it off the digest
+        # the run summary published. The guard fails closed: the job
+        # proceeds only when the registry explicitly answers that the tag
+        # is absent, and refuses on any other error (auth, network,
+        # unexpected state).
+        env:
+          CONTROLLER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}
+          WORKER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          for tag in "$CONTROLLER_TAG" "$WORKER_TAG"; do
+            if out=$(docker manifest inspect "$tag" 2>&1); then
+              echo "::error::${tag} already exists in GHCR. sha-<commit> tags are immutable: a rerun would silently replace the published reference. Publish a new commit instead."
+              exit 1
+            fi
+            # Fail closed: only an explicit registry absence (404
+            # MANIFEST_UNKNOWN / NAME_UNKNOWN / not found) proves the tag
+            # is absent. Anything else — auth, TLS ("unknown authority"),
+            # network, an OCI UNKNOWN error code — refuses the run. (An
+            # access denial also means this same GITHUB_TOKEN could not
+            # overwrite the tag later, so refusing can never mask an
+            # overwrite; at worst it fails one run loudly.)
+            if ! printf '%s\n' "$out" | grep -Eqi 'manifest.unknown|name.unknown|not found'; then
+              echo "registry answer for ${tag}:" >&2
+              printf '%s\n' "$out" >&2
+              echo "::error::cannot confirm that ${tag} is absent; refusing to push over uncertain registry state."
+              exit 1
+            fi
+          done
+
+      # Provenance attestations are disabled so the pushed artifact is a
+      # plain single manifest: the digest reported below is then exactly
+      # the digest `docker pull` / Kubernetes resolves for operators
+      # pinning `image@sha256:...`.
+      #
+      # The immutable `sha-<SOURCE_SHA>` tag publishes on every run. The
+      # `pr-<number>` ref publishes only for pull_request events, the SemVer
+      # and major.minor aliases only for validated `vX.Y.Z` tag pushes
+      # (each conditional line collapses to an empty entry that the build
+      # action drops). The GHA cache is written only for non-PR runs — PR
+      # builds read it but never export, so a PR cannot rewrite the cache
+      # the `main` builds consume.
+      - name: Build and push controller (linux/amd64)
+        id: controller
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: controller
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}
+            ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
+            ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
+            ${{ env.RELEASE_MAJOR_MINOR != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.RELEASE_MAJOR_MINOR) || '' }}
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Build and push worker (linux/amd64)
+        id: worker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}
+            ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
+            ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
+            ${{ env.RELEASE_MAJOR_MINOR != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_MAJOR_MINOR) || '' }}
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Record published digests
+        env:
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          PR_REF: ${{ env.PR_REF }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
+          CONTROLLER_DIGEST: ${{ steps.controller.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Fail loudly on a missing digest instead of printing a bare
+          # image reference in the summary.
+          [ -n "$CONTROLLER_DIGEST" ] || { echo "controller digest is empty" >&2; exit 1; }
+          [ -n "$WORKER_DIGEST" ] || { echo "worker digest is empty" >&2; exit 1; }
+          {
+            echo "## Self-hosted images published (#1704)"
+            echo
+            echo "Trigger: \`${GITHUB_EVENT_NAME}\`. Source commit: \`${SOURCE_SHA}\` (both images built from this one commit)."
+            echo
+            echo "| image | digest reference |"
+            echo "|---|---|"
+            echo "| controller | \`ghcr.io/${GHCR_OWNER}/pr-reviewer-controller@${CONTROLLER_DIGEST}\` |"
+            echo "| worker | \`ghcr.io/${GHCR_OWNER}/pr-reviewer-worker@${WORKER_DIGEST}\` |"
+            echo
+            echo "Immutable SHA refs: \`pr-reviewer-controller:sha-${SOURCE_SHA}\`, \`pr-reviewer-worker:sha-${SOURCE_SHA}\`."
+            if [ -n "$PR_REF" ]; then
+              echo "Moving PR refs: \`pr-reviewer-controller:${PR_REF}\`, \`pr-reviewer-worker:${PR_REF}\`."
+            fi
+            if [ -n "$RELEASE_VERSION" ]; then
+              echo "Release refs: \`pr-reviewer-controller:${RELEASE_VERSION}\`, \`pr-reviewer-controller:${RELEASE_MAJOR_MINOR}\`, \`pr-reviewer-worker:${RELEASE_VERSION}\`, \`pr-reviewer-worker:${RELEASE_MAJOR_MINOR}\`."
+            fi
+            echo
+            echo "Pin the Helm controller image with the controller reference and the"
+            echo "instance-config \`kubernetes.image\` with the worker reference; see"
+            echo "\`deploy/images/README.md\` and \`docs/self-hosted-deployment.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Surface the exact references in the job log as well.
+          echo "controller: ghcr.io/${GHCR_OWNER}/pr-reviewer-controller@${CONTROLLER_DIGEST}"
+          echo "worker:     ghcr.io/${GHCR_OWNER}/pr-reviewer-worker@${WORKER_DIGEST}"
+
+  build-fork-pr:
+    # Fork pull requests build and validate both targets but receive no
+    # GHCR credentials: `contents: read` only, no login, no push. This job
+    # is the only surface fork-PR code can reach, and it publishes nothing.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Validate the actual PR HEAD commit, not the synthetic merge
+          # commit the default pull_request checkout builds: the summary
+          # below reports this commit as the build source.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Local builds only (push: false, load: true) with throwaway tags.
+      # No cache export: fork code never writes the cache the `main`
+      # builds read.
+      - name: Build controller (linux/amd64, validation only)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: controller
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: pr-reviewer-controller:ci
+          cache-from: type=gha
+
+      - name: Build worker (linux/amd64, validation only)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: pr-reviewer-worker:ci
+          cache-from: type=gha
+
+      - name: Validate the built controller image
+        run: |
+          set -euo pipefail
+          # The runtime contract from deploy/images/Dockerfile: exec-form
+          # node entrypoint, controller subcommand, non-root user.
+          entrypoint=$(docker image inspect --format '{{json .Config.Entrypoint}}' pr-reviewer-controller:ci)
+          cmd=$(docker image inspect --format '{{json .Config.Cmd}}' pr-reviewer-controller:ci)
+          echo "controller entrypoint=${entrypoint} cmd=${cmd}"
+          if [ "$entrypoint" != '["node","/app/dist/index.js"]' ]; then
+            echo "::error::controller entrypoint drifted from the runtime contract: ${entrypoint}"
+            exit 1
+          fi
+          if [ "$cmd" != '["controller"]' ]; then
+            echo "::error::controller cmd drifted from the runtime contract: ${cmd}"
+            exit 1
+          fi
+          # The runtime node executes inside the built image.
+          docker run --rm --entrypoint node pr-reviewer-controller:ci --version
+
+      - name: Validate the built worker image
+        run: |
+          set -euo pipefail
+          entrypoint=$(docker image inspect --format '{{json .Config.Entrypoint}}' pr-reviewer-worker:ci)
+          cmd=$(docker image inspect --format '{{json .Config.Cmd}}' pr-reviewer-worker:ci)
+          echo "worker entrypoint=${entrypoint} cmd=${cmd}"
+          if [ "$entrypoint" != '["node","/app/dist/index.js"]' ]; then
+            echo "::error::worker entrypoint drifted from the runtime contract: ${entrypoint}"
+            exit 1
+          fi
+          if [ "$cmd" != '["worker"]' ]; then
+            echo "::error::worker cmd drifted from the runtime contract: ${cmd}"
+            exit 1
+          fi
+          docker run --rm --entrypoint node pr-reviewer-worker:ci --version
+
+      - name: Record fork-PR build result
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Self-hosted images built (fork PR, validation only)"
+            echo
+            echo "Source commit: \`${SOURCE_SHA}\`. Both targets built and validated locally."
+            echo
+            echo "No image was published: fork pull requests receive no GHCR"
+            echo "credentials and cannot move any tag. The same-repo PR flow"
+            echo "(or a merge to \`main\`) publishes the images."
+          } >> "$GITHUB_STEP_SUMMARY"

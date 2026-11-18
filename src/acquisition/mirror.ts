@@ -38,6 +38,7 @@ import { parseRepoRef } from "../platform/repo-ref.js";
 import { pullHeadRefspec, type AcquisitionPlatform } from "../platform/head-ref.js";
 import { isForgeId } from "../platform/resolve.js";
 import { runProcess } from "../runtime/subprocess.js";
+import { maskDiagnostic } from "../context/redact.js";
 import { gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
 import { AcquisitionError, type AcquisitionFailureCode, type FetchCredentials, type MirrorInfo } from "./types.js";
 
@@ -195,6 +196,14 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
   }
   if (result.status === "cancelled") {
     throw new AcquisitionError(failureCode, `git ${opts.label}: cancelled`);
+  }
+  if (result.status === "spawn_error") {
+    // Preserve the refusal cause (missing pgrep, ENOENT, pre-abort, etc.)
+    // without ever including git argv, clone URLs, child stderr or secrets.
+    throw new AcquisitionError(
+      failureCode,
+      `git ${opts.label}: spawn refused (${maskDiagnostic(result.launchError ?? "unknown launch refusal")})`,
+    );
   }
   if (result.status !== "exited" || result.exitCode !== 0) {
     throw new AcquisitionError(
