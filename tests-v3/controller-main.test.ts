@@ -1263,7 +1263,7 @@ function kubeSpecOf(controllerRoot: string): KubernetesExecutorSpec {
   };
 }
 
-function credentialCompositionFixture(runId: string, runRoot: string) {
+function credentialCompositionFixture(runId: string, runRoot: string, defaultEvidenceProfile?: string) {
   const instance = parseInstanceConfigText(GITHUB_INSTANCE_CONFIG, validateContract(V3_CONTRACT));
   const broker = createModelCredentialVault({
     instance,
@@ -1277,7 +1277,7 @@ function credentialCompositionFixture(runId: string, runRoot: string) {
   const binding = createWorkerCredentialBinding({
     instance,
     defaultModelProfile: instance.defaultModelProfile,
-    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    defaultEvidenceProfile: defaultEvidenceProfile ?? instance.defaultEvidenceProfile!,
     broker,
     onRefusal: (message) => refusals.push(message),
   });
@@ -1285,6 +1285,24 @@ function credentialCompositionFixture(runId: string, runRoot: string) {
   mkdirSync(runDir, { recursive: true });
   return { binding, refusals, runDir, instance };
 }
+
+test("a binding composes a valid plan with the EMPTY evidence profile name — 'no providers' rides the #735 seam (#1711)", async () => {
+  const runRoot = mkdtempSync(join(tmpdir(), "ctl-cred-noev-"));
+  try {
+    // #1711: the composition may run with no default evidence profile —
+    // the plan seam documents "" as the no-evidence state, so the binding
+    // must compose a VALID plan for it (and add no evidence credential).
+    const { binding } = credentialCompositionFixture("run-no-evidence", runRoot, "");
+    const refs = await binding.credentialRefs(
+      { jobId: "job-1", repoFullName: "owner/repo", platform: "github", installationId: "42", fork: false },
+      "run-no-evidence",
+    );
+    assert.equal(refs.some((ref) => ref.name === "evidence"), false);
+    assert.deepEqual(refs.map((ref) => ref.name).sort(), ["forge-publish", "model"]);
+  } finally {
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
 
 test("a credential-bearing Kubernetes run projects its Secret through the real store before the Job", async (t) => {
   const fake = await startKubeFake();

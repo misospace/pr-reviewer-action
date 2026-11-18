@@ -533,17 +533,18 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   }
 
   // ── the execution profile resolution (fail closed here, not at the
-  //    first dispatch): execution requests require all three profile
-  //    names, so the operator must have declared each default.
+  //    first dispatch): execution requests require an executor and a model
+  //    profile, so the operator must have declared each default. Evidence
+  //    is OPTIONAL (#1711, Action-mode parity): the schema makes
+  //    `evidence-profiles`/`default-evidence-profile` optional, so a null
+  //    default means "not configured" — the plan/credential seam carries
+  //    the empty name (src/credentials/worker-set.ts) and the envelope's
+  //    `profiles.evidence` accepts "" (src/executor/types.ts). The
+  //    executor deliberately consumes no evidence config, so there is
+  //    nothing a missing default could break downstream.
   if (instance.defaultExecutorProfile === null) {
     throw new StartupRefusal(
       "the instance config declares no default executor profile; execution requests require one",
-      2,
-    );
-  }
-  if (instance.defaultEvidenceProfile === null) {
-    throw new StartupRefusal(
-      "the instance config declares no default evidence profile; execution requests require one",
       2,
     );
   }
@@ -1257,8 +1258,9 @@ export async function controllerMain(
   //    plans opaque references through `credentialRefs`; the Kubernetes
   //    executor resolves THAT plan late, through `resolver`). The follow-up
   //    answer lane reads the same startup map directly — it is controller-
-  //    side, not a worker handoff. `resolveStartup` already refused a missing
-  //    evidence default, so the assertion below is proven by startup.
+  //    side, not a worker handoff. The evidence default may be "" ("not
+  //    configured", #1711): the plan seam documents the empty name as the
+  //    no-evidence state and omits the evidence credential for it.
   const credentialVault = createModelCredentialVault({
     instance: startup.instance,
     // Credential scopes are FAMILY-scoped (#1682): a Gitea instance's
@@ -1284,7 +1286,9 @@ export async function controllerMain(
   const credentialBinding = createWorkerCredentialBinding({
     instance: startup.instance,
     defaultModelProfile: startup.instance.defaultModelProfile,
-    defaultEvidenceProfile: startup.instance.defaultEvidenceProfile!,
+    // "" = "not configured" (#1711): the plan seam carries the empty
+    // evidence profile name and adds no evidence credential for it.
+    defaultEvidenceProfile: startup.instance.defaultEvidenceProfile ?? "",
     broker: credentialBroker,
     onRefusal: diagnostic,
   });
@@ -1349,10 +1353,13 @@ export async function controllerMain(
 
   // ── profile resolution: operator-approved names resolved from the
   //    instance config's defaults (repository config selects names only
-  //    and can never supply infrastructure).
+  //    and can never supply infrastructure). Evidence may be "" ("not
+  //    configured", #1711): the executor deliberately consumes no evidence
+  //    config, so the empty name is the no-providers state, never an
+  //    execution refusal (Action-mode parity).
   const defaultModel = startup.instance.defaultModelProfile;
   const defaultExecutor = startup.instance.defaultExecutorProfile!;
-  const defaultEvidence = startup.instance.defaultEvidenceProfile!;
+  const defaultEvidence = startup.instance.defaultEvidenceProfile ?? "";
   const resolveProfiles = async (_job: unknown): Promise<ExecutionProfiles> =>
     Object.freeze({ executor: defaultExecutor, model: defaultModel, evidence: defaultEvidence });
 

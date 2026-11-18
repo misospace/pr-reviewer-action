@@ -1410,10 +1410,8 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   assert.throws(() => validateExecutionRequest({ ...valid, jobId: "  " }), /jobId must match/);
   assert.throws(() => validateExecutionRequest({ ...valid, attempt: 0 }), /attempt must be an integer >= 1/);
   assert.throws(() => validateExecutionRequest({ ...valid, prNumber: 0 }), /prNumber must be an integer >= 1/);
-  assert.throws(
-    () => validateExecutionRequest({ ...valid, profiles: { ...valid.profiles, evidence: "" } }),
-    /evidence must be non-empty/,
-  );
+  // `profiles.evidence: ""` is VALID since #1711 (the not-configured
+  // state) — its grammar is pinned by the dedicated #1711 test below.
   assert.throws(
     () => validateExecutionRequest({ ...valid, credentials: [{ name: "BAD", reference: "ref" }] }),
     /name must match/,
