@@ -47,6 +47,26 @@ test('unchanged "version" context lines do not defeat digest-only (digest refres
   assert.equal(result.prKind, "renovate_digest_only");
 });
 
+test("changed blank lines cannot borrow unchanged JSON/YAML version context", () => {
+  const json = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText:
+      '+\n' +
+      '      "version": "1.2.3",\n' +
+      '-      "integrity": "sha512-aaa"\n' +
+      '+      "integrity": "sha512-bbb"\n',
+  });
+  assert.equal(json.prKind, "renovate_digest_only");
+
+  const yaml = classifyPr({
+    prFiles: files("yarn.lock"),
+    authoritativeChangedFiles: 1,
+    diffText: "+\n appVersion: 1.2.3\n- #68f3a9\n+ #9b384d\n",
+  });
+  assert.equal(yaml.prKind, "renovate_digest_only");
+});
+
 test('a removed/added "version" line pair defeats digest-only', () => {
   const result = classifyPr({
     prFiles: files("package-lock.json"),
