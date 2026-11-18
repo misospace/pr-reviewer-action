@@ -95,6 +95,29 @@ test("#1575: final trace diagnostics report rejection codes without untrusted co
   assert.equal(finalTraceFailureLog({ ...trace, rows: [], incomplete: true }), "");
 });
 
+test("#1702/#1703: material unknowns produce final trace diagnostics even without a mechanical refutation", () => {
+  const id = "req-67157c1f302f";
+  const trace: RequirementTraceArtifact = {
+    version: 2,
+    summary: { confirmed_unmet: [], unmet_claimed: [], unresolved_material: [id], unresolved_advisory: [], total_rows: 1 },
+    incomplete: false, errors: [],
+    rows: [{
+      requirement_id: id, disposition: "unverifiable", proof: "test_required",
+      resolution: "unresolved", materiality: "material",
+      enforcement: [{ file: "src/gates/ci-wait.ts", line: 218 }], test: [],
+      reason: "UNTRUSTED_SECRET", notes: ["downgraded-no-valid-test-location"],
+    }],
+  };
+  const log = finalTraceFailureLog(trace);
+  assert.match(log, /final unresolved=1\/1/);
+  assert.match(log, /req-67157c1f302f:unverifiable\/test_required\[downgraded-no-valid-test-location\]/);
+  assert.doesNotMatch(log, /UNTRUSTED_SECRET|ci-wait/);
+  assert.equal(finalTraceFailureLog({
+    ...trace, summary: { ...trace.summary, unresolved_material: [], unresolved_advisory: [id] },
+    rows: [{ ...trace.rows[0]!, materiality: "advisory" }],
+  }), "", "advisory-only unknowns do not create material failure logs");
+});
+
 test("#1575: final trace diagnostics cap the number of reported rows", () => {
   const rows: RequirementTraceArtifact["rows"] = Array.from({ length: MAX_TRACE_FINAL_DIAGNOSTIC_ROWS + 2 }, (_, i) => ({
     requirement_id: `req-${i}`, disposition: "unverifiable", proof: "test_required",
@@ -2751,6 +2774,60 @@ test("#985: exported proof classifiers pin polarity, vetoes, and explicit test d
   assert.equal(structuralStateClaim("`config/production.yaml` must omit debug logging"), null);
   assert.equal(explicitlyRequiresTest("`.dockerignore` must not exclude `assets/`"), false);
   assert.equal(explicitlyRequiresTest("`.dockerignore` must not exclude `assets/` and must be covered by a regression test"), true);
+});
+
+test("#1702/#1703: a CI test leg is not an explicit demand to provide regression tests", () => {
+  const text = "Keep CI producer and consumer decision identities synchronized; original/bounded name identity drift must refuse evidence rather than discard a material test leg.";
+  const id = "req-67157c1f302f";
+  assert.equal(explicitlyRequiresTest(text), false, "a test leg is an artifact to retain, not a new test requirement");
+  assert.equal(explicitlyRequiresTest(text + " It must be covered by regression tests."), true,
+    "a separate explicit test demand must not be lost");
+  assert.equal(explicitlyRequiresTest("The updated logic must have unit tests."), true);
+
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gates/ci-wait.ts", [
+      "function renderCiEvidenceOutput() {",
+      "  if (ciCheckIdentity(originalName) !== ciCheckIdentity(boundedName)) return '';",
+      "}",
+    ]);
+    const claim = {
+      requirement_id: id, disposition: "met", reason: "the producer refuses an identity-changing truncated name",
+      enforcement: [{ file: "src/gates/ci-wait.ts", line: 2 }],
+      test: [],
+    };
+    const accepted = validateRequirementTrace([claim], ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
+    assert.equal(accepted.rows[0]?.proof, "runtime_behavior");
+    assert.equal(accepted.rows[0]?.disposition, "met");
+    assert.equal(accepted.rows[0]?.resolution, "evidenced");
+    assert.equal(accepted.summary.unresolved_material.length, 0);
+    assert.equal(finalTraceFailureLog(accepted), "");
+
+    const noCitation = validateRequirementTrace([{ ...claim, enforcement: [] }],
+      ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
+    assert.equal(noCitation.rows[0]?.disposition, "unverifiable");
+    assert.equal(noCitation.rows[0]?.materiality, "material");
+    assert.ok(noCitation.rows[0]?.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.match(finalTraceFailureLog(noCitation), /downgraded-no-valid-enforcement-location/);
+
+    const actualTestDemand = validateRequirementTrace([claim],
+      ledgerWith([{ id, text: text + " It must be covered by regression tests.", kind: "acceptance" }]), workspace);
+    assert.equal(actualTestDemand.rows[0]?.proof, "test_required");
+    assert.ok(actualTestDemand.rows[0]?.notes.includes("downgraded-no-valid-test-location"));
+    assert.equal(actualTestDemand.rows[0]?.materiality, "material");
+    const tested = validateRequirementTrace([{ ...claim, test: [VALID_TEST_LOCATION] }],
+      ledgerWith([{ id, text: text + " It must be covered by regression tests.", kind: "acceptance" }]), workspace);
+    assert.equal(tested.rows[0]?.disposition, "met");
+
+    const declaredUnknown = validateRequirementTrace([{
+      requirement_id: id, status: "unknown", evidence: [], reason: "the reviewer did not verify this",
+    }], ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
+    assert.equal(declaredUnknown.rows[0]?.materiality, "material");
+    assert.ok(declaredUnknown.rows[0]?.notes.includes("model-declared-unknown"));
+    assert.match(finalTraceFailureLog(declaredUnknown), /model-declared-unknown/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("#985: multiple named config files do not form a vacuous structural claim", () => {
