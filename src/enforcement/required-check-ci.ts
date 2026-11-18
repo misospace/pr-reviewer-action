@@ -15,9 +15,12 @@
  *   test-execution check closes the ask WITHOUT a model re-invocation; but
  *   the check must prove the ask's test SCOPE too — `Unit Tests` cannot
  *   discharge `run integration tests`, and a full-suite ask needs an
- *   explicit exhaustive identity (`test suite`, `full test suite`,
- *   `all tests`), not a vague generic `test`/`test (24)` name (an
- *   ambiguous green says nothing provable about the requested tests);
+ *   exhaustive identity: an explicit marker (`test suite`, `full test
+ *   suite`, `all tests`) or the conventional bare-suite job name
+ *   (`Tests`, `test (24)`, or a bare `test`/`tests` step inside an
+ *   enumeration like `Typecheck, lint, test, build`) with no narrow scope
+ *   (#1702 — ordinary CI jobs must not have to rename themselves to
+ *   `Full Test Suite` to be recognized);
  * - precedence is failure-first — a matching test-named check that went red
  *   on the exact head refutes discharge even when a sibling matrix leg is
  *   green (one red leg means the suite did not pass);
@@ -135,20 +138,48 @@ export function isTestExecutionObligation(text: string): boolean {
  * name-separator characters CI check names actually use. Word-delimited (not
  * substring) so `latest` never reads as a test run. */
 const TEST_NAME_WORD_RE = /(?:^|[\s/\\()\[\]{},;:._|-])tests?(?:$|[\s/\\()\[\]{},;:._|-])/;
-/** Substring tokens that disqualify a name from denoting a test EXECUTION:
- * coverage/reporting/upload/publish/deploy/image/scan/analysis/lint/docs/
- * formatting jobs run against (or replace) tests, they do not run them.
- * Substring matching errs toward disqualifying — the conservative direction
- * for a discharge. */
+/** Substring tokens that disqualify a name (or one name component) from
+ * denoting a test EXECUTION: coverage/reporting/upload/publish/deploy/image/
+ * scan/analysis/lint/docs/formatting jobs run against (or replace) tests,
+ * they do not run them. Substring matching errs toward disqualifying — the
+ * conservative direction for a discharge. */
 const TEST_NAME_DISQUALIFIERS = [
   "coverage", "codecov", "report", "upload", "publish", "deploy", "docker",
   "image", "scan", "analysis", "codeql", "lint", "docs", "prettier", "fmt",
 ] as const;
 
+/** Separators of a step-list job name (`Typecheck, lint, test, build`): a
+ * combined job runs every listed step, so one clean test step still proves
+ * test execution even though a sibling step is lint or docs. Deliberately
+ * narrow — comma/semicolon/ampersand/plus enumerate steps; `-`, `/` and `:`
+ * qualify the test word itself (`lint/tests`, `unit-test`), so they never
+ * split. */
+const NAME_COMPONENT_SPLIT_RE = /[,;&+]+/;
+
+/** The components of a step-list name, lowercased. A name without a step
+ * separator is exactly one component (itself), so component rules subsume
+ * the single-name rules. */
+function nameComponents(lower: string): string[] {
+  return lower.split(NAME_COMPONENT_SPLIT_RE);
+}
+
+/** One name component denotes a test execution: it carries the delimited
+ * test word and no disqualifier anywhere inside the component. */
+function componentIsTestExecution(component: string): boolean {
+  return TEST_NAME_WORD_RE.test(component)
+    && !TEST_NAME_DISQUALIFIERS.some((token) => component.includes(token));
+}
+
 export function isTestExecutionCheckName(name: string): boolean {
   const lower = name.toLowerCase();
   if (!TEST_NAME_WORD_RE.test(lower)) return false;
-  return !TEST_NAME_DISQUALIFIERS.some((token) => lower.includes(token));
+  if (!TEST_NAME_DISQUALIFIERS.some((token) => lower.includes(token))) return true;
+  // #1702: a combined step-list name is not rejected wholesale because one
+  // sibling step is lint/build-adjacent — it still runs its test step. Only
+  // a name where EVERY component is disqualified (or test-free) —
+  // `lint tests`, `report tests upload`, `test report, upload artifacts` —
+  // keeps the old fail-closed refusal.
+  return nameComponents(lower).some(componentIsTestExecution);
 }
 
 /**
@@ -199,15 +230,50 @@ function asksForFullTestSuite(text: string): boolean {
   return FULL_TEST_SUITE_RE.test(normalizedTestScopeText(text));
 }
 
+/** A bare conventional suite job name: `test`/`tests` alone, optionally with
+ * one matrix parameter suffix (`tests (24)`, `test [node-20]`). This is the
+ * shape of the configured full suite in ordinary repos (#1702): demanding an
+ * explicit `full`/`suite` marker refused real green suites. Anything else
+ * attached to the word (`unit tests`, `test report`) is a scope, a
+ * disqualifier, or unknown — never bare-suite identity. */
+const BARE_SUITE_NAME_RE = /^tests?(?:\s*[\[(][^\])]*[\])])?$/;
+
+/** A bare-suite candidate is clean only when no disqualifier substring
+ * hides anywhere in it, including inside a matrix parameter suffix:
+ * `test (24, lint)` names parameters, not a clean suite step, so it proves
+ * nothing exhaustively (the conservative direction for a discharge). */
+function bareSuiteCandidateIsClean(candidate: string): boolean {
+  return !TEST_NAME_DISQUALIFIERS.some((token) => candidate.includes(token));
+}
+
+/** Whether a check NAME proves full-suite identity: an explicit exhaustive
+ * marker, or — #1702 — a bare conventional suite step (alone, with a matrix
+ * parameter suffix like `test (18.x, ubuntu-latest)`, or as one step of an
+ * enumeration like `Typecheck, lint, test, build`) with no narrow scope
+ * token and no disqualifier anywhere in the candidate. The marker arm keeps
+ * #1594 semantics exactly (a scoped name like `unit tests suite` was — and
+ * remains — refused at discharge by the caller's scope check, not here); the
+ * scope veto protects only the new bare-name arms, where commas INSIDE a
+ * matrix suffix must not look like an enumeration, so the whole name is
+ * matched before any component split. */
+function nameProvesFullSuite(name: string): boolean {
+  if (FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name))) return true;
+  if (testScopesIn(name).length > 0) return false;
+  const lower = name.trim().toLowerCase();
+  if (BARE_SUITE_NAME_RE.test(lower) && bareSuiteCandidateIsClean(lower)) return true;
+  return nameComponents(lower)
+    .some((component) => BARE_SUITE_NAME_RE.test(component.trim()) && bareSuiteCandidateIsClean(component.trim()));
+}
+
 type ScopeMatchMode = "discharge" | "contradiction";
 
 /** `discharge` needs PROOF of every requested scope; `contradiction` only
  * needs the red leg to belong to the requested scope (a red unit leg cannot
- * refute an integration-only ask). A full-suite ask needs an EXPLICIT
- * exhaustive identity in the name (`test suite`, `full test suite`,
- * `all tests`, ...) with no narrow scope; a bare generic `test`/`tests`/
- * `test (24)` name does not prove which suite ran, so it stays unresolved.
- * A generic ask accepts any test execution. */
+ * refute an integration-only ask). A full-suite ask needs an exhaustive
+ * identity in the name (see `nameProvesFullSuite`: an explicit marker like
+ * `test suite`/`all tests`, or the conventional bare-suite name `Tests`/
+ * `test (24)` per #1702) with no narrow scope. A generic ask accepts any
+ * test execution. */
 function checkCoversRequestedScope(
   name: string,
   requestedScopes: readonly string[],
@@ -222,21 +288,22 @@ function checkCoversRequestedScope(
   }
   if (mode === "contradiction") return true;
   if (!fullSuite) return true;
-  return provided.length === 0 && FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name));
+  return provided.length === 0 && nameProvesFullSuite(name);
 }
 
 /**
  * Canonical decision identity of a check NAME: whether it denotes test
  * execution at all, the narrow test scopes it proves, and whether it carries
- * an explicit exhaustive (`suite`/`full`/`all`) identity. The evidence
- * producer compares this before and after field truncation, so a truncated
- * name can never silently lose a test suffix, a scope, or a disqualifier and
- * change what the enforcement pass is allowed to conclude from it.
+ * full-suite identity (explicit `suite`/`full`/`all` marker or the #1702
+ * conventional bare-suite name). The evidence producer compares this before
+ * and after field truncation, so a truncated name can never silently lose a
+ * test suffix, a scope, or a disqualifier and change what the enforcement
+ * pass is allowed to conclude from it.
  */
 export function ciCheckIdentity(name: string): string {
   const testExecution = isTestExecutionCheckName(name);
   const scopes = testScopesIn(name);
-  const exhaustive = testExecution && asksForFullTestSuite(name);
+  const exhaustive = testExecution && nameProvesFullSuite(name);
   return `${testExecution ? "test" : "other"}|${scopes.join(",")}|${exhaustive ? "exhaustive" : "plain"}`;
 }
 

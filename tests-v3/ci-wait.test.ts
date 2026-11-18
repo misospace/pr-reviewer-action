@@ -936,6 +936,43 @@ test("renderCiEvidenceOutput: truncated names are never decision evidence", () =
   assert.equal(ciDischargeForCheckText("run integration tests", parsedNormal, SHA).outcome, "satisfied");
 });
 
+// #1702: the widened consumer matcher (bare `Tests`, combined step-list
+// names) must round-trip through the producer, and the identity-drift fence
+// must cover the new decision dimensions.
+test("renderCiEvidenceOutput: #1702 conventional names round-trip and stay protected", () => {
+  // Positive replay: the organic job shapes survive producer + strict parser
+  // and discharge a full-suite ask end to end.
+  for (const name of ["Tests", "Typecheck, lint, test, build"]) {
+    const line = renderCiEvidenceOutput(SHA, "success", [
+      { name: "build", state: "success", conclusion: "success" },
+      { name, state: "success", conclusion: "success" },
+    ]);
+    const parsed = parseHeadBoundCiEvidence(line.replace(/^ci_checks_evidence=/, ""));
+    assert.notEqual(parsed, null, name);
+    assert.equal(ciDischargeForCheckText("run full test suite after upgrade", parsed, SHA).outcome, "satisfied", name);
+  }
+
+  // Identity drift on the new dimensions: truncation cuts the bare suite
+  // step off a combined name, so the bounded copy is no longer test-named.
+  // The producer must refuse the artifact, not demote the test row.
+  const lostTestStep = renderCiEvidenceOutput(SHA, "success", [
+    { name: `${"x".repeat(195)}, tests`, state: "success", conclusion: "success" },
+  ]);
+  assert.equal(lostTestStep, "", "a truncated name that loses its bare suite step is not evidence");
+
+  // A red conventional test row is decision evidence: the 50-row cap keeps
+  // it (failure-first) and trims only non-test context.
+  const overflow = [
+    ...Array.from({ length: 51 }, (_, i) => ({ name: `check-${i}`, state: "success" as const })),
+    { name: "Tests", state: "failure" as const, conclusion: "failure" },
+  ];
+  const parsedOverflow = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "failure", overflow).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedOverflow, null);
+  assert.equal(parsedOverflow!.checks.length, 50);
+  assert.equal(parsedOverflow!.checks[0]!.name, "Tests", "the red Tests leg leads the truncated list");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", parsedOverflow, SHA).outcome, "contradicted");
+});
+
 test("renderCiEvidenceOutput: UTF-16 field bound and serialized budget always parse strictly", () => {
   // The parser counts UTF-16 units (an emoji is 2); truncation by code point
   // alone could emit a 200-code-point/400-unit field and invalidate the
