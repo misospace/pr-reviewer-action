@@ -228,12 +228,12 @@ workerExecutor:
   volumeClaims: []
 
 # ── network policy ─────────────────────────────────────────────────────
-# Default-deny. Controller ingress: deny-all (enable per-service rules
-# via additionalIngress). Controller egress: DNS, PostgreSQL (5432) and
+# Opt-in only (default OFF). When enabled: controller ingress denies all except
+# webhook/additionalIngress; controller egress allows DNS, PostgreSQL (5432) and
 # TLS (443) for the forge API and model endpoints. Worker egress: DNS and
 # TLS only (the worker's envelope/result travel over shared volumes).
 networkPolicy:
-  enabled: true
+  enabled: false
   additionalIngress: []
   additionalEgress: []
 

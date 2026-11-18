@@ -151,8 +151,10 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - service-account token automount off unless a feature needs it (the worker
   ServiceAccount never automounts a token; the controller's is mounted only
   in Kubernetes-executor mode);
-- optional NetworkPolicy (default ON): deny-by-default ingress, egress
-  limited to DNS, the forge API, the model endpoints, and PostgreSQL;
+- optional NetworkPolicy (**default OFF**): no chart-managed traffic restrictions
+  unless explicitly enabled; when enabled it denies ingress by default and
+  limits egress to specified ports, requiring cluster-specific exceptions
+  for the Kubernetes API, model endpoint and admin/dashboard path;
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
 
@@ -230,7 +232,8 @@ credentials — bounded counters only); the `/admin/*` API and the MCP mount
 are guarded by a required bearer token. The chart sets
 `PR_REVIEWER_ADMIN_BIND=0.0.0.0` when
 the admin surface is enabled so kubelet probes and Prometheus can reach it;
-the token and the NetworkPolicy remain the guards. Set
+the bearer token remains mandatory for privileged admin endpoints;
+chart-managed NetworkPolicies are opt-in and must not be assumed present. Set
 `serviceMonitor.enabled: true` (requires the admin surface) for the
 ServiceMonitor resource; `admin.enabled: false` keeps the listener
 loopback-only and off the network. The #742 operations dashboard

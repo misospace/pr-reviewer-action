@@ -128,11 +128,11 @@ test("chart default values parse with hardened security defaults", () => {
   assert.equal(containerSecurity.allowPrivilegeEscalation, false);
   assert.equal(containerSecurity.readOnlyRootFilesystem, true);
   assert.deepEqual(containerSecurity.capabilities, { drop: ["ALL"] });
-  // Chart posture defaults: policy on, monitoring off, no database.
+  // Chart posture defaults: NetworkPolicies OFF, monitoring off, no database.
   const workerExecutor = values.workerExecutor as Record<string, unknown>;
   assert.equal(workerExecutor.mode, "disabled");
   const networkPolicy = values.networkPolicy as Record<string, unknown>;
-  assert.equal(networkPolicy.enabled, true);
+  assert.equal(networkPolicy.enabled, false);
   const serviceMonitor = values.serviceMonitor as Record<string, unknown>;
   assert.equal(serviceMonitor.enabled, false);
 });

@@ -166,6 +166,8 @@ stringData:
 - The admin listener is served on `controller.admin.port`, guarded by the
   admin bearer token and bound pod-wide (`PR_REVIEWER_ADMIN_BIND=0.0.0.0`)
   when enabled; `kubectl exec` + loopback also works for local debugging.
-- The chart's `networkPolicy` is default-deny; the webhook port accepts
-  ingress from any source by default (the forge delivery path) — narrow
-  it with `networkPolicy.additionalIngress`.
+- The chart's `networkPolicy.enabled` defaults to `false`. Only explicitly
+  enable it after configuring controller/worker ingress and egress for your
+  cluster, including the Kubernetes API, model endpoint and admin listener.
+  With policies enabled the webhook intake permits ingress on its port;
+  operator-specific exceptions go in `networkPolicy.additionalIngress`.

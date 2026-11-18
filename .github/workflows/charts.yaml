@@ -49,7 +49,15 @@ jobs:
           grep -q -- "- ALL" /var/tmp/render-controller-only.yaml
           grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
-          grep -q "kind: NetworkPolicy" /var/tmp/render-controller-only.yaml
+          # Policies are opt-in; verify default renders none, opt-in renders one.
+          if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
+            echo "unexpected default NetworkPolicy in controller-only chart" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-controller-only-netpol.yaml
+          [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-controller-only-netpol.yaml)" -eq 1 ]
           # #1621: the operations dashboard stays OFF by default — the flag
           # is genuinely absent, never emitted as an empty value.
           if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
@@ -94,8 +102,21 @@ jobs:
           grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
           grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
-          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
-          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+          # Kubernetes-executor mode must also default off; explicit opt-in has two policies.
+          if grep -q '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor.yaml; then
+            echo "unexpected default NetworkPolicy in Kubernetes-executor chart" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
+          # The worker selector is only present when the policy is opted in.
+          grep -q 'app.kubernetes.io/managed-by: pr-reviewer-action' /var/tmp/render-kubernetes-executor-netpol.yaml
+          policy_count="$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml || true)"
+          if [ "$policy_count" -ne 2 ]; then
+            echo "::error::expected 2 opt-in policies for Kubernetes executor; found $policy_count" >&2
+            exit 1
+          fi
 
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
