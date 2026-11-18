@@ -1410,10 +1410,8 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   assert.throws(() => validateExecutionRequest({ ...valid, jobId: "  " }), /jobId must match/);
   assert.throws(() => validateExecutionRequest({ ...valid, attempt: 0 }), /attempt must be an integer >= 1/);
   assert.throws(() => validateExecutionRequest({ ...valid, prNumber: 0 }), /prNumber must be an integer >= 1/);
-  assert.throws(
-    () => validateExecutionRequest({ ...valid, profiles: { ...valid.profiles, evidence: "" } }),
-    /evidence must be non-empty/,
-  );
+  // `profiles.evidence: ""` is VALID since #1711 (the not-configured
+  // state) — its grammar is pinned by the dedicated #1711 test below.
   assert.throws(
     () => validateExecutionRequest({ ...valid, credentials: [{ name: "BAD", reference: "ref" }] }),
     /name must match/,
@@ -1427,6 +1425,30 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   assert.throws(
     () => validateExecutionRequest({ ...valid, resultPath: `${valid.runDir}/../escape/result.json` }),
     /must not contain '\.\.' path segments/,
+  );
+});
+
+test("validateExecutionRequest accepts profiles.evidence \"\" — 'no providers' is expressible (#1711)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+  // REPRODUCTION of #1711 on the current composition: an instance config
+  // without evidence profiles composes an envelope whose evidence name is
+  // "" (the documented not-configured state, Action-mode parity). The
+  // envelope must accept it; refusing it makes 'no providers'
+  // inexpressible end to end.
+  const accepted = validateExecutionRequest({
+    ...valid,
+    profiles: { ...valid.profiles, evidence: "" },
+  });
+  assert.equal(accepted.profiles.evidence, "");
+  // A non-empty name still rides as identity metadata; the bounded-identity
+  // grammar applies to it (control characters are refused).
+  assert.throws(
+    () => validateExecutionRequest({
+      ...valid,
+      profiles: { ...valid.profiles, evidence: "bad\u0007name" },
+    }),
+    /evidence/,
   );
 });
 

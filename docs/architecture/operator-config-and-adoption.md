@@ -88,7 +88,10 @@ default-executor-profile: default
 evidence-profiles:                    # optional; named operator-owned provider sets
   - name: strict
     providers-file: /etc/pr-reviewer/providers-strict.yml
-default-evidence-profile: null
+default-evidence-profile: null        # null = no evidence providers (#1711): the
+                                      # daemon starts; executions carry the empty
+                                      # profile name (Action-mode parity — evidence
+                                      # is "not configured", never a refusal)
 adoption:                             # see "Adoption" below
   mode: allowlist                     # all_allowed | allowlist | opt_in | opt_out
   allowlist: ["org/team-repo"]
