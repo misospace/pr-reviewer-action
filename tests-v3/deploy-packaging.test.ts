@@ -143,6 +143,43 @@ test("chart default values parse with hardened security defaults", () => {
   assert.equal(serviceMonitor.enabled, false);
 });
 
+test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key, never the v1 `podOptions` spelling", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // bjw-s common 5.x reads pod-level overrides from
+  // `controllers.<name>.pod` (`templates/lib/pod/_getOption.tpl`);
+  // `podOptions` is the v1 key and is silently ignored by the library, so
+  // the Kubernetes executor's controller pod never mounted its
+  // service-account token over `defaultPodOptions.automountServiceAccountToken:
+  // false`. The v1 spelling must never reappear.
+  assert.match(
+    helpers,
+    /\$_ := set \$main "pod" \(mustMergeOverwrite \(\$main\.pod \| default dict\) \(dict "automountServiceAccountToken" true\)\)/,
+    "the executor branch must set controllers.main.pod.automountServiceAccountToken",
+  );
+  assert.doesNotMatch(helpers, /podOptions/, "the v1 podOptions key must not remain");
+  // CI is where the real renders assert the projection both ways: the
+  // Kubernetes-executor example must render the controller Deployment
+  // with automountServiceAccountToken: true, and the controller-only
+  // example must keep the default-deny false (both assertions scoped to
+  // the Deployment via the awk kind filter).
+  const workflow = read(".github/workflows/charts.yaml");
+  const deploymentScope = String.raw`awk '/\^kind: Deployment\$/,0'`;
+  assert.match(
+    workflow,
+    new RegExp(
+      String.raw`${deploymentScope} [^\n]*\| grep -q "automountServiceAccountToken: true"`,
+    ),
+    "charts.yaml must pin the kubernetes-executor render assertion (Deployment automount true)",
+  );
+  assert.match(
+    workflow,
+    new RegExp(
+      String.raw`if ${deploymentScope} [^\n]*\| grep -q "automountServiceAccountToken: true"; then`,
+    ),
+    "charts.yaml must pin the controller-only render assertion (Deployment automount stays false)",
+  );
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);

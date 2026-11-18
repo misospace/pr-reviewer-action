@@ -344,7 +344,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if $kubeExecutor -}}
 {{- /* the Kubernetes executor needs the controller's in-cluster identity
        to create/delete worker Jobs; otherwise no token is mounted */ -}}
-{{- $_ := set $main "podOptions" (mustMergeOverwrite ($main.podOptions | default dict) (dict "automountServiceAccountToken" true)) -}}
+{{- $_ := set $main "pod" (mustMergeOverwrite ($main.pod | default dict) (dict "automountServiceAccountToken" true)) -}}
 {{- $sa := index ($v.serviceAccount | default dict) "main" -}}
 {{- if not (empty $sa) -}}
 {{- $_ := set $sa "automountServiceAccountToken" true -}}

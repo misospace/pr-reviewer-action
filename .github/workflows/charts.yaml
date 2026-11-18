@@ -49,6 +49,12 @@ jobs:
           grep -q -- "- ALL" /var/tmp/render-controller-only.yaml
           grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
+          # #1712: controller-only mode keeps the default-deny token posture
+          # on the controller Deployment itself.
+          if awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml | grep -q "automountServiceAccountToken: true"; then
+            echo "controller Deployment must keep automountServiceAccountToken: false in controller-only mode" >&2
+            exit 1
+          fi
           # Policies are opt-in; verify default renders none, opt-in renders one.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
             echo "unexpected default NetworkPolicy in controller-only chart" >&2
@@ -148,6 +154,11 @@ jobs:
           grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
           grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          # #1712: the Kubernetes executor's controller pod must project its
+          # service-account token (bjw-s common 5.x reads pod-level
+          # overrides from controllers.<name>.pod — the v1 `podOptions`
+          # key is silently ignored, leaving the default-deny false).
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "automountServiceAccountToken: true"
           grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
           # Kubernetes-executor mode must also default off; explicit opt-in has two policies.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor.yaml; then
