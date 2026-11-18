@@ -33,15 +33,55 @@ common library templates at render time. Run
 
 ## Release version synchronization
 
-The chart's `appVersion` and the controller/worker image tags in
-`examples/*.yaml` track the application release in
+The chart's `version`, the chart's `appVersion`, and the controller/worker
+image tags in `examples/*.yaml` track the application release in
 `.release-please-manifest.json`. Each version field carries an
 `x-release-please-version` annotation and its file is listed under
 `packages["."].extra-files` in `release-please-config.json`, so the standing
 release PR bumps all of them together. `tests-v3/deploy-packaging.test.ts`
 fails when a bound field and the manifest disagree, so a release PR cannot
-land with stale deployment artifacts. The chart's own `version` (`0.1.0`)
-is the independent Helm chart version and is never annotated.
+land with stale deployment artifacts.
+
+Since #1708 the chart's own `version` equals the application release
+version too (no more independent `0.1.0`): Helm OCI artifacts are tagged
+by `Chart.yaml.version`, so publishing application releases while the
+chart stayed at one constant version would collide with the
+already-published artifact. One release, one coordinate everywhere:
+release tag `vX.Y.Z`, `Chart.yaml.version` `X.Y.Z`, `Chart.yaml.appVersion`
+`X.Y.Z`, OCI chart tag `X.Y.Z`, and the `#1704` image tags `X.Y.Z`. If
+independent chart releases are ever needed, that is a deliberate separate
+versioning/release design, not implicit drift.
+
+## Published OCI artifact (#1708)
+
+The chart is published to GHCR as an OCI artifact by
+`.github/workflows/publish-chart.yaml` from the trusted release lifecycle
+(the GitHub Release event, plus a manual dispatch with an explicit release
+tag as the recovery path):
+
+```sh
+helm install pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -f values.yaml
+```
+
+- The chart version to install is the application release version — the
+  same `X.Y.Z` as the `#1704` controller/worker image release tags of that
+  release.
+- The published chart resolves its pinned bjw-s `common` dependency
+  (`helm dependency build` runs in the publish job), so installation needs
+  no source checkout. Installing from `deploy/charts/pr-reviewer/` in a
+  checkout remains the development path, not the normal release path.
+- Digest-pinned image overrides work exactly as before (`image.digest` /
+  the instance-config `kubernetes.image` reference) and remain the exact
+  immutable production pin when desired; the chart does not weaken them.
+- The publish job refuses to replace an already-published chart version
+  (GHCR does not enforce tag immutability) and never mutates `Chart.yaml`
+  to make a mismatched release pass. There is no `latest` chart alias.
+- Package visibility/read permissions follow the self-hosted runtime
+  images (`deploy/images/README.md`): a newly created GHCR package starts
+  private — set it public or attach a pull secret.
 
 ## Values structure
 

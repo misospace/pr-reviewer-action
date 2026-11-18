@@ -123,7 +123,55 @@ only for what the common library cannot express: worker RBAC, the
 NetworkPolicy, the ServiceMonitor, and the env wiring that maps values onto
 the controller's fail-closed environment contract.
 
-Install (controller-only mode):
+### Published chart OCI artifact (#1708)
+
+Every release publishes the chart to GHCR as an OCI artifact
+(`.github/workflows/publish-chart.yaml`), so a self-hosted installation
+consumes a stable coordinate instead of a source checkout:
+
+```sh
+helm install pr-reviewer \
+  oci://ghcr.io/misospace/charts/pr-reviewer \
+  --version 3.9.1 \
+  -n pr-reviewer --create-namespace \
+  -f values-controller-only.yaml
+```
+
+Upgrade follows the same shape (`helm upgrade pr-reviewer
+oci://ghcr.io/misospace/charts/pr-reviewer --version <new release> ...`).
+
+How the chart artifact relates to the release:
+
+- **One release coordinate everywhere.** The chart version equals the
+  application release version: release tag `vX.Y.Z` publishes
+  `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z` alongside
+  `ghcr.io/misospace/pr-reviewer-controller:X.Y.Z` and
+  `pr-reviewer-worker:X.Y.Z` from the same release. There is no `latest`
+  chart alias and no ad-hoc version rewrite; the publish job refuses to
+  replace an already-published chart version.
+- **Fail-closed coordinates.** The publish job runs only for a GitHub
+  Release (plus an explicit-tag manual dispatch recovery path) and fails
+  closed unless the tag is `vX.Y.Z` SemVer, `Chart.yaml.version` and
+  `appVersion` equal `X.Y.Z`, and `.release-please-manifest.json` equals
+  `X.Y.Z`. release-please bumps all of them together in the release PR
+  (`x-release-please-version` annotations); `Chart.yaml` is never mutated
+  during publishing.
+- **Auth prerequisite.** The same GHCR visibility/read-permission policy as
+  the runtime images applies: a newly created `charts/pr-reviewer` package
+  starts private — either make it public or attach a registry pull secret
+  (see `deploy/images/README.md`).
+- **Digest overrides unchanged.** The chart still supports digest-pinned
+  image overrides (`controller.controllers.main.containers.main.image.digest`
+  and the instance-config `kubernetes.image` reference) — those remain the
+  exact immutable production pin when desired.
+- **Source checkout stays a development path.** Installing from
+  `deploy/charts/pr-reviewer/` in a repository checkout (below) is for
+  development and CI validation; the released OCI coordinate is the normal
+  install path. The packaged chart resolves its pinned bjw-s `common`
+  dependency inside the publish job, so no client-side
+  `helm dependency build` is needed.
+
+Source-checkout install (controller-only mode, development path):
 
 ```bash
 helm dependency build deploy/charts/pr-reviewer
@@ -328,7 +376,11 @@ The `.github/workflows/publish-images.yaml` workflow builds and pushes
 the controller and worker images to GHCR for PRs, `main` commits, release
 tags, and manual dispatches
 ([Published GHCR images](#published-ghcr-images-1704) above); it also never
-gates a merge.
+gates a merge. The `.github/workflows/publish-chart.yaml` workflow publishes
+the Helm chart OCI artifact for release publications (and validates, lints
+and packages the chart on pull requests without publish credentials —
+[Published chart OCI artifact](#published-chart-oci-artifact-1708) above);
+it also never gates a merge.
 
 ## Known limits
 

@@ -1,0 +1,299 @@
+name: Publish chart
+
+# #1708: publish the #738 self-hosted Helm chart to GHCR as an OCI
+# artifact (oci://ghcr.io/misospace/charts/pr-reviewer) from the trusted
+# release lifecycle, following the established org pattern
+# (misospace/dispatch's publish-chart.yaml). The GitHub Release event is
+# the automatic publish trigger; a manual dispatch carrying an explicit
+# release tag is the narrowly scoped recovery path. Pull requests NEVER
+# publish: they run the credential-free `validate` job below.
+#
+# The chart is packaged EXACTLY as committed on the release tag. The job
+# fails closed unless every release coordinate agrees — the tag is a
+# vX.Y.Z SemVer release, deploy/charts/pr-reviewer/Chart.yaml `version` and
+# `appVersion` both equal X.Y.Z, and .release-please-manifest.json equals
+# X.Y.Z (release-please bumps all of them together in the release PR via
+# the `x-release-please-version` annotations; see release-please-config.json
+# `extra-files`). Chart.yaml is only ever READ here: a disagreement refuses
+# the run — the workflow never rewrites the chart to make a bad release
+# look valid. The committed release/tagged tree must already carry the
+# release version.
+#
+# Helm OCI artifacts are tagged by Chart.yaml.version, so the published
+# tag is exactly the validated X.Y.Z: no `latest`, no major-only alias, and
+# no major.minor alias (Helm rejects non-SemVer OCI tags). If independent
+# chart releases are ever needed, that is a deliberate versioning design
+# change, not silent drift away from the application release coordinate.
+#
+# Trust boundary (mirrors .github/workflows/publish-images.yaml / #1704):
+# the `publish` job is the only holder of `packages: write` and the
+# workflow's own GITHUB_TOKEN, and a pull_request event can never enter it
+# (the job's `if` refuses pull_request outright). PR code reaches only the
+# `validate` job: dependency build, lint and packaging with `contents:
+# read`, no secret, no registry login, no push. This workflow writes no git
+# tags, no releases, and no dist artifacts and stays entirely separate from
+# the Action release pipeline (release-please / manual-release).
+#
+# GHCR has no registry-side tag-immutability setting, so the publish job
+# itself refuses to replace an already-published chart version (see the
+# pre-push guard below): re-publishing a version would silently move the
+# artifact off the digest the run summary reports.
+on:
+  release:
+    types: [published]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package or republish (for example v3.9.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-chart-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Release publications and explicit-tag dispatches only. A pull_request
+    # event never enters this job, so pull-request code can never reach the
+    # GHCR credentials held here, and charts are never published from
+    # pull-request code.
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Package exactly the tagged tree: the release event names the
+          # release tag, a dispatch names the explicit recovery tag. (A
+          # workflow_dispatch started from a branch must NOT package that
+          # branch: the recovery path is defined by the tag input alone.)
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Validate the release coordinates
+        # Fail closed unless ALL release coordinates agree: the tag is a
+        # vX.Y.Z SemVer release, the checked-out tree is that tag's commit,
+        # the committed Chart.yaml version AND appVersion equal X.Y.Z, and
+        # the repository release manifest equals X.Y.Z. Chart.yaml is only
+        # ever read here — a disagreement refuses the run instead of
+        # mutating the chart to look valid.
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          [ -n "$TAG" ] || { echo "no release tag resolved for this event" >&2; exit 1; }
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::release ref ${TAG} is not a v-prefixed release tag; refusing to publish." >&2
+               exit 1 ;;
+          esac
+          version="${TAG#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::release tag ${TAG} is not vX.Y.Z SemVer; refusing to publish."
+            exit 1
+          fi
+
+          # The packaged tree must be the tagged commit itself: assert the
+          # checkout really is the tag before anything is packaged.
+          tag_commit="$(git rev-parse --verify "${TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          [ "$head_commit" = "$tag_commit" ] || {
+            echo "checked-out commit ${head_commit} is not the ${TAG} commit ${tag_commit}; refusing to package a mismatched tree" >&2
+            exit 1
+          }
+          echo "SOURCE_SHA=$head_commit" >> "$GITHUB_ENV"
+
+          # Read (never write) the committed coordinates. The regexes anchor
+          # on column 0, so the indented `version:` line of the bjw-s
+          # `common` dependency cannot be mistaken for the chart's own.
+          chart_version="$(awk '/^version:/ { gsub(/"/, "", $2); print $2; exit }' deploy/charts/pr-reviewer/Chart.yaml)"
+          chart_appversion="$(awk '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' deploy/charts/pr-reviewer/Chart.yaml)"
+          manifest_version="$(jq -r '."."' .release-please-manifest.json)"
+          [ -n "$chart_version" ] || { echo "cannot read Chart.yaml version" >&2; exit 1; }
+          [ -n "$chart_appversion" ] || { echo "cannot read Chart.yaml appVersion" >&2; exit 1; }
+          [ "$manifest_version" != "null" ] || { echo "cannot read .release-please-manifest.json" >&2; exit 1; }
+          if [ "$chart_version" != "$version" ] || [ "$chart_appversion" != "$version" ] || [ "$manifest_version" != "$version" ]; then
+            echo "::error::release coordinates disagree: tag ${TAG} -> ${version}, Chart.yaml version ${chart_version}, Chart.yaml appVersion ${chart_appversion}, release manifest ${manifest_version}. A release publishes only when the tagged tree already carries the release version; refusing to publish (and refusing to rewrite Chart.yaml to make it pass)." >&2
+            exit 1
+          fi
+          echo "CHART_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Normalize the GHCR chart owner
+        # GHCR repository paths must be lowercase; build the artifact path
+        # from the lowercased owner so an uppercase owner name can never
+        # produce a path the registry would reject.
+        run: echo "GHCR_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.2
+
+      - name: Resolve chart dependencies
+        # Chart.lock and vendored charts/ are deliberately not committed
+        # (see the chart README); the release checkout resolves the pinned
+        # bjw-s dependency so the packaged chart installs without a source
+        # checkout or a client-side `helm dependency build`.
+        run: |
+          helm repo add bjw-s-labs https://bjw-s-labs.github.io/helm-charts
+          helm dependency build deploy/charts/pr-reviewer
+
+      - name: Lint the chart
+        run: helm lint deploy/charts/pr-reviewer
+
+      - name: Package the chart
+        run: |
+          set -euo pipefail
+          helm package deploy/charts/pr-reviewer --destination /tmp/charts
+          # The packaged artifact must be the validated version: the OCI tag
+          # is Chart.yaml.version, so this check proves the pushed tag is
+          # exactly the coordinate validated above.
+          [ -f "/tmp/charts/pr-reviewer-${CHART_VERSION}.tgz" ] || {
+            echo "expected /tmp/charts/pr-reviewer-${CHART_VERSION}.tgz was not produced" >&2
+            exit 1
+          }
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin <<< "${GH_TOKEN}"
+
+      - name: Refuse to replace a published chart version
+        # GHCR has no registry-side tag immutability (a push always
+        # overwrites), so immutability is enforced here: Helm OCI artifacts
+        # are tagged by Chart.yaml.version, so re-publishing the same
+        # release would silently move the artifact off the digest the run
+        # summary reports. The guard fails closed: it proceeds only when
+        # the registry explicitly answers that the version is absent, and
+        # refuses on any other error (auth, network, unexpected state).
+        env:
+          CHART_REF: oci://ghcr.io/${{ env.GHCR_OWNER }}/charts/pr-reviewer
+          CHART_VERSION: ${{ env.CHART_VERSION }}
+        run: |
+          set -euo pipefail
+          if out=$(helm show chart "$CHART_REF" --version "$CHART_VERSION" 2>&1); then
+            echo "::error::${CHART_REF}:${CHART_VERSION} already exists in GHCR. Chart versions are immutable: re-publishing would silently replace the artifact operators install by version. Cut a new release instead."
+            exit 1
+          fi
+          # Fail closed: only an explicit registry absence proves the
+          # version is absent. The oras client reports a 404 as
+          # "<ref>: not found"; the leading colon is load-bearing — an
+          # authorization failure reports "basic credential not found",
+          # which must never read as absence. Anything else (auth, TLS,
+          # network, an unexpected OCI error) refuses the run.
+          if ! printf '%s\n' "$out" | grep -Eq ': not found|manifest unknown|name unknown'; then
+            echo "registry answer for ${CHART_REF}:${CHART_VERSION}:" >&2
+            printf '%s\n' "$out" >&2
+            echo "::error::cannot confirm that ${CHART_REF}:${CHART_VERSION} is absent; refusing to push over uncertain registry state."
+            exit 1
+          fi
+
+      - name: Push the chart to GHCR
+        id: push
+        env:
+          CHART_VERSION: ${{ env.CHART_VERSION }}
+        run: |
+          set -euo pipefail
+          out="$(helm push "/tmp/charts/pr-reviewer-${CHART_VERSION}.tgz" "oci://ghcr.io/${GHCR_OWNER}/charts")"
+          printf '%s\n' "$out"
+          digest="$(printf '%s\n' "$out" | awk '/^Digest: / { print $2; exit }')"
+          [ -n "$digest" ] || { echo "helm push reported no digest" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record the published chart
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          CHART_VERSION: ${{ env.CHART_VERSION }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Fail loudly on a missing digest instead of printing a bare
+          # reference in the summary.
+          [ -n "$DIGEST" ] || { echo "chart digest is empty" >&2; exit 1; }
+          {
+            echo "## Chart published (#1708)"
+            echo
+            echo "Trigger: \`${GITHUB_EVENT_NAME}\`. Release tag: \`${TAG}\`. Source commit: \`${SOURCE_SHA}\`."
+            echo
+            echo "| artifact | reference |"
+            echo "|---|---|"
+            echo "| chart | \`oci://ghcr.io/${GHCR_OWNER}/charts/pr-reviewer:${CHART_VERSION}\` |"
+            echo
+            echo "Digest: \`${DIGEST}\`."
+            echo
+            echo "Install: \`helm install pr-reviewer oci://ghcr.io/${GHCR_OWNER}/charts/pr-reviewer --version ${CHART_VERSION}\`."
+            echo
+            echo "The chart version equals the application release version: it"
+            echo "coordinates with \`ghcr.io/misospace/pr-reviewer-controller:${CHART_VERSION}\`"
+            echo "and \`ghcr.io/misospace/pr-reviewer-worker:${CHART_VERSION}\` from the same release."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "chart: oci://ghcr.io/${GHCR_OWNER}/charts/pr-reviewer:${CHART_VERSION} @ ${DIGEST}"
+
+  validate:
+    # Pull requests validate, lint and package the chart but receive NO
+    # chart-publish credentials: `contents: read` only, no registry login,
+    # no secret, nothing pushed. This job is the only surface pull-request
+    # code can reach, and it publishes nothing.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Validate the actual PR HEAD commit, not the synthetic merge
+          # commit the default pull_request checkout produces: the summary
+          # below reports this commit as the validation source.
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.2
+
+      - name: Resolve chart dependencies
+        run: |
+          helm repo add bjw-s-labs https://bjw-s-labs.github.io/helm-charts
+          helm dependency build deploy/charts/pr-reviewer
+
+      - name: Lint and package the chart (validation only)
+        run: |
+          set -euo pipefail
+          helm lint deploy/charts/pr-reviewer
+          helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+          helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+          helm package deploy/charts/pr-reviewer --destination /tmp/charts
+          chart_version="$(awk '/^version:/ { gsub(/"/, "", $2); print $2; exit }' deploy/charts/pr-reviewer/Chart.yaml)"
+          [ -f "/tmp/charts/pr-reviewer-${chart_version}.tgz" ] || {
+            echo "expected /tmp/charts/pr-reviewer-${chart_version}.tgz was not produced" >&2
+            exit 1
+          }
+          echo "packaged /tmp/charts/pr-reviewer-${chart_version}.tgz (validation only; nothing was pushed)"
+
+      - name: Record the validation result
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Chart validated (PR, publish-credentials-free)"
+            echo
+            echo "Source commit: \`${SOURCE_SHA}\`. Dependencies resolved, chart"
+            echo "linted (default values plus both example postures), chart packaged."
+            echo
+            echo "No chart was published: pull requests receive no GHCR"
+            echo "credentials and cannot push any OCI artifact. The release"
+            echo "flow publishes the chart."
+          } >> "$GITHUB_STEP_SUMMARY"
