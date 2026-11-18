@@ -157,6 +157,18 @@ stringData:
   model-key: REPLACE_ME
 ```
 
+## PR discovery without webhooks
+
+The polling-first chart default runs every 900000 ms (15 minutes) once you
+configure `controller.reconcile.repos` and, for GitHub, the corresponding
+`controller.reconcile.githubInstallationId`. A repo list with no installation
+identity is rejected for GitHub; an empty repo list scans nothing.
+`controller.webhook.enabled: false` is supported: webhook delivery is only
+an optional lower-latency path. Override `controller.reconcile.intervalMs`
+for another interval, or set `controller.reconcile.enabled: false` to opt out.
+A first sweep can enqueue already-open PRs; bound rollout/model spending
+accordingly.
+
 ## Notes
 
 - The instance config must declare forges for exactly ONE platform per
