@@ -68,14 +68,15 @@ is the independent Helm chart version and is never annotated.
   is the cluster-side guardrail on their shape.
   The Job manifests themselves are built by the executor from the
   instance config's `kubernetes` profile.
-- `networkPolicy` (default ON) — default-deny policies for controller
-  and worker pods; the worker selector matches the executor's
+- `networkPolicy` (default **OFF**) — opt-in default-deny policies for controller
+  and worker pods; configure only after verifying cluster-specific API, model,
+  webhook and admin paths. When disabled the chart renders no NetworkPolicies; the worker selector matches the executor's
   `app.kubernetes.io/managed-by: pr-reviewer-action` pod label
   (WORKER_NETWORK_POSTURE in `src/executor/kubernetes.ts`).
 - `serviceMonitor` (default OFF) — the admin listener serves `/metrics`;
   the chart binds it to the pod-wide wildcard when the admin surface is
   enabled, so a Prometheus scrape works out of the box (still guarded by
-  the admin bearer token and the NetworkPolicy). Requires
+  the admin bearer token; opt-in NetworkPolicies may additionally restrict ingress). Requires
   `controller.admin.enabled`.
 
 ## Security defaults
@@ -91,9 +92,10 @@ is the independent Helm chart version and is never annotated.
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.
-- Worker pods never mount any token, and the worker NetworkPolicy
-  denies all ingress and limits egress to DNS + TLS (the worker's
-  request/result travel over shared volumes, not the network).
+- Worker pods never mount any token. If enabled explicitly, the chart's worker
+  NetworkPolicy denies all ingress and limits egress to DNS + TLS; operators
+  must then allow their configured model endpoint and other required paths.
+  Without opt-in, pod egress follows the cluster's existing policies.
 - Secret material always travels through `secretKeyRef` or secret
   mounts; inline values (`webhook.secret`, `admin.token`,
   `credentials.<ref>.value`) exist only for throwaway environments and
@@ -111,7 +113,8 @@ this chart binds it to the pod-wide wildcard (`0.0.0.0`) so kubelet HTTP
 probes (`/healthz`, `/readyz`) and Prometheus scrapes (`/metrics`) work.
 The surface stays guarded: health and metrics are content-free, the
 `/admin/*` API requires the bearer token (refused at startup without
-one), and the NetworkPolicy bounds which sources may reach the port.
+one). An explicitly enabled NetworkPolicy can further restrict ingress;
+without it, use cluster networking and ingress controls.
 
 The #742 operations dashboard (`GET /dashboard` on the admin listener)
 stays off by default: `controller.admin.dashboard: false` leaves
