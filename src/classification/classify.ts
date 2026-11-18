@@ -2694,8 +2694,22 @@ function hasVersionBump(diffText: string): boolean {
   return false;
 }
 
-function isRenovateDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
-  return allFilesAreLockfiles(files.map((file) => file.filename)) && !hasVersionBump(diffText);
+function isRenovateDigestOnly(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  // "Every changed file is a lockfile" and "no version bump" are only-claims,
+  // so they require the same proven-complete evidence the #909 reconciliation
+  // establishes for the image/chart rules' strict walks: the file listing must
+  // be the COMPLETE set (the authoritative count equals the supplied list —
+  // the platform read is a single capped page), and the version-bump scan runs
+  // on the FULL diff (never the prioritized context diff), failing closed when
+  // that surface itself carries a truncation marker.
+  if (!fileListComplete(files, authoritativeChangedFiles)) return false;
+  if (DIFF_TRUNCATION_MARKER_RE.test(fullDiffText)) return false;
+  return allFilesAreLockfiles(files.map((file) => file.filename)) && !hasVersionBump(fullDiffText);
 }
 
 /** True only when EVERY changed file is a modified YAML/Dockerfile image
@@ -2914,6 +2928,18 @@ function isImageDigestOnly(
   return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
 }
 
+/** The file-list completeness half of `evidenceIsComplete`: the authoritative
+ * changed-file count must be a valid integer equal to the supplied list
+ * length, or the listing is a capped page (GitHub's `listPrFiles` returns one
+ * page of up to 100 entries) and no "every changed file is X" claim is safe.
+ * A missing, non-integer, or mismatching count fails closed. */
+function fileListComplete(
+  files: readonly ChangedFile[],
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  return Number.isInteger(authoritativeChangedFiles) && authoritativeChangedFiles === files.length;
+}
+
 /** Prove the supplied file list and diff are complete before claiming every
  * changed line is digest-only. Both platform reads can be incomplete — GitHub's
  * file listing is a single capped page and the raw diff carries no completeness
@@ -2926,7 +2952,7 @@ function evidenceIsComplete(
   totalAdded: number,
   totalRemoved: number,
 ): boolean {
-  if (!Number.isInteger(authoritativeChangedFiles) || authoritativeChangedFiles !== files.length) {
+  if (!fileListComplete(files, authoritativeChangedFiles)) {
     return false;
   }
   let expectedAdded = 0;
@@ -4082,6 +4108,12 @@ function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] 
  * material regardless of its version pair. Pure and bounded; returns
  * counts only. */
 export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyRefresh {
+  // #909 vocabulary: a truncation marker means the supplied diff is missing
+  // changed lines, so no "lockfile-only / zero-material" verdict is safe —
+  // the parser's own per-line rules cannot see what was cut (the marker
+  // itself is a sign-less line and is ignored below). Fail closed to the
+  // full material review, never the scoped one.
+  if (DIFF_TRUNCATION_MARKER_RE.test(fullDiffText)) return { material: 0, lowRisk: 0, parseable: false };
   const buckets = parseLockfileVersionBuckets(fullDiffText);
   if (buckets === null) return { material: 0, lowRisk: 0, parseable: false };
   let material = 0;
@@ -4899,9 +4931,16 @@ export function classifyPr(input: ClassifyInput): PRClassification {
   const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
   // #1595: bounded lockfile-only triage — only for a dependency_upgrade PR
   // whose every changed file is a lockfile, over the complete diff (the same
-  // completeness surface the digest rules use).
+  // completeness surface the digest rules use). "Every changed file is a
+  // lockfile" is an only-claim, so the triage also requires the proven-
+  // complete file listing (authoritative count == list length): the platform
+  // read is a single capped page, and a zero-material verdict computed over a
+  // truncated list would open the #1595 scoped review (and the #1629
+  // low-risk envelope) over changes the list never showed.
   const lockfileOnlyRefresh =
-    prKind === "dependency_upgrade" && allFilesAreLockfiles(prFiles.map((file) => file.filename))
+    prKind === "dependency_upgrade" &&
+    fileListComplete(prFiles, authoritativeChangedFiles) &&
+    allFilesAreLockfiles(prFiles.map((file) => file.filename))
       ? evaluateLockfileOnlyRefresh(fullDiffText ?? diffText)
       : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);

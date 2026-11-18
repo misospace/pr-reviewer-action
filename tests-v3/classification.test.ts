@@ -11,6 +11,7 @@ import {
   SUMMARY_FILE_CAP,
 } from "../src/classification/role-selection.js";
 import { classificationToArtifact } from "../src/classification/classify.js";
+import { lowRiskToolBudgetCap } from "../src/tools/budget.js";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../src/context/index.js";
 
 function files(...names: string[]) {
@@ -20,7 +21,13 @@ function files(...names: string[]) {
 // ── pr_kind precedence (#675 port of pr_reviewer/classifier.py) ───────────
 
 test("digest-only lockfile PRs classify as renovate_digest_only", () => {
-  const result = classifyPr({ prFiles: files("package-lock.json", "yarn.lock"), diffText: "- #68f3a9\n+ #9b384d\n" });
+  // The digest-only kind requires the proven-complete file listing (#909
+  // discipline): the authoritative changed-file count must equal the list.
+  const result = classifyPr({
+    prFiles: files("package-lock.json", "yarn.lock"),
+    authoritativeChangedFiles: 2,
+    diffText: "- #68f3a9\n+ #9b384d\n",
+  });
   assert.equal(result.prKind, "renovate_digest_only");
   assert.deepEqual(result.riskFlags, []);
   assert.deepEqual(result.mustCheck, ["verify no functional changes beyond lockfile hashes"]);
@@ -3021,6 +3028,7 @@ test("#1595 AC1: a lockfile-only transitive-churn PR scopes must_check to the bo
   // per-package upstream-evidence rows burned the whole tool budget.
   const result = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText:
       "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
       lockfileBump("ms", "2.1.2", "2.1.3") +
@@ -3068,6 +3076,7 @@ test("#1595 AC2: any material bump or an unparseable lockfile diff keeps the FUL
   const bump = (diffText: string, provenance: { material: number; lowRisk: number; parseable: boolean }): void => {
     const result = classifyPr({
       prFiles: files("site/package-lock.json"),
+      authoritativeChangedFiles: 1,
       diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + diffText,
     });
     assert.equal(result.prKind, "dependency_upgrade");
@@ -3093,7 +3102,7 @@ test("#1595 AC2: any material bump or an unparseable lockfile diff keeps the FUL
   // version bump — it classifies renovate_digest_only, whose benign
   // zero-selection gates #1595 deliberately never touches.)
   assert.equal(
-    classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "integrity": "sha512-aaa"\n+      "integrity": "sha512-bbb"\n` }).prKind,
+    classifyPr({ prFiles: files("site/package-lock.json"), authoritativeChangedFiles: 1, diffText: `-      "integrity": "sha512-aaa"\n+      "integrity": "sha512-bbb"\n` }).prKind,
     "renovate_digest_only",
   );
 });
@@ -3107,6 +3116,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   const bump = (diffText: string, provenance: { material: number; lowRisk: number; parseable: boolean }): void => {
     const result = classifyPr({
       prFiles: files("site/package-lock.json"),
+      authoritativeChangedFiles: 1,
       diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + diffText,
     });
     assert.equal(result.prKind, "dependency_upgrade");
@@ -3125,6 +3135,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   // SCOPED must_check (low risk), not the full set.
   const buildMeta = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
       lockfileBump("ms", "2.1.2+build.1", "2.1.2+build.5"),
   });
@@ -3151,6 +3162,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   // every real npm bump rewrites "integrity" and sometimes "resolved".
   const hashChurn = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
       `    "node_modules/ms": {\n` +
       `-      "version": "2.1.2",\n` +
@@ -3180,6 +3192,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
     lockfileBump("ms", "2.1.2", "2.1.3");
   const direct = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + directRange,
   });
   assert.equal(direct.prKind, "dependency_upgrade");
@@ -3286,6 +3299,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   // is semver-insignificant, so this stays ordinary churn (and SCOPED).
   const buildMetaDash = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
       lockfileBump("ms", "1.0.0+2023-01-01", "1.0.0+2024-01-01"),
   });
@@ -3339,7 +3353,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
     { material: 0, lowRisk: 0, parseable: false },
   );
   assert.equal(
-    classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "engines": {\n+      "engines": {\n` }).prKind,
+    classifyPr({ prFiles: files("site/package-lock.json"), authoritativeChangedFiles: 1, diffText: `-      "engines": {\n+      "engines": {\n` }).prKind,
     "renovate_digest_only",
   );
 
@@ -3355,6 +3369,7 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
     `    },\n`;
   const scoped = classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + contextEngines,
   });
   assert.equal(scoped.prKind, "dependency_upgrade");
@@ -3374,9 +3389,165 @@ test("#1595: the triage is null unless the PR is a dependency_upgrade of lockfil
     ...DEPENDENCY_EVIDENCE_CHECKS,
   ]);
   // A non-dependency kind never triages, even on a lockfile-only diff.
-  const digestOnly = classifyPr({ prFiles: files("site/package-lock.json"), diffText: "- #68f3a9\n+ #9b384d\n" });
+  const digestOnly = classifyPr({ prFiles: files("site/package-lock.json"), authoritativeChangedFiles: 1, diffText: "- #68f3a9\n+ #9b384d\n" });
   assert.equal(digestOnly.prKind, "renovate_digest_only");
   assert.equal(digestOnly.lockfileOnlyRefresh, null);
+});
+
+// ── Proven-complete evidence for the only-claims (#909 discipline) ────────
+//
+// The platform file read is a single capped page (up to 100 entries) while
+// the PR object carries the authoritative changed_files count. An "every
+// changed file is X" verdict computed over the capped page misclassifies a
+// 101+-file PR (100 lockfiles listed, source code beyond the cap) as
+// digest-only / zero-material — which deterministically suppresses
+// specialist selection, collapses must_check, activates the scoped
+// dependency guidance, and engages the #1629 low-risk tool-budget envelope.
+// The digest-only rule and the #1595 triage gate therefore fail closed
+// unless the listing is proven complete (authoritative count == list
+// length), and the version-bump scan runs on the FULL diff, never the
+// prioritized context diff.
+
+/** N lockfile entries exactly as a capped first page would list them
+ * (lockfile paths sort before the late-sorting source directory). */
+function lockfilePage(n: number) {
+  return Array.from({ length: n }, (_, index) =>
+    canonicalChangedFile({ filename: `pkg-${index}/package-lock.json`, status: "modified" }),
+  );
+}
+
+const CAPPED_SOURCE_HUNK =
+  "diff --git a/zsrc/app.py b/zsrc/app.py\n--- a/zsrc/app.py\n+++ b/zsrc/app.py\n@@ -1,2 +1,3 @@\n context\n-old\n+new\n";
+
+test("a capped file listing never yields renovate_digest_only, even with 100 listed lockfiles", () => {
+  const diff =
+    'diff --git a/pkg-0/package-lock.json b/pkg-0/package-lock.json\n-  "integrity": "sha512-aaa"\n+  "integrity": "sha512-bbb"\n' +
+    CAPPED_SOURCE_HUNK;
+  for (const authoritative of [101, 150]) {
+    const result = classifyPr({
+      prFiles: lockfilePage(100),
+      authoritativeChangedFiles: authoritative,
+      diffText: diff,
+      fullDiffText: diff,
+    });
+    assert.notEqual(result.prKind, "renovate_digest_only");
+  }
+});
+
+test("a missing or non-integer authoritative count fails the digest-only claim closed", () => {
+  const diff = '-  "integrity": "sha512-aaa"\n+  "integrity": "sha512-bbb"\n';
+  // Missing (undefined) and a mismatching integer both fail closed; the
+  // same all-lockfile listing with its true complete count is the control.
+  for (const authoritative of [undefined, 0, 3]) {
+    const result = classifyPr({ prFiles: files("a/package-lock.json", "b/yarn.lock"), authoritativeChangedFiles: authoritative, diffText: diff });
+    assert.notEqual(result.prKind, "renovate_digest_only", String(authoritative));
+  }
+  assert.equal(
+    classifyPr({ prFiles: files("a/package-lock.json", "b/yarn.lock"), authoritativeChangedFiles: 2, diffText: diff }).prKind,
+    "renovate_digest_only",
+  );
+});
+
+test("a complete listing still classifies renovate_digest_only (positive control)", () => {
+  const result = classifyPr({
+    prFiles: lockfilePage(2),
+    authoritativeChangedFiles: 2,
+    diffText: '-  "integrity": "sha512-aaa"\n+  "integrity": "sha512-bbb"\n',
+  });
+  assert.equal(result.prKind, "renovate_digest_only");
+  assert.deepEqual(result.riskFlags, []);
+});
+
+test("the digest-only version-bump scan runs on the full diff, not the truncated context diff", () => {
+  // The prioritized context diff kept only the integrity churn; the raw diff
+  // still carries the version bump. The digest-only kind must consult the
+  // full surface and fail closed to the dependency lane.
+  const result = classifyPr({
+    prFiles: files("app/package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: '-  "integrity": "sha512-aaa"\n+  "integrity": "sha512-bbb"\n',
+    fullDiffText: 'diff --git a/app/package-lock.json b/app/package-lock.json\n-  "version": "1.0.0",\n+  "version": "1.1.0",\n',
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("a capped file listing never opens the #1595 lockfile-only triage", () => {
+  // The shape that otherwise classifies dependency_upgrade and triages:
+  // every LISTED file is a lockfile, the diff parses as ordinary transitive
+  // churn — but the authoritative count proves the listing is a capped page.
+  const lockfileDiff =
+    "diff --git a/pkg-0/package-lock.json b/pkg-0/package-lock.json\n" + lockfileBump("ms", "2.1.2", "2.1.3");
+  const result = classifyPr({
+    prFiles: lockfilePage(100),
+    authoritativeChangedFiles: 101,
+    diffText: lockfileDiff,
+    fullDiffText: lockfileDiff + CAPPED_SOURCE_HUNK,
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  assert.equal(result.lockfileOnlyRefresh, null);
+  // The scoped must_check never replaces the full set: the full review is
+  // what a classification computed over a truncated listing owes the PR.
+  assert.deepEqual(result.mustCheck, [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ]);
+  // The #1629 low-risk envelope reads exactly these artifact fields (the
+  // harness reader passes null for an absent lockfile_only_refresh): the
+  // capped classification must not qualify for the low-risk cap.
+  const artifact = classificationToArtifact(result);
+  assert.ok(!("lockfile_only_refresh" in artifact));
+  assert.equal(
+    lowRiskToolBudgetCap({
+      prKind: String(artifact.pr_kind),
+      riskFlagCount: Array.isArray(artifact.risk_flags) ? (artifact.risk_flags as string[]).length : -1,
+      linkedMetadataUncertain: artifact.linked_metadata_uncertain === true,
+      lockfileOnlyMaterial: null,
+      lockfileOnlyParseable: false,
+      mandatoryRows: Array.isArray(artifact.must_check) ? (artifact.must_check as string[]).length : 0,
+    }),
+    null,
+  );
+});
+
+test("a complete zero-material lockfile refresh still triages (positive control)", () => {
+  const result = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + lockfileBump("ms", "2.1.2", "2.1.3"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  assert.deepEqual(result.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(result.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+});
+
+test("a truncation marker on the diff surface never permits an only-claim", () => {
+  const marker = "…[diff truncated to fit context budget]";
+  // Digest-only: a marker on the full-diff surface fails the kind closed —
+  // a diff missing changed lines can carry a bump the scan cannot see.
+  const digest = classifyPr({
+    prFiles: files("app/package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: marker,
+    fullDiffText: marker,
+  });
+  assert.notEqual(digest.prKind, "renovate_digest_only");
+  // Triage: a marker on the full-diff surface fails the triage closed to
+  // the full material review, never the scoped one.
+  const triageDiff = `diff --git a/site/package-lock.json b/site/package-lock.json\n${marker}\n` + lockfileBump("ms", "2.1.2", "2.1.3");
+  const triage = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: triageDiff,
+    fullDiffText: triageDiff,
+  });
+  assert.equal(triage.prKind, "dependency_upgrade");
+  assert.deepEqual(triage.lockfileOnlyRefresh, { material: 0, lowRisk: 0, parseable: false });
+  assert.deepEqual(triage.mustCheck, [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ]);
 });
 
 test("#1336: the home-ops #11591 fixture classifies as renovate_image_update, not app_code", () => {
@@ -4461,6 +4632,7 @@ test("#1657 (round 3): an unavailable scope leaves the dependency rows scope-les
 test("#1657 (round 3): the persisted tag rows carry strictly the artifact shape — the producer-internal takes_dependency_scope marker never rides the artifact", () => {
   const artifact = classificationToArtifact(classifyPr({
     prFiles: files("site/package-lock.json"),
+    authoritativeChangedFiles: 1,
     diffText:
       "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
       lockfileBump("ms", "2.1.2", "2.1.3"),
