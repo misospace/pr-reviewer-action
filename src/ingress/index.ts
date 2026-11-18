@@ -10,6 +10,8 @@
 //   forgejo-events.ts    - native Gitea/Forgejo event projection onto the #728 envelope
 //   gitea-events.ts      - Gitea-named ingress entry point (#1678) onto that same
 //                          shared projection: verifier, parse, non-HTTP dispatch, handler
+//   gitlab-events.ts     - GitLab-named ingress (#740): its own auth (secret token OR
+//                          whsec_ signing token), projection, dispatch and handler
 //   webhook-handler.ts   - Node http webhook ingress (verify before parse, fixed bodies)
 //   github-webhook-handler.ts - Node http GitHub App webhook ingress
 //                           (X-Hub-Signature-256 over the RAW body; the event-name
@@ -57,6 +59,22 @@ export {
   projectGiteaWebhookPayload,
   verifyGiteaWebhookSignature,
 } from "./gitea-events.js";
+export type {
+  GitLabWebhookAuthHeaders,
+  GitLabWebhookDelivery,
+  GitLabWebhookDispatchOptions,
+  GitLabWebhookDispatchOutcome,
+  GitLabWebhookHandlerOptions,
+  GitLabWebhookVerifyOptions,
+} from "./gitlab-events.js";
+export {
+  computeGitLabWebhookSignatureHeader,
+  createGitLabWebhookHandler,
+  dispatchGitLabWebhookEvent,
+  parseGitLabWebhookEvent,
+  projectGitLabWebhookPayload,
+  verifyGitLabWebhookDelivery,
+} from "./gitlab-events.js";
 
 export type {
   AuthFailureClassification,
@@ -82,14 +100,17 @@ export { GitHubAppCapabilityClient } from "./github-app-client.js";
 
 export type {
   ForgejoEndpoints,
+  GitLabEndpoints,
   IngressEndpoints,
   RepositoryEndpoints,
 } from "./endpoints.js";
 export {
   FORGEJO_WEBHOOK_PATH,
   GITEA_WEBHOOK_PATH,
+  GITLAB_WEBHOOK_PATH,
   ingressWebhookPath,
   resolveForgejoEndpoints,
+  resolveGitLabEndpoints,
   resolveRepositoryEndpoints,
   selectIngressEndpoints,
 } from "./endpoints.js";
@@ -110,6 +131,7 @@ export {
   FORGEJO_CAPABILITIES,
   GITHUB_CAPABILITIES,
   GITEA_CAPABILITIES,
+  GITLAB_CAPABILITIES,
   capabilitiesFor,
   requireCapability,
 } from "./capabilities.js";

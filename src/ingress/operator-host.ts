@@ -47,13 +47,16 @@
  * capability, so a host that served both platforms would accept a delivery
  * for a platform the instance cannot act on. `platform` selects the intake
  * the host binds: `github` the GitHub App intake (`X-Hub-Signature-256`,
- * `X-GitHub-Event`) or `forgejo`/`gitea` the native Gitea-header intake
+ * `X-GitHub-Event`), `forgejo`/`gitea` the native Gitea-header intake
  * (`X-Gitea-Signature`, `X-Gitea-Event`) — the same handler serves both
  * (#1682: Forgejo is a Gitea fork; `gitea` is the identity, the verified
- * intake is shared); absent → `forgejo`. The
- * SELECTION is the only thing that changes: the router, the follow-up
- * consumer and the ONE durable rate-limit store are unchanged, so there is
- * still exactly one of each per host.
+ * intake is shared) — or `gitlab` (#740) the native GitLab intake, whose
+ * `secret` is either a legacy secret token (compared against
+ * `X-Gitlab-Token`) or a `whsec_` signing token (verified as the
+ * Standard-Webhooks `webhook-signature` over id.timestamp.body); absent →
+ * `forgejo`. The SELECTION is the only thing that changes: the router, the
+ * follow-up consumer and the ONE durable rate-limit store are unchanged, so
+ * there is still exactly one of each per host.
  *
  * The Q&A budget's durable backend is OWNED HERE (#1295): the operator's
  * durable state location (`durableStateDir`) is the host's configuration, and
@@ -94,6 +97,7 @@ import {
   type ForgejoWebhookHandlerOptions,
 } from "./webhook-handler.js";
 import { createGiteaWebhookHandler } from "./gitea-events.js";
+import { createGitLabWebhookHandler } from "./gitlab-events.js";
 
 /** The file name of the durable Q&A-budget ledger inside the operator's
  * durable state location (#1295). */
@@ -203,10 +207,15 @@ export interface OperatorHostOptions {
    * vocabulary projection differs. One platform per host: the operator's forge
    * capability is a single per-platform capability, so an intake that served
    * both would accept deliveries for a platform the instance cannot act on.
-   * Absent → `forgejo`. */
-  readonly platform?: "github" | "forgejo" | "gitea" | undefined;
-  /** The webhook HMAC-SHA256 secret; the signature is verified over the raw
-   * body before anything else (the handler's fail-closed boundary). */
+   * `gitlab` (#740) binds the native GitLab intake. Absent → `forgejo`. */
+  readonly platform?: "github" | "forgejo" | "gitea" | "gitlab" | undefined;
+  /** The webhook secret. Forgejo/Gitea: the HMAC-SHA256 key verified over the
+   * raw body before anything else (the handler's fail-closed boundary).
+   * GitLab: EITHER a legacy secret token (compared, constant-time, against
+   * `X-Gitlab-Token`) OR a `whsec_` signing token (verified as the
+   * Standard-Webhooks `webhook-signature` HMAC over
+   * `{webhook-id}.{webhook-timestamp}.{raw-body}`); the token's shape decides
+   * the mode exclusively, and an empty secret accepts nothing. */
   readonly secret: string;
   /** Maximum accepted body bytes; the handler's
    * `DEFAULT_MAX_WEBHOOK_BODY_BYTES` applies when omitted. */
@@ -305,8 +314,11 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
   const platform = options.platform ?? "forgejo";
   // #1678: the Gitea intake is the NATIVE intake with the Gitea projection
   // injected, so `gitea` and `forgejo` share one verification pipeline and one
-  // router binding. `github` never sees `project` — its handler has its own
-  // projection and its own signature scheme.
+  // router binding. #740: the GitLab intake is its own verified pipeline
+  // (different headers, different auth factors) bound to the SAME router,
+  // consumer and budget — the platform choice never forks those singletons.
+  // `github` never sees `project` — its handler has its own projection and
+  // its own signature scheme.
   const handlerOptions: ForgejoWebhookHandlerOptions & GitHubWebhookHandlerOptions = {
     secret: options.secret,
     maxBodyBytes: options.maxBodyBytes,
@@ -331,7 +343,9 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
         ? createGitHubWebhookHandler(handlerOptions)
         : platform === "gitea"
           ? createGiteaWebhookHandler(handlerOptions)
-          : createForgejoWebhookHandler(handlerOptions),
+          : platform === "gitlab"
+            ? createGitLabWebhookHandler(handlerOptions)
+            : createForgejoWebhookHandler(handlerOptions),
     rateLimitStore,
   };
 }

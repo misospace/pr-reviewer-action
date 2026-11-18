@@ -11,6 +11,8 @@ import { ciAttemptTimeoutMs } from "../platform/bounded.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
+import { GitLabAdapter } from "../platform/gitlab.js";
+import { gitlabTokenFromEnv } from "../platform/gitlab-auth.js";
 import { jqCompact } from "../platform/jq.js";
 import { forgejoSelfRunOrigin, type ExternalCheck } from "../platform/normalize.js";
 import { declaredFamilyForge, resolvePlatform } from "../platform/resolve.js";
@@ -114,6 +116,17 @@ export function ciAdapterFromEnv(ciEnv: CiEnv, repo: string, prNumber: string, t
       // Forgejo-only `authorized_integration` mode into this lane, where the
       // adapter's construction guard never sees the identity that refuses it.
       forge: declaredFamilyForge(ciEnv.PLATFORM),
+    });
+  }
+  if (platform === "gitlab") {
+    // #740: the GitLab lane reads commit statuses through the same
+    // adapter seam; GITLAB_API_URL is required (no default endpoint —
+    // the adapter's own guard refuses an empty base before any token).
+    return new GitLabAdapter({
+      repo,
+      prNumber,
+      baseUrl: ciEnv.GITLAB_API_URL ?? "",
+      token: gitlabTokenFromEnv(ciEnv),
     });
   }
   return new GitHubAdapter({

@@ -64,8 +64,15 @@ export const CI_GATE_ENV_KEYS: EnvAllowlist = [
   "PR_HEAD_SHA",
   "PLATFORM",
   "FORGEJO_API_URL",
+  // #740: the CI-wait gate serves GitLab through the same adapter seam, and
+  // GITLAB_API_URL has no default — it must reach this child or a GitLab
+  // deployment fails closed at the adapter's endpoint guard.
+  "GITLAB_API_URL",
   "TANGLED_REPO_DID",
   "FORGEJO_TOKEN",
+  // #740: the GitLab credential travels only as GITLAB_TOKEN (the adapter
+  // injects it as the PRIVATE-TOKEN header at the fetch seam).
+  "GITLAB_TOKEN",
   // #1678: `GITEA_TOKEN` is the family resolver's alias, and the CI-wait gate
   // resolves its token THROUGH that resolver (`forgejoTokenFromEnv`), so the
   // alias must reach this child or a Gitea deployment whose only credential is
