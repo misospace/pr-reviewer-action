@@ -197,6 +197,48 @@ test("buildTracePlan maps the ledger, the scope and the distributed hints onto p
   }
 });
 
+test("#1702/#1703: test-first P1 acceptance clauses reserve test evidence reads", () => {
+  const rows = [
+    {
+      id: "req-9d075d469102",
+      text: "Tests for stale/mismatched head, red sibling, pending/skipped/neutral sibling, scope-limited jobs, `test report`, `coverage`, `upload tests`, `lint tests`, and a combined job that does not actually denote test execution.",
+      kind: "acceptance",
+    },
+    {
+      id: "req-515fd367d6b3",
+      text: "Regression tests must cover this exact producer/consumer identity requirement, the critical negative variants (missing either side, unrelated names, invalid/stale citations, incompletely verified behavior), and any adjusted repair fallback/diagnostics.",
+      kind: "acceptance",
+    },
+    {
+      id: "req-67157c1f302f",
+      text: "Keep CI producer and consumer decision identities synchronized; original/bounded name identity drift must refuse evidence rather than discard a material test leg.",
+      kind: "acceptance",
+    },
+    {
+      id: "req-outcome",
+      text: "The unrelated external workflow must be green before this PR merges.",
+      kind: "acceptance",
+    },
+  ];
+  const plan = buildTracePlan({
+    ledger: { requirements: rows },
+    scopeIds: rows.map((row) => row.id),
+    distributedHints: [],
+  });
+  assert.deepEqual(
+    plan.rows.map((row) => [row.id, row.proof_shape, row.required_attempts]),
+    [
+      ["req-9d075d469102", "runtime", 2],
+      ["req-515fd367d6b3", "runtime", 2],
+      ["req-67157c1f302f", "runtime", 1],
+      ["req-outcome", "non-code", 0],
+    ],
+    "test-first acceptance rows need both the implementation AND regression-test evidence; a CI test leg does not",
+  );
+  assert.ok(tracePlanSection(plan).includes("req-9d075d469102"));
+  assert.ok(tracePlanSection(plan).includes("req-515fd367d6b3"));
+});
+
 test("#1519 (review): an overflow-topology requirement plans as distributed, not runtime", () => {
   // The validator classifies an overflow-topology requirement DISTRIBUTED
   // (and then forces the row unverifiable on the overflow note), so the plan
