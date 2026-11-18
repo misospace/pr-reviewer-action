@@ -271,6 +271,13 @@ test("#1702 replay: conventional suite shapes discharge through CI provenance", 
     assert.equal(ciDischargeForCheckText(ask, pendingSibling, HEAD).reason, "test-check-not-success", name);
     const skippedSelf = evidence("success", [{ name, state: "success", conclusion: "skipped" }]);
     assert.equal(ciDischargeForCheckText(ask, skippedSelf, HEAD).reason, "test-check-not-success", name);
+    // #1702/#1703: a neutral *sibling* must not be hidden behind a green
+    // conventional full-suite leg; GitHub may expose neutral as state success.
+    const neutralSibling = evidence("success", [
+      { name, state: "success", conclusion: "success" },
+      { name: `${name} (node-neutral)`, state: "success", conclusion: "neutral" },
+    ]);
+    assert.equal(ciDischargeForCheckText(ask, neutralSibling, HEAD).reason, "test-check-not-success", name);
   }
 });
 
