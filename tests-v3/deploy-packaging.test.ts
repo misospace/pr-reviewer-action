@@ -321,8 +321,10 @@ test("Dockerfile: non-root USER 1000, exec-form entrypoint, worker argv", () => 
   // No committed dist, no shell transport, no node_modules in runtime.
   assert.doesNotMatch(dockerfile, /npm start|sh -c|bash -c/);
   assert.doesNotMatch(dockerfile, /COPY --from=build .*node_modules/);
-  // git is installed without recommendations and lists are cleaned.
-  assert.match(dockerfile, /apt-get install -y --no-install-recommends git/);
+  // Both production targets inherit the same runtime stage. The subprocess
+  // boundary refuses every launch without pgrep; pin the image contract.
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends git procps/);
+  assert.match(dockerfile, /command -v git && command -v pgrep && command -v pkill/);
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists/);
   // #1584: every external base image stays pinned by sha256 digest, and
   // the whole file builds on ONE base revision. Stage-name FROMs are

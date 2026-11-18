@@ -42,7 +42,11 @@ token that can read it, and attach it to the chart's namespace and the
 worker ServiceAccount.
 
 Both images are self-contained: `pg` is bundled into the single esbuild
-output `dist/index.js`, so neither image carries `node_modules`. The
+output `dist/index.js`, so neither image carries `node_modules`. Both
+targets also install `git` and `procps` (`pgrep`/`pkill`) in their shared
+runtime layer. `src/runtime/subprocess.ts` refuses to launch any subprocess
+when `pgrep` is unavailable; a minimal Node+git image is **not** sufficient.
+The image build asserts those binaries exist before publication. The
 `controller` target exposes webhook `8080` and admin `8081`; the admin
 listener binds loopback by default and the chart sets
 `PR_REVIEWER_ADMIN_BIND=0.0.0.0` when the admin surface is enabled
