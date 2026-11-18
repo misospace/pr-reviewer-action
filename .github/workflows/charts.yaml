@@ -49,7 +49,448 @@ jobs:
           grep -q -- "- ALL" /var/tmp/render-controller-only.yaml
           grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
-          grep -q "kind: NetworkPolicy" /var/tmp/render-controller-only.yaml
+          # Deployment NetworkPolicies must never appear without explicit opt-in.
+          if grep -q '^kind: NetworkPolicy
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q '^kind: NetworkPolicy
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only.yaml; then
+            echo "default controller-only chart unexpectedly rendered NetworkPolicy" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-controller-only-netpol.yaml
+          [ "$(grep -c '^kind: NetworkPolicy
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only-netpol.yaml)" -eq 1 ]
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-kubernetes-executor.yaml; then
+            echo "default Kubernetes executor chart unexpectedly rendered NetworkPolicy" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
+          [ "$(grep -c '^kind: NetworkPolicy
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only.yaml; then
+            echo "default controller-only chart unexpectedly rendered NetworkPolicy" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-controller-only-netpol.yaml
+          [ "$(grep -c '^kind: NetworkPolicy
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only-netpol.yaml)" -eq 1 ]
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-kubernetes-executor-netpol.yaml)" -eq 2 ]
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only.yaml; then
+            echo "default controller-only chart unexpectedly rendered NetworkPolicy" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set networkPolicy.enabled=true > /var/tmp/render-controller-only-netpol.yaml
+          [ "$(grep -c '^kind: NetworkPolicy
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml
+ /var/tmp/render-controller-only-netpol.yaml)" -eq 1 ]
           # #1621: the operations dashboard stays OFF by default — the flag
           # is genuinely absent, never emitted as an empty value.
           if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
