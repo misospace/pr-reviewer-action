@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TANGLED_MANAGED_REVIEW_COLLECTION, TangledPublishApi } from "../src/platform/tangled-publish.js";
-import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
+import {
+  TANGLED_MANAGED_REVIEW_COLLECTION,
+  TangledPublishApi,
+  managedReviewRkey,
+} from "../src/platform/tangled-publish.js";
+import { TangledAtprotoClient, TangledAtprotoError } from "../src/platform/tangled-atproto.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { ManagedInlineCommentRef, NativeReviewRequest, PublishReviewRef, ThreadQueryResult } from "../src/platform/publish-api.js";
@@ -69,6 +73,7 @@ interface ListedRecord {
 interface StubCalls {
   created: Array<{ collection: string; record: Record<string, unknown> }>;
   puts: Array<{ collection: string; rkey: string; record: Record<string, unknown> }>;
+  deleted: Array<{ collection: string; rkey: string }>;
   lists: number;
 }
 
@@ -77,11 +82,26 @@ interface StubOptions {
   /** Pages of listRecords results; when absent, one page built from `records`. */
   pages?: Array<{ records: ListedRecord[]; cursor: string | undefined }>;
   records?: ListedRecord[];
-  throwOn?: "list" | "create" | "put";
+  throwOn?: "list" | "create" | "put" | "delete";
+  /** #1691: block every list entry until `barrier` callers have entered, so
+   * a test can force a concurrent list-then-write race deterministically. */
+  barrier?: number;
+  /** #1691: `putRecord`/`deleteRecord` also mutate the store that
+   * `listRecords` returns, like a real PDS. */
+  stateful?: boolean;
+  /** rkeys whose `deleteRecord` throws the given error — e.g. a real PDS
+   * answering 404 `RecordNotFound` for an already-missing record. */
+  deleteErrors?: Array<{ rkey: string; error: Error }>;
 }
 
 function makeStub(options: StubOptions = {}): { client: TangledAtprotoClient; calls: StubCalls } {
-  const calls: StubCalls = { created: [], puts: [], lists: 0 };
+  const calls: StubCalls = { created: [], puts: [], deleted: [], lists: 0 };
+  const store: ListedRecord[] = [...(options.records ?? [])];
+  let barrierEntered = 0;
+  let releaseBarrier: (() => void) | undefined;
+  const barrier = new Promise<void>((resolve) => {
+    releaseBarrier = resolve;
+  });
   const client = {
     get did(): string | undefined {
       return options.did;
@@ -91,13 +111,27 @@ function makeStub(options: StubOptions = {}): { client: TangledAtprotoClient; ca
       _opts?: { limit?: number; cursor?: string },
     ): Promise<{ records: ListedRecord[]; cursor: string | undefined }> {
       calls.lists += 1;
-      if (options.throwOn === "list") throw new Error("list boom");
+      // The snapshot is taken AT ENTRY, before any barrier wait: two callers
+      // that both list before either writes see the SAME state.
+      let pageRecords: ListedRecord[];
+      let pageCursor: string | undefined;
       if (options.pages !== undefined) {
         const page = options.pages[Math.min(calls.lists - 1, options.pages.length - 1)];
-        if (page === undefined) return { records: [], cursor: undefined };
-        return { records: page.records, cursor: page.cursor };
+        pageRecords = page?.records ?? [];
+        pageCursor = page?.cursor;
+      } else {
+        pageRecords = options.stateful === true
+          ? [...store]
+          : (options.records ?? []);
+        pageCursor = undefined;
       }
-      return { records: options.records ?? [], cursor: undefined };
+      if (options.throwOn === "list") throw new Error("list boom");
+      if (options.barrier !== undefined) {
+        barrierEntered += 1;
+        if (barrierEntered >= options.barrier) releaseBarrier?.();
+        await barrier;
+      }
+      return { records: pageRecords, cursor: pageCursor };
     },
     async createRecord(
       collection: string,
@@ -114,7 +148,25 @@ function makeStub(options: StubOptions = {}): { client: TangledAtprotoClient; ca
     ): Promise<{ uri: string; cid: string }> {
       if (options.throwOn === "put") throw new Error("put boom");
       calls.puts.push({ collection, rkey, record });
-      return { uri: `at://${SESSION_DID}/${collection}/${rkey}`, cid: "bafyput" };
+      const uri = `at://${SESSION_DID}/${collection}/${rkey}`;
+      if (options.stateful === true) {
+        const entry: ListedRecord = { uri, cid: "bafyput", value: record };
+        const index = store.findIndex((candidate) => candidate.uri === uri);
+        if (index === -1) store.push(entry);
+        else store[index] = entry;
+      }
+      return { uri, cid: "bafyput" };
+    },
+    async deleteRecord(collection: string, rkey: string): Promise<void> {
+      calls.deleted.push({ collection, rkey });
+      if (options.throwOn === "delete") throw new Error("delete boom");
+      const injected = options.deleteErrors?.find((candidate) => candidate.rkey === rkey);
+      if (injected !== undefined) throw injected.error;
+      if (options.stateful === true) {
+        const uri = `at://${SESSION_DID}/${collection}/${rkey}`;
+        const index = store.findIndex((candidate) => candidate.uri === uri);
+        if (index !== -1) store.splice(index, 1);
+      }
     },
   };
   return { client: client as unknown as TangledAtprotoClient, calls };
@@ -135,11 +187,21 @@ function managedRecord(over: Partial<Record<string, unknown>> = {}): ListedRecor
   return { uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${rkey}`, cid: "bafyold", value };
 }
 
+/** Exactly the error shape `TangledAtprotoClient.expectOkStatus` throws for
+ * a PDS rejection of the given HTTP status. */
+function pdsRequestError(status: number, message = "no such record"): TangledAtprotoError {
+  return new TangledAtprotoError(
+    "request",
+    `AT-Proto com.atproto.repo.deleteRecord returned HTTP ${status}: ${message}`,
+    status,
+  );
+}
+
 function makeApi(
   stub: TangledAtprotoClient,
   over: Partial<TangledContext> = {},
   options: { reviewedIdentity?: typeof REVIEWED_IDENTITY | undefined } = {},
-): { api: TangledPublishApi; calls: StubCalls } {
+): { api: TangledPublishApi } {
   const api = new TangledPublishApi({
     context: makeCtx(over),
     atproto: stub,
@@ -147,13 +209,37 @@ function makeApi(
     // missing-identity refusal test overrides it to undefined.
     reviewedIdentity: "reviewedIdentity" in options ? options.reviewedIdentity : REVIEWED_IDENTITY,
   });
-  const calls: StubCalls = { created: [], puts: [], lists: 0 };
-  return { api, calls };
+  return { api };
 }
+
+// ── #1691: deterministic managed-record key ─────────────────────────────
+
+test("managedReviewRkey is deterministic per identity, distinct across identities, and valid rkey grammar", () => {
+  const a1 = managedReviewRkey(TICKET_URI);
+  const a2 = managedReviewRkey(TICKET_URI);
+  const other = managedReviewRkey(`at://${REPO_DID}/org.tangled.track.ticket/3lzother`);
+  // Pinned exact keys (#1691 review request): these literals are the
+  // lowercase RFC-4648 base32 of the first 8 bytes of SHA-256 over the
+  // namespaced domain string plus the URI, computed independently of the
+  // implementation. Pinning them proves the documented 64-bit collision
+  // span for this fixture is the actual output, and freezes it against any
+  // future encoder change.
+  assert.equal(a1, "prsxmxrfq3ox67k");
+  assert.equal(other, "prwv673djh3ysd2");
+  assert.equal(a1, a2, "same identity → same key, every run");
+  assert.notEqual(a1, other, "different identities → different keys");
+  for (const rkey of [a1, other]) {
+    // atproto rkey grammar: at most 15 chars from [A-Za-z0-9_-], and never
+    // something that reads as a bare number — the letter prefix guarantees
+    // that last part for every hash value.
+    assert.match(rkey, /^pr[a-z2-7]{13}$/, "15 chars: two letters + 13 lowercase base32 digits");
+    assert.ok(rkey.length <= 15);
+  }
+});
 
 // ── upsertStickyComment: create / update / stale ─────────────────────────
 
-test("first publish creates exactly one record with the full contract shape", async () => {
+test("first publish puts exactly one record at the deterministic rkey with the full contract shape", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
   const { api } = makeApi(client);
 
@@ -161,13 +247,18 @@ test("first publish creates exactly one record with the full contract shape", as
   assert.deepEqual(result, {
     ok: true,
     created: true,
-    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3labnew`,
+    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
     updatedAt: result.updatedAt,
+    action: "created",
   });
 
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
-  const { collection, record } = calls.created[0] ?? { collection: "", record: {} };
+  // #1691: creation goes through putRecord at the deterministic rkey — a
+  // concurrent run converges on the SAME record instead of duplicating, and
+  // createRecord is off the publication path entirely.
+  assert.equal(calls.created.length, 0);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(TICKET_URI));
+  const { collection, record } = calls.puts[0] ?? { collection: "", record: {} };
   assert.equal(collection, TANGLED_MANAGED_REVIEW_COLLECTION);
   assert.deepEqual(Object.keys(record).sort(), [
     "$type",
@@ -203,7 +294,7 @@ test("sourceSha is the resolved revision's head regardless of the launch-time co
 
   const result = await api.upsertStickyComment(MARKER, BODY);
   assert.equal(result.ok, true);
-  const record = calls.created[0]?.record ?? {};
+  const record = calls.puts[0]?.record ?? {};
   assert.equal(record.sourceSha, "2222222222222222222222222222222222222222");
   assert.equal("pullCid" in record, true);
   assert.deepEqual(JSON.parse(JSON.stringify(record)), record);
@@ -215,12 +306,24 @@ test("re-review updates the SAME record: putRecord with the same rkey, no second
   const { api } = makeApi(client);
 
   const first = await api.upsertStickyComment(MARKER, BODY + " round 1");
-  assert.deepEqual(first, { ok: true, created: false, commentId: existing.uri, updatedAt: first.updatedAt });
+  assert.deepEqual(first, {
+    ok: true,
+    created: false,
+    commentId: existing.uri,
+    updatedAt: first.updatedAt,
+    action: "updated",
+  });
 
   // Both writes hit the same rkey and createRecord stays at zero: the
   // reviewed identity is the only write identity.
   const second = await api.upsertStickyComment(MARKER, BODY + " round 2");
-  assert.deepEqual(second, { ok: true, created: false, commentId: existing.uri, updatedAt: second.updatedAt });
+  assert.deepEqual(second, {
+    ok: true,
+    created: false,
+    commentId: existing.uri,
+    updatedAt: second.updatedAt,
+    action: "updated",
+  });
 
   assert.equal(calls.created.length, 0);
   assert.equal(calls.puts.length, 2);
@@ -228,6 +331,272 @@ test("re-review updates the SAME record: putRecord with the same rkey, no second
   assert.equal(calls.puts[1]?.rkey, "3lab1");
   assert.equal(calls.puts[0]?.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
   assert.equal(calls.puts[0]?.record.pull, TICKET_URI);
+});
+
+test("wrong reviewer identity is ignored → treated as no managed record → creates fresh", async () => {
+  const foreign = managedRecord({ reviewer: "did:plc:other" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [foreign] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true);
+  assert.equal(result.created, true);
+  assert.equal(result.action, "created");
+  assert.equal(calls.created.length, 0);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, managedReviewRkey(TICKET_URI));
+});
+
+test("unattributable record (missing/non-string reviewer) is ignored", async () => {
+  const orphan = managedRecord({ reviewer: undefined });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [orphan] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true);
+  assert.equal(result.created, true);
+  assert.equal(calls.created.length, 0);
+  assert.equal(calls.puts.length, 1);
+});
+
+test("stale repo binding (pullRepoDid mismatch) is ignored → creates fresh", async () => {
+  const staleBinding = managedRecord({ pullRepoDid: "did:plc:other-repo" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [staleBinding] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.created, true);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.created.length, 0);
+});
+
+test("stale case: single pull-matching record whose body lacks the current marker is updated in place", async () => {
+  const oldMarker = managedRecord({ body: "<!-- pr-reviewer managed review (run:OLD) -->" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [oldMarker] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.deepEqual(result, {
+    ok: true,
+    created: false,
+    commentId: oldMarker.uri,
+    updatedAt: result.updatedAt,
+    action: "updated",
+  });
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.created.length, 0);
+  assert.equal(calls.puts[0]?.rkey, "3lab1");
+});
+
+// ── #1691: the concurrent list-then-write race converges on ONE record ───
+
+test("two concurrent first publications with both listings before either write leave ONE record", async () => {
+  // Deterministically force the #1691 race: the stub blocks every list
+  // until TWO callers have entered, so both runs observe zero records and
+  // both take the create branch — the exact interleaving that used to
+  // produce two records and permanently wedge every later run.
+  const { client } = makeStub({ did: SESSION_DID, barrier: 2, stateful: true });
+  const { api: apiA } = makeApi(client);
+  const { api: apiB } = makeApi(client);
+
+  const [first, second] = await Promise.all([
+    apiA.upsertStickyComment(MARKER, `${BODY} (run A)`),
+    apiB.upsertStickyComment(MARKER, `${BODY} (run B)`),
+  ]);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+  // Both converge on the deterministic rkey → one record, last writer wins.
+  assert.equal(first.commentId, second.commentId);
+  assert.equal(
+    String(first.commentId),
+    `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
+  );
+
+  // A third, sequential run sees exactly one record and updates it.
+  const { api: apiC } = makeApi(client);
+  const third = await apiC.upsertStickyComment(MARKER, `${BODY} (run C)`);
+  assert.equal(third.ok, true);
+  assert.equal(third.created, false);
+  assert.equal(third.action, "updated");
+  assert.equal(third.commentId, first.commentId);
+});
+
+// ── #1691: a pre-existing duplicate set reconciles, never wedges ─────────
+
+test("more than one pull-matching record reconciles: newest kept, others deleted, count reported", async () => {
+  const oldest = managedRecord({ rkey: "3lab1", createdAt: "2026-01-01T00:00:00.000Z" });
+  const middle = managedRecord({ rkey: "3lab2", createdAt: "2026-02-02T00:00:00.000Z" });
+  const newest = managedRecord({ rkey: "3lab3", createdAt: "2026-03-03T00:00:00.000Z" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [oldest, newest, middle] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true);
+  assert.equal(result.created, false);
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.supersededDuplicates, 2);
+  assert.equal(result.commentId, newest.uri, "the newest createdAt is kept in place");
+  assert.equal(calls.created.length, 0);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey).sort(), ["3lab1", "3lab2"]);
+  assert.deepEqual(calls.deleted.map((d) => d.collection).sort(), [
+    TANGLED_MANAGED_REVIEW_COLLECTION,
+    TANGLED_MANAGED_REVIEW_COLLECTION,
+  ]);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, "3lab3");
+});
+
+test("marker no longer gates the duplicate rule: equal createdAt resolves to the greater uri", async () => {
+  // The old marker-matching-vs-ambiguous split is gone: BOTH duplicated
+  // sets (marker-matching, or none matching) resolve by the same documented
+  // createdAt rule. Equal (default) createdAt ties on the greater uri.
+  const a = managedRecord({ rkey: "3lab1" });
+  const b = managedRecord({ rkey: "3lab2" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [a, b] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true, "a duplicated set no longer wedges publication on ambiguity");
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.supersededDuplicates, 1);
+  assert.equal(result.commentId, b.uri);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey), ["3lab1"]);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, "3lab2");
+});
+
+test("invalid or missing createdAt sorts oldest; the next sequential run updates the single healed record", async () => {
+  const garbage = managedRecord({ rkey: "3lab1", createdAt: "not-a-date" });
+  const valid = managedRecord({ rkey: "3lab2", createdAt: "2020-01-01T00:00:00.000Z" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [garbage, valid], stateful: true });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true);
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.commentId, valid.uri);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey), ["3lab1"]);
+  assert.equal(calls.puts[0]?.rkey, "3lab2");
+
+  // The heal is durable: a stateful store now answers exactly one record,
+  // so the next sequential run takes the ordinary single-update path.
+  const healed = await api.upsertStickyComment(MARKER, `${BODY} (after heal)`);
+  assert.equal(healed.ok, true);
+  assert.equal(healed.action, "updated");
+  assert.equal(healed.commentId, valid.uri);
+  assert.equal(calls.deleted.length, 1, "nothing left to delete");
+  assert.equal(calls.puts.length, 2);
+  assert.equal(calls.puts[1]?.rkey, "3lab2");
+});
+
+test("the concurrent-reconcile loser tolerates a 404 on an already-deleted duplicate and still updates the keeper", async () => {
+  // Two runs reconciling the same duplicate set both list it before either
+  // writes; the loser's delete then targets a record the winner already
+  // deleted, and a real PDS answers 404 `RecordNotFound`. That IS the
+  // intended end state, so the run must still update the keeper and report
+  // success — a re-review round must not exit 1 over an already-achieved
+  // deletion.
+  const gone = managedRecord({ rkey: "3lab0", createdAt: "2026-05-01T00:00:00.000Z" });
+  const deletedByWinner = managedRecord({ rkey: "3lab1" });
+  const keeperValue = managedRecord({ rkey: "3lab2", createdAt: "2026-06-01T00:00:00.000Z" });
+  const { client, calls } = makeStub({
+    did: SESSION_DID,
+    records: [gone, deletedByWinner, keeperValue],
+    deleteErrors: [{ rkey: "3lab1", error: pdsRequestError(404) }],
+  });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, true, `a 404 on an already-deleted duplicate must not fail the run: ${result.error}`);
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.supersededDuplicates, 2, "a duplicate already gone still counts as superseded");
+  assert.equal(result.commentId, keeperValue.uri);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey).sort(), ["3lab0", "3lab1"]);
+  assert.equal(calls.puts.length, 1);
+  assert.equal(calls.puts[0]?.rkey, "3lab2", "the keeper update ran despite the 404");
+});
+
+test("a typed non-404 delete failure propagates: no keeper update, no reported success", async () => {
+  // Only a definite 404 proves the duplicate is already gone. A 500 leaves
+  // the deletion state unknown, so the reconciliation must not continue and
+  // claim success: the run fails, and the next run reconciles the remainder
+  // from a fresh listing.
+  const a = managedRecord({ rkey: "3lab1" });
+  const b = managedRecord({ rkey: "3lab2", createdAt: "2026-06-01T00:00:00.000Z" });
+  const { client, calls } = makeStub({
+    did: SESSION_DID,
+    records: [a, b],
+    deleteErrors: [{ rkey: "3lab1", error: pdsRequestError(500, "pds exploded") }],
+  });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /HTTP 500/);
+  assert.equal(result.action, undefined);
+  assert.deepEqual(calls.deleted.map((d) => d.rkey), ["3lab1"]);
+  assert.equal(calls.puts.length, 0, "the keeper update never ran, so no success is reported");
+});
+
+test("a failed delete reports failure without pretending the put happened", async () => {
+  // Only NON-404 delete failures propagate: session-dead or PDS-down means
+  // the deletion state is unknown, so this run fails honestly and the NEXT
+  // run reconciles what remains from a fresh listing. (The loser's
+  // already-deleted 404 is the case pinned in the test above.)
+  const a = managedRecord({ rkey: "3lab1" });
+  const b = managedRecord({ rkey: "3lab2" });
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [a, b], throwOn: "delete" });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "delete boom");
+  assert.equal(result.action, undefined);
+  assert.equal(calls.deleted.length, 1, "the first delete attempt threw");
+  assert.equal(calls.puts.length, 0, "the keeper update never ran, so no success is reported");
+});
+
+test("a malformed record uri fails before ANY delete or put (no half-applied reconciliation)", async () => {
+  const good = managedRecord({ rkey: "3lab1" });
+  const malformed: ListedRecord = {
+    uri: "https://not-an-at-uri.example/x",
+    cid: "bafybad",
+    value: {
+      $type: TANGLED_MANAGED_REVIEW_COLLECTION,
+      pull: TICKET_URI,
+      pullRepoDid: REPO_DID,
+      reviewer: SESSION_DID,
+      body: MARKER,
+      createdAt: "2027-01-01T00:00:00.000Z",
+    },
+  };
+  const { client, calls } = makeStub({ did: SESSION_DID, records: [good, malformed] });
+  const { api } = makeApi(client);
+
+  const result = await api.upsertStickyComment(MARKER, BODY);
+  assert.equal(result.ok, false);
+  assert.ok(result.error?.includes("at://"), `expected the URI parse failure, got: ${result.error}`);
+  assert.equal(calls.deleted.length, 0);
+  assert.equal(calls.puts.length, 0);
+});
+
+// ── input validation: no network call ────────────────────────────────────
+
+test("empty marker or body fails without any network call", async () => {
+  const { client, calls } = makeStub({ did: SESSION_DID });
+  const { api } = makeApi(client);
+
+  const noMarker = await api.upsertStickyComment("", BODY);
+  assert.deepEqual(noMarker, { ok: false, created: false, error: noMarker.error });
+  const noBody = await api.upsertStickyComment(MARKER, "");
+  assert.equal(noBody.ok, false);
+  assert.equal(noBody.created, false);
+  assert.notEqual(noBody.error, undefined);
+  assert.equal(calls.lists, 0);
+  assert.equal(calls.created.length, 0);
+  assert.equal(calls.puts.length, 0);
 });
 
 // ── reviewed-identity handoff (#1695 TOCTOU) ─────────────────────────────
@@ -278,8 +647,9 @@ test("listRecords pagination follows cursors and accumulates records across page
   const { api } = makeApi(client);
 
   const result = await api.upsertStickyComment(MARKER, BODY);
-  assert.equal(result.ok, false, "two marker-matching records across pages is still ambiguous");
-  assert.ok(result.error?.includes("ambiguous"));
+  assert.equal(result.ok, true, "two marker-matching records across pages reconcile, not wedge");
+  assert.equal(result.action, "reconciled");
+  assert.equal(result.supersededDuplicates, 1);
   assert.equal(calls.lists, 2, "the third page is never fetched once the cursor is exhausted");
 });
 
@@ -376,14 +746,16 @@ test("first publish works against the REAL client whose DID is undefined until t
       assert.equal(url.searchParams.get("repo"), SESSION_DID);
       return json({ records: [] });
     }
-    if (nsid === "com.atproto.repo.createRecord") {
+    if (nsid === "com.atproto.repo.putRecord") {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       assert.equal(body.repo, SESSION_DID);
       assert.equal(body.collection, TANGLED_MANAGED_REVIEW_COLLECTION);
+      // #1691: creation is a putRecord at the deterministic ticket-bound rkey.
+      assert.equal(body.rkey, managedReviewRkey(TICKET_URI));
       const record = body.record as Record<string, unknown>;
       assert.equal(record.reviewer, SESSION_DID);
       assert.equal(record.pull, TICKET_URI);
-      return json({ uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3new`, cid: "bafynew" });
+      return json({ uri: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${String(body.rkey)}`, cid: "bafynew" });
     }
     throw new Error(`unexpected XRPC call: ${nsid}`);
   };
@@ -393,9 +765,16 @@ test("first publish works against the REAL client whose DID is undefined until t
     reviewedIdentity: REVIEWED_IDENTITY,
   });
   const result = await api.upsertStickyComment(MARKER, BODY);
-  assert.deepEqual(result, { ok: true, created: true, commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3new`, updatedAt: result.updatedAt });
+  assert.deepEqual(result, {
+    ok: true,
+    created: true,
+    commentId: `at://${SESSION_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
+    updatedAt: result.updatedAt,
+    action: "created",
+  });
   assert.ok(nsids.includes("com.atproto.server.createSession"), "session must be established");
-  assert.ok(!nsids.includes("com.atproto.repo.putRecord"), "create path never puts");
+  assert.ok(nsids.includes("com.atproto.repo.putRecord"), "#1691: creation goes through putRecord at the deterministic rkey");
+  assert.ok(!nsids.includes("com.atproto.repo.createRecord"), "createRecord is off the publication path");
 });
 
 // ── #588: publication on a platform with no native review surface ─────────
@@ -510,10 +889,13 @@ function publishInput(over: Partial<PublishInput> = {}): PublishInput {
   };
 }
 
-/** The body of the ONE managed record this publication created. */
+/** The body of the ONE managed record this publication wrote. #1691: the
+ * first publication is now exactly one `putRecord` at the deterministic
+ * pull rkey — `createRecord` is off the publication path. */
 function createdBody(calls: StubCalls): string {
-  assert.equal(calls.created.length, 1, "expected exactly one managed record");
-  return String(calls.created[0]?.record.body ?? "");
+  assert.equal(calls.created.length, 0, "publication no longer uses createRecord");
+  assert.equal(calls.puts.length, 1, "expected exactly one managed record write");
+  return String(calls.puts[0]?.record.body ?? "");
 }
 
 /** The published handoff container, read back from the body: the fence
@@ -536,8 +918,8 @@ test("#588: review_verdict publishes the managed record, never a native review",
   const result = await publishReview(publishInput({ verdict: "request_changes" }), api, { diffText: "" });
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native review may be created on Tangled");
   assert.ok(
     result.messages.some((m) => m.includes("Published the review as a managed top-level review record")),
@@ -561,8 +943,8 @@ test("#588: review_verdict with an approve publishes the managed record as an ad
   const result = await publishReview(publishInput({ verdict: "approve" }), api, { diffText: "" });
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native approval may be created on Tangled");
 
   const body = createdBody(calls);
@@ -586,8 +968,8 @@ test("#588: review_comment publishes the findings in the body, never as native c
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native inline review may be created on Tangled");
 
   const body = createdBody(calls);
@@ -612,7 +994,7 @@ test("#588: the findings reach the body under a non-strict policy too (no findin
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
   assert.equal(api.nativeCalls, 0);
 
   const body = createdBody(calls);
@@ -637,7 +1019,7 @@ test("#588: a hostile finding message cannot forge or swallow the body's own sec
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
   assert.equal(api.nativeCalls, 0);
 
   const body = createdBody(calls);
@@ -692,8 +1074,8 @@ test("#588: review_verdict carries the findings in the body too (none is dropped
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native review may be created on Tangled");
 
   const body = createdBody(calls);
@@ -712,8 +1094,8 @@ test("#588: review_blockers publishes the managed record, never a native review"
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native review may be created on Tangled");
 
   const body = createdBody(calls);
@@ -733,8 +1115,8 @@ test("#588: the managed record survives a cleanup-enabled run (the sticky checkp
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0);
   assert.ok(
     !result.messages.some((m) => m.includes("No replacement checkpoint")),
@@ -765,7 +1147,7 @@ test("#588: a hostile review body cannot swallow or precede the action's own not
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
   assert.equal(api.nativeCalls, 0);
 
   const body = createdBody(calls);
@@ -786,8 +1168,8 @@ test("#588: comment mode publishes the managed record, never a native review", a
   const result = await publishReview(publishInput({ mode: "comment" }), api, { diffText: "" });
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
-  assert.equal(calls.puts.length, 0);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
   assert.equal(api.nativeCalls, 0, "no native review may be created on Tangled");
 });
 
@@ -802,7 +1184,7 @@ test("#588: the comment mode compensates nothing (it publishes no findings nativ
   );
 
   assert.equal(result.status, "published");
-  assert.equal(calls.created.length, 1);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
   assert.equal(api.nativeCalls, 0);
 
   // A forge's comment mode publishes no findings natively either, so its
@@ -898,7 +1280,7 @@ test("#589: a cleanup-enabled review_verdict run skips the native cleanup sweep 
   assert.ok(!result.messages.some((m) => m.includes("A newer review superseded this run")), "no misleading supersession warning from empty native listings");
   assert.ok(!result.messages.some((m) => m.includes("No replacement checkpoint")), "the managed record stays the replacement checkpoint");
   assert.ok(!result.messages.some((m) => m.includes("platform=forgejo")), "no forgejo-worded diagnostic under Tangled");
-  assert.equal(calls.created.length, 1, "the managed record is still published exactly once");
+  assert.equal(calls.puts.length, 1, "the managed record is still published exactly once");
 });
 
 test("#589: a cleanup-enabled review_comment run with inline findings enabled skips the sweep and the inline build", async () => {
@@ -939,7 +1321,8 @@ test("#589: a cleanup-enabled review_blockers run skips the sweep with the same 
   assert.equal(api.nativeCalls, 0);
   assert.equal(api.cleanupCalls, 0, "cleanup is auto-ON for review_blockers too, and must be skipped with zero native operations");
   assert.equal(result.messages.filter((m) => m.includes("Skipping native review cleanup")).length, 1);
-  assert.equal(calls.created.length, 1);
+  assert.equal(calls.created.length, 0, "publication no longer creates");
+  assert.equal(calls.puts.length, 1, "the managed record is written by putRecord");
 });
 
 test("#589: comment mode never requests native cleanup, so no degradation note is emitted", async () => {

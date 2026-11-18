@@ -106,6 +106,16 @@ export interface StickyResult {
    * replacement checkpoint timestamp when no native review was created;
    * absent → the gate skips cleanup (fail closed). */
   updatedAt?: string;
+  /** #1691: what the upsert actually did, when the platform reports it.
+   * The Tangled managed record distinguishes `created` (no record existed),
+   * `updated` (the single existing record was written in place), and
+   * `reconciled` (more than one record matched the pull; the newest was
+   * kept in place and the superseded duplicates were deleted). Other
+   * platforms may omit it; `created` stays the compatibility signal. */
+  action?: "created" | "updated" | "reconciled";
+  /** #1691: with `action: "reconciled"`, how many superseded duplicate
+   * records were deleted. Reported, never silent. */
+  supersededDuplicates?: number;
   error?: string;
 }
 

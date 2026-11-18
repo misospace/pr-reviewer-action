@@ -109,7 +109,7 @@ The matrix uses three words:
 | Normal review engine | Supported | The same engine runs on GitHub and Forgejo; the stock adapter's wired diff read (#1690) lets a Tangled run reach a verdict. |
 | Verdict policy and required-check policy | Supported | The same deterministic policy runs on every platform. |
 | Selected-revision diff and changed files | Supported | The selected patch revision's trusted base/head drive a bounded local git read of the checked-out round (`src/platform/tangled-git.ts`, #1690) through `TangledAdapter.getPrDiff`/`listPrFiles`; a checkout that cannot produce the diff fails closed. |
-| Managed top-level review record | Supported | The record client writes one record per pull and updates it in place on a re-review. The publication head re-check reads the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`) and fails closed on an unknown, malformed, or ambiguous head. |
+| Managed top-level review record | Supported | The record client writes one record per pull and updates it in place on a re-review. Publication creates with `putRecord` at a record key derived from the ticket AT URI, so two overlapping runs update the same record instead of making two. If a listing still shows more than one record for the pull, the run keeps the newest `createdAt`, updates it in place, deletes the others, and reports how many it removed (#1691). The publication head re-check reads the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`) and fails closed on an unknown, malformed, or ambiguous head. |
 | Inline findings on a diff line | Unsupported | Tangled has no inline review object. The findings stay in the review body. |
 | Native approve or request-changes objects | Unsupported | Tangled has no native review verdict object. The verdict stays in the review body. |
 | Review dismissal and minimization | Unsupported | The managed record is updated in place instead. |
@@ -133,6 +133,7 @@ These guardrails hold on every Tangled run.
 - The publish step refuses to publish when it cannot prove that the pull did not advance since the review. The launch-time source commit is not a trustworthy source for that proof.
 - The CI gate stays off. The runner does not start a status child that Tangled cannot serve.
 - The publish step never asks for a native approval. A missing native surface degrades to the managed record.
+- Managed review publication is idempotent under concurrent runs (#1691). The record key comes from the pull AT URI, so overlapping runs converge on one record. A duplicate set left by an older run heals on the next run by a fixed rule, and the run reports what it removed.
 - The diff is designed to come from the pull round, and the file content from the checkout. The runner does not trust a pull record for the commit that a review covers.
 
 ## Exit codes

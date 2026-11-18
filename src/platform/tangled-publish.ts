@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FetchLike } from "./http.js";
 import type {
   CommentPostResult,
@@ -12,7 +13,7 @@ import type {
   StickyResult,
   ThreadQueryResult,
 } from "./publish-api.js";
-import { TangledAtprotoClient } from "./tangled-atproto.js";
+import { TangledAtprotoClient, TangledAtprotoError } from "./tangled-atproto.js";
 import { parseTangledAtUri } from "./tangled-bobbin.js";
 import type { TangledReviewIdentity } from "./tangled-ticket.js";
 import type { TangledContext } from "./tangled.js";
@@ -38,9 +39,10 @@ import type { TangledContext } from "./tangled.js";
  * - This module performs NO Python invocation: it is pure TypeScript over
  *   the `TangledAtprotoClient` (#837) and the canonical pull resolver
  *   (#584), which already carry the secret-handling and fail-closed rules.
- * - Decisions are deterministic and fail closed: an ambiguous managed
- *   record set never mutates, and a resolution failure is reported as a
- *   `StickyResult` error rather than thrown at construction time.
+ * - Decisions are deterministic and fail closed: a resolution or listing
+ *   failure is reported as a `StickyResult` error rather than thrown at
+ *   construction time, and publication is idempotent under concurrent runs
+ *   (#1691) — see `managedReviewRkey` and `upsertStickyComment`.
  */
 
 /** EXPERIMENTAL (#588, #564 umbrella): locally-namespaced collection the
@@ -54,6 +56,75 @@ export const TANGLED_MANAGED_REVIEW_COLLECTION = "dev.prreviewer.review";
 const MAX_LIST_PAGES = 10;
 const LIST_PAGE_LIMIT = 100;
 const MAX_LISTED_RECORDS = 1000;
+
+/**
+ * #1691: the deterministic AT-Proto record key for a review identity's
+ * managed review, derived from the AT-URI the record binds to (#1690: the
+ * REVIEWED ticket's AT-URI — the same value the record's `pull` field
+ * carries). Publication creates with `putRecord` at this rkey (atproto
+ * `putRecord` is create-or-update), so two overlapping runs converge on the
+ * SAME record (last writer wins) instead of racing list-then-create into two
+ * records. That removes the permanent ambiguous-record wedge the old
+ * `createRecord` path could form.
+ *
+ * Key grammar: atproto rkeys are at most 15 characters from
+ * `[A-Za-z0-9_-]` and must not look like a bare number. The key is the
+ * letter prefix `pr` plus lowercase RFC-4648 base32 of the first 8 bytes of
+ * SHA-256 over a namespaced domain string and the bound URI — exactly 15
+ * characters, never all digits, stable for the identity across runs, and
+ * collision-free at 64 bits for any realistic number of pulls. The record
+ * lives in the bot's own repo, so one key per pull per bot account.
+ */
+export function managedReviewRkey(boundUri: string): string {
+  const digest = createHash("sha256")
+    .update(`pr-reviewer/managed-review/v1\u0000${boundUri}`)
+    .digest();
+  return `pr${base32Lower(digest.subarray(0, 8))}`;
+}
+
+function base32Lower(bytes: Uint8Array): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let out = "";
+  let bits = 0;
+  let value = 0;
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return out;
+}
+
+/** A record value's `createdAt` for ordering, as epoch milliseconds: an
+ * absent or unparseable value sorts oldest (−∞), never throws. Comparing
+ * parsed instants (not raw strings) keeps the ordering right even if a
+ * record value ever carries a non-Z UTC offset. */
+function recordCreatedAt(value: Record<string, unknown>): number {
+  const raw = value.createdAt;
+  if (typeof raw !== "string" || raw === "") return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+/** #1691 reconciliation: the keeper of a duplicated managed-record set —
+ * the record with the newest `createdAt` value; equal (or invalid) values
+ * break the tie on the greater uri, so the choice is deterministic. */
+function pickKeeperRecord(
+  records: Array<{ uri: string; value: Record<string, unknown> }>,
+): { uri: string; value: Record<string, unknown> } {
+  let keeper = records[0];
+  if (keeper === undefined) throw new Error("unreachable: empty record set");
+  for (const candidate of records) {
+    const mine = recordCreatedAt(candidate.value);
+    const theirs = recordCreatedAt(keeper.value);
+    if (mine > theirs || (mine === theirs && candidate.uri > keeper.uri)) keeper = candidate;
+  }
+  return keeper;
+}
 
 /** The shape of one managed review record as written by this module. */
 interface ManagedReviewRecord {
@@ -185,16 +256,24 @@ export class TangledPublishApi implements PublishPlatformApi {
   /**
    * Create or update the ONE managed top-level review record for the
    * resolved review identity (#1690: one ticket + its newest immutable
-   * patch revision; the record binds to the ticket AT-URI). Deterministic
-   * and fail closed:
-   * - zero identity-matching records → create;
-   * - one marker-matching record → update in place (same rkey);
-   * - one identity-matching record without the current marker → stale
-   *   marker format drift on the SAME managed record: update in place
-   *   (same rkey);
-   * - more than one marker-matching record, or more than one
-   *   identity-matching record with no marker match → ambiguous, no
-   *   mutation.
+   * patch revision; the record binds to the ticket AT-URI). Deterministic,
+   * fail closed, and idempotent under concurrent runs (#1691):
+   * - zero identity-matching records → create via `putRecord` at the
+   *   deterministic `managedReviewRkey(identity.ticketUri)`, so overlapping
+   *   runs converge on one record instead of duplicating;
+   * - one identity-matching record → update it in place (same rkey), whether
+   *   or not its body carries the current marker (marker format drift on the
+   *   SAME managed record keeps its identity);
+   * - more than one identity-matching record → reconcile by the documented
+   *   rule: keep the newest `createdAt` (tie → greater uri), update it in
+   *   place, delete the superseded duplicates, and report the count. A
+   *   duplicate the PDS already reports as missing (HTTP 404, deleted by a
+   *   concurrent reconcile run) counts as resolved without failing this
+   *   run. Every candidate is ours by construction (the filter pins
+   *   reviewer to the session DID, the ticket URI, and the repo binding), so
+   *   this only ever removes the bot's own redundant records; a duplicate
+   *   set can now only predate the deterministic-rkey fix, and one run
+   *   heals it — the old permanent ambiguous wedge no longer exists.
    */
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
     if (typeof marker !== "string" || marker === "") {
@@ -238,39 +317,55 @@ export class TangledPublishApi implements PublishPlatformApi {
         if (typeof value.reviewer !== "string" || value.reviewer !== sessionDid) return false;
         return value.pullRepoDid === this.context.repoDid;
       });
-      const markerMatching = pullMatching.filter(({ value }) => typeof value.body === "string" && value.body.includes(marker));
 
       if (pullMatching.length === 0) {
-        const { uri } = await this.atproto.createRecord(TANGLED_MANAGED_REVIEW_COLLECTION, record);
-        return { ok: true, created: true, commentId: uri, updatedAt: createdAt };
+        const { uri } = await this.atproto.putRecord(
+          TANGLED_MANAGED_REVIEW_COLLECTION,
+          managedReviewRkey(identity.ticketUri),
+          record,
+        );
+        return { ok: true, created: true, commentId: uri, updatedAt: createdAt, action: "created" };
       }
-      if (markerMatching.length > 1) {
-        return {
-          ok: false,
-          created: false,
-          error: `ambiguous managed review: ${markerMatching.length} marker-matching records exist for ticket ${identity.ticketUri}`,
-        };
-      }
-      if (markerMatching.length === 1) {
-        const target = markerMatching[0];
-        if (target === undefined) throw new Error("unreachable: markerMatching has exactly one entry");
+
+      if (pullMatching.length === 1) {
+        const target = pullMatching[0];
+        if (target === undefined) throw new Error("unreachable: pullMatching has exactly one entry");
         await this.putManagedRecord(target.uri, record);
-        return { ok: true, created: false, commentId: target.uri, updatedAt: createdAt };
+        return { ok: true, created: false, commentId: target.uri, updatedAt: createdAt, action: "updated" };
       }
-      // No marker match: exactly one pull-matching record is expected drift
-      // (marker format changed between runs) — update it in place. More than
-      // one is ambiguous; never guess.
-      if (pullMatching.length > 1) {
-        return {
-          ok: false,
-          created: false,
-          error: `ambiguous managed review: ${pullMatching.length} identity-matching records exist for ticket ${identity.ticketUri} and none matches the current marker`,
-        };
+
+      // Duplicate set: resolve it per the documented rule instead of
+      // wedging on ambiguity (#1691). Every uri is parsed and its rkey
+      // validated BEFORE any mutation, so a malformed uri can never leave a
+      // half-applied reconciliation. A duplicate whose delete answers HTTP
+      // 404 (RecordNotFound) is already gone — a concurrent reconcile run
+      // deleted it first — which IS the intended end state, so it is
+      // tolerated and the keeper update still proceeds (a losing run must
+      // not exit 1 over an already-achieved deletion). Any other failed
+      // delete propagates through the outer catch and the next run
+      // reconciles the remainder from a fresh listing.
+      const ours = pullMatching.map((candidate) => ({
+        ...candidate,
+        rkey: parseTangledAtUri(candidate.uri).rkey,
+      }));
+      const keeper = pickKeeperRecord(ours);
+      const superseded = ours.filter((candidate) => candidate !== keeper);
+      for (const duplicate of superseded) {
+        try {
+          await this.atproto.deleteRecord(TANGLED_MANAGED_REVIEW_COLLECTION, duplicate.rkey);
+        } catch (error) {
+          if (!(error instanceof TangledAtprotoError) || error.status !== 404) throw error;
+        }
       }
-      const stale = pullMatching[0];
-      if (stale === undefined) throw new Error("unreachable: pullMatching has exactly one entry");
-      await this.putManagedRecord(stale.uri, record);
-      return { ok: true, created: false, commentId: stale.uri, updatedAt: createdAt };
+      await this.putManagedRecord(keeper.uri, record);
+      return {
+        ok: true,
+        created: false,
+        commentId: keeper.uri,
+        updatedAt: createdAt,
+        action: "reconciled",
+        supersededDuplicates: superseded.length,
+      };
     } catch (error) {
       // TangledAtprotoError messages are already secret-redacted by the
       // client; anything else is sanitized the same way by passing only the

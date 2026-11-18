@@ -215,6 +215,82 @@ test("putRecord: URL, method, bearer token, body shape", async () => {
   });
 });
 
+// ── deleteRecord ─────────────────────────────────────────────────────────
+
+test("deleteRecord: URL, bearer token, body shape; a REAL PDS's empty 200 body is success", async () => {
+  const { fetchImpl, calls } = makeFetch((url) => {
+    if (url.pathname.endsWith("createSession")) return SESSION_OK();
+    // A real PDS answers a successful delete with 200 and NO body — the
+    // JSON-parsing transport would call that invalid JSON, so deleteRecord
+    // must treat the status alone as success.
+    return new Response("", { status: 200 });
+  });
+  const client = new TangledAtprotoClient(makeConfig({ fetchImpl }));
+  await client.deleteRecord("app.test.thing", "rkey1");
+  const call = calls[1];
+  assert.ok(call);
+  assert.equal(call.url.toString(), `${HOST}/xrpc/com.atproto.repo.deleteRecord`);
+  assert.equal(call.nsid, "com.atproto.repo.deleteRecord");
+  assert.equal(call.auth, `Bearer ${SESSION.accessJwt}`);
+  assert.deepEqual(JSON.parse(String(call.body)), {
+    repo: SESSION.did,
+    collection: "app.test.thing",
+    rkey: "rkey1",
+  });
+});
+
+test("deleteRecord: empty rkey rejected as a config error without any call", async () => {
+  const { fetchImpl, calls } = makeFetch(() => SESSION_OK());
+  const client = new TangledAtprotoClient(makeConfig({ fetchImpl }));
+  await assert.rejects(
+    () => client.deleteRecord("app.test.thing", ""),
+    (e: unknown) => e instanceof TangledAtprotoError && e.kind === "config" && e.status === undefined,
+  );
+  assert.equal(calls.length, 0, "config validation precedes any session or network call");
+});
+
+test("deleteRecord: expired session (401) re-auths ONCE and retries ONCE", async () => {
+  let deleteCalls = 0;
+  const { fetchImpl, calls } = makeFetch((url) => {
+    if (url.pathname.endsWith("createSession")) return SESSION_OK();
+    deleteCalls += 1;
+    if (deleteCalls === 1) return json({ error: "ExpiredToken", message: "token expired" }, 401);
+    return new Response("", { status: 200 });
+  });
+  const client = new TangledAtprotoClient(makeConfig({ fetchImpl }));
+  await client.deleteRecord("app.test.thing", "rk");
+  assert.equal(deleteCalls, 2, "original call + one retry");
+  // createSession, delete(401), createSession, delete(ok) = 4 calls
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls.map((c) => c.nsid), [
+    "com.atproto.server.createSession",
+    "com.atproto.repo.deleteRecord",
+    "com.atproto.server.createSession",
+    "com.atproto.repo.deleteRecord",
+  ]);
+});
+
+test("deleteRecord: 404 maps to a request-kind error carrying the status", async () => {
+  const { fetchImpl } = makeFetch((url) => {
+    if (url.pathname.endsWith("createSession")) return SESSION_OK();
+    return json({ error: "RecordNotFound", message: "no such record" }, 404);
+  });
+  const client = new TangledAtprotoClient(makeConfig({ fetchImpl }));
+  await assert.rejects(
+    () => client.deleteRecord("app.test.thing", "rk"),
+    (e: unknown) => {
+      assert.ok(e instanceof TangledAtprotoError);
+      assert.equal(e.kind, "request");
+      // The structured status is what lets the #1691 reconcile loop tell an
+      // already-deleted duplicate (404, tolerable) from an unknown failure.
+      assert.equal(e.status, 404);
+      assert.equal(e.message.includes("404"), true);
+      assert.equal(e.message.includes("no such record"), true);
+      return true;
+    },
+  );
+});
+
 test("listRecords: exact query shape and default limit", async () => {
   const { fetchImpl, calls } = makeFetch((url) => {
     if (url.pathname.endsWith("createSession")) return SESSION_OK();
@@ -432,6 +508,7 @@ test("4xx without token-error code throws request kind with status in message", 
     (e: unknown) => {
       assert.ok(e instanceof TangledAtprotoError);
       assert.equal(e.kind, "request");
+      assert.equal(e.status, 404);
       assert.equal(e.message.includes("404"), true);
       assert.equal(e.message.includes("no such record"), true);
       return true;

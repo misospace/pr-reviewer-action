@@ -36,8 +36,11 @@
  *   real SHA-256 repository checked out across the patch's two commits;
  * - publication goes through the PRODUCTION `buildPublishApi` factory: the
  *   real `TangledAtprotoClient` + `TangledPublishApi` against a stateful
- *   mock PDS (session, listRecords, createRecord, putRecord), and the real
- *   #1165 current-head re-check against the same knot stub;
+ *   mock PDS (session, listRecords, createRecord, putRecord, deleteRecord),
+ *   and the real #1165 current-head re-check against the same knot stub.
+ *   The #1691 concurrency races drive the same real client + publish API
+ *   directly against the mock PDS, because the runner cannot interleave two
+ *   of its own rounds deterministically;
  * - the model is a local mock serving one OpenAI-style chat completion.
  *
  * Everything stays offline: the only network targets are the loopback mock
@@ -51,7 +54,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage } from "node:http";
 import { platformActionMain } from "../src/run/platform-action.js";
-import { TANGLED_MANAGED_REVIEW_COLLECTION } from "../src/platform/tangled-publish.js";
+import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
+import { TANGLED_MANAGED_REVIEW_COLLECTION, TangledPublishApi, managedReviewRkey } from "../src/platform/tangled-publish.js";
+import type { TangledReviewIdentity } from "../src/platform/tangled-ticket.js";
+import type { TangledContext } from "../src/platform/tangled.js";
 import { startMockServer, type MockServer } from "./helpers.js";
 
 const OWNER_DID = "did:plc:owner00000000000000000000000000000000000000000000000";
@@ -192,13 +198,36 @@ interface MockPds {
   records: Map<string, Record<string, unknown>>;
   creates: number;
   puts: number;
+  deletes: number;
+  /** #1691: hold every subsequent `listRecords` response until `needed`
+   * list requests have arrived (the response snapshots the store AT
+   * REQUEST ENTRY), so a test can force a concurrent list-then-create
+   * race deterministically over real HTTP. */
+  armListBarrier(needed: number): void;
 }
 
 async function startMockPds(): Promise<MockPds> {
   const records = new Map<string, Record<string, unknown>>();
   let counter = 0;
-  const pds: MockPds = { records, creates: 0, puts: 0, server: undefined as unknown as MockServer };
-  pds.server = await startMockServer((req: IncomingMessage, body: string, res) => {
+  let barrierNeeded = 0;
+  let barrierEntered = 0;
+  let barrierPromise: Promise<void> = Promise.resolve();
+  let barrierRelease: () => void = () => {};
+  const pds: MockPds = {
+    records,
+    creates: 0,
+    puts: 0,
+    deletes: 0,
+    server: undefined as unknown as MockServer,
+    armListBarrier(needed: number) {
+      barrierNeeded = needed;
+      barrierEntered = 0;
+      barrierPromise = new Promise<void>((resolve) => {
+        barrierRelease = resolve;
+      });
+    },
+  };
+  pds.server = await startMockServer(async (req: IncomingMessage, body: string, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const path = url.pathname;
     if (path === "/xrpc/com.atproto.server.createSession") {
@@ -225,9 +254,15 @@ async function startMockPds(): Promise<MockPds> {
         res.end(JSON.stringify({ error: "Unknown collection or repo" }));
         return;
       }
-      res.end(JSON.stringify({
+      const snapshot = JSON.stringify({
         records: [...records.entries()].map(([uri, value]) => ({ uri, value })),
-      }));
+      });
+      if (barrierNeeded > 0) {
+        barrierEntered += 1;
+        if (barrierEntered >= barrierNeeded) barrierRelease();
+        await barrierPromise;
+      }
+      res.end(snapshot);
       return;
     }
     if (path === "/xrpc/com.atproto.repo.createRecord") {
@@ -256,6 +291,30 @@ async function startMockPds(): Promise<MockPds> {
       const uri = `at://${BOT_DID}/${request.collection}/${request.rkey}`;
       records.set(uri, request.record);
       res.end(JSON.stringify({ uri, cid: `bafyerecord${counter}` }));
+      return;
+    }
+    if (path === "/xrpc/com.atproto.repo.deleteRecord") {
+      // #1691: a real PDS answers a successful delete with 200 and an
+      // EMPTY body — the mock matches that wire behavior, including the
+      // 404 `RecordNotFound` for an already-missing record (the shape a
+      // concurrent reconcile loser sees).
+      const request = JSON.parse(body) as { collection: string; rkey: string };
+      if (request.collection !== TANGLED_MANAGED_REVIEW_COLLECTION) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "Unknown collection" }));
+        return;
+      }
+      const uri = `at://${BOT_DID}/${request.collection}/${request.rkey}`;
+      if (!records.has(uri)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "RecordNotFound", message: "no such record" }));
+        return;
+      }
+      counter += 1;
+      pds.deletes += 1;
+      records.delete(uri);
+      res.statusCode = 200;
+      res.end("");
       return;
     }
     res.statusCode = 404;
@@ -421,6 +480,49 @@ function soleManagedRecord(world: TangledWorld): { uri: string; value: Record<st
   return { uri: entry[0], value: entry[1] };
 }
 
+/** #1691 concurrency races: a REAL `TangledPublishApi` + `TangledAtprotoClient`
+ * against the world's mock PDS, carrying the same reviewed identity the knot
+ * fixtures encode — the same object the production `buildPublishApi` factory
+ * constructs inside a runner round. Two of these racing over the shared PDS
+ * is the interleaving the runner itself cannot force deterministically. */
+function makePublishApi(world: TangledWorld): TangledPublishApi {
+  const context: TangledContext = {
+    ownerDid: OWNER_DID,
+    repoDid: REPO_DID,
+    repoName: "demo/repo",
+    sourceBranch: "feature",
+    targetBranch: "main",
+    sourceSha: world.headOid,
+    knotHost: KNOT_HOST,
+    bobbinUrl: undefined,
+  };
+  const reviewedIdentity: TangledReviewIdentity = {
+    ticketUri: TICKET_URI,
+    ticketCid: "bafyreiticket",
+    ticketRkey: TICKET_RKEY,
+    ticketValue: {},
+    patchUri: `at://${REPO_DID}/org.tangled.review.patch/${PATCH_CID}`,
+    patchCid: PATCH_CID,
+    patchValue: {},
+    baseOid: world.baseOid,
+    headOid: world.headOid,
+    targetBranch: "main",
+    sourceBranch: "feature",
+    sourceRepoDid: REPO_DID,
+    state: "open",
+  };
+  return new TangledPublishApi({
+    context,
+    atproto: new TangledAtprotoClient({
+      host: world.pds.server.url,
+      handle: "reviewer.bot.test",
+      appPassword: "app-password-value",
+      timeoutMs: 5000,
+    }),
+    reviewedIdentity,
+  });
+}
+
 test("one offline round drives the runner from ticket resolution to a created managed review record", async () => {
   const world = await startTangledWorld();
   try {
@@ -442,7 +544,7 @@ test("one offline round drives the runner from ticket resolution to a created ma
 
     // The managed record is the real TangledPublishApi's output, published
     // through the production buildPublishApi factory, bound to the TICKET.
-    const { value } = soleManagedRecord(world);
+    const { uri, value } = soleManagedRecord(world);
     assert.equal(value.$type, TANGLED_MANAGED_REVIEW_COLLECTION);
     assert.equal(value.pull, TICKET_URI, "the record is bound to the resolved ticket");
     assert.equal(value.pullRepoDid, REPO_DID);
@@ -450,8 +552,13 @@ test("one offline round drives the runner from ticket resolution to a created ma
     assert.equal(value.sourceSha, world.headOid, "the reviewed head is the selected patch revision's trusted head.oid");
     assert.equal(typeof value.body, "string");
     assert.match(String(value.body), /First review: looks fine\./, "the record body is the published review");
-    assert.equal(world.pds.creates, 1, "the first round creates the record");
-    assert.equal(world.pds.puts, 0);
+    // #1691: first publication is a `putRecord` at the deterministic rkey
+    // derived from the ticket URI the record binds to — no `createRecord`,
+    // so a concurrent run converges here.
+    assert.equal(uri, `at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`,
+      "the record lives at the deterministic ticket-bound rkey");
+    assert.equal(world.pds.creates, 0);
+    assert.equal(world.pds.puts, 1);
 
     assert.deepEqual(world.pds.server.handlerErrors, []);
     assert.deepEqual(world.model.handlerErrors, []);
@@ -472,11 +579,91 @@ test("a re-review updates the existing managed review instead of duplicating it"
     const second = soleManagedRecord(world);
 
     assert.equal(second.uri, first.uri, "the managed review keeps the same record uri");
-    assert.equal(world.pds.creates, 1, "the re-review created no second record");
-    assert.equal(world.pds.puts, 1, "the re-review updated the record in place");
+    assert.equal(world.pds.creates, 0, "no run ever uses createRecord anymore (#1691)");
+    assert.equal(world.pds.puts, 2, "the re-review updated the record in place");
     assert.match(String(second.value.body), /Second review: still looks fine\./);
     assert.doesNotMatch(String(second.value.body), /First review: looks fine\./,
       "the superseded body no longer stays visible");
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1691: a forced concurrent first publication leaves ONE record, and a re-review after the race updates it in place", async () => {
+  const world = await startTangledWorld();
+  try {
+    // Force the list-then-create race deterministically over real HTTP:
+    // both listRecords responses are held until BOTH concurrent upserts
+    // have listed, so both observe zero records and both take the create
+    // branch — the exact interleaving that used to form two records and
+    // permanently wedge every later run on the ambiguous guard.
+    world.pds.armListBarrier(2);
+    const marker = "<!-- pr-reviewer managed review (race) -->";
+    const [first, second] = await Promise.all([
+      makePublishApi(world).upsertStickyComment(marker, `${marker}\nConcurrent review A.`),
+      makePublishApi(world).upsertStickyComment(marker, `${marker}\nConcurrent review B.`),
+    ]);
+    assert.equal(first.ok, true, `first publication failed: ${first.error}`);
+    assert.equal(second.ok, true, `second publication failed: ${second.error}`);
+    assert.equal(first.created, true, "both listed zero records, so both report creating");
+    assert.equal(second.created, true);
+    assert.equal(first.commentId, second.commentId, "both converge on the deterministic ticket-bound rkey");
+    assert.equal(world.pds.records.size, 1, "the race left exactly ONE managed record");
+    assert.equal(world.pds.creates, 0, "no run ever uses createRecord anymore");
+    assert.equal(world.pds.puts, 2, "last writer wins on the one record");
+
+    // The re-review after the race is a FULL runner round: it must update
+    // that same single record in place, proving no permanent ambiguous
+    // state was formed.
+    world.markdown.current = "Post-race review: still looks fine.\n";
+    assert.equal((await runTangledSmokeRound(world, "run-post-race")).code, 0);
+    const { uri, value } = soleManagedRecord(world);
+    assert.equal(uri, first.commentId, "the managed record kept one identity across the race and the re-review");
+    assert.equal(uri, `at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/${managedReviewRkey(TICKET_URI)}`);
+    assert.match(String(value.body), /Post-race review: still looks fine\./);
+    assert.doesNotMatch(String(value.body), /Concurrent review/, "the superseded race bodies no longer stay visible");
+    assert.equal(world.pds.records.size, 1);
+    assert.equal(world.pds.puts, 3);
+    assert.deepEqual(world.pds.server.handlerErrors, []);
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1691: a full runner round heals a pre-existing duplicate set instead of wedging", async () => {
+  const world = await startTangledWorld();
+  try {
+    // Seed the wedge pre-#1691 publication could form: two managed records
+    // bound to the SAME ticket (neither carrying the CURRENT runner marker —
+    // the shape that used to answer every run with "ambiguous managed
+    // review" until a human deleted a record from the AT-Proto repo).
+    const legacyMarker = "<!-- pr-reviewer managed review (legacy) -->";
+    const legacy = (createdAt: string, text: string) => ({
+      $type: TANGLED_MANAGED_REVIEW_COLLECTION,
+      pull: TICKET_URI,
+      pullRepoDid: REPO_DID,
+      reviewer: BOT_DID,
+      body: `${legacyMarker}\n${text}`,
+      createdAt,
+    });
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupa`,
+      legacy("2026-10-01T00:00:00.000Z", "Legacy review one."));
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      legacy("2026-10-02T00:00:00.000Z", "Legacy review two."));
+
+    world.markdown.current = "Recovery review: healed.\n";
+    assert.equal((await runTangledSmokeRound(world, "run-heal")).code, 0,
+      "the run PUBLISHES (exit 0) where the old guard refused forever");
+
+    const { uri, value } = soleManagedRecord(world);
+    assert.equal(uri, `at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      "the newest createdAt is kept in place");
+    assert.match(String(value.body), /Recovery review: healed\./);
+    assert.doesNotMatch(String(value.body), /Legacy review/, "the superseded body no longer stays visible");
+    assert.equal(world.pds.deletes, 1, "the superseded duplicate was deleted through the real client (empty-200 wire)");
+    assert.equal(world.pds.puts, 1);
+    assert.equal(world.pds.creates, 0);
+    assert.deepEqual(world.pds.server.handlerErrors, []);
   } finally {
     await world.close();
   }
@@ -506,6 +693,53 @@ test("a stale checkout fails closed BEFORE the model is called, even with H2 pre
     assert.equal(world.pds.records.size, 0, "nothing was published");
     assert.equal(world.pds.creates, 0);
     assert.equal(world.pds.puts, 0);
+  } finally {
+    await world.close();
+  }
+});
+
+test("#1691: concurrent reconcile: the loser's 404 on an already-deleted duplicate still updates the keeper", async () => {
+  const world = await startTangledWorld();
+  try {
+    // Seed the legacy duplicate set, then force BOTH concurrent runs to
+    // list it before either writes: both pick the same keeper and both
+    // delete the same superseded duplicate, so the loser's delete answers
+    // 404 RecordNotFound over the real wire — the interleaving that used
+    // to fail the run without ever updating the keeper.
+    const legacyMarker = "<!-- pr-reviewer managed review (legacy) -->";
+    const legacy = (createdAt: string, text: string) => ({
+      $type: TANGLED_MANAGED_REVIEW_COLLECTION,
+      pull: TICKET_URI,
+      pullRepoDid: REPO_DID,
+      reviewer: BOT_DID,
+      body: `${legacyMarker}\n${text}`,
+      createdAt,
+    });
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupa`,
+      legacy("2026-10-01T00:00:00.000Z", "Legacy review one."));
+    world.pds.records.set(`at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      legacy("2026-10-02T00:00:00.000Z", "Legacy review two."));
+
+    world.pds.armListBarrier(2);
+    const marker = "<!-- pr-reviewer managed review (reconcile race) -->";
+    const [first, second] = await Promise.all([
+      makePublishApi(world).upsertStickyComment(marker, `${marker}\nReconcile race A.`),
+      makePublishApi(world).upsertStickyComment(marker, `${marker}\nReconcile race B.`),
+    ]);
+    assert.equal(first.ok, true, `first reconcile run failed: ${first.error}`);
+    assert.equal(second.ok, true, `loser reconcile run failed on its 404: ${second.error}`);
+    assert.equal(first.action, "reconciled");
+    assert.equal(second.action, "reconciled");
+    assert.equal(first.commentId, `at://${BOT_DID}/${TANGLED_MANAGED_REVIEW_COLLECTION}/3mqdupb`,
+      "both runs deterministically keep the newest createdAt record");
+    assert.equal(second.commentId, first.commentId);
+
+    const { uri, value } = soleManagedRecord(world);
+    assert.equal(uri, first.commentId);
+    assert.equal(world.pds.deletes, 1, "the duplicate was deleted once; the loser's second delete answered 404");
+    assert.match(String(value.body), /Reconcile race/);
+    assert.doesNotMatch(String(value.body), /Legacy review/, "the superseded body no longer stays visible");
+    assert.deepEqual(world.pds.server.handlerErrors, []);
   } finally {
     await world.close();
   }
