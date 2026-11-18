@@ -37,9 +37,9 @@ controller:
       name: pr-reviewer-admin
       key: token
 
+  # Poll the listed repository at the chart's default 15-minute interval,
+  # even with webhook disabled. No explicit enable/interval setting required.
   reconcile:
-    enabled: true
-    intervalMs: 300000
     repos:
       - example-org/example-repo
 
