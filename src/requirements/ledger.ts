@@ -162,7 +162,7 @@ function isAdvisoryHeading(heading: string): boolean {
   // Match only the exact subject heading, optionally followed by a bounded
   // parenthetical qualifier. Other headings and the uppercase MUST/SHALL
   // escape hatch in scanDocument remain untouched.
-  const plain = heading.replace(/\\s*\\([^()]{0,120}\\)\\s*$/, "").toLowerCase()
+  const plain = heading.replace(/\s*\([^()]{0,120}\)\s*$/, "").toLowerCase()
     .replace(/[^a-z0-9]+/g, " ").trim();
   return plain === "reproduction" || plain === "reproductions"
     || plain === "organic reproduction" || plain === "organic reproductions";
