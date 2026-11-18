@@ -102,7 +102,6 @@ jobs:
           grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
           grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
-          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
           # Kubernetes-executor mode must also default off; explicit opt-in has two policies.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor.yaml; then
             echo "unexpected default NetworkPolicy in Kubernetes-executor chart" >&2
@@ -111,15 +110,11 @@ jobs:
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
             --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
-          # Print the rendered policy identities if this assertion ever fails.
-          echo "opt-in Kubernetes-executor rendered bytes:"
-          wc -c /var/tmp/render-kubernetes-executor-netpol.yaml
-          echo "rendered object kinds:"
-          grep -n '^kind:' /var/tmp/render-kubernetes-executor-netpol.yaml | tail -n 35 || true
-          grep -n 'kind: NetworkPolicy' /var/tmp/render-kubernetes-executor-netpol.yaml || true
+          # The worker selector is only present when the policy is opted in.
+          grep -q 'app.kubernetes.io/managed-by: pr-reviewer-action' /var/tmp/render-kubernetes-executor-netpol.yaml
           policy_count="$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml || true)"
           if [ "$policy_count" -ne 2 ]; then
-            echo "::error::expected 2 opt-in policies for Kubernetes executor; found $policy_count"
+            echo "::error::expected 2 opt-in policies for Kubernetes executor; found $policy_count" >&2
             exit 1
           fi
 
