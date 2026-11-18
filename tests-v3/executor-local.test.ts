@@ -1430,6 +1430,30 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   );
 });
 
+test("validateExecutionRequest accepts profiles.evidence \"\" — 'no providers' is expressible (#1711)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+  // REPRODUCTION of #1711 on the current composition: an instance config
+  // without evidence profiles composes an envelope whose evidence name is
+  // "" (the documented not-configured state, Action-mode parity). The
+  // envelope must accept it; refusing it makes 'no providers'
+  // inexpressible end to end.
+  const accepted = validateExecutionRequest({
+    ...valid,
+    profiles: { ...valid.profiles, evidence: "" },
+  });
+  assert.equal(accepted.profiles.evidence, "");
+  // A non-empty name still rides as identity metadata; the bounded-identity
+  // grammar applies to it (control characters are refused).
+  assert.throws(
+    () => validateExecutionRequest({
+      ...valid,
+      profiles: { ...valid.profiles, evidence: "bad\u0007name" },
+    }),
+    /evidence/,
+  );
+});
+
 test("validateExecutionRequest accepts an optional valid sharedGroupId and refuses malformed ones (#1631)", () => {
   const { request } = makeRequest();
   const valid = JSON.parse(JSON.stringify(request));

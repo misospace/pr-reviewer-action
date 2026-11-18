@@ -130,6 +130,38 @@ forges:
     credential: forge-cred
 `;
 
+/** #1711: the #727 operator contract taken literally — no
+ * `evidence-profiles`, no `default-evidence-profile`. The doc's example
+ * carries `default-evidence-profile: null`, and Action-mode parity makes
+ * evidence "not configured" (an empty providers file set), never a startup
+ * refusal. */
+const NO_EVIDENCE_INSTANCE_CONFIG = `version: 1
+model-profiles:
+  - name: fast
+    endpoint: http://127.0.0.1:9/v1
+    api-format: openai
+    model: test-model
+    credential: model-cred
+default-model-profile: fast
+executor-profiles:
+  - name: local-dev
+    kind: local
+    local:
+      command: /bin/true
+      args: []
+default-executor-profile: local-dev
+forges:
+  - name: primary
+    kind: gitea
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred
+adoption:
+  mode: all_allowed
+  discovered-default: adopt
+queue:
+  max-concurrent-reviews: 2
+`;
+
 /** The minimal production-shaped environment for one startup. */
 function baseEnv(configPath: string): NodeJS.ProcessEnv {
   return {
@@ -407,6 +439,47 @@ test("a gitea-kind instance starts with FORGEJO_TOKEN (#1682)", async (t) => {
   const started = handle!;
 
   // The graceful stop drains and exits 0, exactly the successful-boot contract.
+  const code = await started.stop();
+  assert.equal(code, 0);
+  assert.equal(started.daemon.stopped, true);
+});
+
+test("an instance config with no evidence profiles composes: 'no providers' is expressible (#1711)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-no-evidence-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, NO_EVIDENCE_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_TOKEN = "forgejo-token";
+
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      publish: async () => ({ publicationId: "forgejo-comment:1" }),
+    },
+    followUpAdapter: followUpAdapter(),
+    followUpBotLogin: async () => "reviewer-bot",
+    followUpAnswer: async () => "an answer",
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  // The #727 doc's example instance config (`default-evidence-profile:
+  // null`) must start: the schema makes evidence optional, so the
+  // composition may not refuse what the contract declares valid (#1711).
+  await waitFor(() => handle !== null);
+  assert.notEqual(handle, null);
+  const started = handle!;
+
   const code = await started.stop();
   assert.equal(code, 0);
   assert.equal(started.daemon.stopped, true);
