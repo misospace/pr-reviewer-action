@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildPlanningContext, type HarnessDeps } from "../src/tools/harness.js";
+import { buildPlanningContext, traceTestAdmissionRows, MAX_TRACE_TEST_READS, type HarnessDeps } from "../src/tools/harness.js";
 import {
   buildTracePlan,
   readTracePlan,
@@ -237,6 +237,44 @@ test("#1702/#1703: test-first P1 acceptance clauses reserve test evidence reads"
   );
   assert.ok(tracePlanSection(plan, []).text.includes("req-9d075d469102"));
   assert.ok(tracePlanSection(plan, []).text.includes("req-515fd367d6b3"));
+});
+
+test("#1702: trace plan tests become bounded, exact changed-file read admissions", () => {
+  const texts = [
+    { id: "req-9d075d469102", text: "Tests for stale/mismatched head, red sibling, pending/skipped/neutral sibling, scope-limited jobs.", kind: "acceptance" },
+    { id: "req-515fd367d6b3", text: "Regression tests must cover the producer/consumer identity requirement.", kind: "acceptance" },
+    { id: "req-67157c1f302f", text: "The original/bounded name check must refuse evidence rather than discard a material test leg.", kind: "acceptance" },
+  ];
+  const plan = buildTracePlan({ ledger: { requirements: texts }, scopeIds: texts.map((r) => r.id), distributedHints: [] });
+  assert.deepEqual(plan.rows.map((row) => row.required_attempts), [2, 2, 1]);
+  const paths = [
+    "tests-v3/required-check-ci.test.ts",
+    "tests-v3/requirement-trace.test.ts",
+    "tests-v3/ci-wait.test.ts",
+    "tests-v3/requirement-trace-plan.test.ts",
+    "tests-v3/tools-loop.test.ts",
+    "src/tools/loop.ts",
+    "../tests/hostile.test.ts",
+    "/tmp/outside.test.ts",
+    "tests/../private.test.ts",
+    "tests\\hostile.test.ts",
+  ];
+  const admitted = traceTestAdmissionRows(plan.rows, paths, 4);
+  assert.equal(admitted.length, MAX_TRACE_TEST_READS);
+  assert.deepEqual(admitted.map((row) => row.id), ["trace:test-read-1", "trace:test-read-2", "trace:test-read-3", "trace:test-read-4"]);
+  assert.ok(admitted.every((row) => row.tools?.length === 1 && row.tools[0] === "read_file"));
+  assert.deepEqual(admitted.map((row) => row.tokens[0]), [
+    "tests-v3/ci-wait.test.ts",
+    "tests-v3/required-check-ci.test.ts",
+    "tests-v3/requirement-trace-plan.test.ts",
+    "tests-v3/requirement-trace.test.ts",
+  ]);
+  assert.equal(traceTestAdmissionRows(plan.rows, paths, 1).length, 1, "explicit envelope limit");
+  assert.deepEqual(traceTestAdmissionRows(plan.rows, paths, 0), []);
+  assert.deepEqual(traceTestAdmissionRows(plan.rows.slice(2), paths, 4), [],
+    "an ordinary code row talking about a test leg cannot force test-file reads");
+  assert.deepEqual(traceTestAdmissionRows(plan.rows, ["src/foo.ts", "README.md"], 4), [],
+    "a plan with no changed test files cannot invent test evidence");
 });
 
 test("#1519 (review): an overflow-topology requirement plans as distributed, not runtime", () => {
