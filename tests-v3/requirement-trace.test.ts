@@ -2830,6 +2830,72 @@ test("#1702/#1703: a CI test leg is not an explicit demand to provide regression
   }
 });
 
+test("#1703 replay: test-first linked acceptance demands both code and test provenance", () => {
+  const id = "req-515fd367d6b3";
+  const text = "Regression tests must cover this exact producer/consumer identity requirement, the critical negative variants (missing either side, unrelated names, invalid/stale citations, incompletely verified behavior), and any adjusted repair fallback/diagnostics.";
+  const otherId = "req-9d075d469102";
+  const otherText = "Tests for stale/mismatched head, red sibling, pending/skipped/neutral sibling, scope-limited jobs, `test report`, `coverage`, `upload tests`, `lint tests`, and a combined job that does not actually denote test execution.";
+  assert.equal(explicitlyRequiresTest(text), true);
+  assert.equal(explicitlyRequiresTest(otherText), true);
+  assert.equal(explicitlyRequiresTest("Keep the CI test leg on the reviewed head."), false);
+  assert.equal(explicitlyRequiresTest("The test suite must pass on CI."), false,
+    "test execution outcome is not a demand for new regression tests");
+
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gates/ci-wait.ts", [
+      "function renderCiEvidenceOutput(name: string) {",
+      "  if (ciCheckIdentity(name) !== ciCheckIdentity(name.slice(0, 200))) return '';",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id, text, kind: "acceptance" }, { id: otherId, text: otherText, kind: "acceptance" }]);
+    const coverage = (source: string, testPath: string, status: string = "satisfied") => ({
+      requirement_id: id, status,
+      evidence: [
+        { kind: "file", ref: source, detail: "original and bounded names are compared" },
+        { kind: "test", ref: testPath, detail: "regression tests exercise identity drift" },
+      ],
+    });
+    const valid = validateRequirementTrace([
+      coverage("src/gates/ci-wait.ts:2", "tests/real.test.ts:1"),
+      { requirement_id: otherId, status: "satisfied", evidence: [
+        { kind: "file", ref: "src/gates/ci-wait.ts:2", detail: "producer retains evidence" },
+        { kind: "test", ref: "tests/real.test.ts:1", detail: "negative suite cases" },
+      ] },
+    ], ledger, workspace);
+    assert.deepEqual(valid.rows.map(row => [row.proof, row.disposition]), [
+      ["test_required", "met"], ["test_required", "met"],
+    ]);
+
+    const variants = [
+      ["missing enforcement", coverage("", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["missing test", coverage("src/gates/ci-wait.ts:2", ""), "downgraded-no-valid-test-location"],
+      ["nonexistent enforcement", coverage("src/gates/absent.ts:2", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["stale enforcement line", coverage("src/gates/ci-wait.ts:999", "tests/real.test.ts:1"), "downgraded-no-valid-enforcement-location"],
+      ["nonexistent test", coverage("src/gates/ci-wait.ts:2", "tests/absent.test.ts:1"), "downgraded-no-valid-test-location"],
+      ["stale test line", coverage("src/gates/ci-wait.ts:2", "tests/real.test.ts:999"), "downgraded-no-valid-test-location"],
+    ] as const;
+    for (const [label, claim, note] of variants) {
+      const result = validateRequirementTrace([claim], ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
+      assert.equal(result.rows[0]?.disposition, "unverifiable", label);
+      assert.equal(result.rows[0]?.materiality, "material", label);
+      assert.ok(result.rows[0]?.notes.includes(note), label);
+      assert.match(finalTraceFailureLog(result), /final unresolved=1\/1/, label);
+    }
+    // A citation merely points at a file. The model must assess relevance;
+    // no validator shortcut may upgrade a declared unknown using unrelated
+    // otherwise well-formed refs.
+    const notVerified = validateRequirementTrace([
+      coverage("src/real.ts:1", "tests/real.test.ts:1", "unknown"),
+    ], ledgerWith([{ id, text, kind: "acceptance" }]), workspace);
+    assert.equal(notVerified.rows[0]?.disposition, "unverifiable");
+    assert.equal(notVerified.rows[0]?.materiality, "material");
+    assert.ok(notVerified.rows[0]?.notes.includes("model-declared-unknown"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#985: multiple named config files do not form a vacuous structural claim", () => {
   const workspace = makeWorkspace();
   try {
