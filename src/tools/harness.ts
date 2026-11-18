@@ -1698,7 +1698,7 @@ export function traceTestAdmissionRows(
   if (!needsTestEvidence || !Number.isFinite(maxRows) || maxRows < 1) return [];
   const safePath = (path: string): boolean =>
     path.length > 0 && path.length <= 200
-    && /^[A-Za-z0-9._/\\-]+$/.test(path)
+    && /^[A-Za-z0-9._/-]+$/.test(path)
     && !path.startsWith("/")
     && !path.split("/").includes("..")
     && isTestPath(path);
