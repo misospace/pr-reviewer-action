@@ -1238,6 +1238,14 @@ export async function driveToolLoop(
       + paths.map((path) => `\`${path}\``).join(", ")
       + ". A successful read is NOT semantic proof: assess the tests and report unknown if they do not establish the requirement.";
   };
+  // #1702: trace-file acquisition and review-owned prose are independent
+  // mandatory evidence surfaces. A trace note cannot replace and hide the
+  // Required Review Evidence window when both have pending rows.
+  const traceAndProseNote = (proseNote: string): string => {
+    const trace = traceReadNote();
+    return trace === "" ? proseNote
+      : anyActiveProseRow() ? `${trace}\n${proseNote}` : trace;
+  };
   const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
     pendingRows
       .filter((row) => row.obligation !== undefined && rowActive(row))
@@ -1552,7 +1560,7 @@ export async function driveToolLoop(
                     roundsLeft,
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   })) + mixedClause
-            : (traceReadNote() !== "" ? traceReadNote() : REQUIRED_EVIDENCE_TURN_NOTE)
+            : traceAndProseNote(REQUIRED_EVIDENCE_TURN_NOTE)
           : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
             ? LOW_BUDGET_TURN_NOTE
             : BUDGET_TURN_NOTE;
@@ -1800,7 +1808,7 @@ export async function driveToolLoop(
                   formatNote(leadClaimTailNotScarce ? RESERVE_LEAD_CLAIM_REFUSAL_NOTE : RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
-                : traceReadNote() || REQUIRED_EVIDENCE_REFUSAL_NOTE,
+                : traceAndProseNote(REQUIRED_EVIDENCE_REFUSAL_NOTE),
             },
           });
           roundRefused++;
