@@ -1229,7 +1229,7 @@ export async function driveToolLoop(
   const activeTraceTargets = (): string[] =>
     pendingRows.filter((row) => row.tools?.includes("read_file") && rowActive(row))
       .map((row) => row.tokens[0] ?? "")
-      .filter((path) => /^[A-Za-z0-9._/\\-]{1,200}$/.test(path))
+      .filter((path) => /^[A-Za-z0-9._\/-]{1,200}$/.test(path))
       .slice(0, 4);
   const traceReadNote = (): string => {
     const paths = activeTraceTargets();
