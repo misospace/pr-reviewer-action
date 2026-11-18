@@ -34,13 +34,14 @@ COPY tsconfig.json tsconfig.build.json ./
 RUN npm run build
 
 # ── shared runtime base ────────────────────────────────────────────────
-# `git` is required by the worker engine inside the acquired workspace
-# and kept in both targets for image parity. Lists are cleaned and
-# recommendations dropped to keep the surface minimal. Same digest pin as
-# the build stage (one base revision for the whole file).
+# Both targets need git and procps: runProcess refuses EVERY
+# subprocess unless pgrep is available to prove tree-cleanup capability.
+# Assert that the binaries exist while building the shared runtime layer.
+# Recommendations are dropped; the base image digest stays pinned.
 FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git procps \
+    && command -v git && command -v pgrep && command -v pkill \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
