@@ -111,6 +111,8 @@ jobs:
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
             --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
+          # Print the rendered policy identities if this assertion ever fails.
+          grep -n 'kind: NetworkPolicy' /var/tmp/render-kubernetes-executor-netpol.yaml || true
           [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor-netpol.yaml)" -eq 2 ]
 
       - name: kubeconform rendered output
