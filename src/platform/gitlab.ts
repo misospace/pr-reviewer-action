@@ -26,7 +26,7 @@
  *   MR that cannot answer that question fails the read cleanly rather than
  *   guessing "same repo" or "unknown". */
 
-import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+import { PlatformRequestError, requestJson, type FetchLike } from "./http.js";
 import { normalizeForgejoConversationComments, normalizeForgejoPrFiles } from "./normalize.js";
 import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
 import { parsePlatformBaseUrl } from "./urls.js";
@@ -365,8 +365,11 @@ export class GitLabAdapter implements PlatformReadAdapter {
         }
         const pagination = isObject(data.pagination) ? data.pagination : null;
         const nextPage = pagination === null ? null : pagination.next_page;
+        // A malformed `next_page` (not number, not null) fails the read; a
+        // present null ends it cleanly. (Anything else, including a missing
+        // key, is caught by the first check, so no `undefined` arm is needed.)
         if (typeof nextPage !== "number" && nextPage !== null) return "";
-        if (nextPage === null || nextPage === undefined) break;
+        if (nextPage === null) break;
       }
       return chunks.join("");
     } catch (error) {
