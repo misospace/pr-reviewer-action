@@ -5614,6 +5614,16 @@ test("#1688: certified seven-file coverage completes optional investigation befo
   assert.match(JSON.stringify(requests[2]), /Suite pending/);
   assert.deepEqual(result.corpus_diff_covered_files, files);
   assert.match(fs.readFileSync(path.join(root, "specialist-correctness.json"), "utf8"), /Suite pending/);
+  // #1729: the confirmation fact reaches the PERSISTED artifact. The harness
+  // writes `tool_loop_telemetry` from the loop's round records unchanged, so
+  // the documented field is observable in the artifact — not just on the
+  // in-process round callback.
+  const telemetry = result.tool_loop_telemetry as { rounds: Array<Record<string, unknown>> };
+  assert.deepEqual(
+    telemetry.rounds.map((round) => round.completion_confirmation_requested),
+    [false, true],
+    "the confirmation round is visible in tool_loop_telemetry.rounds",
+  );
 });
 
 test("coverage completion fails closed on uncovered or truncated manifests", async () => {
