@@ -374,9 +374,14 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
        the fixed roots as matching (root gid already equals fsGroup), so the
        kubelet never re-applies group-writability on later mounts and the
        fix survives restarts. chown needs CAP_CHOWN and the post-handoff
-       chmod needs CAP_FOWNER; everything else stays dropped. The mounts
-       themselves ride the persistence globalMounts, which the common
-       library applies to init containers as well as app containers. */ -}}
+        chmod needs CAP_FOWNER; everything else stays dropped. The mounts
+        themselves ride the persistence globalMounts, which the common
+        library renders for every container type (container.spec calls
+        the volumeMounts field for init containers too) — the charts CI
+        pins that the example render carries both claim-root mounts on
+        fix-roots; operators who relocate controller.paths.* must keep
+        the persistence globalMounts in sync (an unmounted root fails
+        loudly: the read-only rootfs makes the init container error). */ -}}
 {{- $podSecurity := dig "defaultPodOptions" "securityContext" dict $v -}}
 {{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}
 {{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}
@@ -398,7 +403,17 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
     "capabilities" (dict "drop" (list "ALL") "add" (list "CHOWN" "FOWNER"))
     "seccompProfile" (dict "type" "RuntimeDefault"))
 }}
-{{- $_ := set $main "initContainers" (mustMergeOverwrite ($main.initContainers | default dict) (dict "fix-roots" $fixRoots)) -}}
+{{- /* The common library models controllers.<name>.initContainers as a map
+       keyed by container name (bjw-s common 5.x pod.field.initContainers
+       ranges key/values), which is also the shape this merge preserves.
+       A raw Kubernetes container list is invalid for the library itself;
+       fail with the actionable shape instead of an opaque sprig merge
+       type error. */ -}}
+{{- $operatorInitContainers := $main.initContainers | default dict -}}
+{{- if not (kindIs "map" $operatorInitContainers) -}}
+{{- fail "controller.controllers.main.initContainers must be a map keyed by container name (the common-library shape); a raw Kubernetes container list is not supported" -}}
+{{- end -}}
+{{- $_ := set $main "initContainers" (mustMergeOverwrite $operatorInitContainers (dict "fix-roots" $fixRoots)) -}}
 {{- end -}}
 {{- $_ := set $v "controllers" $controllers -}}
 {{- end -}}

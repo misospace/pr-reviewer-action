@@ -221,8 +221,16 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
   assert.match(helpers, /chown %d:%d %s && chmod 2750 %s/, "the fix command must be chown + chmod 2750 (setgid preserved for #1631 group inheritance)");
   assert.match(
     helpers,
-    /\(mustMergeOverwrite \(\$main\.initContainers \| default dict\) \(dict "fix-roots"/,
+    /\(mustMergeOverwrite \$operatorInitContainers \(dict "fix-roots"/,
     "fix-roots must merge into controllers.main.initContainers, preserving operator-defined ones",
+  );
+  // The common library models initContainers as a map keyed by name; a
+  // raw Kubernetes container list must fail with that guidance instead of
+  // an opaque sprig merge type error.
+  assert.match(
+    helpers,
+    /\{\{- if not \(kindIs "map" \$operatorInitContainers\) -\}\}\n\{\{- fail "controller\.controllers\.main\.initContainers must be a map keyed by container name/,
+    "a list-shaped controllers.main.initContainers must fail closed with the map-shape guidance",
   );
   // The injection is scoped to the executor branch: a root init container
   // renders only when workerExecutor.mode is kubernetes.
@@ -256,6 +264,25 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
   assert.ok(
     workflow.includes(`if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then`),
     "charts.yaml must pin the controller-only absence assertion",
+  );
+  // Review follow-ups (#1736): CI must pin that fix-roots actually receives
+  // the claim-root mounts, that an operator-defined init container
+  // coexists with fix-roots, and that a list-shaped initContainers refuses.
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the runs mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-init-section.yaml | grep -q 'name: workspace-cache'`),
+    "charts.yaml must pin the workspace-cache mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: operator-init'`),
+    "charts.yaml must pin operator-defined init container preservation",
+  );
+  assert.ok(
+    workflow.includes("a raw list under controller.controllers.main.initContainers must refuse the render"),
+    "charts.yaml must pin the list-shaped initContainers refusal",
   );
   // The operator-facing contract is documented (acceptance criterion 3).
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");

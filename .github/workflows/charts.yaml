@@ -179,6 +179,39 @@ jobs:
           # is one long string the emitter wraps across lines.
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml \
             | tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '
+          # #1725 review: the fix-roots chown targets must actually exist in
+          # the init container — the common library must render the runs and
+          # workspace-cache globalMounts onto fix-roots, not just the app
+          # container. Extract only the initContainers section of the
+          # Deployment and require both mounts there.
+          awk '/initContainers:/,/containers:/' /var/tmp/render-kubernetes-executor.yaml \
+            > /var/tmp/render-init-section.yaml
+          grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-init-section.yaml | grep -q 'name: runs'
+          grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-init-section.yaml | grep -q 'name: workspace-cache'
+          # #1725 review: the fix-roots merge must preserve an
+          # operator-defined init container (the common-library map shape
+          # keyed by name) alongside the chart-owned one.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set controller.controllers.main.initContainers.operator-init.image.repository=busybox \
+            --set controller.controllers.main.initContainers.operator-init.image.tag=latest \
+            --set-json 'controller.controllers.main.initContainers.operator-init.command=["echo","ready"]' \
+            > /var/tmp/render-operator-init.yaml
+          awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: operator-init'
+          awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: fix-roots'
+          # Fail closed: a raw Kubernetes container LIST under
+          # controllers.main.initContainers is not the common-library map
+          # shape and must refuse the render with the actionable message,
+          # not an opaque sprig merge type error.
+          if list_err="$(helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-json 'controller.controllers.main.initContainers=[{"name":"operator-init","image":"busybox:latest"}]' 2>&1 >/dev/null)"; then
+            echo "a raw list under controller.controllers.main.initContainers must refuse the render" >&2
+            exit 1
+          elif ! printf '%s' "$list_err" | grep -q 'map keyed by container name'; then
+            echo "list-shaped initContainers must fail with the map-shape guidance, got: $list_err" >&2
+            exit 1
+          fi
           # Kubernetes-executor mode must also default off; explicit opt-in has two policies.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor.yaml; then
             echo "unexpected default NetworkPolicy in Kubernetes-executor chart" >&2

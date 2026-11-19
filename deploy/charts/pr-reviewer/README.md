@@ -176,7 +176,14 @@ and configured concurrency/model costs before first enabling the poll.
   the controller refuses to start exactly as above. Verify a running
   install from inside the controller pod with
   `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`,
-  expecting `2750 1000 65532` for each.
+  expecting `2750 1000 65532` for each. `fix-roots` reaches the roots
+  through the `persistence` `globalMounts` (the common library renders
+  them for init containers as well), so relocating `controller.paths.*`
+  requires updating the matching `globalMounts` paths in sync. Custom
+  init containers added under `controller.controllers.main.initContainers`
+  must use the common-library map shape keyed by container name; in
+  Kubernetes-executor mode the chart's `fix-roots` merge preserves them
+  next to its own container and refuses a raw Kubernetes container list.
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.
