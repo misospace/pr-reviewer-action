@@ -354,6 +354,51 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if not (empty $sa) -}}
 {{- $_ := set $sa "automountServiceAccountToken" true -}}
 {{- end -}}
+{{- /* #1725: the kubelet applies fsGroup to freshly provisioned claim roots
+       as group-WRITABLE (mode 0775, uid 0), and the runtime's own trust
+       check (assertTrustedDirChain in src/acquisition/mirror.ts) refuses any
+       cache root that is group/other-writable or not owned by the process
+       uid — every job would fail "cache root is writable by group or
+       other" before dispatch. The chart guarantees the documented
+       shared-group shape instead: root uid = the pod's runAsUser (the
+       controller), group = the shared worker group (fsGroup), mode 2750 —
+       owner-write only, with the shared group keeping read/execute, and
+       the setgid bit that fsGroup provisioning itself carries PRESERVED:
+       shareRunDirectoryGroup chmods the components below the root but
+       never chgroups them, so without root setgid each <jobId> dir would
+       inherit the controller's primary group (1000) instead of 65532 and
+       the worker would be refused traversal one level below the root.
+       A chart-owned
+       root init container chowns/chmods the claim roots before the
+       controller starts; fsGroupChangePolicy OnRootMismatch then treats
+       the fixed roots as matching (root gid already equals fsGroup), so the
+       kubelet never re-applies group-writability on later mounts and the
+       fix survives restarts. chown needs CAP_CHOWN and the post-handoff
+       chmod needs CAP_FOWNER; everything else stays dropped. The mounts
+       themselves ride the persistence globalMounts, which the common
+       library applies to init containers as well as app containers. */ -}}
+{{- $podSecurity := dig "defaultPodOptions" "securityContext" dict $v -}}
+{{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}
+{{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}
+{{- $quotedRoots := list -}}
+{{- range $claimRoot := (list $v.paths.runsRoot $v.paths.workspaceCacheRoot) -}}
+{{- $quotedRoots = append $quotedRoots (quote $claimRoot) -}}
+{{- end -}}
+{{- $rootArgs := join " " $quotedRoots -}}
+{{- $fixRoots := dict
+  "image" $container.image
+  "command" (list "/bin/sh" "-c")
+  "args" (list (printf "chown %d:%d %s && chmod 2750 %s" $rootUid $rootGid $rootArgs $rootArgs))
+  "securityContext" (dict
+    "runAsNonRoot" false
+    "runAsUser" 0
+    "runAsGroup" 0
+    "allowPrivilegeEscalation" false
+    "readOnlyRootFilesystem" true
+    "capabilities" (dict "drop" (list "ALL") "add" (list "CHOWN" "FOWNER"))
+    "seccompProfile" (dict "type" "RuntimeDefault"))
+}}
+{{- $_ := set $main "initContainers" (mustMergeOverwrite ($main.initContainers | default dict) (dict "fix-roots" $fixRoots)) -}}
 {{- end -}}
 {{- $_ := set $v "controllers" $controllers -}}
 {{- end -}}

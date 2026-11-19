@@ -197,6 +197,72 @@ test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key,
   );
 });
 
+test("#1725: kubernetes-executor mode injects the fix-roots claim-root init container, CI pins both renders", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The kubelet applies fsGroup to freshly provisioned claim roots as
+  // group-WRITABLE (0775, uid 0), which the runtime's cache-root trust
+  // walk (assertTrustedDirChain in src/acquisition/mirror.ts) refuses —
+  // the chart must fix the roots to the documented shared-group shape
+  // (2750, owner = the pod's runAsUser, group = the shared fsGroup; the
+  // setgid bit keeps the #1631 group inheritance below the root).
+  assert.ok(
+    helpers.includes('{{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}'),
+    "the fix must chown to the pod's runAsUser (default 1000)",
+  );
+  assert.ok(
+    helpers.includes('{{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}'),
+    "the fix must keep the shared fsGroup (default 65532)",
+  );
+  assert.match(
+    helpers,
+    /\(list \$v\.paths\.runsRoot \$v\.paths\.workspaceCacheRoot\)/,
+    "the fix must target exactly the runs and workspace-cache roots",
+  );
+  assert.match(helpers, /chown %d:%d %s && chmod 2750 %s/, "the fix command must be chown + chmod 2750 (setgid preserved for #1631 group inheritance)");
+  assert.match(
+    helpers,
+    /\(mustMergeOverwrite \(\$main\.initContainers \| default dict\) \(dict "fix-roots"/,
+    "fix-roots must merge into controllers.main.initContainers, preserving operator-defined ones",
+  );
+  // The injection is scoped to the executor branch: a root init container
+  // renders only when workerExecutor.mode is kubernetes.
+  const executorBranch = helpers.indexOf("{{- if $kubeExecutor -}}");
+  const fixRoots = helpers.indexOf('"fix-roots"');
+  assert.notEqual(executorBranch, -1, "the executor branch must exist");
+  assert.ok(fixRoots > executorBranch, "fix-roots must be injected inside the executor branch");
+  assert.equal(helpers.indexOf('"fix-roots"', fixRoots + 1), -1, "fix-roots must appear exactly once");
+  assert.match(
+    helpers,
+    /"capabilities" \(dict "drop" \(list "ALL"\) "add" \(list "CHOWN" "FOWNER"\)\)/,
+    "the fix container must run with only CHOWN/FOWNER added",
+  );
+  // CI pins the behavior on both renders: present in the
+  // Kubernetes-executor Deployment, absent from the controller-only one.
+  // Substring checks on the literal CI lines (the rendered fix command is
+  // one folded YAML scalar, hence the tr-joining pipeline).
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes(
+      `awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "name: fix-roots"`,
+    ),
+    "charts.yaml must pin the fix-roots render assertion for the Kubernetes executor",
+  );
+  assert.ok(
+    workflow.includes(
+      String.raw`| tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '`,
+    ),
+    "charts.yaml must pin the exact chown/chmod fix command in the rendered Deployment",
+  );
+  assert.ok(
+    workflow.includes(`if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then`),
+    "charts.yaml must pin the controller-only absence assertion",
+  );
+  // The operator-facing contract is documented (acceptance criterion 3).
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.match(chartReadme, /`2750`, owner uid 1000,\s+group 65532/);
+  assert.match(chartReadme, /fix-roots/);
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);

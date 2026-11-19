@@ -55,6 +55,13 @@ jobs:
             echo "controller Deployment must keep automountServiceAccountToken: false in controller-only mode" >&2
             exit 1
           fi
+          # #1725: the fix-roots claim-root init container is scoped to the
+          # shared-claim (Kubernetes-executor) posture; controller-only
+          # renders no root-fixing container at all.
+          if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then
+            echo "fix-roots init container must not render outside Kubernetes-executor mode" >&2
+            exit 1
+          fi
           # Policies are opt-in; verify default renders none, opt-in renders one.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
             echo "unexpected default NetworkPolicy in controller-only chart" >&2
@@ -160,6 +167,18 @@ jobs:
           # key is silently ignored, leaving the default-deny false).
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "automountServiceAccountToken: true"
           grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          # #1725: Kubernetes-executor mode must render the chart-owned
+          # fix-roots init container — kubelet provisions claim roots as
+          # group-writable 0775 uid 0, which the runtime's cache-root trust
+          # check refuses, so the chart must fix them to 2750 1000:65532
+          # before the controller starts. The setgid bit is part of the
+          # contract: below-root components inherit group 65532 only from
+          # it, and the runtime never chgroups them.
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "name: fix-roots"
+          # tr joins (and squeezes) the folded YAML scalar: the fix command
+          # is one long string the emitter wraps across lines.
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml \
+            | tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '
           # Kubernetes-executor mode must also default off; explicit opt-in has two policies.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-kubernetes-executor.yaml; then
             echo "unexpected default NetworkPolicy in Kubernetes-executor chart" >&2

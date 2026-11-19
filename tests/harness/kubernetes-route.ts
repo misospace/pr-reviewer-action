@@ -176,10 +176,12 @@ class HarnessCredentialResolver implements WorkerCredentialResolver {
  * the envelope 0600 and the worker writes the result 0600, so the double
  * relaxes the two shared files around the launch — the envelope becomes
  * readable for the worker's uid, and the result file is pre-created
- * writable so the controller can read it back. The shipped chart does not
- * give the controller (uid 1000) and the worker pod (uid 65532) a claim
- * they can both read, so that relaxation is a stand-in the route reports
- * rather than a property the deployment has today (issue #1631). */
+ * writable so the controller can read it back. A real deployment gets
+ * that shared access from the cluster: the chart pins the shared-group
+ * shape (fsGroup 65532, plus the #1725 fix-roots init container fixing
+   * the claim roots to 2750 1000:65532). The double has no kubelet to
+ * reproduce that group application, so the relaxation stands in for it
+ * and the route reports it (issues #1631/#1725). */
 class DockerClusterDouble implements KubernetesApi {
   private readonly jobs = new Map<string, JobRecord>();
   /** Whether the double had to relax the shared claim's file permissions:

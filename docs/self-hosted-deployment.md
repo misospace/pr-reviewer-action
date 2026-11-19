@@ -243,6 +243,23 @@ unknown), and mount the shared claims on storage whose driver honors
 `None`-policy drivers get no group application and the exchange fails
 closed).
 
+Kubelet applies `fsGroup` to a freshly provisioned claim with a
+group-WRITABLE root (`0775`, uid 0), which the runtime's own cache-root
+trust check refuses — every job would fail "cache root is writable by
+group or other" before dispatch (#1725). In Kubernetes-executor mode the
+chart therefore renders a `fix-roots` init container that fixes the runs
+and workspace-cache claim roots to the shared-group shape before the
+controller starts: mode `2750`, owner uid 1000, group 65532 — owner-write
+only, with the shared group keeping the read/execute the #1631 exchange
+needs and the setgid bit keeping group inheritance for everything the
+runtime creates below the root (it chmods those components but never
+chgroups them). `fsGroupChangePolicy: OnRootMismatch` keeps the fix
+durable: once
+the root carries the shared group, the kubelet no longer re-applies
+group-writability. Operators mounting pre-existing claims must provide
+the same root shape themselves; the contract is documented in the chart
+README.
+
 External secret handling is the operator's choice: every secret can come
 from an `existingSecret`, so External Secrets, Sealed Secrets, or your vault
 controller all work.

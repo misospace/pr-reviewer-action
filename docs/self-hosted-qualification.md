@@ -185,10 +185,12 @@ controller writes the execution envelope `0600` as its own uid and the
 worker writes the result `0600` as the pod's uid, so the double relaxes
 those two files around the launch (the envelope becomes readable for the
 worker's uid, the result file is pre-created writable so the controller
-can read it back). The shipped chart does not give the controller
-(`runAsUser` 1000) and the worker pod (uid 65532, pinned by the
-executor) a claim they can both read, so that relaxation is a stand-in,
-not a property the deployment has today — see issue #1631. The route
+can read it back). A real deployment gets that shared access from the
+cluster: the chart pins the shared-group shape (`fsGroup: 65532`, and
+since #1725 a `fix-roots` init container fixing each shared claim's root
+to `2750`, uid 1000, group 65532). The double has no kubelet to
+reproduce that group application, so the relaxation is a stand-in the
+route reports, not something the harness exercises. The route
 reports whether it relied on the relaxation, so a run never hides it.
 
 A harness-owned stub model server makes the parity assertable: it is a

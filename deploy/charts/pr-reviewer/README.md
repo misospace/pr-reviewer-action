@@ -151,6 +151,32 @@ and configured concurrency/model costs before first enabling the poll.
   claims is what lets the controller read the worker's result file and
   the worker read the controller's envelope across the uid boundary
   (#1631).
+- **Shared-claim volume-root contract (#1725): `2750`, owner uid 1000,
+  group 65532.** When `workerExecutor.mode: kubernetes` provisions shared
+  claims, kubelet applies `fsGroup` to each freshly provisioned root as
+  group-writable (`0775`, uid 0) — and the runtime's own acquisition
+  check refuses any cache root that is group/other-writable or not owned
+  by the controller uid (`assertTrustedDirChain` in
+  `src/acquisition/mirror.ts`), so every job would fail before dispatch.
+  The chart therefore ships a `fix-roots` init container (rendered only
+  in Kubernetes-executor mode): it runs as root with only `CHOWN`/`FOWNER`
+  added, `chown`s the runs and workspace-cache claim roots to the
+  controller uid plus the shared group, and `chmod`s them to `2750`.
+  `2750` keeps the shared group's read/execute (which the #1631 exchange
+  needs) while stripping the group write the check refuses, and keeps the
+  setgid bit that fsGroup provisioning itself carries: the runtime
+  chmods the components below the claim root but never chgroups them, so
+  without the setgid bit each run directory would inherit the
+  controller's primary group (1000) instead of 65532 and the worker
+  would be refused traversal one level below the root.
+  `fsGroupChangePolicy: OnRootMismatch` makes the fix durable: once the
+  root matches the shared group, the kubelet stops re-applying. Operators
+  mounting pre-existing claims must ensure the same root shape — uid
+  1000, group 65532, mode `2750` (no group/other write, setgid set) — or
+  the controller refuses to start exactly as above. Verify a running
+  install from inside the controller pod with
+  `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`,
+  expecting `2750 1000 65532` for each.
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.
