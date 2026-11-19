@@ -299,7 +299,7 @@ test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping —
   // that false premise was the review blocker on #1736.
   const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
   assert.doesNotMatch(helpers, /never re-applies|treats\s*\n?\s*the fixed roots as matching/, "helper comment must not claim OnRootMismatch skips a fixed root");
-  assert.match(helpers, /SUPERSSET of 0770[\s\S]*setgid set/, "helper comment must state the real skip condition");
+  assert.match(helpers, /superset of 0770[\s\S]*setgid set/, "helper comment must state the real skip condition");
   assert.match(helpers, /volume_linux\.go/, "helper comment must cite the kubelet source");
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");
   assert.doesNotMatch(chartReadme, /makes the fix durable: once the/, "chart README must not keep the OnRootMismatch durability claim");

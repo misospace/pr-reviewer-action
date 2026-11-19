@@ -589,7 +589,7 @@ export interface KubernetesJobManifest {
        * plus the setgid bit the deployment provisions on the claim root
        * (#1631/#1725); kubelet group application must stay out. With
        * fsGroup set, OnRootMismatch skips only when the root GID matches
-       * AND the root mode is a SUPERSSET of 0770 WITH setgid
+       * AND the root mode is a superset of 0770 WITH setgid
        * (`requiresPermissionChange`, kubernetes `pkg/volume/volume_linux.go`),
        * so the controller's trusted non-group-writable `2750` root can
        * never match: every worker launch would recursively restyle the

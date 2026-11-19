@@ -372,7 +372,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
        root init container chowns/chmods the claim roots before the
        controller starts. Durability is NOT fsGroupChangePolicy
        OnRootMismatch (#1736): that policy skips only when the root GID
-       matches AND the root mode is a SUPERSSET of 0770 WITH setgid set
+        matches AND the root mode is a superset of 0770 WITH setgid set
        (requiresPermissionChange, kubernetes pkg/volume/volume_linux.go —
        its own example treats 0750 as a mismatch), and a trusted root may
        never be group-writable, so a 2750 root always re-triggers. The fix
