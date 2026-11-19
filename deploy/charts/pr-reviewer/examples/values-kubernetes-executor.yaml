@@ -109,6 +109,19 @@ controller:
     workspace-cache:
       existingClaim: pr-reviewer-workspace
 
+# On Cilium kube-proxy-replacement clusters, also allow the Kubernetes
+# API on TCP 6443 — the base 443 egress rule does not match there, and
+# Job creation plus the credential sweep fail silently (#1714):
+#
+#   networkPolicy:
+#     enabled: true
+#     additionalEgress:
+#       - to:
+#           - ipBlock:
+#               cidr: 10.69.1.20/29 # your control-plane/node subnet
+#         ports:
+#           - protocol: TCP
+#             port: 6443
 workerExecutor:
   mode: kubernetes
   # Same namespace as the controller: the #734 shared-run-directory

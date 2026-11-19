@@ -231,6 +231,58 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
 
+### Kubernetes API egress for Kubernetes-executor mode (#1714)
+
+When `networkPolicy.enabled` is on and `workerExecutor.mode` is
+`kubernetes`, the controller needs egress to the Kubernetes API: it creates
+and polls the per-review worker Jobs (`src/executor/kubernetes.ts`) and
+manages the per-run credential Secrets (`src/executor/kubernetes-credential-store.ts`,
+including the lifetime sweep). The chart's base egress rules — DNS, TCP
+443, and PostgreSQL 5432 — do **not** cover this on every cluster.
+
+Why: the API server's `kubernetes` Service is a ClusterIP on port 443, but
+the real API server listens on node port 6443 and runs with
+`hostNetwork: true`. How egress policy sees the connection depends on the
+CNI data plane:
+
+- **Classic kube-proxy (iptables/IPVS):** the pod's connection to the
+  ClusterIP is policy-evaluated **before** DNAT, so the generic TCP 443
+  egress rule already allows it. No exception needed.
+- **Cilium with `kube-proxy-replacement=true`:** the connection is
+  redirected at socket level to the API server backend
+  (`<nodeIP>:6443`), and egress policy is evaluated against that
+  redirected destination. The 443 rule never matches and the connection
+  is silently dropped. Verified live in the #725 pilot on Talos + Cilium
+  (kube-proxy-replacement strict): from the controller pod,
+  `<ClusterIP>:443` timed out while a real API server endpoint
+  `<nodeIP>:6443` was dropped by policy, even though RBAC passed.
+
+The symptom is silent: Job creation and the credential sweep fail with
+"the API call did not complete" (status `null`), not a permission error —
+`kubectl auth can-i` succeeds because only the network path is missing.
+
+Fix: add an `additionalEgress` rule for the API server on TCP 6443. Node
+addresses are cluster-specific, so the chart ships no default. The
+verified pilot snippet (controller policy is the only one that needs the
+API — worker pods never mount a token and never call it):
+
+```yaml
+networkPolicy:
+  enabled: true
+  additionalEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.69.1.20/29 # your control-plane/node subnet
+      ports:
+        - protocol: TCP
+          port: 6443
+```
+
+Operators on Cilium can instead express the same allowance with a
+CiliumNetworkPolicy using `toEntities: [kube-apiserver]`, which resolves
+the API server endpoints automatically; the chart's stock NetworkPolicy
+cannot do that, so the ipBlock exception above is the portable form.
+
 The Kubernetes worker executor pins worker pods to uid/gid 65532, so the
 controller deployment must share group 65532 with the worker pin (the
 chart sets `fsGroup: 65532`; operators running the controller outside the
