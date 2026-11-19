@@ -3,6 +3,8 @@ import { ForgejoAdapter } from "../platform/forgejo.js";
 import { giteaAdapterFromEnv } from "../platform/gitea.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
+import { GitLabAdapter } from "../platform/gitlab.js";
+import { gitlabTokenFromEnv } from "../platform/gitlab-auth.js";
 import { declaredForgeId, resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend, tangledContextFromEnv } from "../platform/tangled.js";
 import { TangledAdapter } from "../platform/tangled-adapter.js";
@@ -73,6 +75,19 @@ export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): 
       ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
         ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }
         : {}),
+      ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+    });
+  }
+  // #740: GitLab is its own wire family — never a GitHub or Forgejo fallback.
+  // There is NO default endpoint: an empty GITLAB_API_URL fails at the
+  // adapter constructor, and a GitLab declaration carrying the
+  // Forgejo/Gitea-family auth settings fails in `gitlabTokenFromEnv`.
+  if (platform === "gitlab") {
+    return new GitLabAdapter({
+      repo,
+      prNumber,
+      baseUrl: env.GITLAB_API_URL ?? "",
+      token: gitlabTokenFromEnv(env),
       ...(fetchImpl !== undefined ? { fetchImpl } : {}),
     });
   }

@@ -124,14 +124,14 @@ export interface ForgeIntegration {
 
 /** The canonical forge platform family (#1682): the platform identity that
  * flows through `CanonicalForgeEvent`, `ReviewJob`, the generation id, the
- * queue/state records, and the execution envelope — closed at `github` |
- * `forgejo` there. A `gitea` integration belongs to the `forgejo` family
- * (Forgejo is a Gitea fork; the wire formats are the same), so `kind:
- * gitea` never re-keys a generation and never splits an instance's
- * webhook/poll convergence. ONE definition: the platform seam owns it
- * (`forgeWireFamily`, #1678), and every family-aware guard compares through
- * this function. */
-export type ForgeFamily = "github" | "forgejo";
+ * queue/state records, and the execution envelope — the three REST families
+ * `github` | `forgejo` | `gitlab`. A `gitea` integration belongs to the
+ * `forgejo` family (Forgejo is a Gitea fork; the wire formats are the same),
+ * so `kind: gitea` never re-keys a generation and never splits an instance's
+ * webhook/poll convergence; a `gitlab` integration (#740) is its OWN family.
+ * ONE definition: the platform seam owns it (`forgeWireFamily`, #1678), and
+ * every family-aware guard compares through this function. */
+export type ForgeFamily = "github" | "forgejo" | "gitlab";
 
 export function forgeFamily(kind: ForgeIntegration["kind"]): ForgeFamily {
   return forgeWireFamily(kind);
@@ -403,7 +403,7 @@ function validateForgeIntegration(value: unknown, path: string): ForgeIntegratio
   // The closed declared-forge vocabulary is the platform seam's (`isForgeId`),
   // not a second list here (#1683).
   if (!isForgeId(kind)) {
-    fail(`${path}.kind`, "must be 'github', 'forgejo', or 'gitea'");
+    fail(`${path}.kind`, "must be 'github', 'forgejo', 'gitea', or 'gitlab'");
   }
   return Object.freeze({
     name: profileNameAt(item.name, `${path}.name`),

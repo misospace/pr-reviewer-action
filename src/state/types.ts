@@ -34,8 +34,8 @@ import { containsSecretShapedContent, isCanonicalJsonEncoding } from "../context
 import type { JobLifecycleState } from "../queue/types.js";
 import { isPlainObject } from "../platform/object.js";
 
-/** The two platforms the controller knows (mirrors `ReviewJob`). */
-export type ControlPlanePlatform = "github" | "forgejo";
+/** The platforms the controller knows (mirrors `ReviewJob`). */
+export type ControlPlanePlatform = "github" | "forgejo" | "gitlab";
 
 /** The run record's review-kind (mirrors `ReviewJobKind`). */
 export type RunKind = "review" | "follow_up";
@@ -107,7 +107,7 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
 }
 
 function isPlatform(value: unknown): value is ControlPlanePlatform {
-  return value === "github" || value === "forgejo";
+  return value === "github" || value === "forgejo" || value === "gitlab";
 }
 
 function isRunKind(value: unknown): value is RunKind {

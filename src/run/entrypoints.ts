@@ -11,9 +11,12 @@ import {
   giteaTokenFromEnv,
 } from "../platform/gitea.js";
 import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
+import { GitLabAdapter } from "../platform/gitlab.js";
+import { gitlabTokenFromEnv } from "../platform/gitlab-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
+import { GitLabPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
 import { requireTangledHeadReadConfig } from "../platform/tangled-head.js";
 import { readReviewedTangledIdentityFromRunDir, readReviewedTicketCurrentHead } from "../platform/tangled-ticket.js";
@@ -91,6 +94,17 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
       ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
         ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }
         : {}),
+    });
+  }
+  // #740: GitLab is its own wire family, explicit-only in the resolver. No
+  // default endpoint: an empty GITLAB_API_URL fails at the adapter
+  // constructor; a cross-family auth config fails in `gitlabTokenFromEnv`.
+  if (platform === "gitlab") {
+    return new GitLabAdapter({
+      repo,
+      prNumber,
+      baseUrl: env.GITLAB_API_URL ?? "",
+      token: gitlabTokenFromEnv(env),
     });
   }
   const token = ghToken(env);
@@ -851,7 +865,14 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
   // API choice on the wire family, so the two can never disagree.
   const forge = declaredForgeId(env.PLATFORM, platform);
   const family = forgeWireFamily(forge);
-  const token = family === "forgejo" ? (forge === "gitea" ? giteaTokenFromEnv(env) : forgejoTokenFromEnv(env)) : ghToken(env);
+  // #740: GitLab authenticates with GITLAB_TOKEN (attached as the
+  // PRIVATE-TOKEN header by `GitLabPublishApi`); `gitlabTokenFromEnv` refuses
+  // a cross-family auth configuration before anything is constructed.
+  const token = family === "forgejo"
+    ? (forge === "gitea" ? giteaTokenFromEnv(env) : forgejoTokenFromEnv(env))
+    : family === "gitlab"
+      ? gitlabTokenFromEnv(env)
+      : ghToken(env);
   const apiOptions = {
     repo,
     prNumber,
@@ -870,7 +891,18 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
     // construction; ambient `PR_REVIEWER_RUN_DIR` is never consulted here.
     // A caller that passes no run dir gets only the fresh-read fallback.
     reviewedDiffFromRunDir(runDir) ?? buildAdapter(env).getPrDiff();
-  const api: PublishPlatformApi = family === "forgejo"
+  // #740: GitLab's publish API takes the raw GITLAB_TOKEN (the PRIVATE-TOKEN
+  // header is attached at the transport) and an explicit GITLAB_API_URL —
+  // there is no default endpoint, so an empty base fails at the constructor
+  // rather than silently targeting gitlab.com or the GitHub API.
+  const api: PublishPlatformApi = family === "gitlab"
+    ? new GitLabPublishApi({
+        repo,
+        prNumber,
+        baseUrl: env.GITLAB_API_URL ?? "",
+        ...(token !== undefined ? { token } : {}),
+      })
+    : family === "forgejo"
     ? (forge === "gitea"
         ? createGiteaPullRequestClient({
             ...apiOptions,

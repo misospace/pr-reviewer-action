@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   FORGEJO_CAPABILITIES,
+  GITEA_CAPABILITIES,
+  GITLAB_CAPABILITIES,
   GITHUB_CAPABILITIES,
   capabilitiesFor,
   requireCapability,
@@ -26,8 +28,21 @@ test("capability manifests: github all true, forgejo degraded on checkRuns and g
     commitStatus: true,
     graphql: false,
   });
+  // #1678: upstream Gitea declares the Forgejo baseline verbatim.
+  assert.equal(GITEA_CAPABILITIES, FORGEJO_CAPABILITIES);
+  // #740: GitLab's own matrix: notes/discussions/reviews/statuses, degraded
+  // on checkRuns (statuses carry the CI signal) and graphql (unused).
+  assert.deepEqual(GITLAB_CAPABILITIES, {
+    nativeReview: true,
+    stickyComment: true,
+    inlineReviewComments: true,
+    checkRuns: false,
+    commitStatus: true,
+    graphql: false,
+  });
   assert.ok(Object.isFrozen(GITHUB_CAPABILITIES));
   assert.ok(Object.isFrozen(FORGEJO_CAPABILITIES));
+  assert.ok(Object.isFrozen(GITLAB_CAPABILITIES));
 });
 
 test("requireCapability: github passes every capability name", () => {
@@ -74,8 +89,25 @@ test("requireCapability rejects unknown capability names instead of defaulting t
   }
 });
 
+test("requireCapability: gitlab checkRuns degrades to commit status, graphql degrades without fallback", () => {
+  const checkRuns = requireCapability("gitlab", "checkRuns");
+  assert.equal(checkRuns.ok, false);
+  if (checkRuns.ok) assert.fail("expected ok:false");
+  assert.equal(checkRuns.platform, "gitlab");
+  assert.ok(checkRuns.degradation.includes("commit status"));
+  const graphql = requireCapability("gitlab", "graphql");
+  assert.equal(graphql.ok, false);
+  if (graphql.ok) assert.fail("expected ok:false");
+  assert.ok(graphql.degradation.includes("graphql"));
+  for (const capability of ["stickyComment", "nativeReview", "inlineReviewComments", "commitStatus"] as CapabilityName[]) {
+    assert.deepEqual(requireCapability("gitlab", capability), { ok: true });
+  }
+});
+
 test("capabilitiesFor: identity per known platform, throws on unknown", () => {
   assert.equal(capabilitiesFor("github"), GITHUB_CAPABILITIES);
   assert.equal(capabilitiesFor("forgejo"), FORGEJO_CAPABILITIES);
-  assert.throws(() => capabilitiesFor("gitlab" as ForgePlatform));
+  assert.equal(capabilitiesFor("gitea"), GITEA_CAPABILITIES);
+  assert.equal(capabilitiesFor("gitlab"), GITLAB_CAPABILITIES);
+  assert.throws(() => capabilitiesFor("bitbucket" as ForgePlatform));
 });

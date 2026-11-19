@@ -701,7 +701,7 @@ test("a hand-built event with a malformed scoping identity field builds no job (
     { prNumber: 0 },
     { prId: -1 },
     { fork: "yes" as unknown as boolean },
-    { platform: "gitlab" as unknown as "github" | "forgejo" },
+    { platform: "bitbucket" as unknown as "github" | "forgejo" },
   ];
   for (const overrides of variants) {
     assert.equal(buildReviewJob(makeEvent(overrides)), null);

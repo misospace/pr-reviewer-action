@@ -711,3 +711,94 @@ test("the platform-aware host binds the GITHUB intake: it requires X-Hub-Signatu
   assert.equal(dispatched[0]!.repoFullName, "org/repo");
   assert.equal(dispatched[0]!.prNumber, 7);
 });
+
+// ── #740: the GitLab intake is what the `gitlab` platform binds ──
+//
+// A correctly authenticated GitLab merge-request delivery reaches the
+// dispatch seam as a canonical GitLab event, and a delivery carrying any
+// other platform's authenticator is refused at the GitLab auth boundary —
+// the single router/dispatch/budget wiring is exactly what the other
+// platform tests pin, so only the intake swap needs pinning here.
+
+function gitlabMrPayload(): Record<string, unknown> {
+  return {
+    object_kind: "merge_request",
+    event_type: "merge_request",
+    user: { name: "Bob", username: "bob" },
+    project: { id: 100, path_with_namespace: "acme/widgets" },
+    object_attributes: {
+      iid: 4,
+      id: 99,
+      source_project_id: 100,
+      target_project_id: 100,
+      last_commit: { id: HEAD_SHA, message: "feat: thing" },
+      work_in_progress: false,
+      state: "opened",
+      action: "open",
+      title: "Add thing",
+      source_branch: "feature",
+      target_branch: "main",
+      url: "https://gitlab.example/acme/widgets/-/merge_requests/4",
+    },
+    repository: { name: "widgets", url: "git@gitlab.example:acme/widgets.git" },
+  };
+}
+
+test("the platform-aware host binds the GITLAB intake: it accepts a token-authenticated merge-request delivery and refuses a Forgejo one", async (t) => {
+  const { adapter } = makeAdapter(QUESTION);
+  const dispatched: CanonicalForgeEvent[] = [];
+  const gitlabSecret = "gitlab-host-secret-0123456789";
+  const host = createOperatorHost({
+    platform: "gitlab",
+    secret: gitlabSecret,
+    durableStateDir: makeDurableStateDir(t),
+    followUp: makeFollowUpOptions(adapter),
+    dispatch: (event) => {
+      dispatched.push(event);
+    },
+  });
+  const h = await startTestHandler(host.handler);
+  t.after(() => h.close());
+
+  // A Forgejo-style delivery carries no `X-Gitlab-Event` header at all: the
+  // GitLab intake refuses it on the event header before any auth work — the
+  // same fixed-body contract the GitHub intake pins for its own header.
+  const forgejoBody = JSON.stringify(makeForgejoSyncPayload());
+  const forgejoRes = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "pull_request",
+      "x-gitea-signature": computeForgejoWebhookSignature(SECRET, forgejoBody),
+    },
+    body: forgejoBody,
+  });
+  assert.equal(forgejoRes.status, 400);
+  assert.equal(dispatched.length, 0, "a Forgejo delivery never reaches dispatch through the GitLab intake");
+
+  // The event header alone is not enough: without the secret token the same
+  // body is refused at the auth boundary with the fixed 401 body.
+  const body = JSON.stringify(gitlabMrPayload());
+  const unauthenticatedRes = await fetch(h.url, {
+    method: "POST",
+    headers: { "x-gitlab-event": "Merge Request Hook" },
+    body,
+  });
+  assert.equal(unauthenticatedRes.status, 401);
+  assert.equal(dispatched.length, 0);
+
+  const res = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-gitlab-event": "Merge Request Hook",
+      "x-gitlab-token": gitlabSecret,
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "pr_opened" });
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]!.platform, "gitlab");
+  assert.equal(dispatched[0]!.kind, "pr_opened");
+  assert.equal(dispatched[0]!.repoFullName, "acme/widgets");
+  assert.equal(dispatched[0]!.prNumber, 4);
+});

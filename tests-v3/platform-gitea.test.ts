@@ -39,11 +39,14 @@ test("resolvePlatform: 'gitea' selects the Forgejo/Gitea wire family", () => {
 test("resolvePlatform: 'auto' never selects Gitea, and the unsupported list names it", () => {
   assert.equal(resolvePlatform("auto", INSTANCE, "", ""), "forgejo");
   assert.equal(resolvePlatform("auto", "", INSTANCE, ""), "forgejo");
+  // GitLab joined the vocabulary (#740) as an explicit-only declaration;
+  // "gogs" remains an outside word the diagnostic must reject by name.
+  assert.equal(resolvePlatform("auto", "https://gitlab.example.com", "", ""), "forgejo");
   assert.throws(
-    () => resolvePlatform("gitlab", "", "", ""),
+    () => resolvePlatform("gogs", "", "", ""),
     (e: unknown) =>
       e instanceof Error
-      && e.message === "unsupported PLATFORM 'gitlab' (expected github|forgejo|gitea|tangled|auto)",
+        && e.message === "unsupported PLATFORM 'gogs' (expected github|forgejo|gitea|gitlab|tangled|auto)",
   );
 });
 

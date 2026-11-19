@@ -201,6 +201,7 @@ No Action input controls this: the signatures are a fixed allowlist. Every failu
 | Local model issues and common misconfigurations | [Troubleshooting](docs/troubleshooting.md) |
 | Repository-owned config file | [Repository config](docs/repository-config.md) |
 | Reviewing on Tangled (experimental) | [Tangled](docs/tangled.md) |
+| Reviewing on GitLab (adapters shipped, daemon wiring pending) | [GitLab](docs/gitlab.md) |
 | Reviewing pull requests from forks | [Fork reviews](docs/fork-review.md) |
 | Upgrading from v2 | [v2 → v3 migration](docs/v3-migration.md) |
 

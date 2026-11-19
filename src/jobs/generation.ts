@@ -20,7 +20,7 @@ import type { BuildJobOptions, ReviewJob, ReviewJobKind } from "./types.js";
 
 /** The exact fields the generation id is a function of. */
 export interface GenerationIdentity {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly repoFullName: string;
   readonly prNumber: number;
@@ -203,7 +203,7 @@ export const FORGE_INTEGRATION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   hostile value can never raise.
  * - the scoping identity fields are well-formed (the builder's own
  *   fail-closed guard for hand-built events): `platform` is exactly
- *   "github" or "forgejo"; `installationId` is a string and, when
+ *   "github", "forgejo" or "gitlab"; `installationId` is a string and, when
  *   non-empty, matches `INSTALLATION_ID_PATTERN` (the shared canonical
  *   installation-id form imported from the event boundary);
  *   `repoFullName` is a non-empty string; `prNumber` is a safe integer
@@ -394,7 +394,9 @@ export function buildReviewJob(
   // the literal text "undefined" in the identity and hash identically to
   // a real value of that text (the same "two distinct tuples, one id"
   // class the \n/\r guard prevents), so the build must not hash them.
-  if (event.platform !== "github" && event.platform !== "forgejo") return null;
+  if (event.platform !== "github" && event.platform !== "forgejo" && event.platform !== "gitlab") {
+    return null;
+  }
   if (typeof event.installationId !== "string") return null;
   if (event.installationId !== "" && !INSTALLATION_ID_PATTERN.test(event.installationId)) {
     return null;

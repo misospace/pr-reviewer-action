@@ -355,6 +355,17 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   }
   const platform = instance.forges[0]!.kind;
   const forgeEndpoint = instance.forges[0]!.endpoint;
+  if (platform === "gitlab") {
+    // #740: the GitLab adapter stack (ingress intake, read/publish
+    // adapters) exists at the platform seam, but the controller daemon's
+    // capability composition, credential wiring and reconciliation for
+    // GitLab are not landed yet. Refuse at startup — the daemon must
+    // never compose a GitLab instance on another family's adapters.
+    throw new StartupRefusal(
+      "the instance config declares a gitlab forge integration, but controller-daemon GitLab composition is not wired yet (#1677)",
+      2,
+    );
+  }
 
   // ── forge material (platform-specific, fail closed).
   let githubAppId = "";
@@ -761,7 +772,7 @@ const MAX_TRACKED_RUN_PLANS = 256;
 export interface CredentialPlanJob {
   readonly jobId: string;
   readonly repoFullName: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly fork: boolean;
   /** The serving forge integration's identity (#1440), when the job names
@@ -796,7 +807,7 @@ export interface WorkerCredentialBinding {
  * authentication, exactly the pre-existing posture. */
 function servingForgePublishCredentialRef(
   instance: InstanceConfig,
-  platform: "github" | "forgejo",
+  platform: "github" | "forgejo" | "gitlab",
   forgeIntegration: string,
 ): string {
   if (forgeIntegration !== "") {
@@ -959,7 +970,7 @@ export function createWorkerCredentialBinding(deps: {
  * only bounds reuse within that process. */
 export function createModelCredentialVault(options: {
   readonly instance: InstanceConfig;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly modelCredentialMaterial: ReadonlyMap<string, string>;
 }): InMemorySecretVault {
   const profilesByReference = new Map<string, string[]>();

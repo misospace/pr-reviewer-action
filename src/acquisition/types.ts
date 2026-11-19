@@ -68,7 +68,7 @@ export interface WorkspaceInfo {
    * declared `gitea` acquisition records the `forgejo` family it speaks, so
    * no durable record carries a product id. The declared id lives in the
    * mirror's own directory key (the acquisition seam's vocabulary). */
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly repoFullName: string;
   readonly createdAtMs: number;
 }

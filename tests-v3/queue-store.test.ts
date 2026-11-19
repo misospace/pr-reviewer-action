@@ -521,7 +521,7 @@ test("file store: a malformed nested job fails the load closed", () => {
       ["nested job missing runId", { job: rawJobWithout("runId") }],
       ["invalid kind", { job: rawJob({ kind: "reviewer" }) }],
       ["invalid trigger", { job: rawJob({ trigger: "schedule" }) }],
-      ["invalid platform", { job: rawJob({ platform: "gitlab" }) }],
+      ["invalid platform", { job: rawJob({ platform: "bitbucket" }) }],
       ["non-integer prNumber", { job: rawJob({ prNumber: 7.5 }) }],
       ["non-positive prNumber", { job: rawJob({ prNumber: 0 }) }],
       ["negative prId", { job: rawJob({ prId: -1 }) }],
