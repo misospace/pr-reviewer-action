@@ -335,6 +335,29 @@ ON; the chart exposes it as `controller.admin.dashboard` (default
 `false`, which leaves the flag unset; `true` requires the admin surface)
 — see `docs/architecture/operations-dashboard.md`.
 
+The chart's values define a single Service (`controller.service.webhook`, the
+POST-only intake on 8080); the admin listener on 8081 has no Service of its
+own. That is why turning on the dashboard alone does not make it reachable:
+exposing the admin surface is the operator's ingress decision, and because
+the shell carries no data it is served unauthenticated, so network access
+control is the remaining guard on who can reach it (all admin data stays
+bearer-protected). Reach it with the bjw-s `common` `service` and `route`
+passthrough — add an `admin` port to a controller Service and route the
+dashboard/admin paths to it. The chart README ("Reaching the dashboard from
+outside the pod") carries the full Gateway values. Two contract notes hold
+wherever you route it:
+
+- `/admin` and `/dashboard` must reach the same origin (the admin port). The
+  dashboard script fetches `/admin/*` from the listener that served the shell
+  (its CSP `connect-src 'self'` forbids any other origin), so splitting them
+  across hostnames breaks every data request.
+- Never expose `/dashboard*` or `/admin*` as the forge intake path. The GitHub
+  intake ignores the request path, and the Forgejo/Gitea intake mounts its
+  fixed canonical route (`/webhooks/forgejo` / `/webhooks/gitea`, above), so
+  point the intake at a dedicated path that is neither prefix. A path-split
+  route with no catch-all rule also keeps `/metrics` and `/healthz` off the
+  public route.
+
 ## Upgrades
 
 1. Read the release notes for the new version; check for control-plane
