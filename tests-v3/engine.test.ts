@@ -2012,3 +2012,136 @@ test("#1726: the loop's gh_api upstream evidence settles its dependency rows end
     run.cleanup();
   }
 });
+
+test("#1726: the fully evidenced positive case reaches native APPROVE end to end — receipts + head-bound CI settle every gating row, the run publishes clean", async () => {
+  // The issue's positive acceptance, end to end through the real pipeline:
+  // a clean patch bump whose upstream evidence rides attributed channels
+  // (forge-read provenance + exact old→new compare + a version-bound
+  // advisory search) AND whose head carries a green test-named CI check
+  // (the scripted CI gate's head-bound evidence line). Every gating row
+  // settles — the dependency rows deterministically from the receipts, the
+  // suite row from the #1612 head-bound CI reconciliation — and the run
+  // certifies native APPROVE (review_result clean, required-check coverage
+  // complete), all inside the existing budget.
+  async function fullyEvidencedRun(): Promise<{
+    result: Awaited<ReturnType<typeof runReview>>;
+    runDir: string;
+    cleanup: () => void;
+    close: () => Promise<void>;
+  }> {
+    const head = "a".repeat(40);
+    let loopTurns = 0;
+    const handler: NonNullable<Parameters<typeof startMockServer>[0]> = (req, body, res) => {
+      res.setHeader("Content-Type", "application/json");
+      // The configured search endpoint (search-url → SEARCH_URL): the
+      // web_search executor answers here, version-bound.
+      if ((req.url ?? "").startsWith("/search")) {
+        res.end(JSON.stringify({ results: [{ title: "lodash advisory DB", url: "https://github.com/advisories?query=lodash", content: "no advisory affects the 1.2.3..4.5.6 range" }] }));
+        return;
+      }
+      const parsed = JSON.parse(body || "{}") as { tools?: unknown[] };
+      if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+        const turn = loopTurns++;
+        if (turn === 0) {
+          res.end(JSON.stringify({ id: "c0", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [
+            { id: "t1", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash"}' } },
+            { id: "t2", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/compare/v1.2.3...v4.5.6"}' } },
+            { id: "t3", type: "function", function: { name: "web_search", arguments: '{"query":"lodash npm security advisories 1.2.3 4.5.6"}' } },
+          ] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+          return;
+        }
+        res.end(JSON.stringify({ id: "c2", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "evidence gathered" } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+        return;
+      }
+      res.end(JSON.stringify({ id: "c3", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
+        verdict: "approve", review_markdown: "Provenance, exact delta, advisories and head CI all verified; no defects.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
+        required_check_dispositions: [
+          { check: CITATION_CHECKS[0], status: "not_applicable", rationale: "single-version lockfile bump: no API surface is exercised by this repository" },
+        ],
+      }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
+    };
+    const server = await startMockServer(handler);
+    const root = mkdtempSync(join(tmpdir(), "v3-engine-dep-approve-"));
+    writeFileSync(join(root, "package-lock.json"), '{\n  "lodash": "4.5.6"\n}\n');
+    gitInit(root);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "auto", "deep-review": "false",
+        "tool-mode": "native_loop", "tool-max-requests": "6",
+        "tool-allowed-gh-api-repos": "*",
+        "search-url": `${server.url}/search`,
+        "ci-status-check": "true",
+      },
+      // The CI gate as an in-process workload branch: it writes the same
+      // GITHUB_OUTPUT artifact the real gate child writes (the v2 stage ABI
+      // file the engine reads after the join — engine CI_GATE_OUTPUT_FILE
+      // is `ci-gate-outputs.txt` in the run dir) with the head-bound check
+      // evidence line, then exits 0.
+      ciGate: {
+        file: "unused",
+        envAllowlist: [],
+        workload: async (_signal: AbortSignal) => {
+          writeFileSync(join(root, "ci-gate-outputs.txt"),
+            `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: head, final_state: "success", checks: [{ name: "test (node-22)", state: "success", conclusion: "success" }] })}\nci-status-final=success\nci_status_skipped=false\n`);
+          return 0;
+        },
+      },
+      runDir: root, workspace: root,
+      platformAdapter: {
+        ...mockPlatform(),
+        ghApi: async (endpoint: string) => {
+          if (endpoint.includes("repos/upstream/lodash")) return { data: { ok: true, endpoint } };
+          return { error: "not served" };
+        },
+        getPr: async () => ({
+          number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+          body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+          state: "open", draft: false, head: { sha: head, ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+          user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+        }),
+        getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n    \"node_modules/lodash\": {\n-      \"version\": \"1.2.3\",\n+      \"version\": \"4.5.6\",\n    },\n",
+        listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+      } as unknown as PlatformReadAdapter,
+      quiet: true,
+    });
+    return { result, runDir: root, cleanup: (): void => rmSync(root, { recursive: true, force: true }), close: (): Promise<void> => server.close() };
+  }
+
+  const run = await fullyEvidencedRun();
+  try {
+    // One round, three attributed upstream acquisitions.
+    const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ tool?: string; status?: string }> };
+    assert.deepEqual((harness.tool_calls ?? []).map((call) => `${call.tool}:${call.status}`), [
+      "gh_api:ok", "gh_api:ok", "web_search:ok",
+    ]);
+    // Every row settled: the generic ask folds on its applicability answer;
+    // the suite ask discharges through the #1612 head-bound CI matcher
+    // (resolvedBy provenance); the three dependency rows settle
+    // deterministically from the validated receipts.
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ text: string; status: string; reason?: string; resolved_by?: { kind?: string; check?: string; head_sha?: string }; evidence?: { state?: string } }>;
+    };
+    assert.deepEqual(persisted.obligations.map((row) => [row.text, row.status, row.reason ?? ""]), [
+      ["check for breaking API changes in updated dependencies", "satisfied", "ok"],
+      ["run full test suite after upgrade", "satisfied", "no-disposition"],
+      ["establish upstream provenance for the updated dependency: publisher and canonical source repository", "satisfied", "dependency-evidence"],
+      ["inspect the exact old→new upstream release delta for the updated dependency", "satisfied", "dependency-evidence"],
+      ["check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "satisfied", "dependency-evidence"],
+    ]);
+    const ciRow = persisted.obligations.find((row) => row.text === CITATION_CHECKS[1])!;
+    assert.deepEqual(ciRow.resolved_by, { kind: "ci-evidence", check: "test (node-22)", head_sha: "a".repeat(40) });
+    assert.equal(ciRow.evidence?.state, "receipt-backed");
+    assert.ok(persisted.obligations.filter((row) => row.reason === "dependency-evidence").every((row) => row.evidence?.state === "receipt-backed"));
+    // Coverage complete and the run publishes CLEAN: native APPROVE.
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "complete");
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.equal(run.result.outputs.reviewResult, "clean");
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
+});

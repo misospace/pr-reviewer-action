@@ -71,6 +71,7 @@
  */
 import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
+import { FORGE_READ_TOOL } from "../platform/endpoint.js";
 import { dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
 
 export type { DependencyEvidenceObligation };
@@ -707,12 +708,15 @@ function receiptForTraceCall(
         // `dependencyEvidenceObligationsForCall`): an upstream
         // release/advisory/provenance lookup through the forge API is the
         // acquisition the #1721 run actually made after its registry host
-        // was refused, and the ledger must see it.
+        // was refused, and the ledger must see it. The channel name comes
+        // from the platform seam — this case IS the forge-read channel's
+        // receipt builder (the tool names in this switch are the
+        // capability-neutral tool catalog).
         subject: {
           ...(repo !== "" ? { repo } : {}),
           ...(ref !== "" ? { ref } : {}),
           url: endpoint.slice(0, MAX_RECEIPT_FIELD_LENGTH),
-          obligations: dependencyEvidenceObligationsForCall("gh_api", args),
+          obligations: dependencyEvidenceObligationsForCall(FORGE_READ_TOOL, args),
         },
       };
     }

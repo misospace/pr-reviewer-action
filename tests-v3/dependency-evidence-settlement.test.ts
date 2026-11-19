@@ -54,6 +54,8 @@ import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
+import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
+import { Conversation } from "../src/model/conversation.js";
 
 // ---------------------------------------------------------------------------
 // The #1721 replay inputs (from the retained record — see module docstring).
@@ -516,4 +518,156 @@ test("#1726: the replay's CI evidence shape is the gate's own parse output", () 
     checks: [{ name: "validate", state: "success", conclusion: "success" }],
   });
   assert.equal(parsed?.headSha, HEAD);
+});
+
+// ---------------------------------------------------------------------------
+// The #1721 replay at the LOOP level: the 40-call budget burn, observed.
+//
+// The organic run's first missing link was channel-level: its successful
+// upstream evidence rode a channel the attribution grammar did not
+// recognize, so the tracked rows never discharged, the settled stop never
+// fired, and the loop spent every one of its 40 requests (23 rounds, stop
+// `tool-call-budget-exhausted`). This fixture replays that loop with the
+// same budget/reserve/row configuration and an upstream channel that never
+// attributes (workspace reads plus evidence-channel fetches whose targets
+// name no obligation) — the burn is deterministic and still reachable
+// post-fix whenever the evidence channel yields nothing attributable, and
+// the fail-closed fold over the burned run reads exactly the #1721 shape.
+// The channel-fixed counterpart (attributed upstream evidence settling the
+// rows and stopping the loop early) is pinned in tools-loop.test.ts.
+// ---------------------------------------------------------------------------
+
+test("#1721 loop replay: 40/40 calls burn to tool-call-budget-exhausted and the fold reads 5/5 no-disposition when no executed call attributes", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // 20 scripted rounds x 2 calls = the full 40-request budget: rounds 1-18
+  // pre-window workspace reads (36 calls), rounds 19-20 inside the reserved
+  // window evidence-channel fetches whose targets attribute nothing (the
+  // no-lockout hatch admits them while a shape row is active, so they DO
+  // consume the reserved tail — exactly how the organic burn reached 40/40).
+  const responses: unknown[] = [];
+  let callIndex = 0;
+  for (let round = 0; round < 18; round++) {
+    responses.push({
+      choices: [{ message: { content: null, tool_calls: [0, 1].map((offset) => {
+        const id = `r${callIndex++}`;
+        return { id, type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: `src/module-${id}.ts` }) } };
+      }) } }],
+    });
+  }
+  for (let round = 0; round < 2; round++) {
+    responses.push({
+      choices: [{ message: { content: null, tool_calls: [0, 1].map((offset) => {
+        const id = `w${callIndex++}`;
+        return { id, type: "function", function: { name: "web_fetch", arguments: JSON.stringify({ url: `https://example.test/status-${id}` }) } };
+      }) } }],
+    });
+  }
+  let responseIndex = 0;
+  const postFn = async () => responses[responseIndex++] ?? { choices: [{ message: { content: "done" } }] };
+  const executed: Array<{ tool: string; args: Record<string, unknown>; result: Record<string, unknown> }> = [];
+  const executeFn = async (tool: string, args: Record<string, unknown>) => {
+    const record = { tool, args, result: { tool, status: "ok", result: { content: "irrelevant observation" } } };
+    executed.push(record);
+    return record.result;
+  };
+  const timeFn = (): number => Number.MAX_SAFE_INTEGER / 2;
+
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(32, 40, 600), maxRounds: 32 },
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: DEPENDENCY_EVIDENCE_OBLIGATIONS.map((obligation) => ({ id: obligation, tokens: [], obligation: obligation as DependencyEvidenceObligation })),
+  });
+
+  // The budget burned to exactly the organic run's stop: every request
+  // spent, the exhaustion stop (not an early settle, not max-rounds).
+  assert.equal(outcome.stopReason, STOP_BUDGET);
+  assert.equal(outcome.toolCallsIssued, 40);
+  assert.equal(executed.length, 40);
+  assert.equal(outcome.requestsRemaining, 0);
+  // The reserve's tail provably went to evidence attempts, and the tracked
+  // rows ended cap-released — used, then explicitly declined with a reason
+  // (never silently open). The per-row acquisition is `unavailable`: the
+  // hatch admitted the evidence-channel calls, but none of them TARGETED a
+  // row (they attribute nothing), so no row was ever attempted — the honest
+  // #1659 record of a reserve spent without a creditable acquisition.
+  assert.equal(outcome.requiredEvidenceWindowAttempts, 4);
+  assert.deepEqual(outcome.requiredEvidenceCredits, []);
+  assert.ok(outcome.requiredEvidenceSettlements.every((row) => row.evidenceState === "cap-released"), JSON.stringify(outcome.requiredEvidenceSettlements));
+  assert.ok(outcome.requiredEvidenceSettlements.every((row) => row.acquisition === "unavailable"), JSON.stringify(outcome.requiredEvidenceSettlements));
+
+  // The burned run's harness trace, folded exactly as the engine folds it
+  // (candidates rows, the closing verdict's non-echoing dispositions, the
+  // executed-call ledger): every row stays unresolved with the answer-level
+  // no-disposition reason and the budget-exhausted cause — the fail-closed
+  // #1721 shape. No receipt carries the dependency identity, so nothing
+  // settles: a burn without attributable evidence is still 5/5 no-disposition.
+  const ledger = buildEvidenceLedger({
+    toolCalls: executed.map((call) => ({ tool: call.tool, args: call.args, status: (call.result as { status?: string }).status ?? "error" })),
+    toolResults: executed.map((call) => call.result),
+    certifiedDiffPayloads: [],
+    rawDiff: null,
+    candidatePaths: [],
+    ciEvidence: null,
+    reviewedHeadSha: HEAD,
+  });
+  const tags = checkEvidenceTagsFromArtifact(CANDIDATE_ROWS.map((row) => ({
+    text: row.text,
+    row_class: row.row_class,
+    ...(row.gate !== undefined ? { gate: row.gate } : {}),
+    ...(row.obligations !== undefined ? { obligations: row.obligations } : {}),
+    ...(row.dependency_scope !== undefined ? { dependency_scope: row.dependency_scope } : {}),
+  })));
+  const obligations = candidateRowsToObligations(CANDIDATE_ROWS, MUST_CHECK, tags);
+  const folded = foldObligationDispositions(obligations, VERDICT_DISPOSITIONS, ledger, { readPaths: new Set<string>() });
+  const cause = deriveUnresolvedCause({
+    stopReason: outcome.stopReason,
+    harnessError: null,
+    planningError: null,
+    degraded: false,
+  });
+  const annotated = folded.map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
+  ));
+  assert.equal(cause, "budget-exhausted");
+  assert.equal(annotated.filter((obligation) => obligation.status === "unresolved").length, 5);
+  assert.ok(annotated.every((obligation) => obligation.reason === "no-disposition"), JSON.stringify(annotated.map((row) => [row.id, row.status, row.reason])));
+  assert.ok(annotated.filter((obligation) => obligation.source === "must_check" && obligation.status === "unresolved").every((obligation) => obligation.cause === "budget-exhausted"));
+});
+
+test("#1721 loop replay counterpart: attributed upstream evidence stops the same loop BEFORE the budget burns", async () => {
+  // The fixed channel: the same 40-request budget, the same reserve, the
+  // same three tracked rows — but the upstream evidence attributes, so the
+  // rows discharge in round 1, the settled stop fires with 37 requests
+  // unspent, and the reserve is recorded as used (acquired), never declined.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const evidenceCalls = [
+    { id: "t1", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/withastro/astro"}' } },
+    { id: "t2", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/withastro/astro/compare/v7.4.12...v7.4.13"}' } },
+    { id: "t3", type: "function", function: { name: "web_search", arguments: '{"query":"astro npm security advisories 7.4.12 7.4.13"}' } },
+  ];
+  const responses = [
+    { choices: [{ message: { content: null, tool_calls: evidenceCalls } }] },
+    { choices: [{ message: { content: "evidence gathered" } }] },
+  ];
+  let responseIndex = 0;
+  const postFn = async () => responses[responseIndex++] ?? { choices: [{ message: { content: "done" } }] };
+  const executeFn = async (tool: string, args: Record<string, unknown>) => ({ tool, status: "ok", result: { response: "{\"ok\":true}" } });
+  const timeFn = (): number => Number.MAX_SAFE_INTEGER / 2;
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(32, 40, 600), maxRounds: 32 },
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: DEPENDENCY_EVIDENCE_OBLIGATIONS.map((obligation) => ({ id: obligation, tokens: [], obligation: obligation as DependencyEvidenceObligation })),
+  });
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.requestsRemaining, 37);
 });
