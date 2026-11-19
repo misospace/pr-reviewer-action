@@ -24,6 +24,7 @@ import {
   xargsEcho,
 } from "../src/context/index.js";
 import { requirementLedgerFits, requirementLedgerPresence } from "../src/requirements/index.js";
+import { requirementIdentityAttests } from "../src/precheck/linked-issues.js";
 import type { ReadResult } from "../src/platform/types.js";
 import { linesInsideCodeFences } from "./helpers.js";
 
@@ -617,4 +618,397 @@ test("#1750: decomposition evidence is bounded — 16 lines per issue, and an ov
   const rendered = md.split("\n").filter((line) => line.startsWith("(decomposition: "));
   assert.equal(rendered.length, 16, "at most 16 association lines per linked issue");
   assert.ok(!rendered.some((line) => line.includes(reqIdOf("Criterion wide MUST hold."))), "an item with more than 4 child refs renders no line (fail closed)");
+});
+
+// ── #1750 round 3 (operator follow-up): the child-attestation channel ──────
+// The organic Dispatch umbrella shape: acceptance criteria WITHOUT child refs
+// plus a flat decomposition list of child issues (real #740). cbdb6287's
+// inline/nested task-list channel yields no evidence for it. The new trusted
+// seam is BIDIRECTIONAL ATTESTATION: the umbrella's own decomposition section
+// lists the child, the FETCHED child's own body names the parent (its
+// `Parent:` line, resolved canonically), and the child's own acceptance
+// criterion carries the parent criterion's requirement identity — a shared
+// contiguous run of substantial tokens (calibrated on the real #740/#1677
+// bodies; see `requirementIdentityAttests`). Any missing attestation, a
+// child-fetch failure, an over-size child body, an over-count child list, or
+// more than one child attesting the same criterion drops the association
+// whole — the criterion stays in scope. The consumer (ledger provenance →
+// scope predicate) is unchanged: these lines ride the exact seams
+// `(decomposition: …)` already uses.
+
+const ORGANIC_PARENT_CRITERION = "GitLab and Gitea feed the same scheduler/engine.";
+
+/** The real umbrella structure: criteria section + flat groomer decomposition
+ * list (no per-criterion mapping), criterion lines given verbatim. */
+function organicUmbrellaBody(criteriaLines: readonly string[], decompositionLines: readonly string[]): string {
+  return [
+    "Parent: #25",
+    "",
+    "## Ask",
+    "",
+    "Extend the canonical self-hosted forge contracts beyond GitHub and Forgejo.",
+    "",
+    "## Acceptance criteria",
+    "",
+    ...criteriaLines,
+    "",
+    "<!-- dispatch-groomer:decomposition:start -->",
+    "## Decomposition",
+    "",
+    "Created from this parent's grooming decomposition plan. Each child starts `status/backlog`.",
+    "",
+    ...decompositionLines,
+    "<!-- dispatch-groomer:decomposition:end -->",
+    "",
+  ].join("\n");
+}
+
+const ORGANIC_CHILD_CRITERIA = [
+  "- [ ] GitLab merge_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo",
+  "- [ ] GitLab capability differences (inline notes, statuses, managed cleanup) are declared in the adapter-local capability matrix with explicit degradation text",
+  "- [ ] No forge-specific conditional exists in the review engine, classifier, or precheck code",
+];
+
+/** The real child structure: a `Parent:` line naming the umbrella (URL form,
+ * as the real #1677 body carries) plus the child's own acceptance criteria. */
+function organicChildBody(parentLine: string | null, criteriaLines: readonly string[]): string {
+  return [
+    "<!-- dispatch-groomer:child=657cbb -->",
+    "",
+    ...(parentLine === null ? [] : [parentLine, ""]),
+    "## Problem",
+    "GitLab is not wired into the self-hosted forge contracts.",
+    "",
+    "## Acceptance criteria",
+    "",
+    ...criteriaLines,
+    "",
+  ].join("\n");
+}
+
+interface OrganicFixture {
+  umbrellaBody: string;
+  children: Map<string, ReadResult<unknown>>;
+  labels?: Array<{ name: string }>;
+}
+
+function organicAdapter(fixture: OrganicFixture): { adapter: { getIssue: (repo: string, number: string) => Promise<ReadResult<unknown>> }; calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    adapter: {
+      getIssue: async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+        calls.push(`${repo}#${number}`);
+        if (repo === "o/r" && number === "42") {
+          return { ok: true, data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: fixture.labels ?? [{ name: "umbrella" }], body: fixture.umbrellaBody } };
+        }
+        const child = fixture.children.get(number);
+        return child ?? { ok: false, error: `no ${repo}#${number}` };
+      },
+    },
+  };
+}
+
+const ORGANIC_DECOMPOSITION_LINE = "(decomposition: ";
+
+test("#1750 r3: a flat decomposition list plus a parent-naming child attests the matching criterion (organic umbrella shape)", async () => {
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [
+        `- [ ] ${ORGANIC_PARENT_CRITERION}`,
+        "- [ ] Forge capability differences remain adapter-local.",
+        "- [ ] No engine behavior is forked to support a forge.",
+      ],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA) } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  const rendered = md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
+  assert.deepEqual(rendered, [
+    `(decomposition: ${reqIdOf(ORGANIC_PARENT_CRITERION)} -> o/r#1677)`,
+  ], "the bidirectionally attested criterion renders exactly one ownership line; the other criteria are below the identity bar and render none");
+});
+
+test("#1750 r3: two children attesting the same criterion stay ambiguous — no ownership line renders", async () => {
+  // The real #740 shape: BOTH decomposition children carry a criterion with
+  // the parent's requirement identity (#1677's GitLab text and #1678's Gitea
+  // twin share the `same scheduler engine` run). A many-to-many mapping is
+  // ambiguous by rule — the criterion stays in scope, nothing renders.
+  const giteaChild = organicChildBody(
+    "Parent: https://github.com/o/r/issues/42",
+    [
+      "- [ ] Gitea pull_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo",
+      "- [ ] Gitea capability differences from Forgejo are declared in the adapter-local capability matrix with explicit degradation text",
+    ],
+  );
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+      ["1678", { ok: true, data: { number: 1678, title: "Child 2", state: "closed", html_url: "u", labels: [], body: giteaChild } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "many-to-many attestation → no ownership evidence");
+});
+
+test("#1750 r3: a child that does not name the parent attests nothing (one-sided)", async () => {
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody(null, ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "half the attestation → no ownership evidence");
+});
+
+test("#1750 r3: a child whose Parent line names another issue attests nothing", async () => {
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/999", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "parentage mismatch → no ownership evidence");
+});
+
+test("#1750 r3: an umbrella whose body has no decomposition section fetches no children", async () => {
+  // One-sided the other way: the child exists and would attest, but the
+  // umbrella body never lists it in a decomposition section — attestation
+  // gate (a) is missing, and no bounded child fetch may even happen.
+  const { adapter, calls } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      [],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "no decomposition section → no ownership evidence");
+  assert.deepEqual(calls, ["o/r#42"], "no child fetch happened");
+});
+
+test("#1750 r3: attestation drops whole when a listed child cannot be fetched", async () => {
+  // #1677 would attest uniquely, but #1678's fetch fails: a partial child set
+  // could hide a second attesting child, so the whole association drops.
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+      ["1678", { ok: false, error: "boom" }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "a fetch failure voids the umbrella's attestation whole");
+});
+
+test("#1750 r3: attestation drops whole when a listed child resolves to a pull request", async () => {
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, pull_request: { url: "https://example/pulls/1677" }, body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "a pull request is not a child issue contract — whole drop");
+});
+
+test("#1750 r3: attestation drops whole when a child body exceeds the size bound", async () => {
+  const filler = "Filler prose line to push the child body over the admission bound.\n".repeat(400);
+  const oversized = `${organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1))}\n${filler}`;
+  assert.ok(Buffer.byteLength(oversized, "utf8") > 12000, "fixture is over the admission bound");
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: oversized } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "an over-size child cannot prove the absence of more attesting criteria — whole drop");
+});
+
+test("#1750 r3: attestation drops whole when the decomposition lists more children than the bound", async () => {
+  const lines: string[] = [];
+  for (let i = 1; i <= 9; i += 1) lines.push(`- #16${String(70 + i)}: https://forge.example/o/r/issues/16${70 + i}`);
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      lines,
+    ),
+    children: new Map(),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "a child list that cannot be carried whole is never approximated");
+});
+
+test("#1750 r3: cross-repository decomposition children are refused on fork PRs; same-repo children still attest", async () => {
+  const childBody = organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1));
+  const crossRepo = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- other/repo#5: https://forge.example/other/repo/issues/5", "- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+  });
+  const refused = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter: crossRepo.adapter, isForkPr: "true", linear: noLinear,
+  });
+  assert.equal(
+    text(refused.artifacts.get("linked-issues.md")).split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length,
+    0,
+    "a refused cross-repo child is an unreadable child — whole drop on forks",
+  );
+  const sameRepo = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+  });
+  const allowed = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter: sameRepo.adapter, isForkPr: "true", linear: noLinear,
+  });
+  const md = text(allowed.artifacts.get("linked-issues.md"));
+  assert.deepEqual(
+    md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)),
+    [`(decomposition: ${reqIdOf(ORGANIC_PARENT_CRITERION)} -> o/r#1677)`],
+    "the fork boundary gates cross-repo reads only; same-repo children keep attesting",
+  );
+});
+
+test("#1750 r3: a non-umbrella linked issue fetches no children", async () => {
+  // The intake pre-gate mirrors the consumer's per-ref gate (non-closing +
+  // umbrella label): without the label the child fetches never happen.
+  const { adapter, calls } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map(),
+    labels: [{ name: "enhancement" }],
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "no umbrella label → the consumer would never consume the evidence anyway");
+  assert.deepEqual(calls, ["o/r#42"], "no child fetch happened");
+});
+
+test("#1750 r3: the requirement-identity matcher is calibrated on the real #740/#1677 texts — it fires on the requirement phrase only", () => {
+  // Real texts, verbatim from misospace/pr-reviewer-action issues #740 and
+  // #1677. The parent's wording differs from the child's (the child
+  // instantiates the parent criterion for GitLab); the shared identity is the
+  // requirement-bearing phrase `same scheduler engine`.
+  const parent = "GitLab and Gitea feed the same scheduler/engine.";
+  const gitlabChild = "GitLab merge_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo";
+  const giteaTwin = "Gitea pull_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo";
+  const capabilityParent = "Forge capability differences remain adapter-local.";
+  const capabilityChild = "GitLab capability differences (inline notes, statuses, managed cleanup) are declared in the adapter-local capability matrix with explicit degradation text";
+  const forkParent = "No engine behavior is forked to support a forge.";
+  const forkChild = "No forge-specific conditional exists in the review engine, classifier, or precheck code";
+  const requirementsBullet = "no forge-specific behavior in the review engine;";
+  assert.ok(requirementIdentityAttests(parent, gitlabChild), "the real scheduler/engine pair attests");
+  assert.ok(requirementIdentityAttests(parent, giteaTwin), "the Gitea twin attests too — the real shape is many-to-many and stays in scope");
+  assert.ok(requirementIdentityAttests(parent, parent), "verbatim criteria attest trivially (the content-id case)");
+  assert.ok(!requirementIdentityAttests(parent, capabilityChild), "shared vocabulary is not identity");
+  assert.ok(!requirementIdentityAttests(parent, forkChild), "a domain word alone is not identity");
+  assert.ok(!requirementIdentityAttests(capabilityParent, capabilityChild), "a 2-token run is below the identity bar");
+  assert.ok(!requirementIdentityAttests(forkParent, forkChild), "scattered engine/forge tokens are below the identity bar");
+  assert.ok(
+    !requirementIdentityAttests(requirementsBullet, forkChild),
+    "the real #740 Requirements bullet does not ride the generic `in the review engine` phrase onto the boilerplate child criterion",
+  );
+  assert.ok(!requirementIdentityAttests("No engine.", forkChild), "criteria too short to carry a run never attest");
+  assert.ok(!requirementIdentityAttests("", forkChild), "empty criteria never attest");
+});
+
+test("#1750 r3: quoted content cannot attest — fenced decomposition sections and fenced Parent lines are inert", async () => {
+  // AGENTS #252: feed the boundary the hostile delimiter itself. The umbrella
+  // quotes a decomposition section and the child quotes a Parent line inside
+  // code fences — a documented example must not attest ownership.
+  const umbrellaBody = [
+    "## Acceptance criteria",
+    "",
+    `- [ ] ${ORGANIC_PARENT_CRITERION}`,
+    "",
+    "```markdown",
+    "<!-- dispatch-groomer:decomposition:start -->",
+    "- #1677: https://forge.example/o/r/issues/1677",
+    "<!-- dispatch-groomer:decomposition:end -->",
+    "```",
+    "",
+  ].join("\n");
+  const childBody = [
+    "```",
+    "Parent: https://github.com/o/r/issues/42",
+    "```",
+    "",
+    "## Acceptance criteria",
+    "",
+    ORGANIC_CHILD_CRITERIA[0]!,
+    "",
+  ].join("\n");
+  const { adapter, calls } = organicAdapter({
+    umbrellaBody,
+    children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "fenced attestation content is inert");
+  assert.deepEqual(calls, ["o/r#42"], "no child fetch happened — the quoted section lists nothing");
 });

@@ -167,6 +167,123 @@ export function boundedChildRefs(value: unknown): string[] | undefined {
  * generous (4x the accepted cap) precisely because it is not the real cap. */
 export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
 
+// ---------------------------------------------------------------------------
+// #1750 round 3 (operator follow-up): the child-attestation ownership channel
+// (pure leaves — no imports)
+//
+// cbdb6287's decomposition channel associates a criterion with child work
+// only when the criterion's OWN task-list item carries (inline or nested)
+// child refs. The organic Dispatch umbrella shape cannot produce that: its
+// acceptance criteria carry no refs, and its decomposition is a flat,
+// separate list. The next trustworthy seam is the DECOMPOSED CHILD ISSUES
+// themselves — forge-backed, fetched with the deployment's own read
+// credential at intake. The association fires only when ALL of:
+//
+//   (a) the umbrella's own body lists the child in a decomposition section;
+//   (b) the fetched child's own body names that parent (its `Parent:` line,
+//       resolved to the umbrella's canonical `repo#N` identity);
+//   (c) the child's own acceptance criterion carries the parent criterion's
+//       requirement identity — a shared contiguous run of substantial tokens
+//       (`requirementIdentityAttests`, calibrated on the real
+//       #740/#1677 bodies).
+//
+// One attesting child per criterion renders ONE `(decomposition: …)` line —
+// the exact seam cbdb6287 built, so the ledger provenance parse and the
+// scope predicate consume it unchanged (the fail-closed consumer conjunction
+// stays). More than one child attesting the same criterion is AMBIGUOUS
+// (many-to-many) and renders nothing; any unreadable child (fetch failure,
+// pull-request payload, over-size body, refused cross-repo read on a fork)
+// voids the umbrella's attestation WHOLE, because a partial child set could
+// hide a second attesting child and make a many-to-many mapping look 1:1 —
+// the unsafe direction. Everything here is deterministic: no model prose and
+// no PR prose participates in ownership, and the bounds below all fail
+// closed (a bound that cannot be carried whole drops the association, never
+// approximates it).
+// ---------------------------------------------------------------------------
+
+/** At most 8 decomposition children are fetched per umbrella issue (the same
+ * budget class as {@link MAX_LINKED_ISSUES}). A decomposition section listing
+ * more distinct children than this cannot be carried whole — the umbrella's
+ * attestation drops entirely rather than sampling a prefix that could hide
+ * the one child that matters. */
+export const MAX_DECOMPOSITION_CHILDREN_PER_ISSUE = 8;
+
+/** A fetched child's projected (credential-redacted) body is admitted to
+ * attestation only when it fits this many UTF-8 bytes — the same bound class
+ * as the linked-issue embed cut (12000). An over-size body is a FAILURE, not
+ * a truncation: reading only a prefix could miss a second attesting
+ * criterion and turn a genuinely many-to-many mapping into a false 1:1. */
+export const MAX_ATTESTED_CHILD_BODY_BYTES = 12000;
+
+/** At most 32 acceptance-criterion texts are extracted per body for
+ * attestation (real umbrellas and children carry a handful; the ledger's
+ * own rendered-line budget is 16). More criteria than this cannot be mapped
+ * whole → the attestation drops. */
+export const MAX_ATTESTATION_CRITERIA_PER_BODY = 32;
+
+/** The requirement-identity bar: a child criterion attests a parent criterion
+ * only when the child's token sequence contains a contiguous run of at least
+ * this many of the parent's tokens. Calibrated on the real bodies: the only
+ * run long enough in the organic #740/#1677 pair is the requirement-bearing
+ * phrase `same scheduler engine` ("…enter the same scheduler/engine as…");
+ * everything shorter — a domain word (`engine`), a bigram (`capability
+ * differences`) — is shared vocabulary, not requirement identity, and stays
+ * below the bar (those criteria remain in scope, fail closed). */
+export const MIN_REQUIREMENT_IDENTITY_RUN = 3;
+
+/** A token is substantial (identity-bearing) only at this many characters:
+ * a crude closed-class filter that drops articles and short function words
+ * (`the`, `and`, `in`, `no`) so generic stopword runs (`in the review
+ * engine`) can never satisfy the identity bar. Calibrated: with stopword
+ * runs allowed, the real #740 `Requirements` bullet "no forge-specific
+ * behavior in the review engine" would ride the 4-token stopword phrase
+ * `in the review engine` onto the children's boilerplate criterion; with
+ * this filter the same pair tops out at a 2-token run and stays unassociated. */
+export const MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS = 4;
+
+/** Casefolded substantial tokens of one requirement text: alphanumeric runs
+ * of at least {@link MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS} characters. */
+export function requirementIdentityTokens(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter((token) => token.length >= MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS);
+}
+
+/** The longest contiguous token run the two sequences share, by dynamic
+ * programming (O(P×C) cells; both inputs are normalized+truncated criterion
+ * texts upstream, so the quadratic surface is bounded). */
+export function requirementIdentityRun(parentTokens: readonly string[], childTokens: readonly string[]): number {
+  let best = 0;
+  let previous = new Uint32Array(childTokens.length + 1);
+  for (let i = 1; i <= parentTokens.length; i += 1) {
+    const current = new Uint32Array(childTokens.length + 1);
+    const parentToken = parentTokens[i - 1];
+    for (let j = 1; j <= childTokens.length; j += 1) {
+      if (parentToken !== undefined && parentToken === childTokens[j - 1]) {
+        const extended = (previous[j - 1] ?? 0) + 1;
+        current[j] = extended;
+        if (extended > best) best = extended;
+      }
+    }
+    previous = current;
+  }
+  return best;
+}
+
+/** The deterministic requirement-identity test of attestation gate (c):
+ * does the child criterion carry the parent criterion's requirement — a
+ * shared contiguous run of ≥ {@link MIN_REQUIREMENT_IDENTITY_RUN}
+ * substantial tokens? Verbatim-equal criteria (the ledger content-id recipe
+ * case) trivially fire; the real #1677/#740 texts differ and fire on the
+ * `same scheduler engine` phrase; unrelated criteria sharing only scattered
+ * domain vocabulary stay below the bar. */
+export function requirementIdentityAttests(parentText: string, childText: string): boolean {
+  const parentTokens = requirementIdentityTokens(parentText);
+  if (parentTokens.length < MIN_REQUIREMENT_IDENTITY_RUN) return false;
+  const childTokens = requirementIdentityTokens(childText);
+  if (childTokens.length < MIN_REQUIREMENT_IDENTITY_RUN) return false;
+  return requirementIdentityRun(parentTokens, childTokens) >= MIN_REQUIREMENT_IDENTITY_RUN;
+}
+
 /** Closing-keyword body references. The present/imperative forms
  * (`close`/`closes`, `fix`/`fixes`, `resolve`/`resolves`) match anywhere, as
  * GitHub's parser does. The past participles (`closed`/`fixed`/`resolved`)

@@ -28,6 +28,8 @@ import {
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
+import { buildLinkedIssueContext } from "../src/context/index.js";
+import { extractRequirementLedger } from "../src/requirements/index.js";
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), "trace-narrow-"));
@@ -672,6 +674,153 @@ test("#1749 closing control: the same umbrella criterion claimed by a closing PR
     assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
     const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
     assert.equal(disposition.kind, "incomplete");
+    assert.equal(disposition.reason, "material_unknown");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+// ── #1750 round 3 (operator follow-up): child-attested ownership, end to end
+// through the REAL seams — intake renders the `(decomposition: …)` line from
+// the organic umbrella shape (flat decomposition list + a parent-naming
+// child), the ledger attaches it as `childRefs` provenance, the unchanged
+// scope predicate consumes it, and the disposition composition certifies the
+// clean increment. The organic POSITIVE uses the calibrated real texts
+// (#740's scheduler/engine criterion ↔ #1677's own criterion); the AMBIGUOUS
+// negative adds #1678, whose twin criterion also attests it — many-to-many
+// stays in scope by rule.
+
+const ORGANIC_PARENT_CRITERION = "GitLab and Gitea feed the same scheduler/engine.";
+const ORGANIC_CHILD_CRITERION = "GitLab merge_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo";
+const ORGANIC_TWIN_CHILD_CRITERION = "Gitea pull_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo";
+
+function organicUmbrellaBody(criteriaLines: readonly string[], decompositionLines: readonly string[]): string {
+  return [
+    "## Acceptance criteria",
+    "",
+    ...criteriaLines,
+    "",
+    "<!-- dispatch-groomer:decomposition:start -->",
+    "## Decomposition",
+    "",
+    "Created from this parent's grooming decomposition plan.",
+    "",
+    ...decompositionLines,
+    "<!-- dispatch-groomer:decomposition:end -->",
+    "",
+  ].join("\n");
+}
+
+function organicChildBody(parentLine: string): string {
+  return [
+    "Parent: https://github.com/o/r/issues/42",
+    "",
+    "## Acceptance criteria",
+    "",
+    `- [ ] ${parentLine}`,
+    "",
+  ].join("\n");
+}
+
+async function organicLedger(decompositionLines: readonly string[], childCriteria: readonly string[]): Promise<unknown> {
+  const children = new Map(childCriteria.map((criterion, index) => [
+    String(1677 + index),
+    { ok: true as const, data: { number: 1677 + index, title: `Child ${index}`, state: "open", html_url: "u", labels: [], body: organicChildBody(criterion) } },
+  ]));
+  const intake = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" },
+    repo: "o/r",
+    adapter: {
+      getIssue: async (repo: string, number: string) => {
+        if (repo === "o/r" && number === "42") {
+          return { ok: true as const, data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body: organicUmbrellaBody([`- [ ] ${ORGANIC_PARENT_CRITERION}`], decompositionLines) } };
+        }
+        return children.get(number) ?? { ok: false as const, error: `no ${repo}#${number}` };
+      },
+    },
+    isForkPr: "false",
+    linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+  });
+  return extractRequirementLedger({ linkedIssuesMarkdown: Buffer.from(intake.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8") });
+}
+
+test("#1750 r3 organic: the flat-decomposition umbrella criterion scopes out via child attestation — the clean increment reaches native APPROVE (intake→ledger→scope→disposition)", async () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    const ledger = await organicLedger(
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+      [ORGANIC_CHILD_CRITERION],
+    );
+    const umb = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }).requirements
+      .find((entry) => entry.text === ORGANIC_PARENT_CRITERION);
+    assert.ok(umb, "the umbrella criterion reached the ledger");
+    assert.deepEqual(umb.provenance[0]?.childRefs, ["o/r#1677"], "the child attestation rode the ledger provenance seam unchanged");
+    assert.equal(umb.provenance[0]?.closing, false);
+    assert.deepEqual(umb.provenance[0]?.labels, ["umbrella"]);
+    // The scope decision itself: out of scope, machine reason citing the
+    // owning child, even though the change shares the criterion's vocabulary.
+    const scope = requirementTraceScope(ledger, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    assert.deepEqual(scope.inScope, []);
+    assert.equal(scope.outOfScope.length, 1);
+    assert.match(scope.outOfScope[0]!.reason, /o\/r#1677/, "the machine reason cites the owning child");
+    const claims = [{
+      requirement_id: umb.id,
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "deferred to the attested owning child; this PR does not claim the parent",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    const row = trace.rows.find((candidate) => candidate.requirement_id === umb.id);
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(row?.notes.includes("out-of-scope-umbrella-parent"), "the umbrella relationship is machine-readable on the row");
+    assert.ok(row?.notes.includes("out-of-scope-reported-unmet"), "the claim stays disclosure-only");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence, [], "a deferred umbrella claim produces no disposition evidence");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "approve", "the clean increment is not held at INCOMPLETE by parent work");
+    assert.equal(disposition.reason, "approval_certified");
+    assert.equal(disposition.nativeEvent, "APPROVE");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1750 r3: two children attesting one criterion stay in scope and withhold (real #740/#1677/#1678 shape)", async () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    // Both decomposition children carry a twin of the parent criterion (the
+    // real GitLab/Gitea texts), so the mapping is many-to-many → ambiguous →
+    // no ownership evidence renders and the criterion stays mandatory.
+    const ledger = await organicLedger(
+      ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
+      [ORGANIC_CHILD_CRITERION, ORGANIC_TWIN_CHILD_CRITERION],
+    );
+    const umb = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }).requirements
+      .find((entry) => entry.text === ORGANIC_PARENT_CRITERION);
+    assert.ok(umb, "the umbrella criterion reached the ledger");
+    assert.equal(umb.provenance[0]?.childRefs, undefined, "an ambiguous attestation renders no evidence");
+    const scope = requirementTraceScope(ledger, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    assert.equal(scope.inScope.length, 1, "the criterion stays in scope");
+    assert.deepEqual(scope.outOfScope, []);
+    const claims = [{
+      requirement_id: umb.id,
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared scheduler/engine feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    const row = trace.rows.find((candidate) => candidate.requirement_id === umb.id);
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(!row?.notes.includes("out-of-scope-umbrella-parent"), "no ownership claim without unambiguous evidence");
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the claim is material");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "incomplete", "many-to-many ownership withholds");
     assert.equal(disposition.reason, "material_unknown");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
