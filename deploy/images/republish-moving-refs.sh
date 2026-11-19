@@ -2,9 +2,9 @@
 # #1741 review: the image-publish workflow gates each target's build-push step
 # on that target's `sha-<commit>` tag being ABSENT, so a rerun never re-pushes
 # (never moves) an immutable ref. But that gate also skipped the target's
-# MOVING refs — `pr-<number>`, the SemVer release alias, and the major.minor
-# alias — so a run that died after the sha push but before the aliases could
-# never republish them on a rerun.
+# MOVING refs — `pr-<number>` and the exact SemVer release alias (#1742: no
+# floating alias of any shape) — so a run that died after the sha push but
+# before the aliases could never republish them on a rerun.
 #
 # Moving refs may legally be retagged, so this step repoints them for every
 # REUSED target with `docker buildx imagetools create`: each alias is set to
@@ -14,10 +14,10 @@
 # gated build step and are skipped here.
 #
 # Inputs (env): GHCR_OWNER, SOURCE_SHA, CONTROLLER_STATE, WORKER_STATE from
-# the sha-tag resolver, plus the event's moving-ref coordinates PR_REF,
-# RELEASE_VERSION, RELEASE_MAJOR_MINOR (each empty when the event defines
-# none). A reused target with no moving refs for the event is a no-op —
-# imagetools create is never run just to retag the sha ref onto itself.
+# the sha-tag resolver, plus the event's moving-ref coordinates PR_REF and
+# RELEASE_VERSION (each empty when the event defines none). A reused target
+# with no moving refs for the event is a no-op — imagetools create is never
+# run just to retag the sha ref onto itself.
 #
 # Like resolve-sha-tag-state.sh, this talks to the container registry through
 # the already-authenticated Docker CLI, never through the forge capability.
@@ -39,7 +39,8 @@ republish_target() {
   local args=()
   [ -n "$PR_REF" ] && args+=( -t "${repo}:${PR_REF}" )
   [ -n "$RELEASE_VERSION" ] && args+=( -t "${repo}:${RELEASE_VERSION}" )
-  [ -n "$RELEASE_MAJOR_MINOR" ] && args+=( -t "${repo}:${RELEASE_MAJOR_MINOR}" )
+  # #1742: the exact SemVer above is the only release alias — no floating
+  # major.minor (or major-only) ref is ever repointed.
   if [ "${#args[@]}" -eq 0 ]; then
     echo "${name}: no moving refs for this event - nothing to republish"
     return 0
@@ -54,7 +55,6 @@ republish_target() {
 : "${WORKER_STATE:?WORKER_STATE is required}"
 PR_REF="${PR_REF:-}"
 RELEASE_VERSION="${RELEASE_VERSION:-}"
-RELEASE_MAJOR_MINOR="${RELEASE_MAJOR_MINOR:-}"
 
 republish_target controller "$CONTROLLER_STATE"
 republish_target worker "$WORKER_STATE"

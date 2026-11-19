@@ -3,9 +3,11 @@ name: Publish images
 # #1704: publish the #738 controller and worker runtime images to GHCR for
 # every publishable revision, not just the #1584 manual canary. The workflow
 # runs for pull requests targeting `main`, pushes to protected `main`, pushes
-# of `v*` release tags, and manual dispatch (recovery/testing). Every run
-# builds BOTH targets from ONE checked-out commit so the controller and
-# worker images always share a runtime/protocol revision.
+# of exact `vX.Y.Z` release tags, and manual dispatch (recovery/testing). The
+# floating git major tag (`v3`), which the release pipeline moves on every
+# stable release, matches no filter here and never starts a run (#1742).
+# Every run builds BOTH targets from ONE checked-out commit so the controller
+# and worker images always share a runtime/protocol revision.
 #
 # Tag scheme (no `latest` anywhere):
 #   - `sha-<commit>` — immutable, published for every run from this workflow.
@@ -20,10 +22,18 @@ name: Publish images
 #   - `pr-<number>`  — moving ref for same-repository PRs only (the publish
 #     job below refuses fork PRs); each underlying commit stays addressable
 #     by its immutable `sha-<commit>` ref.
-#   - `<X.Y.Z>` and `<X.Y>` — release aliases, published only for a strictly
-#     validated `vX.Y.Z` tag push, from that exact tagged commit (the same
-#     SemVer aliases the Dispatch/Courier image workflows publish; no
-#     `major`-only and no `latest` tag).
+#   - `<X.Y.Z>` — the ONLY release alias (#1742), published for a strictly
+#     validated `vX.Y.Z` tag push, from that exact tagged commit. No
+#     floating alias of any shape (no `major`, no `major.minor`, no
+#     `latest`): a container image tag is what a cluster pulls, so images
+#     publish exact coordinates only. The Helm chart (#1708,
+#     `.github/workflows/publish-chart.yaml`) publishes exact SemVer OCI
+#     tags too — Helm rejects non-SemVer OCI tags — so no floating image
+#     or chart OCI alias exists today. The Action's own floating git major
+#     tag (`vX`, moved by release-please/manual-release) is a separate
+#     surface for `uses:` consumers, and it deliberately does not trigger
+#     this workflow (#1742): a `vX` tag push would only start a run the
+#     strict validation below must refuse.
 #
 # Trust boundary (preserved from #1584 and sharpened): fork pull requests
 # never enter the `publish` job — they run `build-fork-pr`, which holds
@@ -51,7 +61,16 @@ on:
     branches: ["main"]
   push:
     branches: ["main"]
-    tags: ["v*"]
+    # #1742: exact release tags only. GitHub filter patterns are globs, not
+    # regex, but they support character classes with the `+` quantifier
+    # (documented example: `v[12].[0-9]+.[0-9]+`), so this filter never
+    # starts a run for the floating major tag (`v3`) or a floating `vX.Y`
+    # ref that release tooling moves. Such a run could only fail the strict
+    # validation in Resolve publish coordinates: the spurious alarm #1742
+    # removes. That strict check stays regardless: the filter decides which
+    # runs start, the check is what guarantees a tag push never derives a
+    # wrong alias, and it keeps holding if this filter is ever widened.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 permissions:
@@ -64,10 +83,10 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Same-repository pull requests, `main` pushes, `v*` tag pushes and
-    # manual dispatch publish. A fork pull_request event never enters this
-    # job (its head repository differs), so untrusted code can never reach
-    # the GHCR credentials held here.
+    # Same-repository pull requests, `main` pushes, exact `vX.Y.Z` tag
+    # pushes and manual dispatch publish. A fork pull_request event never
+    # enters this job (its head repository differs), so untrusted code can
+    # never reach the GHCR credentials held here.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
@@ -95,7 +114,7 @@ jobs:
         # SOURCE_SHA is the immutable-ref anchor: the PR HEAD commit for
         # pull_request events (github.sha points at the merge commit there),
         # the pushed/dispatched commit for every other event. The moving
-        # `pr-<number>` ref and the SemVer release aliases are derived from
+        # `pr-<number>` ref and the exact SemVer release alias are derived from
         # strictly validated event context; anything that does not parse is
         # a hard failure, never a silently different tag.
         env:
@@ -133,26 +152,24 @@ jobs:
           fi
           echo "PR_REF=$PR_REF" >> "$GITHUB_ENV"
 
-          # Release aliases only from a strict vX.Y.Z tag: anything else
-          # (including v-prefixed non-semver refs) refuses the run rather
-          # than deriving a wrong alias.
+          # The release alias is the exact vX.Y.Z only (#1742): no
+          # floating major or major.minor alias is derived, and anything
+          # else (including v-prefixed non-semver refs) refuses the run
+          # rather than deriving a wrong alias.
           RELEASE_VERSION=""
-          RELEASE_MAJOR_MINOR=""
           if [ "$EVENT_NAME" = "push" ]; then
             case "$GIT_REF" in
               refs/tags/*)
                 version="${REF_NAME#v}"
                 if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-                  echo "::error::release tag ${REF_NAME} is not v<major>.<minor>.<patch>; refusing to derive release aliases."
+                  echo "::error::release tag ${REF_NAME} is not v<major>.<minor>.<patch>; refusing to derive a release alias."
                   exit 1
                 fi
                 RELEASE_VERSION="$version"
-                RELEASE_MAJOR_MINOR="${version%.*}"
                 ;;
             esac
           fi
           echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
-          echo "RELEASE_MAJOR_MINOR=$RELEASE_MAJOR_MINOR" >> "$GITHUB_ENV"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -195,13 +212,14 @@ jobs:
       # sha tag is absent; a target whose sha tag is already present is reused
       # untouched (#1741), so a rerun finishes a half-published pair without
       # moving any existing ref. The `pr-<number>` ref publishes only for
-      # pull_request events, the SemVer and major.minor aliases only for
-      # validated `vX.Y.Z` tag pushes (each conditional line collapses to an
-      # empty entry that the build action drops). A target whose sha tag was
-      # reused publishes no tags from its build step; the moving refs are
-      # repointed at the preserved digest by the alias step below. The GHA
-      # cache is written only for non-PR runs — PR builds read it but never
-      # export, so a PR cannot rewrite the cache the `main` builds consume.
+      # pull_request events, the exact SemVer release alias only for a
+      # validated `vX.Y.Z` tag push (#1742 removed the floating major.minor
+      # alias; each conditional line collapses to an empty entry that the
+      # build action drops). A target whose sha tag was reused publishes no
+      # tags from its build step; the moving refs are repointed at the
+      # preserved digest by the alias step below. The GHA cache is written
+      # only for non-PR runs — PR builds read it but never export, so a PR
+      # cannot rewrite the cache the `main` builds consume.
       - name: Build and push controller (linux/amd64)
         id: controller
         # #1741: push only when the controller's sha-<commit> tag is absent.
@@ -222,7 +240,6 @@ jobs:
             ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}
             ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
             ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
-            ${{ env.RELEASE_MAJOR_MINOR != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.RELEASE_MAJOR_MINOR) || '' }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
@@ -244,24 +261,22 @@ jobs:
             ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}
             ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
             ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
-            ${{ env.RELEASE_MAJOR_MINOR != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_MAJOR_MINOR) || '' }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
       - name: Republish moving refs of reused targets
         # #1741 review: gating the build-push steps on the target's sha-tag
-        # state also skipped that target's pr-<number>/SemVer/major.minor
-        # alias pushes, so a run that died after the sha push but before the
-        # aliases could never republish them. Moving refs may legally be
-        # retagged, so the script below repoints them for every REUSED target
-        # at the exact manifest the immutable sha tag already holds — no
-        # rebuild, so a moving ref can never drift off the immutable digest.
+        # state also skipped that target's pr-<number>/SemVer alias pushes, so
+        # a run that died after the sha push but before the aliases could
+        # never republish them. Moving refs may legally be retagged, so the
+        # script below repoints them for every REUSED target at the exact
+        # manifest the immutable sha tag already holds — no rebuild, so a
+        # moving ref can never drift off the immutable digest.
         env:
           GHCR_OWNER: ${{ env.GHCR_OWNER }}
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           PR_REF: ${{ env.PR_REF }}
           RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-          RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
           CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
           WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
         run: bash deploy/images/republish-moving-refs.sh
@@ -276,7 +291,6 @@ jobs:
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           PR_REF: ${{ env.PR_REF }}
           RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-          RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
           CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
           WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
           RESOLVED_CONTROLLER_DIGEST: ${{ steps.sha_state.outputs.controller_digest }}
@@ -318,7 +332,7 @@ jobs:
               echo "Moving PR refs: \`pr-reviewer-controller:${PR_REF}\`, \`pr-reviewer-worker:${PR_REF}\`."
             fi
             if [ -n "$RELEASE_VERSION" ]; then
-              echo "Release refs: \`pr-reviewer-controller:${RELEASE_VERSION}\`, \`pr-reviewer-controller:${RELEASE_MAJOR_MINOR}\`, \`pr-reviewer-worker:${RELEASE_VERSION}\`, \`pr-reviewer-worker:${RELEASE_MAJOR_MINOR}\`."
+              echo "Release refs: \`pr-reviewer-controller:${RELEASE_VERSION}\`, \`pr-reviewer-worker:${RELEASE_VERSION}\` (exact SemVer only, #1742)."
             fi
             echo
             echo "Pin the Helm controller image with the controller reference and the"

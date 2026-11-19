@@ -686,8 +686,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     }>;
   };
 
-  // ── Triggers (#1704): same-repo PRs, pushes to protected main, `v*` tag
-  // pushes, and retained manual dispatch.
+  // ── Triggers (#1704): same-repo PRs, pushes to protected main, exact
+  // `vX.Y.Z` tag pushes, and retained manual dispatch. #1742: the filter
+  // itself excludes the floating git major tag (`v3`) and a floating
+  // `vX.Y`, because such a push could only produce a run the strict
+  // validation refuses: the spurious alarm #1742 removes.
   assert.ok(parsed.on, "triggers must parse");
   assert.deepEqual(
     Object.keys(parsed.on).sort(),
@@ -695,7 +698,44 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   );
   assert.deepEqual(parsed.on.pull_request?.branches, ["main"], "PR runs must target main");
   assert.deepEqual(parsed.on.push?.branches, ["main"], "every push to main must publish");
-  assert.deepEqual(parsed.on.push?.tags, ["v*"], "release tag pushes must publish");
+  // GitHub filter patterns are globs, not regex, but they support
+  // character classes with a following `+` quantifier (the documented
+  // `v[12].[0-9]+.[0-9]+` shape). This matcher covers exactly that
+  // subset: literals (dots included), `[...]` classes, and `+`.
+  const ghFilterToRegExp = (pattern: string): RegExp => {
+    let source = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i]!;
+      if (ch === "[") {
+        const end = pattern.indexOf("]", i);
+        assert.notEqual(end, -1, "unterminated character class in the tag filter");
+        source += pattern.slice(i, end + 1);
+        i = end;
+        if (pattern[i + 1] === "+") {
+          source += "+";
+          i++;
+        }
+      } else {
+        source += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+    }
+    return new RegExp(`^${source}$`);
+  };
+  assert.deepEqual(
+    parsed.on.push?.tags,
+    ["v[0-9]+.[0-9]+.[0-9]+"],
+    "only exact vX.Y.Z tag pushes may trigger the workflow",
+  );
+  const tagFilter = ghFilterToRegExp(parsed.on.push!.tags![0]!);
+  for (const exact of ["v1.0.0", "v3.9.1", "v10.20.30"]) {
+    assert.ok(tagFilter.test(exact), `the exact release tag ${exact} must trigger the workflow`);
+  }
+  for (const floating of ["v3", "v3.9", "v", "v3.", "v3.9.0-rc.1", "nightly"]) {
+    assert.ok(
+      !tagFilter.test(floating),
+      `the floating/non-release ref ${floating} must never start an image-publication run`,
+    );
+  }
   // A canceled run would silently skip publishing the sha refs of the
   // commit it raced, so runs serialize per ref and never cancel.
   assert.match(parsed.concurrency.group, /publish-images-\$\{\{ github\.ref \}\}/);
@@ -787,8 +827,9 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
 
   // ── Tag contract on the publish job's build steps. The immutable
   // sha-<commit> ref is the UNCONDITIONAL first tag line of both targets;
-  // the moving pr-<number> ref and the SemVer + major.minor release
-  // aliases are conditional on the resolved coordinates.
+  // the moving pr-<number> ref and the exact SemVer release alias are
+  // conditional on the resolved coordinates. #1742: the exact version is
+  // the ONLY release alias — no floating major.minor alias is published.
   const publishTagBlocks = publish.steps.flatMap(
     (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
   ).filter((block) =>
@@ -832,7 +873,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
       ),
       `the ${target} pr ref must be the moving pr-<number> alias, PR runs only`,
     );
-    // Release aliases: exact SemVer and major.minor, validated tag pushes only.
+    // Release alias: the exact SemVer, validated tag pushes only.
     assert.match(
       tagLine(block, "RELEASE_VERSION"),
       new RegExp(
@@ -840,18 +881,17 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
       ),
       `the ${target} release alias must be the exact SemVer version, tag pushes only`,
     );
-    assert.match(
-      tagLine(block, "RELEASE_MAJOR_MINOR"),
-      new RegExp(
-        `env\\.RELEASE_MAJOR_MINOR != '' && format\\('ghcr\\.io/\\{0\\}/pr-reviewer-${target}:\\{1\\}', env\\.GHCR_OWNER, env\\.RELEASE_MAJOR_MINOR\\)`,
-      ),
-      `the ${target} major.minor alias must track the exact version, tag pushes only`,
-    );
-    // Exactly the four refs above: no latest, no floating branch tag.
-    assert.equal(lines.length, 4, `the ${target} tags block must carry exactly sha + pr + SemVer + major.minor`);
+    // #1742: no floating alias of any shape on the tags block.
+    assert.doesNotMatch(block, /RELEASE_MAJOR/, `the ${target} tags block must not carry a floating alias`);
+    // Exactly the three refs above: no floating alias, no latest, no
+    // floating branch tag.
+    assert.equal(lines.length, 3, `the ${target} tags block must carry exactly sha + pr + exact SemVer`);
   }
   assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
   assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // #1742: the whole workflow derives no floating alias anywhere (the
+  // RELEASE_MAJOR prefix also catches a major-only alias variable).
+  assert.doesNotMatch(workflow, /RELEASE_MAJOR/, "no floating alias may be derived");
 
   // ── The source SHA: one resolution step, and PR events anchor the
   // immutable refs to the PR HEAD commit (github.sha is the merge commit
@@ -873,19 +913,26 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.match(coordsRun, /SOURCE_SHA="\$DEFAULT_SHA"/);
   // Moving PR ref is pr-<number>, derived only for pull_request events.
   assert.match(coordsRun, /PR_REF="pr-\$PR_NUMBER"/);
-  // Release aliases derive only from a strictly validated vX.Y.Z tag: the
-  // version is stripped of its v prefix, the major.minor alias is cut from
-  // the exact version, and a non-semver ref refuses the run instead of
-  // producing a wrong alias.
+  // The release alias derives only from a strictly validated vX.Y.Z tag:
+  // the version is stripped of its v prefix, and a non-semver ref refuses
+  // the run instead of producing a wrong alias. #1742: the exact version
+  // is the only alias cut from the tag.
   assert.match(coordsRun, /version="\$\{REF_NAME#v\}"/);
   assert.match(
     coordsRun,
     /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\(\[-\+\]\[0-9A-Za-z\.\-\]\+\)\?\$/,
     "release aliases require a strict X.Y.Z semver check",
   );
-  assert.match(coordsRun, /refusing to derive release aliases/);
-  assert.match(coordsRun, /RELEASE_MAJOR_MINOR="\$\{version%\.\*\}"/);
+  assert.match(coordsRun, /refusing to derive a release alias/);
   assert.match(coordsRun, /RELEASE_VERSION=""/, "non-tag events must derive no release alias");
+  // #1742: the exact version is the only release coordinate derived from
+  // a release tag — the resolution step computes no floating alias by
+  // any means (suffix-cut, cut, or a major/minor-shaped variable).
+  assert.doesNotMatch(
+    coordsRun,
+    /RELEASE_MAJOR|\$\{\s*version\s*%|\$\{\s*VERSION\s*%|\bcut\b/,
+    "the resolution step must derive no floating alias",
+  );
   // ── The resume resolver (#1741): GHCR has no registry-side tag
   // immutability, so the workflow must never re-push an existing
   // sha-<commit> tag — but it must also not refuse the whole run when only
@@ -923,10 +970,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     "the sha-tag resolver must run before any push step",
   );
   // ── A reused target's build step is skipped, but its MOVING refs must
-  // still converge: a dedicated step repoints pr-<number>/SemVer/major.minor
-  // at the manifest the immutable sha tag already holds (no rebuild, so a
-  // moving ref can never drift off the immutable digest, and aliases lost
-  // when an earlier run died after the sha push are recovered on the rerun).
+  // still converge: a dedicated step repoints pr-<number>/SemVer (#1742:
+  // no floating major.minor alias) at the manifest the immutable sha tag
+  // already holds (no rebuild, so a moving ref can never drift off the
+  // immutable digest, and aliases lost when an earlier run died after the
+  // sha push are recovered on the rerun).
   const aliasStep = publish.steps.find((step) =>
     (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
   );
@@ -936,7 +984,6 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     SOURCE_SHA: "${{ env.SOURCE_SHA }}",
     PR_REF: "${{ env.PR_REF }}",
     RELEASE_VERSION: "${{ env.RELEASE_VERSION }}",
-    RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
     CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
     WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
   });
@@ -1206,7 +1253,6 @@ function runMovingRefs(env: {
   worker: string;
   prRef?: string;
   releaseVersion?: string;
-  releaseMajorMinor?: string;
   dockerFail?: boolean;
 }): { status: number | null; calls: string[] } {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
@@ -1232,7 +1278,6 @@ function runMovingRefs(env: {
       WORKER_STATE: env.worker,
       PR_REF: env.prRef ?? "",
       RELEASE_VERSION: env.releaseVersion ?? "",
-      RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
       CALLS_FILE: callsFile,
       ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
     },
@@ -1257,18 +1302,17 @@ test("#1741 moving refs of reused targets repoint at the preserved sha manifest"
     "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-cafe",
   ]);
 
-  // Release-tag resume: every reused target gets BOTH SemVer aliases
-  // repointed, each at its own sha manifest.
+  // Release-tag resume: every reused target gets its exact SemVer alias
+  // repointed (#1742: the only release alias), each at its own sha manifest.
   const release = runMovingRefs({
     controller: "present",
     worker: "present",
     releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
   });
   assert.equal(release.status, 0);
   assert.deepEqual(release.calls, [
-    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-cafe",
-    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-cafe",
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 ghcr.io/o/pr-reviewer-worker:sha-cafe",
   ]);
 
   // First publish: both targets push their own aliases from the build step,
@@ -1301,7 +1345,37 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(readme, /pr-<number>/, "the moving same-repo PR ref must be documented");
   assert.match(readme, /sha-<commit>/, "the immutable commit ref must be documented");
   assert.match(readme, /X\.Y\.Z/, "the exact SemVer release alias must be documented");
-  assert.match(readme, /X\.Y/, "the major.minor release alias must be documented");
+  // #1742: the exact version is the only release alias. The docs must not
+  // advertise a floating major.minor image reference, and (review
+  // follow-up) they must not imply the chart carries a floating OCI alias
+  // today: publish-chart.yaml publishes exact SemVer only, because Helm
+  // rejects non-SemVer OCI tags.
+  assert.doesNotMatch(
+    readme,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  const readmeProse = readme.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    readmeProse,
+    /intended destination for floating references/,
+    "the docs must not present the chart as a floating-alias destination today",
+  );
+  assert.match(
+    readmeProse,
+    /No floating alias exists on the chart surface today/,
+    "the docs must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    readmeProse,
+    /Helm rejects non-SemVer OCI tags/,
+    "the docs must give the reason the chart carries exact tags only",
+  );
+  assert.match(
+    readmeProse,
+    /never starts an image-publication run/,
+    "the docs must state the floating major tag never starts an image-publication run",
+  );
   // The fork trust boundary must be stated.
   assert.match(readme, /[Ff]ork[\s\S]{0,200}publish(?:es)? nothing/, "the fork-PR no-publish contract must be documented");
   // No `latest` policy statement survives either.
@@ -1314,6 +1388,29 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(deploymentDoc, /sha-<commit>/);
   assert.match(deploymentDoc, /X\.Y\.Z/);
   assert.match(deploymentDoc, /[Ff]ork/);
+  // #1742: same single-alias contract in the deployment runbook, with the
+  // same "no floating alias exists today" honesty about the chart surface.
+  assert.doesNotMatch(
+    deploymentDoc,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  const deploymentProse = deploymentDoc.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    deploymentProse,
+    /intended destination for floating references/,
+    "the deployment doc must not present the chart as a floating-alias destination today",
+  );
+  assert.match(
+    deploymentProse,
+    /No floating alias exists on the chart surface today/,
+    "the deployment doc must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    deploymentProse,
+    /never starts an image-publication run/,
+    "the deployment doc must state the floating major tag never starts an image-publication run",
+  );
 });
 
 test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate-only, coordinates fail closed", () => {
