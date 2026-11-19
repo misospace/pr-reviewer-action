@@ -169,8 +169,19 @@ and configured concurrency/model costs before first enabling the poll.
   without the setgid bit each run directory would inherit the
   controller's primary group (1000) instead of 65532 and the worker
   would be refused traversal one level below the root.
-  `fsGroupChangePolicy: OnRootMismatch` makes the fix durable: once the
-  root matches the shared group, the kubelet stops re-applying. Operators
+  The fix is durable because **no other workload mounts these claims with
+  `fsGroup`** — not because `OnRootMismatch` skips it (#1736): kubelet's
+  `OnRootMismatch` skips only when the root GID matches AND the root mode
+  is a superset of `0770` *with* setgid (`requiresPermissionChange`,
+  Kubernetes `pkg/volume/volume_linux.go`), so a trusted non-group-writable
+  `2750` root always re-triggers a full recursive restyle (chgrp to that
+  pod's fsGroup plus group-writable bits) for any pod that mounts with
+  `fsGroup`. The executor's worker Jobs therefore carry no `fsGroup`
+  (#1736, rejected by the shipped worker admission policy); the only
+  remaining fsGroup mount is the controller pod itself, whose kubelet
+  processing runs at pod startup *before* `fix-roots` repairs the root
+  again ahead of the controller process. Any other workload mounting these
+  claims must likewise carry no `fsGroup`. Operators
   mounting pre-existing claims must ensure the same root shape — uid
   1000, group 65532, mode `2750` (no group/other write, setgid set) — or
   the controller refuses to start exactly as above. Verify a running

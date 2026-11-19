@@ -962,8 +962,6 @@ function sampleManifest(namespace: string, name: string): KubernetesJobManifest 
         runAsNonRoot: true as const,
         runAsUser: 65532,
         runAsGroup: 65532,
-        fsGroup: 65532,
-        fsGroupChangePolicy: "OnRootMismatch" as const,
         seccompProfile: Object.freeze({ type: "RuntimeDefault" as const }),
       }),
       containers: [

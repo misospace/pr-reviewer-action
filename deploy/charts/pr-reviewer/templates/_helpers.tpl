@@ -363,17 +363,28 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
        shared-group shape instead: root uid = the pod's runAsUser (the
        controller), group = the shared worker group (fsGroup), mode 2750 —
        owner-write only, with the shared group keeping read/execute, and
-       the setgid bit that fsGroup provisioning itself carries PRESERVED:
+       the setgid bit this fix itself sets, which must persist:
        shareRunDirectoryGroup chmods the components below the root but
        never chgroups them, so without root setgid each <jobId> dir would
        inherit the controller's primary group (1000) instead of 65532 and
        the worker would be refused traversal one level below the root.
        A chart-owned
        root init container chowns/chmods the claim roots before the
-       controller starts; fsGroupChangePolicy OnRootMismatch then treats
-       the fixed roots as matching (root gid already equals fsGroup), so the
-       kubelet never re-applies group-writability on later mounts and the
-       fix survives restarts. chown needs CAP_CHOWN and the post-handoff
+       controller starts. Durability is NOT fsGroupChangePolicy
+       OnRootMismatch (#1736): that policy skips only when the root GID
+       matches AND the root mode is a SUPERSSET of 0770 WITH setgid set
+       (requiresPermissionChange, kubernetes pkg/volume/volume_linux.go —
+       its own example treats 0750 as a mismatch), and a trusted root may
+       never be group-writable, so a 2750 root always re-triggers. The fix
+       survives because no workload mounts these claims with fsGroup
+       except the controller pod itself: the executor's worker Job manifest
+       carries no fsGroup (#1736, pinned by the worker admission policy),
+       and the controller pod's own fsGroup processing runs at pod startup
+       BEFORE this init container, which repairs the root again before the
+       controller process starts. Other workloads must never mount these
+       claims with fsGroup — any fsGroup mount recursively restyles the
+       whole claim (chgrp to its fsGroup plus group-writable bits) the
+       moment it starts. chown needs CAP_CHOWN and the post-handoff
         chmod needs CAP_FOWNER; everything else stays dropped. The mounts
         themselves ride the persistence globalMounts, which the common
         library renders for every container type (container.spec calls

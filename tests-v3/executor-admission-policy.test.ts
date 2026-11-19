@@ -489,6 +489,21 @@ test("rejects a worker Job whose fixed pod security context is broken or missing
   assert.ok(idsOf(evaluateWorkerJobAdmission(missing, reviewContext())).includes("fixedPodSecurityContext"));
 });
 
+test("#1736: rejects a worker pod carrying fsGroup — kubelet would restyle the shared claims mid-run", () => {
+  // Any pod-level fsGroup makes kubelet restyle every mapped claim at
+  // mount (the controller's trusted 2750 root never matches
+  // OnRootMismatch's 0770+setgid superset), so the policy refuses it
+  // even if some mutating webhook or hand-written Job adds one.
+  const withFsGroup = mutate(normalJobObject(), (o) => {
+    (((o.spec as any).template.spec as any).securityContext.fsGroup = 65532);
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withFsGroup, reviewContext())).includes("noPodFsGroup"));
+  const withChangePolicy = mutate(normalJobObject(), (o) => {
+    (((o.spec as any).template.spec as any).securityContext.fsGroupChangePolicy = "OnRootMismatch");
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withChangePolicy, reviewContext())).includes("noPodFsGroup"));
+});
+
 test("rejects a worker container without the fixed container security context", () => {
   const missing = mutate(normalJobObject(), (o) => {
     delete ((o.spec as any).template.spec as any).containers[0].securityContext;

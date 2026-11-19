@@ -290,6 +290,29 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
   assert.match(chartReadme, /fix-roots/);
 });
 
+test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
+  // Kubelet OnRootMismatch skips group application only when the volume
+  // root mode is a superset of 0770 WITH setgid (requiresPermissionChange
+  // in kubernetes pkg/volume/volume_linux.go), so a trusted non-group-
+  // writable 2750 root NEVER matches. Any prose claiming the kubelet
+  // stops re-applying once the root carries the group must stay gone —
+  // that false premise was the review blocker on #1736.
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  assert.doesNotMatch(helpers, /never re-applies|treats\s*\n?\s*the fixed roots as matching/, "helper comment must not claim OnRootMismatch skips a fixed root");
+  assert.match(helpers, /SUPERSSET of 0770[\s\S]*setgid set/, "helper comment must state the real skip condition");
+  assert.match(helpers, /volume_linux\.go/, "helper comment must cite the kubelet source");
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.doesNotMatch(chartReadme, /makes the fix durable: once the/, "chart README must not keep the OnRootMismatch durability claim");
+  assert.match(chartReadme, /no other workload mounts these claims with/, "chart README must name the real durability rule");
+  const deployment = read("docs/self-hosted-deployment.md");
+  assert.doesNotMatch(deployment, /kubelet no longer re-applies/, "deployment doc must not keep the OnRootMismatch durability claim");
+  assert.match(deployment, /worker Jobs carry no `fsGroup`/, "deployment doc must pin the no-fsGroup worker rule");
+  assert.match(deployment, /stat -c '%a %u %g'/, "deployment doc must keep the live root-shape check");
+  const boundary = read("docs/architecture/executor-boundary.md");
+  assert.doesNotMatch(boundary, /worker\s*\n?\s*pod pins `fsGroup/, "executor-boundary must not claim the worker pins fsGroup");
+  assert.match(boundary, /MUST NOT carry\s*\n?\s*`fsGroup`/, "executor-boundary must state the worker no-fsGroup rule");
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);

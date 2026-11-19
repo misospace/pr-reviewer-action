@@ -178,10 +178,13 @@ class HarnessCredentialResolver implements WorkerCredentialResolver {
  * readable for the worker's uid, and the result file is pre-created
  * writable so the controller can read it back. A real deployment gets
  * that shared access from the cluster: the chart pins the shared-group
- * shape (fsGroup 65532, plus the #1725 fix-roots init container fixing
-   * the claim roots to 2750 1000:65532). The double has no kubelet to
- * reproduce that group application, so the relaxation stands in for it
- * and the route reports it (issues #1631/#1725). */
+ * shape (controller fsGroup 65532, plus the #1725 fix-roots init
+ * container fixing the claim roots to 2750 1000:65532; the worker pod
+ * carries no fsGroup since #1736, because a kubelet fsGroup mount
+ * recursively restyles the claims and strips the controller's trusted
+ * root). The double has no kubelet at all, so the relaxation stands in
+ * for the whole provisioned shape and the route reports it
+ * (issues #1631/#1725/#1736). */
 class DockerClusterDouble implements KubernetesApi {
   private readonly jobs = new Map<string, JobRecord>();
   /** Whether the double had to relax the shared claim's file permissions:
