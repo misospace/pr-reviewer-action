@@ -2772,6 +2772,96 @@ test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own
   }
 });
 
+test("#1726: a gh_api call attributes from its ENDPOINT — the upstream evidence channel a refused registry host leaves available", () => {
+  // The #1721 shape: registry.npmjs.org was not allowlisted, so the run's
+  // successful upstream evidence went through gh_api — which attributed
+  // NOTHING pre-fix, so the acquisitions never discharged their rows and
+  // never produced attributed receipts. The endpoint grammar mirrors the
+  // web rules: keyword tokens over the path, plus the canonical
+  // repos/{owner}/{repo} repository-identity shape for provenance.
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/contents/packages/astro/package.json" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/releases/tags/v7.4.13" }),
+    ["release_delta"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/compare/v7.4.12...v7.4.13" }),
+    ["release_delta"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/security-advisories" }),
+    ["security_advisory"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/commits?path=packages/astro" }),
+    ["provenance", "release_delta"],
+  );
+  // Multi-match, canonical order (a changelog read IS release-delta
+  // evidence; a repo-root readme is provenance).
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/withastro/astro/contents/CHANGELOG.md" }),
+    ["release_delta"],
+  );
+  // Negative: endpoints that address no repository and no evidence surface
+  // attribute nothing — issues, users, the reviewed repo's own metadata.
+  assert.deepEqual(dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/owner/repo/issues" }), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("gh_api", { endpoint: "user" }), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("gh_api", { endpoint: "repos/owner/other-repo/issues/1726/comments" }), []);
+  // Absent/non-string endpoints attribute nothing.
+  assert.deepEqual(dependencyEvidenceObligationsForCall("gh_api", {}), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("gh_api", { endpoint: 42 }), []);
+});
+
+test("#1726: an upstream gh_api acquisition discharges its dependency-evidence rows and settles the loop before the budget burns", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/owner/repo"}'),
+    openAiCall("c2", "gh_api", '{"endpoint":"repos/owner/repo/compare/v1.2.3...v1.2.4"}'),
+    openAiCall("c3", "gh_api", '{"endpoint":"repos/owner/repo/security-advisories"}'),
+    openAiCall("c4", "read_file", '{"path":"a.ts"}'),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(4, 8, 120), maxRounds: 20 },
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: depRows(4),
+  });
+  // Every upstream gh_api lookup is admitted against its own shape row and
+  // discharges it — the evidence was gathered through the channel the
+  // source-host allowlist left available (the exact #1721 routing).
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  // The settled stop fires BEFORE the budget burns: three executed calls of
+  // eight, and the optional read (c4) never runs — the reviewer got its
+  // evidence settled without 23 rounds of archaeology.
+  assert.equal(outcome.stopReason, STOP_OBLIGATIONS_SETTLED);
+  assert.equal(outcome.requiredEvidenceSettledStop, true);
+  assert.equal(outcome.requestsRemaining, 5);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["gh_api", "gh_api", "gh_api"]);
+  // #1726 acceptance: the reserved dependency-evidence budget is provably
+  // USED — the canonical per-row settlement record (#1659) shows every
+  // tracked row `acquired` through a successful admitted call, with the
+  // admitting call ids as objective provenance. Never silently open, never
+  // silently cap-released.
+  assert.deepEqual(
+    outcome.requiredEvidenceSettlements.map((row) => [row.id, row.evidenceState, row.acquisition, row.successfulBy]),
+    [
+      ["provenance", "acquired", "available", ["call-1"]],
+      ["release_delta", "acquired", "available", ["call-2"]],
+      ["security_advisory", "acquired", "available", ["call-3"]],
+    ],
+  );
+});
+
 test("#1379: the attempts cap releases the window even with zero credits (no lockout)", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");

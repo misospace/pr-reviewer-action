@@ -1889,3 +1889,126 @@ test("#1657: one executed acquisition cannot manufacture five satisfactions — 
     run.cleanup();
   }
 });
+
+test("#1726: the loop's gh_api upstream evidence settles its dependency rows end to end — a closing verdict that echoes no check text can no longer lose the settlement", async () => {
+  // The #1721 shape end to end: the scoped dependency plan's enforced window
+  // admits the run's upstream evidence through the channel the source-host
+  // allowlist left available (gh_api), every tracked row discharges, the
+  // loop settles early — and the closing verdict carries dispositions that
+  // echo NO check text (`required_check_dispositions: []`, the #1721
+  // no-disposition shape with zero parser drops). The validated receipts
+  // settle the provenance, release-delta, and advisory rows deterministically
+  // (the #12294 mixed shape: genuinely-evidenced rows settle, the rows the
+  // run genuinely could not evidence stay unresolved with exact reasons).
+  async function ghEvidenceRun(): Promise<{
+    result: Awaited<ReturnType<typeof runReview>>;
+    runDir: string;
+    cleanup: () => void;
+    close: () => Promise<void>;
+  }> {
+    let loopTurns = 0;
+    const handler: NonNullable<Parameters<typeof startMockServer>[0]> = (_req, body, res) => {
+      res.setHeader("Content-Type", "application/json");
+      const req = JSON.parse(body) as { tools?: unknown[] };
+      const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
+      if (hasTools) {
+        const turn = loopTurns++;
+        if (turn === 0) {
+          // One round, three upstream acquisitions: canonical repo
+          // identity (provenance), the exact old→new compare
+          // (release_delta, both captured versions), and the repo-scoped
+          // advisory list (security_advisory — slug identity only).
+          res.end(JSON.stringify({ id: "c0", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [
+            { id: "t1", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash"}' } },
+            { id: "t2", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/compare/v1.2.3...v4.5.6"}' } },
+            { id: "t3", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/security-advisories"}' } },
+          ] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+          return;
+        }
+        res.end(JSON.stringify({ id: "c2", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "evidence gathered" } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+        return;
+      }
+      // The verdict turn: NO disposition echoes any check text (the #1721
+      // shape — present, empty, zero parser drops).
+      res.end(JSON.stringify({ id: "c3", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
+        verdict: "approve", review_markdown: "Provenance, delta and advisories investigated upstream; head CI green.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
+        required_check_dispositions: [],
+      }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
+    };
+    const server = await startMockServer(handler);
+    const root = mkdtempSync(join(tmpdir(), "v3-engine-dep-evidence-"));
+    writeFileSync(join(root, "package-lock.json"), '{\n  "lodash": "4.5.6"\n}\n');
+    gitInit(root);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "auto", "deep-review": "false",
+        "tool-mode": "native_loop", "tool-max-requests": "6",
+        "tool-allowed-gh-api-repos": "*",
+      },
+      runDir: root, workspace: root,
+      platformAdapter: {
+        ...mockPlatform(),
+        ghApi: async (endpoint: string) => {
+          // The executor hands the VALIDATED endpoint (/repos/... shape).
+          if (endpoint.includes("repos/upstream/lodash")) {
+            return { data: { ok: true, endpoint } };
+          }
+          return { error: "not served" };
+        },
+        getPr: async () => ({
+          number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+          body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+          state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+          user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+        }),
+        getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n    \"node_modules/lodash\": {\n-      \"version\": \"1.2.3\",\n+      \"version\": \"4.5.6\",\n    },\n",
+        listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+      } as unknown as PlatformReadAdapter,
+      quiet: true,
+    });
+    return { result, runDir: root, cleanup: (): void => rmSync(root, { recursive: true, force: true }), close: (): Promise<void> => server.close() };
+  }
+
+  const run = await ghEvidenceRun();
+  try {
+    // The loop executed exactly the three scripted upstream lookups.
+    const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ tool?: string; status?: string }> };
+    assert.deepEqual((harness.tool_calls ?? []).map((call) => `${call.tool}:${call.status}`), [
+      "gh_api:ok", "gh_api:ok", "gh_api:ok",
+    ]);
+    // The provenance and release-delta rows SETTLED deterministically from
+    // the run's own validated receipts (reason `dependency-evidence`) — the
+    // verdict echoed no check text at all. The advisory row is the #12294
+    // bounded-unresolved shape: its repo-scoped list acquisition is
+    // attributed and slug-identical but carries NO version identity, so the
+    // changed version range stays uncovered — receipt-mismatch, never a
+    // silent missing-source-evidence. The suite ask has no head-bound CI
+    // evidence in this fixture (the #1612 reconciliation owns it) and the
+    // breaking-change ask is a review prompt.
+    const persisted = JSON.parse(readFileSync(join(run.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ id: string; text: string; status: string; reason?: string; evidence?: { state?: string } }>;
+    };
+    const rows = persisted.obligations;
+    assert.equal(rows.length, 5);
+    const settled = rows.filter((row) => row.status === "satisfied" && row.reason === "dependency-evidence");
+    assert.equal(settled.length, 2, JSON.stringify(rows.map((row) => [row.text, row.status, row.reason, row.evidence?.state])));
+    assert.ok(settled.every((row) => row.evidence?.state === "receipt-backed"));
+    assert.deepEqual(rows.filter((row) => row.status === "unresolved").map((row) => [row.reason, row.evidence?.state ?? null]).sort(), [
+      ["no-disposition", "not-required"],
+      ["no-disposition", "receipt-absent"],
+      ["no-disposition", "receipt-mismatch"],
+    ]);
+    // Both folds agree: required_checks incomplete only because of the two
+    // genuinely-unsettled rows; the verdict keeps its coverage semantics.
+    const output = JSON.parse(readFileSync(join(run.runDir, "ai-output.json"), "utf8")) as { required_checks?: string };
+    assert.equal(output.required_checks, "incomplete");
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.equal(run.result.outputs.reviewResult, "partial");
+  } finally {
+    await run.close();
+    run.cleanup();
+  }
+});

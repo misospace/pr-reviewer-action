@@ -702,7 +702,18 @@ function receiptForTraceCall(
         acquired: result.ok, complete: result.ok && !result.truncated,
         freshness: headBound ? "head-bound" : "unbound",
         trust: "forge",
-        subject: { ...(repo !== "" ? { repo } : {}), ...(ref !== "" ? { ref } : {}), url: endpoint.slice(0, MAX_RECEIPT_FIELD_LENGTH) },
+        // #1726: the endpoint path carries the SAME dependency-evidence
+        // attribution a web URL does (one shared implementation — see
+        // `dependencyEvidenceObligationsForCall`): an upstream
+        // release/advisory/provenance lookup through the forge API is the
+        // acquisition the #1721 run actually made after its registry host
+        // was refused, and the ledger must see it.
+        subject: {
+          ...(repo !== "" ? { repo } : {}),
+          ...(ref !== "" ? { ref } : {}),
+          url: endpoint.slice(0, MAX_RECEIPT_FIELD_LENGTH),
+          obligations: dependencyEvidenceObligationsForCall("gh_api", args),
+        },
       };
     }
     case "web_fetch": {
@@ -966,7 +977,14 @@ function dependencyReceiptCoverage(
     if (!kinds.some((kind) => attribution.includes(kind))) continue;
     const identity = receiptIdentityString(receipt);
     if (!scope.some((entry) => identityCarriesToken(identity, entry.slug))) continue;
-    if (receipt.acquired && receipt.complete && receipt.trust === "web") {
+    // #1726: an upstream acquisition is trustworthy whether it came through
+    // the open web or through the forge API's validated read seam (`gh_api` —
+    // the channel the #1721 run actually re-routed to when its registry host
+    // was refused by the source-host allowlist). Both carry the upstream
+    // state the dependency obligations ask about; acquisition and
+    // completeness are still validated, and the identity boundaries below
+    // are unchanged.
+    if (receipt.acquired && receipt.complete && (receipt.trust === "web" || receipt.trust === "forge")) {
       verified.push(receipt);
     } else {
       unverified.push(receipt);

@@ -40,7 +40,7 @@
  * a false discharge would certify an untested claim).
  */
 import type { RequiredCheckRow } from "./required-checks.js";
-import type { ReviewObligation } from "./review-obligations.js";
+import type { ReviewObligation, ReviewObligationReason } from "./review-obligations.js";
 import type { RowEvidenceState } from "./evidence-receipts.js";
 
 export interface CiEvidenceCheck {
@@ -476,6 +476,31 @@ export function reconcileObligationsWithCiEvidence(
         resolvedBy: { kind: "ci-evidence" as const, check: discharge.check.name, headSha: evidence.headSha },
         ...(obligation.source === "must_check" ? { evidence: ciEvidenceState } : {}),
       };
+    }
+    // #1726: the obligation side now carries the SAME exact CI-evidence
+    // reason the #1594 coverage-side refinement writes for an unresolved row
+    // the evidence answers (`ci-evidence-<code>`) — pre-fix the obligation
+    // row kept the generic `no-disposition` while the coverage row said
+    // `ci-evidence-no-matching-test-check`, so the two structured artifacts
+    // disagreed about the very same row (the #1721 replay: the full-suite
+    // ask stayed generic even though the head-bound evidence had already
+    // determined that no test-named check ran on the reviewed head). The
+    // refinement mirrors the coverage-side condition (answer-level reasons
+    // only — malformed/duplicate answers keep their own reason) and only
+    // fires on evidence this runtime actually validated.
+    if (evidence !== null
+      && obligation.status === "unresolved"
+      && discharge.applies
+      && (discharge.outcome === "unresolved" || discharge.outcome === "contradicted")
+      && discharge.reason !== null
+      && discharge.reason !== "no-ci-evidence"
+      && (obligation.reason === "no-disposition" || obligation.reason === "no-structured-dispositions")) {
+      // The outcome guard bounds the discharge reason to the four
+      // unresolved/contradicted codes, all in the closed
+      // `ReviewObligationReason` vocabulary (`test-check-succeeded` rides
+      // the satisfied arm above; `no-ci-evidence` is excluded because null
+      // evidence never reconciles).
+      return { ...obligation, reason: `ci-evidence-${discharge.reason}` as ReviewObligationReason };
     }
     if (obligation.status === "satisfied" && obligation.cause === null && discharge.outcome === "contradicted") {
       const { resolvedBy: _resolvedBy, ...rest } = obligation;
