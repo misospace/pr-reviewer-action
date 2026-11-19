@@ -306,6 +306,17 @@ in-conversation. Once two or fewer requests remain, the note switches from
 status to direction: stop broad exploration and spend what's left on
 unresolved blocker hypotheses and verdict evidence.
 
+The `[loop coverage]` note is the one non-budget note class (#1729): it rides
+the model-confirmed completion gate's confirmation round (see
+**Stop reasons** below) and asks the model to resolve the cheaply-checkable
+verification questions with the unused budget before confirming completion.
+It rides beside — never replaces — the regular budget note; a scarce round
+still carries exactly one budget note. The confirmation round is a real model
+request: a covered review that still has budget and a round slot spends one
+extra request (the model's no-tool-calls confirmation) before it can stop as
+`investigation-complete`; a run with no slot left stops on the pre-#1729
+shape and spends nothing extra.
+
 ## Stop reasons and partial coverage
 
 | Stop reason | Meaning |
@@ -317,7 +328,7 @@ unresolved blocker hypotheses and verdict evidence.
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
 | `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
-| `investigation-complete` | Successful deterministic completion after a round with no refused or failed calls, all changed files and file-bound specialist leads covered by successful reads or certified complete corpus diffs, and no outstanding material evidence acquisition. It precedes same-round budget exhaustion and proceeds to the in-conversation verdict; it is not a budget stop and does not produce partial coverage. No-file specialist leads remain advisory reviewer context. |
+| `investigation-complete` | Successful deterministic completion, **confirmed by the model (#1729)**: after a round with no refused or failed calls, all changed files and file-bound specialist leads covered by successful reads or certified complete corpus diffs, and no outstanding material evidence acquisition, the loop does not stop on the coverage gate alone while budget and a round slot remain — the next round carries the completion-confirmation turn note (`[loop coverage]`: resolve every open verification/"please confirm" question an ordinary repository read or search can answer first, then confirm), and only the model's own no-tool-calls reply on that round selects this stop. The confirmation round's telemetry record carries `completion_confirmation_requested: true`. The gate re-arms after every round the model answers with more work, so a review never ends `investigation-complete` while it is still investigating. Only when no confirmation turn is possible — the round's last call also spent the request budget, or the round ceiling is reached — does the coverage gate stop directly, the pre-#1729 shape. It precedes same-round budget exhaustion and proceeds to the in-conversation verdict; it is not a budget stop and does not produce partial coverage. No-file specialist leads remain advisory reviewer context. |
 | `obligations-settled` | The deterministic early stop (#1627): the run carried an active required-evidence obligation surface and every tracked row settled — discharged by an admitted call or cap-released as unprovable — with budget still unspent, so further rounds could only be optional exploration. A normal, verdict-producing completion: never a harness error, never a fallback trigger, and deliberately not a budget stop (no Partial Coverage Notice, no `coverage_stop_reason`). |
 
 `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and

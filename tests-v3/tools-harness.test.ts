@@ -6,7 +6,7 @@ import path from "node:path";
 import { LoopContextError, LOOP_TOOL_SCHEMA_TOKENS, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, verdictProofIndexSection, insertProofIndexSection, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { TOOL_SCHEMAS, WEB_SEARCH_SCHEMA } from "../src/model/conversation.js";
-import { STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
+import { STOP_INVESTIGATION_COMPLETE, STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
@@ -1793,6 +1793,24 @@ test("#1464: verdict findings body keeps the interrupted-investigation honesty n
   // the investigation finished, so the verdict must not read it as complete.
   assert.match(body, /The tool loop stopped on `wall-clock-verdict-reserve` before the/);
   assert.match(body, /Treat paths you could not verify as/);
+});
+
+test("#1729: verdict findings body carries the unavailable-vs-uninvestigated verification discipline on an investigation-complete stop", () => {
+  const outcome = {
+    executed: [{ tool: "read_file", args: { path: "a.ts" }, result: { status: "ok", result: {} } }],
+    rounds: 2,
+    toolCallsIssued: 1,
+    stopReason: STOP_INVESTIGATION_COMPLETE,
+  } as unknown as LoopOutcome;
+  const body = verdictHarnessFindingsBody(outcome);
+  // The stop is model-confirmed (#1729): the model was offered the unused
+  // budget and confirmed completion. The verdict must therefore keep the
+  // issue's distinction — genuinely unverifiable questions are legitimate
+  // to surface, questions an ordinary repository read or search would
+  // answer are not verification findings.
+  assert.match(body, /stopped as complete with the model's own confirmation/);
+  assert.match(body, /cannot settle it/);
+  assert.match(body, /not investigated/);
 });
 
 test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser reads it, and drops a numeric secret's echo", () => {
@@ -5573,10 +5591,15 @@ test("#1688: certified seven-file coverage completes optional investigation befo
   }));
   assert.equal(result.stop_reason, "investigation-complete");
   assert.equal((result.tool_calls as unknown[]).length, 1);
-  assert.equal(turns, 2);
+  // #1729: the loop spent one extra turn asking the model to confirm
+  // completion (the coverage gate armed with 39 requests unused), and the
+  // model's no-tool-calls reply is what selected the stop.
+  assert.equal(turns, 3);
+  assert.match(JSON.stringify(requests[1]), /\[loop coverage\]/,
+    "the second request carries the completion-confirmation note");
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.partial_coverage, undefined);
-  assert.match(JSON.stringify(requests[1]), /Suite pending/);
+  assert.match(JSON.stringify(requests[2]), /Suite pending/);
   assert.deepEqual(result.corpus_diff_covered_files, files);
   assert.match(fs.readFileSync(path.join(root, "specialist-correctness.json"), "utf8"), /Suite pending/);
 });

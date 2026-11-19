@@ -87,6 +87,7 @@ import {
 DEPENDENCY_EVIDENCE_OBLIGATIONS,
 DEPENDENCY_EVIDENCE_RESERVE,
 STOP_BUDGET,
+STOP_INVESTIGATION_COMPLETE,
 STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   STOP_WALL_CLOCK_RESERVE,
@@ -2288,6 +2289,25 @@ export function verdictHarnessFindingsBody(outcome: LoopOutcome): string {
     );
     lines.push("");
   }
+  if (outcome.stopReason === STOP_INVESTIGATION_COMPLETE) {
+    // #1729: `investigation-complete` is now model-confirmed — the model was
+    // offered the unused budget to resolve its own open verification
+    // questions and confirmed completion. That makes the finding-class
+    // discipline enforceable at the verdict: a verification/please-confirm
+    // finding must be a genuine unavailable-evidence claim, never an
+    // un-investigated question an ordinary repository read or search would
+    // have answered.
+    lines.push(
+      "The investigation stopped as complete with the model's own " +
+        "confirmation after the coverage-complete notice. Any verification, " +
+        'unknown, or "please confirm" finding must state why the available ' +
+        "tools and evidence cannot settle it — that is legitimate to surface. " +
+        "A question an ordinary repository read or search would answer was " +
+        "not investigated, and externalizing it is not a verification " +
+        "finding.",
+    );
+    lines.push("");
+  }
   if (
     outcome.stopReason === STOP_WALL_CLOCK ||
     outcome.stopReason === STOP_WALL_CLOCK_RESERVE ||
@@ -3146,6 +3166,16 @@ export function nativeLoopRoundLogLines(
   // reason it was discarded, its own elapsed, how far the wire got, and the
   // recovery's elapsed. Content-free: numbers and this loop's own tokens.
   const lines = [modelLine, toolsLine];
+  // #1729: the model-confirmed completion gate's own heartbeat line — the
+  // reader can tell a confirmation request round (the loop asked the model
+  // to resolve remaining verification questions or confirm) from an
+  // ordinary exploratory round. Content-free: numbers and this loop's own
+  // tokens.
+  if (rec.completion_confirmation_requested === true) {
+    lines.push(
+      `  native_loop ${label} ${rec.round}: coverage complete — investigation completion confirmation requested`,
+    );
+  }
   if (rec.stream_failure !== null && rec.stream_failure !== undefined) {
     lines.push(
       `  native_loop ${label} ${rec.round}: streamed attempt discarded` +

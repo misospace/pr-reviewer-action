@@ -2165,7 +2165,10 @@ test("#969: native_loop + smart_review_requested escalates through a working sma
         (smartHarness.tool_results ?? []).some((call) => (call.result?.content ?? "").includes("SMART-CORPUS-969 evidence marker")),
         "the smart harness must actually have read the changed file",
       );
-      assert.equal(primaryServer.requests.length, 2, "the primary endpoint serves the investigation and closing verdict");
+      // #1729: the investigation round, the model-confirmed completion round
+      // (the coverage gate armed with budget remaining), and the closing
+      // verdict.
+      assert.equal(primaryServer.requests.length, 3, "the primary endpoint serves the investigation, the completion confirmation, and the closing verdict");
       assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
       assert.ok(smartServer.requests.length >= 2);
       assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
@@ -6616,7 +6619,12 @@ test("#1688: covered app-code investigation reaches a native approval", async ()
     calls++;
     res.setHeader("Content-Type", "application/json");
     const parsed = JSON.parse(String(body)) as { tools?: unknown[] };
-    if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+    // #1729: exactly one investigation turn answers with the read; the
+    // completion-confirmation turn (the coverage gate armed with budget
+    // remaining) and the closing verdict both get the no-tool-calls verdict
+    // body — the model's own no-tool-calls reply on the armed round is what
+    // selects `investigation-complete`.
+    if (calls === 1 && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
       res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "find_files", arguments: '{"pattern":"*.ts"}' } }] } }] }));
     } else res.end(verdictBody(baseVerdict()));
   });
@@ -6637,7 +6645,7 @@ test("#1688: covered app-code investigation reaches a native approval", async ()
     assert.equal(harness.executed_request_count, 1);
     assert.equal(harness.native_loop_verdict_produced, true);
     assert.equal(harness.partial_coverage, undefined);
-    assert.equal(calls, 2, "investigation plus warm verdict, without a separate review call");
+    assert.equal(calls, 3, "#1729: investigation, model-confirmed completion, and the warm verdict — no separate review call");
     const api = await publishRunHandoff(result);
     assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify({ disposition: result.finalDisposition, body: api.submitted[0]!.body }));
   } finally { await server.close(); cleanup(); }
