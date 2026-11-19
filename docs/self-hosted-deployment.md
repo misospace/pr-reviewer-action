@@ -85,7 +85,10 @@ How it runs:
   so the job enforces it before building: it resolves each `sha-<commit>`
   tag's state and never re-pushes one that already exists. A rerun RESUMES a
   half-published pair — it reuses a target whose tag is present (keeping its
-  digest) and publishes only the missing target. If either registry answer
+  digest) and publishes only the missing target. A reused target's moving
+  refs (`pr-<number>` and the release aliases) are repointed at the preserved
+  digest without a rebuild, so a rerun also recovers aliases an earlier run
+  failed to push. If either registry answer
   is uncertain, the run stops instead of pushing (fail closed). A rerun can
   therefore never move a published tag. The `pr-<number>` ref is the only
   intentionally moving ref.

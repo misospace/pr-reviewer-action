@@ -81,7 +81,10 @@ listener binds loopback by default and the chart sets
   half-published controller/worker pair — it reuses a target whose tag is
   present (reporting its existing digest) and publishes only the missing
   target, so a run that failed after pushing one image can finish the pair
-  for that commit without cutting a new one. An uncertain registry answer
+  for that commit without cutting a new one. A reused target's moving refs
+  (`pr-<number>` and the release aliases) are repointed at the preserved
+  digest by a separate step without a rebuild, so a rerun also recovers
+  aliases an earlier run failed to push. An uncertain registry answer
   stops the run (fail closed). A rerun can never move a published tag — but
   a digest is still the exact bytes the controller will execute, so pin the
   digest at both consumption points.

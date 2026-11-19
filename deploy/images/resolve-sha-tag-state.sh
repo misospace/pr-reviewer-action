@@ -21,7 +21,7 @@
 #                 the tag (never re-push, never move it) and report the captured
 #                 digest.
 #   - absent    : the registry explicitly answers absent (404 MANIFEST_UNKNOWN /
-#                 NAME_UNKNOWN / not-found) -> the workflow builds and pushes it.
+#                 NAME_UNKNOWN / ": not found") -> the workflow builds and pushes it.
 #   - ambiguous : any other registry answer (auth, TLS "unknown authority",
 #                 network, an OCI UNKNOWN code), or a present tag whose digest
 #                 cannot be read, fails the run CLOSED: never push over
@@ -42,7 +42,10 @@ set -euo pipefail
 # The `.` in `manifest.unknown` / `name.unknown` is an intentional regex
 # wildcard: the registry's 404 body spells them with a space or a dot
 # ("manifest unknown" / "MANIFEST_UNKNOWN"), and both must classify as absent.
-ABSENT_CLASSIFIER='manifest.unknown|name.unknown|not found'
+# The leading colon before `not found` is load-bearing (matching the chart
+# guard in publish-chart.yaml): an authorization failure reports
+# "basic credential not found", which must never read as absence.
+ABSENT_CLASSIFIER='manifest.unknown|name.unknown|: not found'
 
 resolve_target() {
   local name="$1" tag="$2"

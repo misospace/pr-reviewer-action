@@ -197,15 +197,18 @@ jobs:
       # moving any existing ref. The `pr-<number>` ref publishes only for
       # pull_request events, the SemVer and major.minor aliases only for
       # validated `vX.Y.Z` tag pushes (each conditional line collapses to an
-      # empty entry that the build action drops). The GHA cache is written only
-      # for non-PR runs — PR builds read it but never export, so a PR cannot
-      # rewrite the cache the `main` builds consume.
+      # empty entry that the build action drops). A target whose sha tag was
+      # reused publishes no tags from its build step; the moving refs are
+      # repointed at the preserved digest by the alias step below. The GHA
+      # cache is written only for non-PR runs — PR builds read it but never
+      # export, so a PR cannot rewrite the cache the `main` builds consume.
       - name: Build and push controller (linux/amd64)
         id: controller
         # #1741: push only when the controller's sha-<commit> tag is absent.
         # When it is already present the resolver reused it, and re-running
-        # must not move that immutable ref (nor its release/PR aliases, which
-        # that earlier run pushed as this target's group).
+        # must not rebuild and re-push that immutable ref; the target's moving
+        # refs are (re)pointed at the preserved digest by the alias step
+        # below, without a rebuild.
         if: steps.sha_state.outputs.controller_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -226,7 +229,8 @@ jobs:
       - name: Build and push worker (linux/amd64)
         id: worker
         # #1741: push only when the worker's sha-<commit> tag is absent; a
-        # present worker tag is reused so a rerun never moves it.
+        # present worker tag is reused so a rerun never moves it, and its
+        # moving refs are repointed by the alias step below.
         if: steps.sha_state.outputs.worker_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -243,6 +247,24 @@ jobs:
             ${{ env.RELEASE_MAJOR_MINOR != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_MAJOR_MINOR) || '' }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Republish moving refs of reused targets
+        # #1741 review: gating the build-push steps on the target's sha-tag
+        # state also skipped that target's pr-<number>/SemVer/major.minor
+        # alias pushes, so a run that died after the sha push but before the
+        # aliases could never republish them. Moving refs may legally be
+        # retagged, so the script below repoints them for every REUSED target
+        # at the exact manifest the immutable sha tag already holds — no
+        # rebuild, so a moving ref can never drift off the immutable digest.
+        env:
+          GHCR_OWNER: ${{ env.GHCR_OWNER }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          PR_REF: ${{ env.PR_REF }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
+          CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
+          WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
+        run: bash deploy/images/republish-moving-refs.sh
 
       - name: Record published digests
         # Each digest is either the reused reference the resolver read for a

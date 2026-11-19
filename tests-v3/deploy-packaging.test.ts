@@ -726,6 +726,32 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     firstPushIndex !== -1 && resolverIndex < firstPushIndex,
     "the sha-tag resolver must run before any push step",
   );
+  // ── A reused target's build step is skipped, but its MOVING refs must
+  // still converge: a dedicated step repoints pr-<number>/SemVer/major.minor
+  // at the manifest the immutable sha tag already holds (no rebuild, so a
+  // moving ref can never drift off the immutable digest, and aliases lost
+  // when an earlier run died after the sha push are recovered on the rerun).
+  const aliasStep = publish.steps.find((step) =>
+    (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
+  );
+  assert.ok(aliasStep, "a step must republish the moving refs of reused targets");
+  assert.deepEqual(aliasStep.env, {
+    GHCR_OWNER: "${{ env.GHCR_OWNER }}",
+    SOURCE_SHA: "${{ env.SOURCE_SHA }}",
+    PR_REF: "${{ env.PR_REF }}",
+    RELEASE_VERSION: "${{ env.RELEASE_VERSION }}",
+    RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
+    CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
+    WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
+  });
+  const lastPushIndex = publish.steps.reduce(
+    (last, step, i) => (step.with?.["push"] === true ? i : last),
+    -1,
+  );
+  assert.ok(
+    publish.steps.indexOf(aliasStep) > lastPushIndex,
+    "the moving-refs step must run after the build-push steps",
+  );
   // Both targets from the one Dockerfile, single-arch, pushed in one job —
   // the same checked-out commit is what makes the controller and worker
   // refs of one run share a source SHA.
@@ -836,8 +862,8 @@ const CTRL_DIGEST = `sha256:${"a".repeat(64)}`;
 const WORKER_DIGEST = `sha256:${"b".repeat(64)}`;
 
 function runResolver(states: {
-  controller: "present" | "absent" | "ambiguous" | "present-no-digest";
-  worker: "present" | "absent" | "ambiguous" | "present-no-digest";
+  controller: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
+  worker: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
 }): { status: number | null; outputs: Record<string, string> } {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "resolver-"));
   const docker = join(dir, "docker");
@@ -853,7 +879,9 @@ function runResolver(states: {
       '  case "${!state_var}" in',
       '    present|present-no-digest) echo \'{"schemaVersion":2}\'; exit 0;;',
       '    absent) echo "errors: MANIFEST_UNKNOWN: manifest unknown"; exit 1;;',
+      '    absent-notfound) echo "$tag: not found"; exit 1;;',
       '    ambiguous) echo "error: x509: certificate signed by unknown authority"; exit 1;;',
+      '    auth-denial) echo "errors: unauthorized: basic credential not found"; exit 1;;',
       "  esac",
       "fi",
       'if [ "$sub" = buildx ]; then',
@@ -938,6 +966,29 @@ test("#1741 resolver resumes a half-published pair, reuses present tags, fails c
   // state — whether the ambiguity is on the controller or the worker.
   assert.notEqual(runResolver({ controller: "ambiguous", worker: "absent" }).status, 0, "controller ambiguity fails closed");
   assert.notEqual(runResolver({ controller: "absent", worker: "ambiguous" }).status, 0, "worker ambiguity fails closed");
+  // #252 adversarial boundary: an authorization failure whose text contains
+  // the phrase "not found" ("basic credential not found") must NEVER classify
+  // as absent — only the registry's ": not found" suffix form counts, exactly
+  // like the chart guard in publish-chart.yaml.
+  assert.notEqual(
+    runResolver({ controller: "auth-denial", worker: "absent" }).status,
+    0,
+    "an auth error containing 'not found' fails closed, never classifies absent",
+  );
+  assert.notEqual(
+    runResolver({ controller: "absent", worker: "auth-denial" }).status,
+    0,
+    "a worker auth error containing 'not found' fails closed too",
+  );
+  // The strict form of the same phrase still classifies as absent, so the
+  // tightening does not refuse genuine 404s reported as "<ref>: not found".
+  const colonAbsence = runResolver({ controller: "absent-notfound", worker: "absent" });
+  assert.equal(colonAbsence.status, 0);
+  assert.equal(colonAbsence.outputs["controller_state"], "absent", '": not found" is an explicit registry absence');
+  // The classifier itself carries the load-bearing leading colon.
+  const resolverScript = read(RESOLVER);
+  assert.match(resolverScript, /: not found/, "the absent classifier requires the colon before 'not found'");
+  assert.doesNotMatch(resolverScript, /\|not found/, "a bare 'not found' alternative must not return");
   // A present tag whose digest cannot be read is uncertain too: it must not be
   // reused with a blank/unverifiable reference.
   assert.notEqual(
@@ -945,6 +996,107 @@ test("#1741 resolver resumes a half-published pair, reuses present tags, fails c
     0,
     "a present tag with an unreadable digest fails closed",
   );
+});
+
+// #1741 review: a reused target's build step (and with it its alias pushes)
+// is skipped, so a dedicated script repoints the target's moving refs at the
+// preserved sha manifest. Exercised with a STUBBED `docker` that records each
+// invocation, so the exact registry writes are a deterministic regression
+// test, not a regex over YAML.
+const MOVING_REFS = "deploy/images/republish-moving-refs.sh";
+
+function runMovingRefs(env: {
+  controller: string;
+  worker: string;
+  prRef?: string;
+  releaseVersion?: string;
+  releaseMajorMinor?: string;
+  dockerFail?: boolean;
+}): { status: number | null; calls: string[] } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
+  const callsFile = join(dir, "calls.txt");
+  const docker = join(dir, "docker");
+  writeFileSync(
+    docker,
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$*" >> "$CALLS_FILE"',
+      'if [ -n "${DOCKER_FAIL:-}" ]; then exit 1; fi',
+    ].join("\n"),
+  );
+  chmodSync(docker, 0o755);
+  const result = spawnSync("bash", [MOVING_REFS], {
+    encoding: "utf8",
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      HOME: process.env.HOME,
+      GHCR_OWNER: "o",
+      SOURCE_SHA: "cafe",
+      CONTROLLER_STATE: env.controller,
+      WORKER_STATE: env.worker,
+      PR_REF: env.prRef ?? "",
+      RELEASE_VERSION: env.releaseVersion ?? "",
+      RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
+      CALLS_FILE: callsFile,
+      ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
+    },
+  });
+  let calls: string[] = [];
+  try {
+    calls = readFileSync(callsFile, "utf8").split("\n").filter((line) => line.length > 0);
+  } catch {
+    /* docker was never called */
+  }
+  return { status: result.status, calls };
+}
+
+test("#1741 moving refs of reused targets repoint at the preserved sha manifest", () => {
+  // Half-published PR rerun: the reused controller's pr ref must be repointed
+  // at the exact sha manifest it already holds (no rebuild); the absent
+  // worker publishes its own aliases through the gated build step, so nothing
+  // is written for it here.
+  const half = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
+  assert.equal(half.status, 0);
+  assert.deepEqual(half.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+  ]);
+
+  // Release-tag resume: every reused target gets BOTH SemVer aliases
+  // repointed, each at its own sha manifest.
+  const release = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+  });
+  assert.equal(release.status, 0);
+  assert.deepEqual(release.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-cafe",
+  ]);
+
+  // First publish: both targets push their own aliases from the build step,
+  // so the script performs no registry writes at all.
+  const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
+  assert.equal(fresh.status, 0);
+  assert.deepEqual(fresh.calls, []);
+
+  // A reused target of an event with no moving refs (a `main` push) is a
+  // no-op: imagetools is never invoked just to retag the sha ref onto itself.
+  const noAliases = runMovingRefs({ controller: "present", worker: "present" });
+  assert.equal(noAliases.status, 0);
+  assert.deepEqual(noAliases.calls, []);
+
+  // A failed retag must fail the step, not degrade into the no-op skip path.
+  const failed = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", dockerFail: true });
+  assert.notEqual(failed.status, 0, "a failed imagetools create propagates as a step failure");
+  assert.equal(failed.calls.length, 1, "the attempted write is still recorded");
+
+  // A state outside the resolver's present|absent vocabulary is uncertain
+  // publication state: refuse, never silently skip.
+  const unknown = runMovingRefs({ controller: "present-no-digest", worker: "absent", prRef: "pr-7" });
+  assert.notEqual(unknown.status, 0, "an unknown state fails closed");
+  assert.deepEqual(unknown.calls, [], "no registry write happens for an unknown state");
 });
 
 test("#1704 image coordinates are documented for PR, main, and release flows", () => {
