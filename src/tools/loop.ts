@@ -43,7 +43,7 @@ import type { StreamedAttemptFailureRecord } from "./stream-attempt.js";
 // leaf module (re-exported below); the loop's own uses bind it here.
 import {
   DEPENDENCY_EVIDENCE_OBLIGATIONS,
-  DEPENDENCY_EVIDENCE_TOOLS,
+  isDependencyEvidenceChannelCall,
   dependencyEvidenceObligationsForCall,
   type DependencyEvidenceObligation,
 } from "./dependency-evidence.js";
@@ -316,6 +316,7 @@ const RESERVE_LEAD_CLAIM_REFUSAL_NOTE =
 export {
   DEPENDENCY_EVIDENCE_TOOLS,
   DEPENDENCY_EVIDENCE_OBLIGATIONS,
+  isDependencyEvidenceChannelCall,
   dependencyEvidenceObligationsForCall,
   dependencyObligationForCheckText,
 } from "./dependency-evidence.js";
@@ -869,7 +870,9 @@ export interface LoopOutcome {
    * ids seeded through `requiredEvidenceCredits`, in row order. */
   requiredEvidenceCredits: string[];
   /** #1396 (from #1379 blocker 5728634290): executed upstream
-   * evidence-channel calls (see DEPENDENCY_EVIDENCE_TOOLS) over the whole
+   * evidence-channel calls (see isDependencyEvidenceChannelCall — the
+   * literal evidence tools plus the platform seam's forge-read channel,
+   * #1726) over the whole
    * run, whatever their target or executor status — run-wide across the
    * #1145 repair seam: a continuation seeded by `requiredEvidenceAttemptsPrior`
    * reports the prior loop's attempts too. TELEMETRY ONLY: the no-lockout
@@ -1223,7 +1226,8 @@ export async function driveToolLoop(
   const seededDischarged = new Set(discharged);
   // Attempted upstream evidence-channel calls over the WHOLE RUN, pre-window
   // included. An executor error still counts as an attempt — see
-  // DEPENDENCY_EVIDENCE_TOOLS. #1396 (review): the count is run-wide across
+  // isDependencyEvidenceChannelCall (the forge-read channel included, #1726).
+  // #1396 (review): the count is run-wide across
   // the #1145 repair seam — a continuation starts from the prior loop's
   // attempts instead of a reset zero. TELEMETRY ONLY: this counter no longer
   // drives the no-lockout cap (that is `windowEvidenceAttempts` below), so
@@ -1886,7 +1890,12 @@ export async function driveToolLoop(
         // no-lockout patience; a call executed before the window opened
         // spent freely-chosen budget and must not count toward the cap.
         if (inWindow) countsTowardAttemptsCap = true;
-        if (inWindow && targets.length === 0 && !(DEPENDENCY_EVIDENCE_TOOLS.has(call.name) && anyActiveShapeRow())) {
+        // #1726 (review 5979360208): the hatch's evidence-channel recognition
+        // is the SAME platform-aware predicate attribution consumes — the
+        // forge-read channel is admitted here too (an unattributed forge read
+        // is an evidence-channel attempt that counts toward the cap below,
+        // never a row discharge; lexical attribution still owns discharge).
+        if (inWindow && targets.length === 0 && !(isDependencyEvidenceChannelCall(call.name, args as Record<string, unknown>) && anyActiveShapeRow())) {
           plan.push({
             callId,
             kind: "reserve",
@@ -1918,12 +1927,12 @@ export async function driveToolLoop(
         // consume the call's executor status once results settle below.
         execRowTargets.set(idx, {
           rows: targets.map((target) => target.id),
-          windowEvidence: countsTowardAttemptsCap && DEPENDENCY_EVIDENCE_TOOLS.has(call.name),
+          windowEvidence: countsTowardAttemptsCap && isDependencyEvidenceChannelCall(call.name, args as Record<string, unknown>),
         });
       }
       seenKeys.add(key);
       callsExecuted++;
-      if (DEPENDENCY_EVIDENCE_TOOLS.has(call.name)) {
+      if (isDependencyEvidenceChannelCall(call.name, args as Record<string, unknown>)) {
         // Attempts count for ANY executed-planned evidence-channel call —
         // window, target, and executor status irrelevant (a refused host or
         // failed fetch still counts). Discharge rides `targets` above, so a

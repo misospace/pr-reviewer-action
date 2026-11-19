@@ -234,11 +234,29 @@ workerExecutor:
 # Opt-in only (default OFF). When enabled: controller ingress denies all except
 # webhook/additionalIngress; controller egress allows DNS, PostgreSQL (5432) and
 # TLS (443) for the forge API and model endpoints. Worker egress: DNS and
-# TLS only (the worker's envelope/result travel over shared volumes).
+# TLS only by default (the worker's envelope/result travel over shared
+# volumes); a non-TLS in-cluster model endpoint additionally needs
+# `workerAdditionalEgress`, because WORKERS call the model endpoint too:
+#
+#   workerAdditionalEgress:
+#     - to:
+#         - namespaceSelector:
+#             matchLabels:
+#               kubernetes.io/metadata.name: llm
+#           podSelector:
+#             matchLabels:
+#               app.kubernetes.io/name: litellm
+#       ports:
+#         - protocol: TCP
+#           port: 4000
 networkPolicy:
   enabled: false
   additionalIngress: []
   additionalEgress: []
+  # Worker-only egress extension (#1709): appended verbatim to the WORKER
+  # policy, never the controller's. Requires networkPolicy.enabled and
+  # workerExecutor.mode: kubernetes, or the render fails.
+  workerAdditionalEgress: []
 
 # ── service monitor ────────────────────────────────────────────────────
 # The admin listener serves /metrics on its port and the chart binds it

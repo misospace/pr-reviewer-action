@@ -2520,6 +2520,117 @@ function recordArtifactError(errors: string[], message: string): boolean {
 }
 
 /**
+ * #1724: the deterministic missing-reason floor for unresolved rows.
+ *
+ * The organic #1720 failure: the reviewer's wire decision answered `unknown`
+ * on a material linked-issue requirement with an enforcement citation but no
+ * evidence detail, so the fold produced `unverifiable` with the notes
+ * `coverage-status-mapped,model-declared-unknown,missing-reason` and an EMPTY
+ * reason — the disposition layer correctly withheld approval, and the
+ * published trace gave nobody anything actionable ("why did the ledger refuse
+ * to disposition it" — because there was nothing in the claim to disposition:
+ * no status conclusion and no explanation). The #1736 reproductions added the
+ * second shape: `met` claims whose citations do not resolve, rendering the
+ * generic "no valid enforcement location" phrase with no explanation on an
+ * otherwise clean investigated head.
+ *
+ * The floor composes a BOUNDED, DETERMINISTIC explanation from facts the
+ * validator already established — what the reviewer reported (unknown /
+ * unusable row / unresolvable citations), what proof this row's shape demands,
+ * whether the cited locations resolve at the reviewed head, and the next
+ * check — so a material unknown can never exit the trace without surfacing
+ * what was not verified. It never overrides a model-supplied reason, never
+ * upgrades the disposition (the row stays `unverifiable` and unresolved —
+ * absent evidence cannot turn into approval), and never fabricates a semantic
+ * conclusion: it explains the ABSENCE of one.
+ */
+function missingReasonFloor(
+  notes: readonly string[],
+  proof: RequirementProofKind,
+  enforcement: readonly TraceLocation[],
+  test: readonly TraceLocation[],
+  cache: FileTextCache,
+): string {
+  const parts: string[] = [];
+  // Part 1 — WHY the row is unresolved. A DETERMINISTIC validator failure
+  // states the validator's own outcome: there the reviewer did supply a
+  // decision, and the gap is the checkout state / declared topology, never a
+  // missing explanation (r1 review: the generic wording must never blame the
+  // reviewer for a failure the validator produced). The reviewer-shape
+  // wordings apply only when the fold has no deterministic diagnosis, and a
+  // row can miss several independent proof dimensions at once — every
+  // established gap is composed (r1 review: a `test_required` row can fail
+  // both the enforcement and the test citation check).
+  const structuralFailed = notes.includes("structural-proof-unconfirmed");
+  const structuralRange = notes.includes("structural-citation-line-out-of-range");
+  const topologyOverflow = notes.includes("distributed-topology-overflow");
+  const seamUncovered = notes.some((note) => note.startsWith("distributed-enforcement-group-uncovered:"));
+  const enforcementGap = notes.includes("downgraded-no-valid-enforcement-location");
+  const testGap = notes.includes("downgraded-no-valid-test-location");
+  const deterministicFailure = structuralFailed || structuralRange || topologyOverflow || seamUncovered;
+  if (structuralFailed) {
+    parts.push("validator re-derived the required checkout state at the cited file and it does not hold at reviewed head");
+  } else if (structuralRange) {
+    parts.push("validator rejected the citation: the cited line is outside the cited file at reviewed head");
+  } else if (topologyOverflow) {
+    parts.push("the declared seam topology exceeds the representable bound, so no citation set can validate this row");
+  } else if (seamUncovered) {
+    parts.push("the reviewer's citations left declared enforcement seam(s) without a resolvable location");
+  } else if (notes.includes("model-declared-unknown")) {
+    parts.push("reviewer reported unknown without naming what was not verified");
+  } else if (notes.includes("disposition-invalid")) {
+    parts.push("reviewer decision row carried no usable status or explanation");
+  } else if (enforcementGap || testGap) {
+    const gaps: string[] = [];
+    if (enforcementGap) gaps.push("no resolvable enforcement location");
+    if (testGap) gaps.push("no resolvable regression-test location");
+    parts.push(`reviewer reported satisfied but cited ${gaps.join(" and ")}`);
+  } else {
+    parts.push("reviewer decision carried no explanation");
+  }
+  // Part 1b — ORTHOGONAL citation gaps. A deterministic primary diagnosis
+  // does not consume independent proof gaps: `explicitlyRequiresTest` is
+  // independent of the structural classification (the proof-shape contract:
+  // a structural requirement that also demands tests needs both), so a
+  // structural+test row can fail the state re-derivation AND the required
+  // test evidence in the same fold. Any citation-gap note that still applies
+  // is surfaced additively after the primary diagnosis (r2 review: the floor
+  // must be additive across deterministic diagnoses and orthogonal proof
+  // gaps, never choose only one).
+  if (deterministicFailure && (enforcementGap || testGap)) {
+    const gaps: string[] = [];
+    if (enforcementGap) gaps.push("no resolvable enforcement location");
+    if (testGap) gaps.push("no resolvable regression-test location");
+    parts.push(`additionally, ${gaps.join(" and ")}`);
+  }
+  // Part 2 — what evidence the row carries or demands. The deterministic and
+  // citation-gap wordings above already state the citation outcome, so the
+  // generic resolution-state clause applies only to the reviewer-shape paths
+  // where it adds information.
+  if (enforcement.length === 0 && test.length === 0) {
+    parts.push(PROOF_DEMAND_TEXT[proof] ?? "the proof this row demands was not established");
+  } else if (!deterministicFailure && !enforcementGap && !testGap) {
+    if (anyLocationValid(enforcement, cache) || anyTestLocationValid(test, cache)) {
+      parts.push("the cited locations resolve at reviewed head but carry no stated conclusion");
+    } else {
+      parts.push("the cited locations do not resolve at reviewed head");
+    }
+  }
+  parts.push("next check: answer satisfied or violated from the evidence actually read at the reviewed head, or keep unknown naming the exact unverified behavior");
+  return capReason(parts.join("; "));
+}
+
+/** The proof each proof kind demands, for the floor's no-citation clause. */
+const PROOF_DEMAND_TEXT: Readonly<Record<string, string>> = {
+  runtime_behavior: "the proof this row demands is a resolvable enforcement citation at reviewed head",
+  test_required: "the proof this row demands is resolvable enforcement and regression-test citations",
+  structural_state: "the proof this row demands is the named checkout state re-derived at head",
+  distributed: "the proof this row demands is an enforcement citation in each declared seam",
+  documentation: "the proof this row demands is confirmation from the row's own documentation source",
+  external_state: "the proof this row demands is confirmation from the row's own external source",
+};
+
+/**
  * Validate the model's per-requirement trace claims (read from the same
  * untrusted `requirement_coverage` payload `normalizeRequirementCoverage`
  * consumes) against the ledger's in-scope requirements and the checkout at
@@ -2787,6 +2898,18 @@ export function validateRequirementTrace(
       notes.push("distributed-topology-overflow");
     }
 
+    // #1724: the missing-reason floor. An unresolved row with no explanation
+    // — an unexplained wire `unknown` (#1720), an unusable decision row, or a
+    // degraded `met` whose citations do not resolve (#1736) — never exits the
+    // trace with an empty reason again. A row the reviewer never traced
+    // (`not-traced-by-reviewer`) keeps its own distinct rendering (#959); a
+    // row whose reason the model supplied is untouched. The disposition is
+    // unchanged: the row stays `unverifiable` and unresolved, so absent
+    // evidence can never turn into approval.
+    if (disposition === "unverifiable" && reason === "" && !notes.includes("not-traced-by-reviewer")) {
+      reason = missingReasonFloor(notes, proof, enforcement, test, cache);
+    }
+
     // #1658: the reason-coded resolution and the relevance class — the
     // exposure the final-disposition layer (#1656) consumes. A missing or
     // mismatched proof shape is NEVER a confirmed defect: only the
@@ -2981,6 +3104,13 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
     }
     if (row.notes.includes("structural-citation-line-out-of-range")) {
       details.push("the cited line is outside the cited file");
+    }
+    // #1724: a cited-but-unresolvable location must not render as if it were
+    // live provenance — the row's own citation shown above FAILED validation
+    // at the reviewed head, and the reader must be able to tell that from a
+    // citation that was accepted.
+    if (row.notes.includes("downgraded-no-valid-enforcement-location") && row.enforcement.length > 0) {
+      details.push("the cited location does not resolve at reviewed head");
     }
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
     // #1658: the row's relevance class is rendered so a reader can tell a

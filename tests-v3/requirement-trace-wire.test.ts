@@ -437,6 +437,13 @@ test("#1660 review: the coverage instruction demands semantic adequacy, never ci
     assert.ok(text.includes("supported counterexample or evidence that the requirement is not met"), name);
     // `unknown` explicitly covers located-but-adequacy-unestablished.
     assert.ok(text.includes("cannot establish its adequacy"), name);
+    // #1724: an unknown row owes its explanation — the organic #1720 failure
+    // was a bare wire `unknown` with a file ref and no detail, which the fold
+    // could only report as `missing-reason`. The contract must teach the
+    // explanation floor, and must never demand new tests for the positive
+    // side (pre-existing current-head evidence is valid).
+    assert.ok(text.includes("an unknown row must carry an evidence detail naming the exact behavior you could not verify"), name);
+    assert.ok(text.includes("no test is required beyond what the requirement text itself demands"), name);
     // The shared-observation allowance survives (no per-requirement budget).
     assert.ok(text.includes("One genuine observation may support several requirements; cite it for each."), name);
     // The old locate-meets-satisfied wording must not return.
