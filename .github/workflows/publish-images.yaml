@@ -3,9 +3,11 @@ name: Publish images
 # #1704: publish the #738 controller and worker runtime images to GHCR for
 # every publishable revision, not just the #1584 manual canary. The workflow
 # runs for pull requests targeting `main`, pushes to protected `main`, pushes
-# of `v*` release tags, and manual dispatch (recovery/testing). Every run
-# builds BOTH targets from ONE checked-out commit so the controller and
-# worker images always share a runtime/protocol revision.
+# of exact `vX.Y.Z` release tags, and manual dispatch (recovery/testing). The
+# floating git major tag (`v3`), which the release pipeline moves on every
+# stable release, matches no filter here and never starts a run (#1742).
+# Every run builds BOTH targets from ONE checked-out commit so the controller
+# and worker images always share a runtime/protocol revision.
 #
 # Tag scheme (no `latest` anywhere):
 #   - `sha-<commit>` — immutable, published for every run from this workflow.
@@ -25,10 +27,13 @@ name: Publish images
 #     floating alias of any shape (no `major`, no `major.minor`, no
 #     `latest`): a container image tag is what a cluster pulls, so images
 #     publish exact coordinates only. The Helm chart (#1708,
-#     `.github/workflows/publish-chart.yaml`) is the intended destination
-#     for floating references. The Action's own floating git major tag
-#     (`vX`, moved by release-please/manual-release) is a separate surface
-#     for `uses:` consumers and is unchanged here.
+#     `.github/workflows/publish-chart.yaml`) publishes exact SemVer OCI
+#     tags too — Helm rejects non-SemVer OCI tags — so no floating image
+#     or chart OCI alias exists today. The Action's own floating git major
+#     tag (`vX`, moved by release-please/manual-release) is a separate
+#     surface for `uses:` consumers, and it deliberately does not trigger
+#     this workflow (#1742): a `vX` tag push would only start a run the
+#     strict validation below must refuse.
 #
 # Trust boundary (preserved from #1584 and sharpened): fork pull requests
 # never enter the `publish` job — they run `build-fork-pr`, which holds
@@ -56,7 +61,16 @@ on:
     branches: ["main"]
   push:
     branches: ["main"]
-    tags: ["v*"]
+    # #1742: exact release tags only. GitHub filter patterns are globs, not
+    # regex, but they support character classes with the `+` quantifier
+    # (documented example: `v[12].[0-9]+.[0-9]+`), so this filter never
+    # starts a run for the floating major tag (`v3`) or a floating `vX.Y`
+    # ref that release tooling moves. Such a run could only fail the strict
+    # validation in Resolve publish coordinates: the spurious alarm #1742
+    # removes. That strict check stays regardless: the filter decides which
+    # runs start, the check is what guarantees a tag push never derives a
+    # wrong alias, and it keeps holding if this filter is ever widened.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 permissions:
@@ -69,10 +83,10 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Same-repository pull requests, `main` pushes, `v*` tag pushes and
-    # manual dispatch publish. A fork pull_request event never enters this
-    # job (its head repository differs), so untrusted code can never reach
-    # the GHCR credentials held here.
+    # Same-repository pull requests, `main` pushes, exact `vX.Y.Z` tag
+    # pushes and manual dispatch publish. A fork pull_request event never
+    # enters this job (its head repository differs), so untrusted code can
+    # never reach the GHCR credentials held here.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read

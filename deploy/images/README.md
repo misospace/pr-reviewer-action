@@ -22,8 +22,9 @@ The dedicated GitHub Actions workflow publishes both images to GHCR from
 one checked-out commit for every publishable revision (#1704):
 
 - workflow: `.github/workflows/publish-images.yaml` — triggered by
-  pull requests targeting `main`, pushes to `main`, pushes of `v*` release
-  tags, and manual `workflow_dispatch` (recovery/testing);
+  pull requests targeting `main`, pushes to `main`, pushes of exact
+  `vX.Y.Z` release tags (the floating `vX` major tag never starts a run,
+  #1742), and manual `workflow_dispatch` (recovery/testing);
 - published refs (both images, all from the same source commit):
 
   | trigger | refs |
@@ -35,7 +36,7 @@ one checked-out commit for every publishable revision (#1704):
 
   The exact `image@sha256:...` references for the run are reported in the
   run summary; the immutable `sha-<commit>` ref is the provenance anchor
-  behind the moving PR ref and the release aliases;
+  behind the moving PR ref and the release alias;
 - platform: `linux/amd64`;
 - permissions: the publish job runs with `contents: read` + `packages:
   write` and logs into GHCR with `GITHUB_TOKEN`. Image building never
@@ -82,7 +83,7 @@ listener binds loopback by default and the chart sets
   present (reporting its existing digest) and publishes only the missing
   target, so a run that failed after pushing one image can finish the pair
   for that commit without cutting a new one. A reused target's moving refs
-  (`pr-<number>` and the release aliases) are repointed at the preserved
+  (`pr-<number>` and the release alias) are repointed at the preserved
   digest by a separate step without a rebuild, so a rerun also recovers
   aliases an earlier run failed to push. An uncertain registry answer
   stops the run (fail closed). A rerun can never move a published tag — but
@@ -115,20 +116,23 @@ listener binds loopback by default and the chart sets
   the exact SemVer ref (`X.Y.Z`) only for both images from that exact
   tagged commit, following the same digest-reporting pattern (the
   immutable `sha-<commit>` ref and the run-summary digest remain the
-  provenance anchor behind the alias). No floating alias is published
-  (#1742). A cluster pulls an image tag directly, so every published
-  image tag must resolve to one immutable build: pin the exact tag or
-  the digest. The Helm chart is the intended destination for floating
-  references. An operator who tracks a release line consumes the chart
-  that the same release publishes as
+  provenance anchor behind the alias). Only exact `vX.Y.Z` tag pushes
+  trigger the workflow at all: the floating git major tag (`v3`), which
+  the release pipeline moves on every stable release, matches no trigger
+  filter and never starts an image-publication run (#1742). No floating
+  alias is published. A cluster pulls an image tag directly, so every
+  published image tag must resolve to one immutable build: pin the exact
+  tag or the digest. No floating alias exists on the chart surface today
+  either: the chart that the same release publishes as
   `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z` (#1708,
-  `.github/workflows/publish-chart.yaml`). The chart version is the same
-  application release coordinate as these image release tags: one
-  release, one coordinate. The chart itself also publishes exact SemVer
-  OCI tags (Helm rejects non-SemVer OCI tags), so a future floating
-  convenience belongs on that chart surface, never on image tags. The
-  digest-pinned image overrides above stay the exact immutable
-  production pin when desired.
+  `.github/workflows/publish-chart.yaml`) carries exact SemVer OCI tags
+  only, because Helm rejects non-SemVer OCI tags. The chart version is
+  the same application release coordinate as these image release tags:
+  one release, one coordinate, so an operator who tracks a release line
+  consumes the next exact chart version from each release. If a floating
+  convenience is ever added, it belongs on that chart surface, never on
+  image tags. The digest-pinned image overrides above stay the exact
+  immutable production pin when desired.
 - The release stamp is not baked by the Dockerfile itself; release
   pipelines should run the build with `PR_REVIEWER_BUILD_STAMP=release`
   available (CI-driven) or accept the unstamped dev bundle for local use.

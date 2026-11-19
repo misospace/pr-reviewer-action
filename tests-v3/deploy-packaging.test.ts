@@ -686,8 +686,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     }>;
   };
 
-  // ── Triggers (#1704): same-repo PRs, pushes to protected main, `v*` tag
-  // pushes, and retained manual dispatch.
+  // ── Triggers (#1704): same-repo PRs, pushes to protected main, exact
+  // `vX.Y.Z` tag pushes, and retained manual dispatch. #1742: the filter
+  // itself excludes the floating git major tag (`v3`) and a floating
+  // `vX.Y`, because such a push could only produce a run the strict
+  // validation refuses: the spurious alarm #1742 removes.
   assert.ok(parsed.on, "triggers must parse");
   assert.deepEqual(
     Object.keys(parsed.on).sort(),
@@ -695,7 +698,44 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   );
   assert.deepEqual(parsed.on.pull_request?.branches, ["main"], "PR runs must target main");
   assert.deepEqual(parsed.on.push?.branches, ["main"], "every push to main must publish");
-  assert.deepEqual(parsed.on.push?.tags, ["v*"], "release tag pushes must publish");
+  // GitHub filter patterns are globs, not regex, but they support
+  // character classes with a following `+` quantifier (the documented
+  // `v[12].[0-9]+.[0-9]+` shape). This matcher covers exactly that
+  // subset: literals (dots included), `[...]` classes, and `+`.
+  const ghFilterToRegExp = (pattern: string): RegExp => {
+    let source = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i]!;
+      if (ch === "[") {
+        const end = pattern.indexOf("]", i);
+        assert.notEqual(end, -1, "unterminated character class in the tag filter");
+        source += pattern.slice(i, end + 1);
+        i = end;
+        if (pattern[i + 1] === "+") {
+          source += "+";
+          i++;
+        }
+      } else {
+        source += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+    }
+    return new RegExp(`^${source}$`);
+  };
+  assert.deepEqual(
+    parsed.on.push?.tags,
+    ["v[0-9]+.[0-9]+.[0-9]+"],
+    "only exact vX.Y.Z tag pushes may trigger the workflow",
+  );
+  const tagFilter = ghFilterToRegExp(parsed.on.push!.tags![0]!);
+  for (const exact of ["v1.0.0", "v3.9.1", "v10.20.30"]) {
+    assert.ok(tagFilter.test(exact), `the exact release tag ${exact} must trigger the workflow`);
+  }
+  for (const floating of ["v3", "v3.9", "v", "v3.", "v3.9.0-rc.1", "nightly"]) {
+    assert.ok(
+      !tagFilter.test(floating),
+      `the floating/non-release ref ${floating} must never start an image-publication run`,
+    );
+  }
   // A canceled run would silently skip publishing the sha refs of the
   // commit it raced, so runs serialize per ref and never cancel.
   assert.match(parsed.concurrency.group, /publish-images-\$\{\{ github\.ref \}\}/);
@@ -1306,18 +1346,35 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(readme, /sha-<commit>/, "the immutable commit ref must be documented");
   assert.match(readme, /X\.Y\.Z/, "the exact SemVer release alias must be documented");
   // #1742: the exact version is the only release alias. The docs must not
-  // advertise a floating major.minor image reference, and they must state
-  // that the Helm chart is the intended destination for floating
-  // references.
+  // advertise a floating major.minor image reference, and (review
+  // follow-up) they must not imply the chart carries a floating OCI alias
+  // today: publish-chart.yaml publishes exact SemVer only, because Helm
+  // rejects non-SemVer OCI tags.
   assert.doesNotMatch(
     readme,
     /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
     "no floating image alias may be documented",
   );
+  const readmeProse = readme.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    readmeProse,
+    /intended destination for floating references/,
+    "the docs must not present the chart as a floating-alias destination today",
+  );
   assert.match(
-    readme.replace(/\s+/g, " "),
-    /The Helm chart is the intended destination for floating references/,
-    "the docs must name the Helm chart as the destination for floating references",
+    readmeProse,
+    /No floating alias exists on the chart surface today/,
+    "the docs must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    readmeProse,
+    /Helm rejects non-SemVer OCI tags/,
+    "the docs must give the reason the chart carries exact tags only",
+  );
+  assert.match(
+    readmeProse,
+    /never starts an image-publication run/,
+    "the docs must state the floating major tag never starts an image-publication run",
   );
   // The fork trust boundary must be stated.
   assert.match(readme, /[Ff]ork[\s\S]{0,200}publish(?:es)? nothing/, "the fork-PR no-publish contract must be documented");
@@ -1331,16 +1388,28 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(deploymentDoc, /sha-<commit>/);
   assert.match(deploymentDoc, /X\.Y\.Z/);
   assert.match(deploymentDoc, /[Ff]ork/);
-  // #1742: same single-alias contract in the deployment runbook.
+  // #1742: same single-alias contract in the deployment runbook, with the
+  // same "no floating alias exists today" honesty about the chart surface.
   assert.doesNotMatch(
     deploymentDoc,
     /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
     "no floating image alias may be documented",
   );
+  const deploymentProse = deploymentDoc.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    deploymentProse,
+    /intended destination for floating references/,
+    "the deployment doc must not present the chart as a floating-alias destination today",
+  );
   assert.match(
-    deploymentDoc.replace(/\s+/g, " "),
-    /The Helm chart is the intended destination for floating references/,
-    "the deployment doc must name the Helm chart as the destination for floating references",
+    deploymentProse,
+    /No floating alias exists on the chart surface today/,
+    "the deployment doc must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    deploymentProse,
+    /never starts an image-publication run/,
+    "the deployment doc must state the floating major tag never starts an image-publication run",
   );
 });
 

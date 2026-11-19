@@ -65,20 +65,26 @@ are published from the same source commit:
   may move as commits are pushed; each underlying commit stays addressable
   by its immutable `sha-<head-commit>` ref.
 - **Release tags.** A `vX.Y.Z` tag publishes the exact SemVer ref
-  (`X.Y.Z`) only for both images from that exact tagged commit. No
-  floating alias is published (#1742): a cluster pulls an image tag
-  directly, so every image tag must resolve to one immutable build. The
-  immutable `sha-<commit>` ref and digest remain the provenance anchor
-  behind the alias. No `latest` tag is published. The Helm chart is the
-  intended destination for floating references: an operator who tracks a
-  release line bumps the chart version the same release publishes
+  (`X.Y.Z`) only for both images from that exact tagged commit. Only
+  exact `vX.Y.Z` tag pushes trigger the workflow at all: the floating git
+  major tag (`v3`), which the release pipeline moves on every stable
+  release, matches no trigger filter and never starts an image-publication
+  run (#1742). No floating alias is published: a cluster pulls an image
+  tag directly, so every image tag must resolve to one immutable build.
+  The immutable `sha-<commit>` ref and digest remain the provenance anchor
+  behind the alias. No `latest` tag is published. No floating alias
+  exists on the chart surface today either: the chart publishes exact
+  SemVer OCI tags only, because Helm rejects non-SemVer OCI tags, so an
+  operator who tracks a release line consumes the exact chart version the
+  same release publishes
   (`oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z`), never a moving
   image tag.
 
 How it runs:
 
 - **Triggers.** Pull requests targeting `main`, pushes to `main`, pushes of
-  `v*` release tags, and manual `workflow_dispatch` (recovery/testing,
+  exact `vX.Y.Z` release tags (the floating `vX` major tag never starts a
+  run, #1742), and manual `workflow_dispatch` (recovery/testing,
   from Actions → Publish images).
 - **Fork boundary.** A fork pull request builds and validates both targets
   locally but receives no GHCR credentials (`contents: read` only) and
@@ -92,7 +98,7 @@ How it runs:
   tag's state and never re-pushes one that already exists. A rerun RESUMES a
   half-published pair — it reuses a target whose tag is present (keeping its
   digest) and publishes only the missing target. A reused target's moving
-  refs (`pr-<number>` and the release aliases) are repointed at the preserved
+  refs (`pr-<number>` and the release alias) are repointed at the preserved
   digest without a rebuild, so a rerun also recovers aliases an earlier run
   failed to push. If either registry answer
   is uncertain, the run stops instead of pushing (fail closed). A rerun can
