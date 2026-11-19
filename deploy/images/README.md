@@ -76,11 +76,15 @@ listener binds loopback by default and the chart sets
 - The workflow tags each published image with the source commit
   (`sha-<commit>`) and reports its digest in the run summary. GHCR has no
   registry-side tag immutability, so the workflow enforces it: before it
-  builds anything, it checks both `sha-<commit>` tags in the registry and
-  stops the run if a tag already exists, or if the registry answer is not
-  an explicit "absent". Within this workflow a rerun can therefore never
-  move a published tag — but a digest is still the exact bytes the
-  controller will execute, so pin the digest at both consumption points.
+  builds anything, it resolves each `sha-<commit>` tag's state and never
+  re-pushes one that already exists. A rerun therefore RESUMES a
+  half-published controller/worker pair — it reuses a target whose tag is
+  present (reporting its existing digest) and publishes only the missing
+  target, so a run that failed after pushing one image can finish the pair
+  for that commit without cutting a new one. An uncertain registry answer
+  stops the run (fail closed). A rerun can never move a published tag — but
+  a digest is still the exact bytes the controller will execute, so pin the
+  digest at both consumption points.
 - **Controller image (chart):** the `common` library chart reads the
   image from `controller.controllers.main.containers.main.image`, and
   its image specification accepts a `digest` field next to `repository`

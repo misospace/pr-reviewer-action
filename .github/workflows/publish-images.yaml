@@ -34,8 +34,11 @@ name: Publish images
 # manual-release): it writes no git tags, no releases, and no dist artifacts.
 #
 # GHCR has no registry-side tag-immutability setting, so the publish job
-# itself refuses to replace a `sha-<commit>` tag that already exists (see
-# the pre-push guard below). The `pr-<number>` ref is the only intentionally
+# itself never re-pushes a `sha-<commit>` tag that already exists (see the
+# per-target resolver below). A rerun instead RESUMES a partially published
+# controller/worker pair (#1741): a present target is reused and its digest
+# reported, an absent one is built and pushed, and only an ambiguous registry
+# answer fails the run closed. The `pr-<number>` ref is the only intentionally
 # moving ref.
 #
 # Note on metadata-action: the Dispatch reference workflow tags the SHA ref
@@ -161,54 +164,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse to replace a published sha tag
+      - name: Resolve published sha-tag state (resume a partial pair)
         # GHCR has no registry-side tag immutability (a push always
         # overwrites), so immutability is enforced here: a rebuild is not
         # byte-identical (see the Dockerfile pinning policy), so re-pushing
-        # the same sha-<commit> tag would silently move it off the digest
-        # the run summary published. The guard fails closed: the job
-        # proceeds only when the registry explicitly answers that the tag
-        # is absent, and refuses on any other error (auth, network,
-        # unexpected state).
+        # an existing sha-<commit> tag would silently move it off the digest
+        # the run summary published. But the guard must not refuse the whole
+        # run when only PART of the pair is published (#1741): a run that
+        # pushed the controller and then failed on the worker has to finish
+        # that commit's pair on a rerun, never cut a new commit that leaves
+        # the original release with a controller ref and no worker.
+        #
+        # So the state is resolved PER TARGET: a present tag is reused (its
+        # digest captured, never re-pushed by the gated build below), an
+        # explicitly-absent tag is built and pushed, and any ambiguous
+        # registry answer — or a present tag whose digest cannot be read —
+        # fails the run CLOSED. The step runs before the first push.
+        id: sha_state
         env:
           CONTROLLER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}
           WORKER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}
-        run: |
-          set -euo pipefail
-          for tag in "$CONTROLLER_TAG" "$WORKER_TAG"; do
-            if out=$(docker manifest inspect "$tag" 2>&1); then
-              echo "::error::${tag} already exists in GHCR. sha-<commit> tags are immutable: a rerun would silently replace the published reference. Publish a new commit instead."
-              exit 1
-            fi
-            # Fail closed: only an explicit registry absence (404
-            # MANIFEST_UNKNOWN / NAME_UNKNOWN / not found) proves the tag
-            # is absent. Anything else — auth, TLS ("unknown authority"),
-            # network, an OCI UNKNOWN error code — refuses the run. (An
-            # access denial also means this same GITHUB_TOKEN could not
-            # overwrite the tag later, so refusing can never mask an
-            # overwrite; at worst it fails one run loudly.)
-            if ! printf '%s\n' "$out" | grep -Eqi 'manifest.unknown|name.unknown|not found'; then
-              echo "registry answer for ${tag}:" >&2
-              printf '%s\n' "$out" >&2
-              echo "::error::cannot confirm that ${tag} is absent; refusing to push over uncertain registry state."
-              exit 1
-            fi
-          done
+        run: bash deploy/images/resolve-sha-tag-state.sh
 
       # Provenance attestations are disabled so the pushed artifact is a
       # plain single manifest: the digest reported below is then exactly
       # the digest `docker pull` / Kubernetes resolves for operators
       # pinning `image@sha256:...`.
       #
-      # The immutable `sha-<SOURCE_SHA>` tag publishes on every run. The
-      # `pr-<number>` ref publishes only for pull_request events, the SemVer
-      # and major.minor aliases only for validated `vX.Y.Z` tag pushes
-      # (each conditional line collapses to an empty entry that the build
-      # action drops). The GHA cache is written only for non-PR runs — PR
-      # builds read it but never export, so a PR cannot rewrite the cache
-      # the `main` builds consume.
+      # The immutable `sha-<SOURCE_SHA>` tag publishes whenever that target's
+      # sha tag is absent; a target whose sha tag is already present is reused
+      # untouched (#1741), so a rerun finishes a half-published pair without
+      # moving any existing ref. The `pr-<number>` ref publishes only for
+      # pull_request events, the SemVer and major.minor aliases only for
+      # validated `vX.Y.Z` tag pushes (each conditional line collapses to an
+      # empty entry that the build action drops). The GHA cache is written only
+      # for non-PR runs — PR builds read it but never export, so a PR cannot
+      # rewrite the cache the `main` builds consume.
       - name: Build and push controller (linux/amd64)
         id: controller
+        # #1741: push only when the controller's sha-<commit> tag is absent.
+        # When it is already present the resolver reused it, and re-running
+        # must not move that immutable ref (nor its release/PR aliases, which
+        # that earlier run pushed as this target's group).
+        if: steps.sha_state.outputs.controller_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -227,6 +225,9 @@ jobs:
 
       - name: Build and push worker (linux/amd64)
         id: worker
+        # #1741: push only when the worker's sha-<commit> tag is absent; a
+        # present worker tag is reused so a rerun never moves it.
+        if: steps.sha_state.outputs.worker_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -244,15 +245,34 @@ jobs:
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
       - name: Record published digests
+        # Each digest is either the reused reference the resolver read for a
+        # tag that was already published (#1741) or the freshly built digest
+        # from the gated build step. Exactly one source is set per target, so
+        # the summary always reports BOTH images of the pair for this commit —
+        # the recovery run finishes the pair it did not build itself.
         env:
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           PR_REF: ${{ env.PR_REF }}
           RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
           RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
-          CONTROLLER_DIGEST: ${{ steps.controller.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
+          WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
+          RESOLVED_CONTROLLER_DIGEST: ${{ steps.sha_state.outputs.controller_digest }}
+          RESOLVED_WORKER_DIGEST: ${{ steps.sha_state.outputs.worker_digest }}
+          BUILT_CONTROLLER_DIGEST: ${{ steps.controller.outputs.digest }}
+          BUILT_WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
         run: |
           set -euo pipefail
+          # A reused tag's digest comes from the resolver; a freshly pushed
+          # one from the build step. Prefer the reused digest so a resume run
+          # reports the immutable reference it preserved, not a rebuild.
+          CONTROLLER_DIGEST="${RESOLVED_CONTROLLER_DIGEST:-$BUILT_CONTROLLER_DIGEST}"
+          WORKER_DIGEST="${RESOLVED_WORKER_DIGEST:-$BUILT_WORKER_DIGEST}"
+          # Human-readable list of targets whose immutable tag was reused, for
+          # the summary's resume note.
+          REUSED=""
+          [ "$CONTROLLER_STATE" = "present" ] && REUSED="controller"
+          [ "$WORKER_STATE" = "present" ] && REUSED="${REUSED:+$REUSED, }worker"
           # Fail loudly on a missing digest instead of printing a bare
           # image reference in the summary.
           [ -n "$CONTROLLER_DIGEST" ] || { echo "controller digest is empty" >&2; exit 1; }
@@ -260,7 +280,11 @@ jobs:
           {
             echo "## Self-hosted images published (#1704)"
             echo
-            echo "Trigger: \`${GITHUB_EVENT_NAME}\`. Source commit: \`${SOURCE_SHA}\` (both images built from this one commit)."
+            echo "Trigger: \`${GITHUB_EVENT_NAME}\`. Source commit: \`${SOURCE_SHA}\` (the commit both image refs are published from)."
+            if [ -n "$REUSED" ]; then
+              echo
+              echo "Resume run (#1741): reused the existing \`sha-${SOURCE_SHA}\` ref for ${REUSED} (never moved); published only the target(s) whose sha ref was absent."
+            fi
             echo
             echo "| image | digest reference |"
             echo "|---|---|"

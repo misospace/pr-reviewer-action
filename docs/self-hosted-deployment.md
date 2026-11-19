@@ -82,11 +82,13 @@ How it runs:
   copy-paste-ready `image@sha256:...` reference plus the exact source
   commit and the trigger. No `latest` anywhere.
 - **Tag immutability.** GHCR has no registry-side immutable-tag setting,
-  so the job enforces it before building: it inspects both `sha-<commit>`
-  tags and stops the run when one already exists, or when the registry
-  state is uncertain (fail closed). Within this workflow a rerun can
-  never move a published tag; publish a new commit instead. The
-  `pr-<number>` ref is the only intentionally moving ref.
+  so the job enforces it before building: it resolves each `sha-<commit>`
+  tag's state and never re-pushes one that already exists. A rerun RESUMES a
+  half-published pair — it reuses a target whose tag is present (keeping its
+  digest) and publishes only the missing target. If either registry answer
+  is uncertain, the run stops instead of pushing (fail closed). A rerun can
+  therefore never move a published tag. The `pr-<number>` ref is the only
+  intentionally moving ref.
 - **Permissions.** The publish job runs with `contents: read` and
   `packages: write` and logs into GHCR with `GITHUB_TOKEN`. Image building
   is fully separate from the Action release pipeline (which owns
