@@ -228,6 +228,35 @@ and configured concurrency/model costs before first enabling the poll.
   at controller startup. Rotating a backing Secret therefore requires a
   controller rollout/restart; the chart does not claim live Secret watching.
 
+### Kubernetes API egress exception (Kubernetes-executor mode, #1714)
+
+With `networkPolicy.enabled` and `workerExecutor.mode: kubernetes`, the
+controller must reach the Kubernetes API to create/poll worker Jobs and
+manage the per-run credential Secrets. The base egress rules include TCP
+443, which covers the API's ClusterIP under classic kube-proxy — but on
+Cilium kube-proxy-replacement clusters the connection is redirected to
+the `hostNetwork` API server at `<nodeIP>:6443`, policy is evaluated
+against that backend, and the 443 rule never matches. The failure is
+silent ("the API call did not complete"). Add the API exception with
+`networkPolicy.additionalEgress` (cluster-specific node subnet; the
+controller policy is the only one that needs the API):
+
+```yaml
+networkPolicy:
+  enabled: true
+  additionalEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.69.1.20/29 # your control-plane/node subnet
+      ports:
+        - protocol: TCP
+          port: 6443
+```
+
+Mechanism detail and the CNI shapes that need it:
+`docs/self-hosted-deployment.md` ("Kubernetes API egress for
+Kubernetes-executor mode").
+
 ## Admin/metrics reachability
 
 The controller's admin listener defaults to loopback

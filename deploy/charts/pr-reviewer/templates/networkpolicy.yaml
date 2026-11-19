@@ -4,7 +4,13 @@ Default-deny network policies (#738). Two policies, one per pod family:
 - Controller pods (release namespace): deny-all ingress; egress limited
   to DNS, PostgreSQL (5432), and TLS (443 — the forge API and the model
   endpoints). `networkPolicy.additionalIngress`/`additionalEgress` are
-  operator-extensible rule lists appended verbatim.
+  operator-extensible rule lists appended verbatim. In Kubernetes-
+  executor mode the controller also needs the Kubernetes API: the 443
+  rule covers the ClusterIP under classic kube-proxy, but Cilium
+  kube-proxy-replacement redirects it to the hostNetwork'd API server
+  (`nodeIP:6443`) and policy is evaluated against that backend, so KPR
+  clusters must add a 6443 exception via `additionalEgress` (#1714 —
+  see docs/self-hosted-deployment.md).
 - Worker pods (worker namespace): the selector MUST cover every worker
   pod the executor creates — src/executor/kubernetes.ts
   (WORKER_NETWORK_POSTURE.selector) stamps
