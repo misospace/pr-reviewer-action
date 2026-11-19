@@ -11,8 +11,20 @@ Default-deny network policies (#738). Two policies, one per pod family:
   `app.kubernetes.io/managed-by: pr-reviewer-action` onto every worker
   pod template. Ingress: deny-all (the worker never serves anything).
   Egress: DNS and TLS only — the worker's request/result travel over the
-  shared volumes, never the network.
+  shared volumes, never the network. #1709: the worker ALSO calls the
+  configured model endpoint directly, so a plain-HTTP (non-TLS) in-cluster
+  endpoint needs `networkPolicy.workerAdditionalEgress`, an explicit
+  worker-only extension appended verbatim to the worker policy's egress.
+  It never touches the controller policy, and `additionalEgress` never
+  touches the worker policy.
 */}}
+{{/* ONE condition decides whether the worker policy renders; the
+  #1709 guard and the worker document must never disagree. */}}
+{{- $workerPolicy := and .Values.networkPolicy.enabled
+  (eq (dig "mode" "disabled" (.Values.workerExecutor | default dict)) "kubernetes") }}
+{{- if and .Values.networkPolicy.workerAdditionalEgress (not $workerPolicy) }}
+{{- fail "networkPolicy.workerAdditionalEgress requires networkPolicy.enabled and workerExecutor.mode: kubernetes; without a rendered worker policy the exception would be silently dropped" }}
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -84,7 +96,7 @@ spec:
     {{- with .Values.networkPolicy.additionalEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-{{- if eq (dig "mode" "disabled" (.Values.workerExecutor | default dict)) "kubernetes" }}
+{{- if $workerPolicy }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -123,5 +135,8 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+    {{- with .Values.networkPolicy.workerAdditionalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}
 {{- end }}

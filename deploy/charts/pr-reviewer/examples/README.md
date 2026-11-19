@@ -187,3 +187,28 @@ accordingly.
   cluster, including the Kubernetes API, model endpoint and admin listener.
   With policies enabled the webhook intake permits ingress on its port;
   operator-specific exceptions go in `networkPolicy.additionalIngress`.
+- The **workers**, not only the controller, must reach the model
+  endpoint: the worker pod runs the review engine and calls the model
+  API itself. The default worker policy allows DNS and TLS (443) only,
+  so a plain-HTTP in-cluster endpoint needs
+  `networkPolicy.workerAdditionalEgress` (#1709), for example:
+
+  ```yaml
+  networkPolicy:
+    enabled: true
+    workerAdditionalEgress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: llm
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: litellm
+        ports:
+          - protocol: TCP
+            port: 4000
+  ```
+
+  These rules render only into the worker policy. `additionalEgress`
+  stays controller-only, and the worker default stays DNS + TLS without
+  the override.
