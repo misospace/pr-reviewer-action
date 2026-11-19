@@ -54,8 +54,22 @@ import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
-import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
+import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
 import { Conversation } from "../src/model/conversation.js";
+
+// #1726 (review 5979360208): the loop's no-lockout admission predicate
+// recognizes the forge-read channel through the SAME platform seam
+// attribution consumes — capability-neutral (no literal tool name beyond
+// the seam's), admission-only (it never discharges rows).
+test("#1726: the evidence-channel admission predicate covers the forge-read channel via the platform seam", () => {
+  assert.equal(isDependencyEvidenceChannelCall("web_fetch", {}), true);
+  assert.equal(isDependencyEvidenceChannelCall("web_search", {}), true);
+  assert.equal(isDependencyEvidenceChannelCall("gh_api", { endpoint: "repos/withastro/astro/issues/1" }), true);
+  assert.equal(isDependencyEvidenceChannelCall("gh_api", { endpoint: "" }), false);
+  assert.equal(isDependencyEvidenceChannelCall("gh_api", {}), false);
+  assert.equal(isDependencyEvidenceChannelCall("read_file", { path: "a.ts" }), false);
+  assert.equal(isDependencyEvidenceChannelCall("run_command", { command: "ls" }), false);
+});
 
 // ---------------------------------------------------------------------------
 // The #1721 replay inputs (from the retained record — see module docstring).
@@ -529,8 +543,9 @@ test("#1726: the replay's CI evidence shape is the gate's own parse output", () 
 // fired, and the loop spent every one of its 40 requests (23 rounds, stop
 // `tool-call-budget-exhausted`). This fixture replays that loop with the
 // same budget/reserve/row configuration and an upstream channel that never
-// attributes (workspace reads plus evidence-channel fetches whose targets
-// name no obligation) — the burn is deterministic and still reachable
+// attributes (workspace reads plus FORGE-READ calls — the organic gh_api
+// channel class, #1726 review 5979360208 — whose endpoints name no
+// obligation) — the burn is deterministic and still reachable
 // post-fix whenever the evidence channel yields nothing attributable, and
 // the fail-closed fold over the burned run reads exactly the #1721 shape.
 // The channel-fixed counterpart (attributed upstream evidence settling the
@@ -542,9 +557,13 @@ test("#1721 loop replay: 40/40 calls burn to tool-call-budget-exhausted and the 
   conversation.addUser("corpus");
   // 20 scripted rounds x 2 calls = the full 40-request budget: rounds 1-18
   // pre-window workspace reads (36 calls), rounds 19-20 inside the reserved
-  // window evidence-channel fetches whose targets attribute nothing (the
-  // no-lockout hatch admits them while a shape row is active, so they DO
-  // consume the reserved tail — exactly how the organic burn reached 40/40).
+  // window FORGE-READ calls (gh_api — the organic #1721 channel class) whose
+  // endpoints attribute nothing (issue threads name no obligation keyword
+  // and address no canonical repository identity). The no-lockout hatch
+  // admits them while a shape row is active (#1726 review 5979360208: the
+  // hatch's evidence-channel recognition consumes the same platform seam as
+  // attribution), so they DO consume the reserved tail — exactly how the
+  // organic burn reached 40/40.
   const responses: unknown[] = [];
   let callIndex = 0;
   for (let round = 0; round < 18; round++) {
@@ -559,7 +578,7 @@ test("#1721 loop replay: 40/40 calls burn to tool-call-budget-exhausted and the 
     responses.push({
       choices: [{ message: { content: null, tool_calls: [0, 1].map((offset) => {
         const id = `w${callIndex++}`;
-        return { id, type: "function", function: { name: "web_fetch", arguments: JSON.stringify({ url: `https://example.test/status-${id}` }) } };
+        return { id, type: "function", function: { name: "gh_api", arguments: JSON.stringify({ endpoint: `repos/withastro/astro/issues/${callIndex - 36}` }) } };
       }) } }],
     });
   }

@@ -22,6 +22,30 @@ export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
   "web_search",
 ]);
 
+/**
+ * #1726 (review 5979360208): whether a call rides an upstream
+ * dependency-evidence CHANNEL — the loop's no-lockout admission predicate
+ * (the reserve-window escape hatch, the `windowEvidence` bookkeeping, and
+ * the attempts-cap counters all ask this). The literal evidence tools plus
+ * the platform seam's forge-read channel, through the SAME recognition
+ * attribution consumes (`forgeReadChannelTarget`): an unattributed forge
+ * read inside the reserved window is admitted as an evidence-channel
+ * attempt and counts toward the no-lockout cap instead of being refused —
+ * the forge-read channel is no longer a second-class evidence channel.
+ * ADMISSION ONLY: this predicate never discharges an obligation row — row
+ * discharge still requires `dependencyEvidenceObligationsForCall`'s lexical
+ * attribution grammar, so an unattributed forge read credits nothing. An
+ * endpoint-less `gh_api` call is no channel call (it presents no forge-API
+ * target), exactly as attribution treats it. Pure, total, never throws.
+ */
+export function isDependencyEvidenceChannelCall(
+  name: string,
+  args: Record<string, unknown>,
+): boolean {
+  if (DEPENDENCY_EVIDENCE_TOOLS.has(name)) return true;
+  return forgeReadChannelTarget(name, args) !== null;
+}
+
 /** #1379 review blocker 5728634290: the required upstream evidence
  * obligations the reserve window tracks individually. Canonical order is
  * load-bearing: the tracked set is the prefix the reserve can pay for, and
