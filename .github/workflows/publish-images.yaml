@@ -39,7 +39,9 @@ name: Publish images
 # controller/worker pair (#1741): a present target is reused and its digest
 # reported, an absent one is built and pushed, and only an ambiguous registry
 # answer fails the run closed. The `pr-<number>` ref is the only intentionally
-# moving ref.
+# moving ref, and a reused target's moving-ref retag runs only after the run
+# confirms it is still the live coordinate behind that ref: a rerun of a
+# superseded run fails closed instead of moving a moving ref backward.
 #
 # Note on metadata-action: the Dispatch reference workflow tags the SHA ref
 # via docker/metadata-action's `type=sha`, which for pull_request events
@@ -256,6 +258,17 @@ jobs:
         # retagged, so the script below repoints them for every REUSED target
         # at the exact manifest the immutable sha tag already holds — no
         # rebuild, so a moving ref can never drift off the immutable digest.
+        # But "legally retagged" is only true for the run that still OWNS the
+        # coordinate: a rerun of a SUPERSEDED workflow run must not repoint
+        # pr-<number> backward at the older commit (the pre-#1741 run simply
+        # refused there). The script therefore confirms through the forge API
+        # — the PR HEAD ref, or the tagged commit behind the release tag,
+        # plus for a release run that no newer X.Y.* tag exists (the shared
+        # X.Y alias follows the newest patch) — that SOURCE_SHA is still the
+        # live coordinate before any retag, and fails the run closed (writing
+        # nothing) on a superseded or otherwise uncertain answer. The token
+        # travels header-only via a curl config on stdin; runs with no retag
+        # to perform never use it.
         env:
           GHCR_OWNER: ${{ env.GHCR_OWNER }}
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
@@ -264,6 +277,8 @@ jobs:
           RELEASE_MAJOR_MINOR: ${{ env.RELEASE_MAJOR_MINOR }}
           CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
           WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash deploy/images/republish-moving-refs.sh
 
       - name: Record published digests

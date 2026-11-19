@@ -939,6 +939,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
     CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
     WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
+    // The supersession guard reads the live coordinate through the forge
+    // API with the workflow's own token; the runner-provided repository is
+    // passed explicitly so the script never trusts a stale ambient value.
+    GITHUB_REPOSITORY: "${{ github.repository }}",
+    GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
   });
   const lastPushIndex = publish.steps.reduce(
     (last, step, i) => (step.with?.["push"] === true ? i : last),
@@ -1038,7 +1043,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.equal((login.with ?? {})["registry"], "ghcr.io");
   assert.equal((login.with ?? {})["password"], "${{ secrets.GITHUB_TOKEN }}");
   assert.deepEqual(
-    [...workflow.matchAll(/\$\{\{ secrets\.[A-Z_]+ \}\}/g)].map((match) => match[0]),
+    [...new Set([...workflow.matchAll(/\$\{\{ secrets\.[A-Z_]+ \}\}/g)].map((match) => match[0]))],
     ["${{ secrets.GITHUB_TOKEN }}"],
     "the workflow's own GITHUB_TOKEN is the only secret in play",
   );
@@ -1201,6 +1206,54 @@ test("#1741 resolver resumes a half-published pair, reuses present tags, fails c
 // test, not a regex over YAML.
 const MOVING_REFS = "deploy/images/republish-moving-refs.sh";
 
+// A realistic full commit SHA: the supersession guard compares the run's
+// SOURCE_SHA against the 40-hex object the forge API reports, so the fixture
+// must be shaped like the real value it stands in for.
+const MOVING_SOURCE_SHA = "c".repeat(40);
+const SUPERSEDED_SHA = "d".repeat(40);
+const TAG_OBJECT_SHA = "e".repeat(40);
+const FAKE_TOKEN = "gho_FAKE_TOKEN_VALUE_1234567890";
+
+// STUBBED `curl` for the supersession guard: records every invocation's
+// argv, consumes (and discards) the stdin header config the script pipes in,
+// and answers with a canned git-ref / git-tag body per API_MODE scenario.
+function writeCurlStub(dir: string): void {
+  const curl = join(dir, "curl");
+  writeFileSync(
+    curl,
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$*" >> "$CURL_CALLS_FILE"',
+      "cat > /dev/null",
+      'url=""',
+      'for a in "$@"; do case "$a" in http*) url="$a";; esac; done',
+      'case "${API_MODE:-ok}" in',
+      "  http-fail) exit 22;;",
+      "  garbage) printf 'upstream returned something unparseable'; exit 0;;",
+      "esac",
+      '# An annotated tag ref points at a tag OBJECT, not the commit.',
+      'ref_sha="$LIVE_SHA"',
+      '[ "${TAG_REF_TYPE:-commit}" = tag ] && ref_sha="$TAG_OBJECT_SHA"',
+      'case "$url" in',
+      '  */tags\\?*)',
+      '    out="["',
+      '    for n in ${TAG_LIST:-v1.2.3 v1.1.0}; do',
+      "      out=\"$out{\\\"name\\\":\\\"$n\\\",\\\"commit\\\":{\\\"sha\\\":\\\"ffffffffffffffffffffffffffffffffffffffff\\\",\\\"url\\\":\\\"u\\\"}},\"",
+      "    done",
+      '    printf \'%s]\' "${out%,}";;',
+      '  */git/ref/tags/*)',
+      '    printf \'{"ref":"refs/tags/v1.2.3","object":{"sha":"%s","type":"%s","url":"u"}}\\n\' "$ref_sha" "${TAG_REF_TYPE:-commit}";;',
+      "  */git/tags/*)",
+      '    printf \'{"tag":"v1.2.3","object":{"sha":"%s","type":"commit","url":"u"}}\\n\' "$LIVE_SHA";;',
+      '  */git/ref/*)',
+      '    printf \'{"ref":"refs/pull/7/head","node_id":"n","url":"u","object":{"sha":"%s","type":"commit","url":"u"}}\\n\' "$LIVE_SHA";;',
+      "  *) exit 22;;",
+      "esac",
+    ].join("\n"),
+  );
+  chmodSync(curl, 0o755);
+}
+
 function runMovingRefs(env: {
   controller: string;
   worker: string;
@@ -1208,9 +1261,19 @@ function runMovingRefs(env: {
   releaseVersion?: string;
   releaseMajorMinor?: string;
   dockerFail?: boolean;
-}): { status: number | null; calls: string[] } {
+  // Forge-API emulation for the supersession guard: the sha the live
+  // coordinate resolves to (default: this run's SOURCE_SHA, i.e. current),
+  // plus the stubbed curl scenario and the tag-ref answer shape.
+  live?: string;
+  apiMode?: "ok" | "http-fail" | "garbage" | "pretty";
+  tagRefType?: "commit" | "tag";
+  // Space-separated repository tag names the stubbed listing returns for the
+  // major.minor-alias check (default: this run's tag plus one older patch).
+  tagList?: string;
+}): { status: number | null; calls: string[]; apiCalls: string[]; stdout: string } {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
   const callsFile = join(dir, "calls.txt");
+  const apiCallsFile = join(dir, "api-calls.txt");
   const docker = join(dir, "docker");
   writeFileSync(
     docker,
@@ -1221,29 +1284,66 @@ function runMovingRefs(env: {
     ].join("\n"),
   );
   chmodSync(docker, 0o755);
+  const live = env.live ?? MOVING_SOURCE_SHA;
+  const mode = env.apiMode ?? "ok";
+  writeCurlStub(dir);
+  if (mode === "pretty") {
+    // A pretty-printed variant of the same answer: JSON whitespace is
+    // insignificant, so the guard must not depend on the API compacting.
+    writeFileSync(
+      join(dir, "curl"),
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$*" >> "$CURL_CALLS_FILE"',
+        "cat > /dev/null",
+        'url=""',
+        'for a in "$@"; do case "$a" in http*) url="$a";; esac; done',
+        'case "$url" in',
+        '  */git/ref/*)',
+        '    printf \'{\\n  "ref": "refs/pull/7/head",\\n  "object": {\\n    "sha": "%s",\\n    "type": "commit"\\n  }\\n}\\n\' "$LIVE_SHA";;',
+        "  *) exit 22;;",
+        "esac",
+      ].join("\n"),
+    );
+    chmodSync(join(dir, "curl"), 0o755);
+  }
   const result = spawnSync("bash", [MOVING_REFS], {
     encoding: "utf8",
     env: {
       PATH: `${dir}:${process.env.PATH}`,
       HOME: process.env.HOME,
       GHCR_OWNER: "o",
-      SOURCE_SHA: "cafe",
+      SOURCE_SHA: MOVING_SOURCE_SHA,
       CONTROLLER_STATE: env.controller,
       WORKER_STATE: env.worker,
       PR_REF: env.prRef ?? "",
       RELEASE_VERSION: env.releaseVersion ?? "",
       RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
+      GITHUB_REPOSITORY: "o/r",
+      GITHUB_TOKEN: FAKE_TOKEN,
       CALLS_FILE: callsFile,
+      CURL_CALLS_FILE: apiCallsFile,
+      LIVE_SHA: live,
+      TAG_OBJECT_SHA,
+      ...(env.tagList !== undefined ? { TAG_LIST: env.tagList } : {}),
+      ...(env.tagRefType ? { TAG_REF_TYPE: env.tagRefType } : {}),
       ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
+      ...(mode !== "ok" ? { API_MODE: mode } : {}),
     },
   });
-  let calls: string[] = [];
-  try {
-    calls = readFileSync(callsFile, "utf8").split("\n").filter((line) => line.length > 0);
-  } catch {
-    /* docker was never called */
-  }
-  return { status: result.status, calls };
+  const lines = (file: string): string[] => {
+    try {
+      return readFileSync(file, "utf8").split("\n").filter((line) => line.length > 0);
+    } catch {
+      return [];
+    }
+  };
+  return {
+    status: result.status,
+    calls: lines(callsFile),
+    apiCalls: lines(apiCallsFile),
+    stdout: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+  };
 }
 
 test("#1741 moving refs of reused targets repoint at the preserved sha manifest", () => {
@@ -1254,7 +1354,7 @@ test("#1741 moving refs of reused targets repoint at the preserved sha manifest"
   const half = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
   assert.equal(half.status, 0);
   assert.deepEqual(half.calls, [
-    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
   // Release-tag resume: every reused target gets BOTH SemVer aliases
@@ -1267,8 +1367,8 @@ test("#1741 moving refs of reused targets repoint at the preserved sha manifest"
   });
   assert.equal(release.status, 0);
   assert.deepEqual(release.calls, [
-    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-cafe",
-    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-cafe",
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
   // First publish: both targets push their own aliases from the build step,
@@ -1293,6 +1393,171 @@ test("#1741 moving refs of reused targets repoint at the preserved sha manifest"
   const unknown = runMovingRefs({ controller: "present-no-digest", worker: "absent", prRef: "pr-7" });
   assert.notEqual(unknown.status, 0, "an unknown state fails closed");
   assert.deepEqual(unknown.calls, [], "no registry write happens for an unknown state");
+});
+
+test("#1741 r2: only the run that still owns the moving-ref coordinate may retag", () => {
+  // The regression this closes: a rerun of a SUPERSEDED PR workflow run (the
+  // PR has since moved to a newer head) must not repoint pr-<number> back at
+  // the older commit's sha manifest — the pre-#1741 run simply refused there.
+  const stalePr = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", live: SUPERSEDED_SHA });
+  assert.notEqual(stalePr.status, 0, "a superseded PR rerun fails closed");
+  assert.match(stalePr.stdout, /superseded run/i);
+  assert.deepEqual(stalePr.calls, [], "a superseded PR rerun performs no registry write");
+  assert.match(stalePr.apiCalls.join("\n"), /\/repos\/o\/r\/git\/ref\/pull\/7\/head$/, "the guard resolves the live PR head ref");
+
+  // The live release coordinate behaves the same: a rerun whose tag no longer
+  // resolves to SOURCE_SHA is refused instead of dragging the aliases back.
+  const staleTag = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    live: SUPERSEDED_SHA,
+  });
+  assert.notEqual(staleTag.status, 0, "a run whose release tag no longer resolves to SOURCE_SHA fails closed");
+  assert.deepEqual(staleTag.calls, [], "a superseded release rerun performs no registry write");
+
+  // Current runs still pass: the annotated-tag chain, where the tag ref
+  // points at a tag OBJECT that dereferences to the run's commit.
+  const annotated = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagRefType: "tag",
+  });
+  assert.equal(annotated.status, 0, "an annotated tag is dereferenced and, at SOURCE_SHA, still republishes");
+  assert.equal(annotated.calls.length, 2, "both reused targets republish after the confirmed check");
+  assert.ok(
+    annotated.apiCalls.some((call) => call.includes(`/git/tags/${TAG_OBJECT_SHA}`)),
+    "the tag object is dereferenced through the tag API",
+  );
+
+  // Uncertain forge answers fail CLOSED exactly like uncertain registry
+  // answers: an HTTP failure (#252: the failure itself, not a benign
+  // stand-in) and an unparseable answer both refuse before any write.
+  const httpFail = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", apiMode: "http-fail" });
+  assert.notEqual(httpFail.status, 0, "a failed forge API call fails closed");
+  assert.ok(httpFail.apiCalls.length > 0, "the refusal came from the API answer, not a crash before it");
+  assert.deepEqual(httpFail.calls, [], "no registry write follows an uncertain forge answer");
+  const garbage = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", apiMode: "garbage" });
+  assert.notEqual(garbage.status, 0, "an unparseable forge answer fails closed");
+  assert.ok(garbage.apiCalls.length > 0, "the refusal came from parsing the answer, not a crash before it");
+  assert.deepEqual(garbage.calls, [], "no registry write follows an unparseable forge answer");
+
+  // JSON whitespace is insignificant: a pretty-printed answer still matches.
+  const pretty = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", apiMode: "pretty" });
+  assert.equal(pretty.status, 0, "a pretty-printed API answer parses");
+  assert.equal(pretty.calls.length, 1, "the confirmed run republishes exactly the reused target's refs");
+
+  // The guard protects writes only: runs that retag nothing never contact
+  // the forge API (a first publish, and a reused `main` push with no refs).
+  const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
+  assert.deepEqual(fresh.apiCalls, [], "a first publish never needs the supersession API");
+  const noAliases = runMovingRefs({ controller: "present", worker: "present" });
+  assert.deepEqual(noAliases.apiCalls, [], "a reused main push with no moving refs never calls the API");
+
+  // The guard runs ONCE per run, not once per retag: one coordinate read
+  // and one (first-page) tag enumeration guard both targets.
+  const once = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+  });
+  assert.equal(once.apiCalls.filter((call) => call.includes("/git/ref/")).length, 1, "one coordinate check guards both targets");
+  assert.equal(once.apiCalls.filter((call) => call.includes("/tags?")).length, 1, "one page-bounded tag enumeration per run");
+
+  // The shared X.Y alias follows the NEWEST vX.Y.* release: a rerun of an
+  // older patch's workflow must not repoint it backward, even though the
+  // patch's own tag still resolves to this run's commit.
+  const newerPatch = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagList: "v1.2.3 v1.2.9 v1.1.0",
+  });
+  assert.notEqual(newerPatch.status, 0, "a newer same-bucket patch supersedes the rerun");
+  assert.match(newerPatch.stdout, /v1\.2\.9/);
+  assert.deepEqual(newerPatch.calls, [], "no registry write when a newer patch owns the alias");
+
+  // Newer tags OUTSIDE the bucket do not block it: 1.2 belongs to the newest
+  // 1.2.x, regardless of how far 1.3/2.x have moved ahead.
+  const otherBucket = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagList: "v2.0.0 v1.3.0 v1.2.3 v1.1.0",
+  });
+  assert.equal(otherBucket.status, 0, "newer releases in other buckets do not supersede this one");
+  assert.equal(otherBucket.calls.length, 2, "the confirmed run republishes both reused targets");
+
+  // Enumeration uncertainty fails closed: a same-bucket sibling that is not
+  // numerically comparable, and a listing that omits this run's own tag.
+  const oddSibling = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagList: "v1.2.3 v1.2.x",
+  });
+  assert.notEqual(oddSibling.status, 0, "an undecidable same-bucket tag fails closed");
+  assert.deepEqual(oddSibling.calls, [], "no registry write on undecidable enumeration");
+  const missingSelf = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagList: "v1.1.0 v1.0.0",
+  });
+  assert.notEqual(missingSelf.status, 0, "a listing that omits the run's own tag is uncertain and fails closed");
+  assert.deepEqual(missingSelf.calls, [], "no registry write on an uncertain listing");
+
+  // The numeric comparison is numeric: 10 > 9, not "10" < "9".
+  const patchTen = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.9",
+    releaseMajorMinor: "1.2",
+    tagList: "v1.2.10 v1.2.9",
+  });
+  assert.notEqual(patchTen.status, 0, "v1.2.10 supersedes a rerun of v1.2.9");
+  assert.match(patchTen.stdout, /v1\.2\.10 is a newer 1\.2\.\* release/);
+
+  // A remainder bash cannot hold as an integer is undecidable, not
+  // comparable: it must fail closed, not silently pass the -gt test.
+  const hugeSibling = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+    tagList: "v1.2.3 v1.2.99999999999999999999999",
+  });
+  assert.notEqual(hugeSibling.status, 0, "an int64-overflowing same-bucket tag fails closed");
+  assert.deepEqual(hugeSibling.calls, [], "no registry write on an undecidable patch number");
+
+  // The PR flow needs no tag enumeration.
+  const prGuard = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
+  assert.equal(prGuard.status, 0);
+  assert.deepEqual(prGuard.apiCalls.filter((call) => call.includes("/tags?")), [], "the PR guard never enumerates tags");
+
+  // Credential hygiene: the token travels only in the curl config on stdin,
+  // never in the recorded curl argv.
+  const guard = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
+  assert.equal(guard.status, 0);
+  assert.ok(guard.apiCalls.length > 0, "the guard invoked curl");
+  for (const invocation of guard.apiCalls) {
+    assert.doesNotMatch(invocation, /FAKE_TOKEN/, "the token must never appear in curl argv");
+  }
+
+  // A PR_REF without a numeric PR cannot name a coordinate: refuse before any
+  // write or API call.
+  const bogus = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-latest" });
+  assert.notEqual(bogus.status, 0, "a non-numeric PR ref refuses the run");
+  assert.deepEqual(bogus.calls, [], "no registry write for an unresolvable coordinate");
+  assert.deepEqual(bogus.apiCalls, [], "no API call for an unresolvable coordinate");
 });
 
 test("#1704 image coordinates are documented for PR, main, and release flows", () => {
