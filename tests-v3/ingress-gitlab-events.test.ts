@@ -427,6 +427,18 @@ test("label objects use the documented title field; name-only is the tolerated R
     updatePayload({ changes: { labels: { previous: [], current: [{ name: "ai-review" }] } } }),
   );
   assert.equal(named?.kind, "rereview_label");
+  // A non-string title is not a name: it falls through to the alias, and
+  // alone contributes nothing.
+  const badTitle = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [{ title: 42, name: "ai-review" }] } } }),
+  );
+  assert.equal(badTitle?.kind, "rereview_label");
+  const badTitleOnly = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [{ title: 42 }] } } }),
+  );
+  assert.equal(badTitleOnly?.kind, "unknown");
   // An object with neither field contributes nothing.
   const bare = parseGitLabWebhookEvent(
     "Merge Request Hook",

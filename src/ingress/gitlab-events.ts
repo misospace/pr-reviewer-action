@@ -66,7 +66,8 @@
 //    at top level, which cannot distinguish "label added" from "another label
 //    changed", so the added set is computed as `changes.labels.current` minus
 //    `changes.labels.previous` (both closed entry forms: a string, or a plain
-//    object with a string `name`).
+//    object with the documented label name — `title`, with `name` as the
+//    tolerated REST-API alias).
 // 3. "well-formed `last_commit`" is pinned to "plain object with a non-empty
 //    string `id`" — the shape of a GitLab commit object — so a hostile or empty
 //    placeholder cannot masquerade as commit evidence. The commit-push signal
