@@ -2290,16 +2290,17 @@ export function verdictHarnessFindingsBody(outcome: LoopOutcome): string {
     lines.push("");
   }
   if (outcome.stopReason === STOP_INVESTIGATION_COMPLETE) {
-    // #1729: `investigation-complete` is now model-confirmed — the model was
-    // offered the unused budget to resolve its own open verification
-    // questions and confirmed completion. That makes the finding-class
-    // discipline enforceable at the verdict: a verification/please-confirm
-    // finding must be a genuine unavailable-evidence claim, never an
-    // un-investigated question an ordinary repository read or search would
-    // have answered.
+    // #1729: this stop is model-confirmed by construction — the loop only
+    // emits it on the model's own no-tool-calls reply to the coverage-complete
+    // confirmation note (an exhausted covered round now reports
+    // `tool-call-budget-exhausted` / `max-rounds` instead). That makes the
+    // finding-class discipline enforceable at the verdict: a
+    // verification/please-confirm finding must be a genuine
+    // unavailable-evidence claim, never an un-investigated question an
+    // ordinary repository read or search would have answered.
     lines.push(
-      "The investigation stopped as complete with the model's own " +
-        "confirmation after the coverage-complete notice. Any verification, " +
+      "The investigation stopped as complete only after the model confirmed " +
+        "it on the coverage-complete confirmation turn. Any verification, " +
         'unknown, or "please confirm" finding must state why the available ' +
         "tools and evidence cannot settle it — that is legitimate to surface. " +
         "A question an ordinary repository read or search would answer was " +

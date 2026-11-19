@@ -6,7 +6,7 @@ import path from "node:path";
 import { LoopContextError, LOOP_TOOL_SCHEMA_TOKENS, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, verdictProofIndexSection, insertProofIndexSection, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { TOOL_SCHEMAS, WEB_SEARCH_SCHEMA } from "../src/model/conversation.js";
-import { STOP_INVESTIGATION_COMPLETE, STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
+import { STOP_BUDGET, STOP_INVESTIGATION_COMPLETE, STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
@@ -1803,14 +1803,26 @@ test("#1729: verdict findings body carries the unavailable-vs-uninvestigated ver
     stopReason: STOP_INVESTIGATION_COMPLETE,
   } as unknown as LoopOutcome;
   const body = verdictHarnessFindingsBody(outcome);
-  // The stop is model-confirmed (#1729): the model was offered the unused
-  // budget and confirmed completion. The verdict must therefore keep the
-  // issue's distinction — genuinely unverifiable questions are legitimate
-  // to surface, questions an ordinary repository read or search would
-  // answer are not verification findings.
-  assert.match(body, /stopped as complete with the model's own confirmation/);
+  // The stop is model-confirmed by construction (#1729): an exhausted covered
+  // round reports `tool-call-budget-exhausted` / `max-rounds` instead, so the
+  // claim below is true whenever it is emitted. The verdict must therefore
+  // keep the issue's distinction — genuinely unverifiable questions are
+  // legitimate to surface, questions an ordinary repository read or search
+  // would answer are not verification findings.
+  assert.match(body, /stopped as complete only after the model confirmed/);
   assert.match(body, /cannot settle it/);
   assert.match(body, /not investigated/);
+});
+
+test("#1729: an exhausted covered run never claims the model confirmed completion", () => {
+  const outcome = {
+    executed: [{ tool: "read_file", args: { path: "a.ts" }, result: { status: "ok", result: {} } }],
+    rounds: 1,
+    toolCallsIssued: 1,
+    stopReason: STOP_BUDGET,
+  } as unknown as LoopOutcome;
+  const body = verdictHarnessFindingsBody(outcome);
+  assert.doesNotMatch(body, /confirmed/);
 });
 
 test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser reads it, and drops a numeric secret's echo", () => {
@@ -5625,17 +5637,23 @@ test("coverage completion fails closed on uncovered or truncated manifests", asy
 });
 
 test("coverage completion requires certified deleted-file diffs", async () => {
-  for (const certified of [false, true]) {
+  // #1729: the certified case needs a confirmation turn, so it gets a second
+  // request; the uncertified case never completes coverage and reads as the
+  // exhaustion stop it is.
+  for (const scenario of [
+    { certified: false, maxRequests: "1", expect: "tool-call-budget-exhausted" },
+    { certified: true, maxRequests: "2", expect: "investigation-complete" },
+  ]) {
     const { root, deps } = workspace();
     const diff = "diff --git a/src/deleted.ts b/src/deleted.ts\n--- a/src/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
     fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([{ filename: "src/deleted.ts", status: "removed" }]));
     fs.writeFileSync(path.join(root, "pr.diff"), diff);
-    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), certified ? diff : "");
+    fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), scenario.certified ? diff : "");
     fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), `# PR Diff\n${diff}`);
     let turns = 0;
-    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "review" },
+    const { result } = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: scenario.maxRequests, SYSTEM_PROMPT: "review" },
       transport: async () => ++turns === 1 ? openAiCall("c", "find_files", '{"pattern":"*.ts"}') : validVerdict(),
     }));
-    assert.equal(result.stop_reason, certified ? "investigation-complete" : "tool-call-budget-exhausted");
+    assert.equal(result.stop_reason, scenario.expect);
   }
 });

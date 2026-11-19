@@ -156,7 +156,8 @@ const LOW_BUDGET_TURN_NOTE =
  */
 export const INVESTIGATION_COMPLETION_CONFIRMATION_TURN_NOTE =
   "[loop coverage] The deterministic coverage gate is satisfied: every changed " +
-  "file and file-bound specialist lead is covered by successful reads, and no " +
+  "file and file-bound specialist lead is covered by successful reads or a " +
+  "certified complete corpus diff, and no " +
   "required evidence is outstanding — but the investigation is not complete " +
   "until YOU confirm it. Before you stop: any open verification, unknown, or " +
   "\"please confirm\" question you intend to raise must first be checked with " +
@@ -1416,21 +1417,24 @@ export async function driveToolLoop(
   // no-tool-calls reply on that round selects STOP_INVESTIGATION_COMPLETE.
   // Set at the end of a clean covered round; cleared the moment the model
   // answers the confirmation with further tool calls (it is still
-  // investigating); never set when no confirmation turn is possible (the
-  // pre-#1729 immediate completion stop fires instead). False here so a
-  // first-round no-tool-calls reply keeps its model-stopped/no-tool-calls
-  // meaning.
+  // investigating); never set when no confirmation turn is possible — that
+  // path reports the ordinary exhaustion stop (`tool-call-budget-exhausted`
+  // or `max-rounds`), never a completion the model did not confirm. False
+  // here so a first-round no-tool-calls reply keeps its
+  // model-stopped/no-tool-calls meaning.
   let completionConfirmationPending = false;
   loop: while (outcome.rounds < roundCeiling) {
     // #1729: whether THIS round's request carried the completion-confirmation
     // note — the per-round fact the round telemetry record persists (the
     // pending flag is cleared mid-round the moment the model answers with
     // calls, so the flag alone cannot describe the record). Also whether the
-    // coverage gate ARMED this round: an armed round suppresses the #1627
-    // obligations-settled check below for the round (the #1702 precedence —
-    // coverage completion beats the settled stop — survives the gate).
+    // coverage gate was SATISFIED this round (armed or not): a satisfied round
+    // suppresses the #1627 obligations-settled check below for the round (the
+    // #1702 precedence — coverage completion beats the settled stop — survives
+    // the gate, and an exhausted covered round must report the exhaustion
+    // stop, not the settled one).
     let carriedConfirmationNote = false;
-    let completionGateArmedThisRound = false;
+    let coverageGateSatisfiedThisRound = false;
     if (
       wallClockDeadline !== null
         ? timeFn() >= wallClockDeadline
@@ -2099,25 +2103,24 @@ export async function driveToolLoop(
       // confirmed completion with the unused budget in view.
       //
       // No confirmation turn possible — the last request was just spent, or
-      // the round ceiling is reached — keeps the pre-#1729 immediate stop
-      // byte-for-byte: with no usable round left, a no-tool-calls
-      // confirmation cannot happen, and the exhaustion-shape telemetry
-      // contract (a covered run does not read as a budget stop) is
-      // preserved.
+      // the round ceiling is reached — is NOT a completion: nobody confirmed
+      // one. The loop falls through to the ordinary exhaustion stops instead
+      // (`tool-call-budget-exhausted` from the budget check below, or
+      // `max-rounds` when the round ceiling ends the loop), so a covered run
+      // cut short still reads as an incomplete investigation to the coverage
+      // machinery, and `investigation-complete` keeps meaning exactly one
+      // thing: the model confirmed it.
+      coverageGateSatisfiedThisRound = true;
       if (callsExecuted < budgets.maxToolCalls && outcome.rounds < roundCeiling) {
         completionConfirmationPending = true;
-        // #1702 precedence preserved: a round that satisfies the coverage
-        // gate kept beating the #1627 obligations-settled stop (a trace row
-        // may have settled in the same round). Arming must not flip that
-        // population to `obligations-settled` — the settled check below is
-        // suppressed for THIS round only; it still fires on any later round
-        // the gate did not arm (failed calls, incomplete coverage).
-        completionGateArmedThisRound = true;
-      } else {
-        outcome.stopReason = STOP_INVESTIGATION_COMPLETE;
-        broke = true;
-        break loop;
       }
+      // #1702 precedence preserved: a round that satisfies the coverage gate
+      // kept beating the #1627 obligations-settled stop (a trace row may have
+      // settled in the same round) — including the exhausted covered round,
+      // which must report its exhaustion stop rather than `obligations-settled`.
+      // The settled check below is suppressed for THIS round only; it still
+      // fires on any later round that did not satisfy the gate (failed calls,
+      // incomplete coverage).
     }
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;
@@ -2159,7 +2162,7 @@ export async function driveToolLoop(
       row.tools !== undefined && row.obligation === undefined);
     if (obligationsSeenActive && !hasActiveRow()
       && (!traceNeedsCoverage || options.coverageComplete?.(outcome) === true)
-      && !completionGateArmedThisRound) {
+      && !coverageGateSatisfiedThisRound) {
       const strandedSettlement = pendingRows.some((row) => {
         if (discharged.has(row.id)) {
           return !seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id);

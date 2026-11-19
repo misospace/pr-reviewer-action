@@ -3557,7 +3557,9 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
   // slot (review-corpus.truncated.md), and the initial harness runs at
   // TOOL_HARNESS_TIER=primary. A tiny diff sits in the corpus whole; the
   // loop spends its one request on discovery, the budget stops, and the
-  // credit completes coverage with no gap record at all.
+  // credit completes coverage with no gap record at all — and per #1729 a
+  // covered run with no confirmation turn left reports that exhaustion stop,
+  // not a completion nobody confirmed.
   //
   // The mock discriminates by request shape, not call order: loop turns
   // carry a `tools` array and get the scripted tool call; specialist and
@@ -3614,7 +3616,7 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
     // primary-profile corpus into the first-pass slot.
     assert.equal(result.outputs.reviewRoute, "primary");
     assert.ok(existsSync(join(runDir, "pr.diff.truncated")), "the primary-profile build must have run");
-    assert.equal(harness.stop_reason, "investigation-complete");
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
     assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
 assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
 // #1381's must_check obligation rows are undisposed by the scripted verdict;
@@ -3626,7 +3628,7 @@ assert.equal(result.outputs.verdict, "approve");
     // gap) but is now visible in the marker through `tool_stop_reason` — the
     // case that made budget-exhaustion rates unmeasurable from telemetry.
     assert.doesNotMatch(result.marker, /"coverage":/);
-    assert.match(result.marker, /"tool_stop_reason":"investigation-complete"/);
+    assert.match(result.marker, /"tool_stop_reason":"tool-call-budget-exhausted"/);
   } finally {
     await server.close();
     cleanup();
@@ -4268,7 +4270,9 @@ test("#824: every tool loop turn clamps the same way and the review still publis
     // turn and the verdict turn alike.
     assert.deepEqual(requested, [16384, 8192, 16384, 8192]);
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { stop_reason: string; tool_results: Array<{ tool: string; status: string }> };
-    assert.equal(harness.stop_reason, "investigation-complete");
+    // #1729: the single allowed request is spent on the tool turn, so no
+    // confirmation turn exists and the stop is the exhaustion stop.
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
     assert.equal(harness.tool_results[0]!.tool, "read_file");
     assert.equal(harness.tool_results[0]!.status, "ok");
   } finally {
