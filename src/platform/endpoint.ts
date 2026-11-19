@@ -105,3 +105,42 @@ export function validateEndpoint(endpoint: string, allowedRepos: string | readon
   }
   return { full_path, repo_key };
 }
+
+// ---------------------------------------------------------------------------
+// The forge-read channel (#1726). `gh_api` is the capability-neutral read
+// tool the model calls on EVERY backend: each platform adapter implements
+// the same GitHub-shaped endpoint contract this module validates
+// (`src/platform/github.ts`, `src/platform/forgejo.ts`), so the tool-name
+// binding and the endpoint-shape recognition below live HERE — at the
+// platform boundary — and never in shared caller code.
+// ---------------------------------------------------------------------------
+
+/** The forge-read channel's tool name. One name across the backends: the
+ * adapters normalize their forge reads behind it. */
+export const FORGE_READ_TOOL = "gh_api";
+
+/**
+ * The forge-read channel's attribution target: the endpoint path the call
+ * addresses. Any other tool (and an absent, non-string, or empty endpoint)
+ * has no forge-API target — callers treat `null` exactly like the absent
+ * URL/query of a non-channel tool.
+ */
+export function forgeReadChannelTarget(name: string, args: Record<string, unknown>): string | null {
+  if (name !== FORGE_READ_TOOL) return null;
+  const endpoint = args.endpoint;
+  return typeof endpoint === "string" && endpoint !== "" ? endpoint : null;
+}
+
+/**
+ * The canonical forge-API repository path: exactly `repos/{owner}/{repo}`
+ * (optionally with a trailing query). This is the same repo-identity shape
+ * the validator above scopes — `GH_API_ALLOWED_PREFIXES` keeps every allowed
+ * read under `/repos/`, and the repo allowlist keys on the two segments
+ * after it. A DEEPER path is doing something else (releases, advisories,
+ * contents) and is identified by its own path tokens, never by this rule.
+ */
+export function isCanonicalForgeApiRepoPath(target: string): boolean {
+  const path = target.toLowerCase().split(/[?#]/, 1)[0] ?? "";
+  const segments = path.split("/").filter((segment) => segment !== "");
+  return segments.length === 3 && segments[0] === "repos";
+}

@@ -6,11 +6,45 @@
  * enforcement → tools/loop edge closes a module cycle through
  * requirement-trace). Pure, lexical, total: never throws, never touches the
  * network.
+ *
+ * #1726 (review): the forge-read channel is NOT named here — the tool name
+ * and the endpoint-shape recognition live at the platform boundary
+ * (`FORGE_READ_TOOL` / `forgeReadChannelTarget` /
+ * `isCanonicalForgeApiRepoPath` in `src/platform/endpoint.ts`, beside the
+ * cross-backend endpoint validator they mirror). This module stays
+ * capability-neutral: it runs the obligation keyword vocabulary over
+ * whatever target string a channel hands it.
  */
+import { forgeReadChannelTarget, isCanonicalForgeApiRepoPath } from "../platform/endpoint.js";
+
 export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
   "web_fetch",
   "web_search",
 ]);
+
+/**
+ * #1726 (review 5979360208): whether a call rides an upstream
+ * dependency-evidence CHANNEL — the loop's no-lockout admission predicate
+ * (the reserve-window escape hatch, the `windowEvidence` bookkeeping, and
+ * the attempts-cap counters all ask this). The literal evidence tools plus
+ * the platform seam's forge-read channel, through the SAME recognition
+ * attribution consumes (`forgeReadChannelTarget`): an unattributed forge
+ * read inside the reserved window is admitted as an evidence-channel
+ * attempt and counts toward the no-lockout cap instead of being refused —
+ * the forge-read channel is no longer a second-class evidence channel.
+ * ADMISSION ONLY: this predicate never discharges an obligation row — row
+ * discharge still requires `dependencyEvidenceObligationsForCall`'s lexical
+ * attribution grammar, so an unattributed forge read credits nothing. An
+ * endpoint-less `gh_api` call is no channel call (it presents no forge-API
+ * target), exactly as attribution treats it. Pure, total, never throws.
+ */
+export function isDependencyEvidenceChannelCall(
+  name: string,
+  args: Record<string, unknown>,
+): boolean {
+  if (DEPENDENCY_EVIDENCE_TOOLS.has(name)) return true;
+  return forgeReadChannelTarget(name, args) !== null;
+}
 
 /** #1379 review blocker 5728634290: the required upstream evidence
  * obligations the reserve window tracks individually. Canonical order is
@@ -130,22 +164,40 @@ const SOURCE_CODE_HOSTS: ReadonlySet<string> = new Set([
 /**
  * #1379 review blocker 5728634290: deterministic, conservative attribution
  * of one dependency-evidence call to the obligations its own target (the
- * `web_fetch` URL or the `web_search` query) says it is serving. Bounded and
- * lexical — never throws, never touches the network. Only names in
- * DEPENDENCY_EVIDENCE_TOOLS attribute (any other tool → `[]`); an absent or
- * non-string target attributes nothing. A call can cover several
+ * `web_fetch` URL, the `web_search` query, or — #1726 — the forge-read
+ * channel's endpoint path, recognized through the platform seam) says it is
+ * serving. Bounded and lexical — never throws, never touches the network.
+ * Only the upstream evidence channels attribute (`web_fetch`, `web_search`,
+ * and the platform seam's forge-read channel — any other tool → `[]`); an
+ * absent or non-string target attributes nothing. A call can cover several
  * obligations; matches are returned deduped in canonical
  * DEPENDENCY_EVIDENCE_OBLIGATIONS order (possibly empty — an unattributed
  * evidence call executed inside the enforced window still counts toward the
  * no-lockout attempts cap, just credits nothing; pre-window it counts only
  * toward the run-wide attempts telemetry).
+ *
+ * #1726: the forge-read channel attributes by the SAME lexical rules — an
+ * upstream release/advisory/provenance lookup through the forge API is the
+ * same acquisition as the equivalent web URL, and when a registry host is
+ * refused by the source-host allowlist the forge API is exactly the channel
+ * the run re-routes through (the organic #1721 failure: every successful
+ * upstream lookup was a forge-read call, attributed nothing, so the tracked
+ * rows never discharged, the reserved window never released, and the
+ * evidence never reached the receipt ledger). The endpoint path plays the
+ * URL's role: keyword tokens over the path, plus the canonical repository
+ * identity shape the platform seam recognizes — a bare repository path
+ * identifies the repo exactly the way the source host rule does, while
+ * endpoints that address no repository and no evidence surface (issues,
+ * users, metadata) attribute nothing.
  */
 export function dependencyEvidenceObligationsForCall(
   name: string,
   args: Record<string, unknown>,
 ): DependencyEvidenceObligation[] {
-  if (!DEPENDENCY_EVIDENCE_TOOLS.has(name)) return [];
-  const target = name === "web_fetch" ? args.url : args.query;
+  const forgeTarget = forgeReadChannelTarget(name, args);
+  const isForgeRead = forgeTarget !== null;
+  if (!DEPENDENCY_EVIDENCE_TOOLS.has(name) && !isForgeRead) return [];
+  const target = name === "web_fetch" ? args.url : isForgeRead ? forgeTarget : args.query;
   if (typeof target !== "string" || target === "") return [];
   const lower = target.toLowerCase();
   const tokens = lower.split(/[^a-z0-9.]+/).filter((token) => token !== "");
@@ -172,6 +224,13 @@ export function dependencyEvidenceObligationsForCall(
         matched.add("provenance");
       }
     }
+  }
+  if (isForgeRead) {
+    // The canonical forge-API repository shape comes from the platform seam
+    // (the same repo identity the endpoint validator scopes). A DEEPER path
+    // attributes through its own keyword tokens above, the same way a deep
+    // URL path does.
+    if (isCanonicalForgeApiRepoPath(forgeTarget)) matched.add("provenance");
   }
   return DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => matched.has(obligation));
 }
