@@ -200,9 +200,14 @@ the shell is intentionally unauthenticated because it carries no data, so
 network access control is the remaining guard on who can reach it. Every
 value stays bearer-token protected regardless.
 
-Making the dashboard reachable needs two things, both plain bjw-s `common`
-passthrough under `controller` — no chart change and no hand-written
-HTTPRoute:
+Before the route is useful, the listener itself must exist and serve the
+shell: set `controller.admin.enabled: true` (without it there is no admin
+listener, and the `dashboard` flag fails the render) and
+`controller.admin.dashboard: true`.
+
+Making the dashboard reachable then needs two things, both plain bjw-s
+`common` passthrough under `controller` — no chart change and no
+hand-written HTTPRoute:
 
 1. **A Service port for the admin listener.** Add an `admin` port to a
    controller Service. Reusing the `webhook` Service is the simplest; you can
@@ -228,10 +233,11 @@ controller:
       hostnames: ["pr-reviewer.example.com"]
       parentRefs: [{ name: <gateway>, namespace: <gateway-namespace> }]
       rules:
-        # Forge intake (POST-only). GitHub delivery ignores the path, so a
-        # dedicated path is safe. Forgejo/Gitea mount the EXACT canonical
-        # route, so use /webhooks/forgejo or /webhooks/gitea here instead.
-        - matches: [{ path: { type: PathPrefix, value: /hook } }]
+        # Forge intake (POST-only). GitHub delivery ignores the path, but
+        # Forgejo/Gitea mount the EXACT canonical route, so the example
+        # uses one of them: keep /webhooks/forgejo (or /webhooks/gitea)
+        # here for those forges; any non-admin path is safe for GitHub.
+        - matches: [{ path: { type: PathPrefix, value: /webhooks/forgejo } }]
           backendRefs: [{ identifier: webhook, port: 8080 }]
         # Bearer-guarded admin API. It MUST ride the same origin as the
         # shell: the dashboard script fetches /admin/* from the listener
@@ -252,7 +258,7 @@ controller:
 ```
 
 `backendRefs[].identifier` names the Service key under `controller.service`
-(here `webhook`), never the rendered resource name. Two rules to keep:
+(here `webhook`), never the rendered resource name. Three rules to keep:
 
 - **Route `/admin` and `/dashboard` to the same origin** (the admin port).
   The dashboard script only calls `/admin/*` on the origin that served the
@@ -261,6 +267,12 @@ controller:
   GitHub intake ignores the path and the Forgejo/Gitea intake mounts a fixed
   canonical route; either way those two prefixes belong to the admin listener
   and must not collide with delivery.
+- **With `networkPolicy.enabled: true`, open the admin port to the gateway.**
+  The chart's default-deny ingress allows only the webhook port, plus the
+  admin port for Prometheus scrapes from the release namespace when
+  `serviceMonitor` is on — a gateway in another namespace cannot reach 8081.
+  Add a matching rule (gateway pod/namespace selector, port 8081) under
+  `networkPolicy.additionalIngress`.
 
 To keep a browser surface off entirely, leave `controller.admin.dashboard`
 at its default `false`; then `/dashboard` answers the fixed 404 and only the
