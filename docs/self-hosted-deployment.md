@@ -85,12 +85,16 @@ How it runs:
   so the job enforces it before building: it resolves each `sha-<commit>`
   tag's state and never re-pushes one that already exists. A rerun RESUMES a
   half-published pair — it reuses a target whose tag is present (keeping its
-  digest) and publishes only the missing target. A reused target's moving
-  refs (`pr-<number>` and the release aliases) are repointed at the preserved
-  digest without a rebuild, so a rerun also recovers aliases an earlier run
-  failed to push. If either registry answer
-  is uncertain, the run stops instead of pushing (fail closed). A rerun can
-  therefore never move a published tag. The `pr-<number>` ref is the only
+  digest) and publishes only the missing target. The build steps push nothing
+  but the immutable sha ref; EVERY moving ref (`pr-<number>` and the release
+  aliases), for reused and freshly built targets alike, is written by one
+  guarded step that points it at the sha manifest without a rebuild — so a
+  rerun also recovers aliases an earlier run failed to push, and no write can
+  precede the guard. That step first confirms through the forge API that this
+  run is still the live coordinate behind the refs: a rerun of a superseded
+  run fails closed instead of moving a moving ref backward. If either registry
+  answer is uncertain, the run stops instead of pushing (fail closed). A rerun
+  can therefore never move a published tag. The `pr-<number>` ref is the only
   intentionally moving ref.
 - **Permissions.** The publish job runs with `contents: read` and
   `packages: write` and logs into GHCR with `GITHUB_TOKEN`. Image building

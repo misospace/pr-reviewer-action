@@ -785,10 +785,12 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     "the fork job must validate the PR head commit, never the merge commit",
   );
 
-  // ── Tag contract on the publish job's build steps. The immutable
-  // sha-<commit> ref is the UNCONDITIONAL first tag line of both targets;
-  // the moving pr-<number> ref and the SemVer + major.minor release
-  // aliases are conditional on the resolved coordinates.
+  // ── Tag contract on the publish job's build steps (r3 review): the build
+  // steps push ONLY the immutable sha-<commit> ref. No build step may name a
+  // moving ref (pr-<number> / SemVer / major.minor): the steps carry no
+  // supersession check, so an ungated alias push there could move a moving
+  // ref before the guarded republish step ever ran. Every moving-ref write
+  // lives behind that guard (asserted with the alias step below).
   const publishTagBlocks = publish.steps.flatMap(
     (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
   ).filter((block) =>
@@ -802,53 +804,26 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     ),
   );
   assert.equal(publishTagBlocks.length, 2, "both publish build steps carry GHCR tags");
-  const tagLine = (block: string, marker: string): string => {
-    const line = block
-      .split("\n")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0 && entry.includes(marker))
-      .at(0);
-    assert.ok(line, `a ${marker} tag line must exist in:\n${block}`);
-    return line!;
-  };
   for (const target of ["controller", "worker"]) {
     const block = publishTagBlocks.find((entry) => entry.includes(`pr-reviewer-${target}`))!;
     const lines = block
       .split("\n")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
-    // Immutable source-SHA ref: first line, unconditional, wired from the
-    // resolved SOURCE_SHA — the same resolved SHA for both targets.
-    assert.equal(
-      lines[0],
-      `ghcr.io/\${{ env.GHCR_OWNER }}/pr-reviewer-${target}:sha-\${{ env.SOURCE_SHA }}`,
-      `the ${target} sha ref must be unconditional and anchored to the resolved source SHA`,
+    // Exactly ONE ref: the immutable source-SHA tag, unconditional, wired
+    // from the resolved SOURCE_SHA — the same resolved SHA for both targets.
+    // A second line would be a moving ref escaping the guard.
+    assert.deepEqual(
+      lines,
+      [`ghcr.io/\${{ env.GHCR_OWNER }}/pr-reviewer-${target}:sha-\${{ env.SOURCE_SHA }}`],
+      `the ${target} build step must push ONLY the immutable sha ref: no pr/SemVer/major.minor alias, no latest, no floating branch tag`,
     );
-    // Moving PR ref: pr-<number>, pull_request runs only.
-    assert.match(
-      tagLine(block, "PR_REF"),
-      new RegExp(
-        `env\\.PR_REF != '' && format\\('ghcr\\.io/\\{0\\}/pr-reviewer-${target}:\\{1\\}', env\\.GHCR_OWNER, env\\.PR_REF\\)`,
-      ),
-      `the ${target} pr ref must be the moving pr-<number> alias, PR runs only`,
-    );
-    // Release aliases: exact SemVer and major.minor, validated tag pushes only.
-    assert.match(
-      tagLine(block, "RELEASE_VERSION"),
-      new RegExp(
-        `env\\.RELEASE_VERSION != '' && format\\('ghcr\\.io/\\{0\\}/pr-reviewer-${target}:\\{1\\}', env\\.GHCR_OWNER, env\\.RELEASE_VERSION\\)`,
-      ),
-      `the ${target} release alias must be the exact SemVer version, tag pushes only`,
-    );
-    assert.match(
-      tagLine(block, "RELEASE_MAJOR_MINOR"),
-      new RegExp(
-        `env\\.RELEASE_MAJOR_MINOR != '' && format\\('ghcr\\.io/\\{0\\}/pr-reviewer-${target}:\\{1\\}', env\\.GHCR_OWNER, env\\.RELEASE_MAJOR_MINOR\\)`,
-      ),
-      `the ${target} major.minor alias must track the exact version, tag pushes only`,
-    );
-    // Exactly the four refs above: no latest, no floating branch tag.
-    assert.equal(lines.length, 4, `the ${target} tags block must carry exactly sha + pr + SemVer + major.minor`);
+    // Belt and braces on the moving-ref coordinates: the resolved aliases
+    // must not appear anywhere in a build step, so no build step can ever
+    // become a second, unguarded moving-ref writer.
+    for (const coordinate of ["PR_REF", "RELEASE_VERSION", "RELEASE_MAJOR_MINOR"]) {
+      assert.ok(!block.includes(coordinate), `the ${target} build tags must not reference ${coordinate}`);
+    }
   }
   assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
   assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
@@ -922,15 +897,18 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     firstPushIndex !== -1 && resolverIndex < firstPushIndex,
     "the sha-tag resolver must run before any push step",
   );
-  // ── A reused target's build step is skipped, but its MOVING refs must
-  // still converge: a dedicated step repoints pr-<number>/SemVer/major.minor
-  // at the manifest the immutable sha tag already holds (no rebuild, so a
-  // moving ref can never drift off the immutable digest, and aliases lost
-  // when an earlier run died after the sha push are recovered on the rerun).
+  // ── The moving refs of EVERY target (reused or freshly built) converge in
+  // ONE dedicated step: it repoints pr-<number>/SemVer/major.minor at the
+  // manifest the immutable sha tag holds (no rebuild, so a moving ref can
+  // never drift off the immutable digest, and aliases lost when an earlier
+  // run died after the sha push are recovered on the rerun). Combined with
+  // the build-tag contract above this pins the ordering the r3 review
+  // demanded: the guarded script is the workflow's ONLY moving-ref writer,
+  // so no write can precede the supersession check inside it.
   const aliasStep = publish.steps.find((step) =>
     (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
   );
-  assert.ok(aliasStep, "a step must republish the moving refs of reused targets");
+  assert.ok(aliasStep, "a step must publish the moving refs of every target");
   assert.deepEqual(aliasStep.env, {
     GHCR_OWNER: "${{ env.GHCR_OWNER }}",
     SOURCE_SHA: "${{ env.SOURCE_SHA }}",
@@ -1199,11 +1177,13 @@ test("#1741 resolver resumes a half-published pair, reuses present tags, fails c
   );
 });
 
-// #1741 review: a reused target's build step (and with it its alias pushes)
-// is skipped, so a dedicated script repoints the target's moving refs at the
-// preserved sha manifest. Exercised with a STUBBED `docker` that records each
-// invocation, so the exact registry writes are a deterministic regression
-// test, not a regex over YAML.
+// #1741 review: the build steps push only the immutable sha ref, so this
+// script is the workflow's ONLY moving-ref writer: it repoints every
+// target's moving refs at the sha manifest (reused targets at the preserved
+// one, freshly built targets at the one their build step just pushed), all
+// behind the supersession guard. Exercised with a STUBBED `docker` that
+// records each invocation, so the exact registry writes are a deterministic
+// regression test, not a regex over YAML.
 const MOVING_REFS = "deploy/images/republish-moving-refs.sh";
 
 // A realistic full commit SHA: the supersession guard compares the run's
@@ -1346,15 +1326,16 @@ function runMovingRefs(env: {
   };
 }
 
-test("#1741 moving refs of reused targets repoint at the preserved sha manifest", () => {
-  // Half-published PR rerun: the reused controller's pr ref must be repointed
-  // at the exact sha manifest it already holds (no rebuild); the absent
-  // worker publishes its own aliases through the gated build step, so nothing
-  // is written for it here.
+test("#1741 moving refs of every target repoint at the sha manifest behind the guard", () => {
+  // Half-published PR rerun: the reused controller's pr ref is repointed at
+  // the exact sha manifest it already holds, and the freshly built worker's
+  // pr ref is written here too — the build step pushed ONLY its sha ref, so
+  // no alias exists (or moves) before the guard runs.
   const half = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
   assert.equal(half.status, 0);
   assert.deepEqual(half.calls, [
     `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:pr-7 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
   // Release-tag resume: every reused target gets BOTH SemVer aliases
@@ -1371,17 +1352,24 @@ test("#1741 moving refs of reused targets repoint at the preserved sha manifest"
     `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
-  // First publish: both targets push their own aliases from the build step,
-  // so the script performs no registry writes at all.
+  // First publish: the build steps pushed only the sha refs, so the script
+  // writes every moving ref for the freshly built targets as well — again
+  // only after the supersession guard confirmed this run owns the coordinate.
   const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
   assert.equal(fresh.status, 0);
-  assert.deepEqual(fresh.calls, []);
+  assert.deepEqual(fresh.calls, [
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:pr-7 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
+  ]);
 
-  // A reused target of an event with no moving refs (a `main` push) is a
-  // no-op: imagetools is never invoked just to retag the sha ref onto itself.
+  // An event with no moving refs (a `main` push) is a no-op for either
+  // state: imagetools is never invoked just to retag the sha ref onto itself.
   const noAliases = runMovingRefs({ controller: "present", worker: "present" });
   assert.equal(noAliases.status, 0);
   assert.deepEqual(noAliases.calls, []);
+  const freshNoAliases = runMovingRefs({ controller: "absent", worker: "absent" });
+  assert.equal(freshNoAliases.status, 0);
+  assert.deepEqual(freshNoAliases.calls, []);
 
   // A failed retag must fail the step, not degrade into the no-op skip path.
   const failed = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", dockerFail: true });
@@ -1448,14 +1436,26 @@ test("#1741 r2: only the run that still owns the moving-ref coordinate may retag
   // JSON whitespace is insignificant: a pretty-printed answer still matches.
   const pretty = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", apiMode: "pretty" });
   assert.equal(pretty.status, 0, "a pretty-printed API answer parses");
-  assert.equal(pretty.calls.length, 1, "the confirmed run republishes exactly the reused target's refs");
+  assert.equal(pretty.calls.length, 2, "the confirmed run writes exactly both targets' refs");
 
-  // The guard protects writes only: runs that retag nothing never contact
-  // the forge API (a first publish, and a reused `main` push with no refs).
+  // The guard fires whenever a moving-ref write is due — INCLUDING a first
+  // publish: the r3 bug was exactly an absent target's aliases moving
+  // unguarded from the build step, so the guard now covers every target.
   const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
-  assert.deepEqual(fresh.apiCalls, [], "a first publish never needs the supersession API");
+  assert.ok(fresh.apiCalls.length > 0, "a first publish checks the coordinate before writing aliases");
+  assert.equal(fresh.calls.length, 2, "the confirmed first publish writes both targets' aliases");
+  // A rerun whose coordinate moved, on targets whose sha tags were freshly
+  // built this run: the build pushed only sha refs, so the guard still stops
+  // every moving-ref write.
+  const staleFresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7", live: SUPERSEDED_SHA });
+  assert.notEqual(staleFresh.status, 0, "a superseded rerun of a first publish fails closed too");
+  assert.deepEqual(staleFresh.calls, [], "no alias write happens when the coordinate moved mid-rerun");
+  // Runs with no moving refs never contact the forge API (a `main` push,
+  // reused or fresh): there is nothing for the guard to protect.
   const noAliases = runMovingRefs({ controller: "present", worker: "present" });
   assert.deepEqual(noAliases.apiCalls, [], "a reused main push with no moving refs never calls the API");
+  const freshNoAliases = runMovingRefs({ controller: "absent", worker: "absent" });
+  assert.deepEqual(freshNoAliases.apiCalls, [], "a fresh main push with no moving refs never calls the API");
 
   // The guard runs ONCE per run, not once per retag: one coordinate read
   // and one (first-page) tag enumeration guard both targets.

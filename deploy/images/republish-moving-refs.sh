@@ -6,33 +6,35 @@
 # alias — so a run that died after the sha push but before the aliases could
 # never republish them on a rerun.
 #
-# Moving refs may legally be retagged, so this step repoints them for every
-# REUSED target with `docker buildx imagetools create`: each alias is set to
-# the exact manifest the immutable sha tag already holds. There is NO rebuild,
-# so a moving ref can never drift off the immutable digest the run summary
-# published. Freshly pushed targets already carry their aliases from the
-# gated build step and are skipped here.
+# This script is the ONLY writer of moving refs in the workflow (r3 review):
+# the build steps push nothing but the immutable sha ref, because they carry
+# no supersession check and an ungated alias push there could move a moving
+# ref before any guard ran. Moving refs are written here for EVERY target,
+# reused or freshly built, with `docker buildx imagetools create`: each alias
+# is set to the exact manifest the immutable sha tag holds. There is NO
+# rebuild, so a moving ref can never drift off the immutable digest the run
+# summary published.
 #
 # Supersession guard (r2 review): a rerun of an OLD workflow run must not
 # repoint `pr-<number>` BACKWARD at the older commit's sha manifest — the
 # pre-#1741 run simply refused in that situation, and a moving ref moving
 # backward is a regression the resume feature must not reintroduce. So before
-# ANY retag the script confirms through the forge API that this run's commit
+# ANY moving-ref write the script confirms through the forge API that this run's commit
 # is still the live coordinate behind the event's moving refs: the PR HEAD
 # commit for a pull_request run, the tagged commit for a release-tag run.
 # Git tags never move, but the shared `X.Y` alias tracks the NEWEST vX.Y.*
 # release, so a release-tag run is additionally required to be the newest
 # patch of its own X.Y.* bucket. A superseded run (or any uncertain forge
 # answer, including a failed or unparseable API call) fails the run CLOSED
-# and writes nothing. Runs with no retag to perform never contact the forge
-# API.
+# and writes nothing. Runs whose event defines no moving refs never contact
+# the forge API.
 #
 # Inputs (env): GHCR_OWNER, SOURCE_SHA, CONTROLLER_STATE, WORKER_STATE from
 # the sha-tag resolver, plus the event's moving-ref coordinates PR_REF,
 # RELEASE_VERSION, RELEASE_MAJOR_MINOR (each empty when the event defines
-# none). A reused target with no moving refs for the event is a no-op —
-# imagetools create is never run just to retag the sha ref onto itself. When
-# a retag IS due, the guard additionally requires GITHUB_TOKEN and
+# none). A target of an event with no moving refs is a no-op — imagetools
+# create is never run just to retag the sha ref onto itself. When moving
+# refs ARE due, the guard additionally requires GITHUB_TOKEN and
 # GITHUB_REPOSITORY (the runner provides both; GITHUB_API_URL defaults to
 # the runner's API base so a GitHub Enterprise host is addressed correctly).
 #
@@ -198,10 +200,11 @@ validate_state() {
 }
 
 republish_target() {
-  local name="$1" state="$2"
-  if [ "$state" = absent ]; then
-    return 0
-  fi
+  local name="$1"
+  # Both states write here: a reused target re-converges its aliases on the
+  # sha manifest it already holds, a freshly built one gets its aliases from
+  # the sha manifest its build step just pushed. The build steps never touch
+  # moving refs, so every write below happens behind the supersession guard.
   local repo="ghcr.io/${GHCR_OWNER}/pr-reviewer-${name}"
   local args=()
   [ -n "$PR_REF" ] && args+=( -t "${repo}:${PR_REF}" )
@@ -227,15 +230,17 @@ GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 validate_state controller "$CONTROLLER_STATE"
 validate_state worker "$WORKER_STATE"
 
-# The supersession guard protects every retag this run could perform; it runs
-# once, only when a retag is actually due (a reused target AND the event
-# defines moving refs). Runs that write nothing never contact the forge API.
-if [ -n "${PR_REF}${RELEASE_VERSION}${RELEASE_MAJOR_MINOR}" ] \
-  && { [ "$CONTROLLER_STATE" = present ] || [ "$WORKER_STATE" = present ]; }; then
+# The supersession guard protects EVERY moving-ref write this run can perform
+# (this script is the workflow's only moving-ref writer, and it runs after
+# every build step has pushed nothing but its immutable sha ref). It runs
+# once, whenever the event defines moving refs — regardless of which targets
+# were reused or freshly built. Runs with no moving refs (a `main` push)
+# write nothing and never contact the forge API.
+if [ -n "${PR_REF}${RELEASE_VERSION}${RELEASE_MAJOR_MINOR}" ]; then
   : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to confirm the moving-ref coordinate}"
   : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required to confirm the moving-ref coordinate}"
   assert_current_run_owns_moving_refs
 fi
 
-republish_target controller "$CONTROLLER_STATE"
-republish_target worker "$WORKER_STATE"
+republish_target controller
+republish_target worker
