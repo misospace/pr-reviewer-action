@@ -65,9 +65,15 @@ are published from the same source commit:
   may move as commits are pushed; each underlying commit stays addressable
   by its immutable `sha-<head-commit>` ref.
 - **Release tags.** A `vX.Y.Z` tag publishes the exact SemVer ref
-  (`X.Y.Z`) and a `X.Y` alias for both images from that exact tagged
-  commit. The immutable `sha-<commit>` ref and digest remain the
-  provenance anchor behind the aliases. No `latest` tag is published.
+  (`X.Y.Z`) only for both images from that exact tagged commit. No
+  floating alias is published (#1742): a cluster pulls an image tag
+  directly, so every image tag must resolve to one immutable build. The
+  immutable `sha-<commit>` ref and digest remain the provenance anchor
+  behind the alias. No `latest` tag is published. The Helm chart is the
+  intended destination for floating references: an operator who tracks a
+  release line bumps the chart version the same release publishes
+  (`oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z`), never a moving
+  image tag.
 
 How it runs:
 

@@ -30,7 +30,7 @@ one checked-out commit for every publishable revision (#1704):
   |---|---|
   | pull request (same-repo) | `ghcr.io/misospace/pr-reviewer-<image>:pr-<number>` (moving) and `:sha-<head-commit>` (immutable) |
   | push to `main` | `ghcr.io/misospace/pr-reviewer-<image>:sha-<commit>` (immutable) |
-  | release tag `vX.Y.Z` | `ghcr.io/misospace/pr-reviewer-<image>:X.Y.Z` and `:X.Y` plus `:sha-<commit>` (immutable) |
+  | release tag `vX.Y.Z` | `ghcr.io/misospace/pr-reviewer-<image>:X.Y.Z` (exact; the only release alias) plus `:sha-<commit>` (immutable) |
   | manual dispatch | `ghcr.io/misospace/pr-reviewer-<image>:sha-<commit>` (immutable) |
 
   The exact `image@sha256:...` references for the run are reported in the
@@ -105,15 +105,23 @@ listener binds loopback by default and the chart sets
   `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest from the run
   summary>`.
 - Release tags (`vX.Y.Z` — release-please tags the release commit) publish
-  the exact SemVer ref (`X.Y.Z`) and a `X.Y` alias for both images from
-  that exact tagged commit, following the same digest-reporting pattern
-  (the immutable `sha-<commit>` ref and the run-summary digest remain the
-  provenance anchor behind the aliases). The release also publishes the
-  Helm chart as `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z`
-  (#1708, `.github/workflows/publish-chart.yaml`): the chart version is
-  the same application release coordinate as these image release tags —
-  one release, one coordinate; the digest-pinned image overrides above
-  stay the exact immutable production pin when desired.
+  the exact SemVer ref (`X.Y.Z`) only for both images from that exact
+  tagged commit, following the same digest-reporting pattern (the
+  immutable `sha-<commit>` ref and the run-summary digest remain the
+  provenance anchor behind the alias). No floating alias is published
+  (#1742). A cluster pulls an image tag directly, so every published
+  image tag must resolve to one immutable build: pin the exact tag or
+  the digest. The Helm chart is the intended destination for floating
+  references. An operator who tracks a release line consumes the chart
+  that the same release publishes as
+  `oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z` (#1708,
+  `.github/workflows/publish-chart.yaml`). The chart version is the same
+  application release coordinate as these image release tags: one
+  release, one coordinate. The chart itself also publishes exact SemVer
+  OCI tags (Helm rejects non-SemVer OCI tags), so a future floating
+  convenience belongs on that chart surface, never on image tags. The
+  digest-pinned image overrides above stay the exact immutable
+  production pin when desired.
 - The release stamp is not baked by the Dockerfile itself; release
   pipelines should run the build with `PR_REVIEWER_BUILD_STAMP=release`
   available (CI-driven) or accept the unstamped dev bundle for local use.

@@ -589,8 +589,9 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
 
   // ── Tag contract on the publish job's build steps. The immutable
   // sha-<commit> ref is the UNCONDITIONAL first tag line of both targets;
-  // the moving pr-<number> ref and the SemVer + major.minor release
-  // aliases are conditional on the resolved coordinates.
+  // the moving pr-<number> ref and the exact SemVer release alias are
+  // conditional on the resolved coordinates. #1742: the exact version is
+  // the ONLY release alias — no floating major.minor alias is published.
   const publishTagBlocks = publish.steps.flatMap(
     (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
   ).filter((block) =>
@@ -634,7 +635,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
       ),
       `the ${target} pr ref must be the moving pr-<number> alias, PR runs only`,
     );
-    // Release aliases: exact SemVer and major.minor, validated tag pushes only.
+    // Release alias: the exact SemVer, validated tag pushes only.
     assert.match(
       tagLine(block, "RELEASE_VERSION"),
       new RegExp(
@@ -642,18 +643,17 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
       ),
       `the ${target} release alias must be the exact SemVer version, tag pushes only`,
     );
-    assert.match(
-      tagLine(block, "RELEASE_MAJOR_MINOR"),
-      new RegExp(
-        `env\\.RELEASE_MAJOR_MINOR != '' && format\\('ghcr\\.io/\\{0\\}/pr-reviewer-${target}:\\{1\\}', env\\.GHCR_OWNER, env\\.RELEASE_MAJOR_MINOR\\)`,
-      ),
-      `the ${target} major.minor alias must track the exact version, tag pushes only`,
-    );
-    // Exactly the four refs above: no latest, no floating branch tag.
-    assert.equal(lines.length, 4, `the ${target} tags block must carry exactly sha + pr + SemVer + major.minor`);
+    // #1742: no floating alias of any shape on the tags block.
+    assert.doesNotMatch(block, /RELEASE_MAJOR/, `the ${target} tags block must not carry a floating alias`);
+    // Exactly the three refs above: no floating alias, no latest, no
+    // floating branch tag.
+    assert.equal(lines.length, 3, `the ${target} tags block must carry exactly sha + pr + exact SemVer`);
   }
   assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
   assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // #1742: the whole workflow derives no floating alias anywhere (the
+  // RELEASE_MAJOR prefix also catches a major-only alias variable).
+  assert.doesNotMatch(workflow, /RELEASE_MAJOR/, "no floating alias may be derived");
 
   // ── The source SHA: one resolution step, and PR events anchor the
   // immutable refs to the PR HEAD commit (github.sha is the merge commit
@@ -675,19 +675,26 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.match(coordsRun, /SOURCE_SHA="\$DEFAULT_SHA"/);
   // Moving PR ref is pr-<number>, derived only for pull_request events.
   assert.match(coordsRun, /PR_REF="pr-\$PR_NUMBER"/);
-  // Release aliases derive only from a strictly validated vX.Y.Z tag: the
-  // version is stripped of its v prefix, the major.minor alias is cut from
-  // the exact version, and a non-semver ref refuses the run instead of
-  // producing a wrong alias.
+  // The release alias derives only from a strictly validated vX.Y.Z tag:
+  // the version is stripped of its v prefix, and a non-semver ref refuses
+  // the run instead of producing a wrong alias. #1742: the exact version
+  // is the only alias cut from the tag.
   assert.match(coordsRun, /version="\$\{REF_NAME#v\}"/);
   assert.match(
     coordsRun,
     /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\(\[-\+\]\[0-9A-Za-z\.\-\]\+\)\?\$/,
     "release aliases require a strict X.Y.Z semver check",
   );
-  assert.match(coordsRun, /refusing to derive release aliases/);
-  assert.match(coordsRun, /RELEASE_MAJOR_MINOR="\$\{version%\.\*\}"/);
+  assert.match(coordsRun, /refusing to derive a release alias/);
   assert.match(coordsRun, /RELEASE_VERSION=""/, "non-tag events must derive no release alias");
+  // #1742: the exact version is the only release coordinate derived from
+  // a release tag — the resolution step computes no floating alias by
+  // any means (suffix-cut, cut, or a major/minor-shaped variable).
+  assert.doesNotMatch(
+    coordsRun,
+    /RELEASE_MAJOR|\$\{\s*version\s*%|\$\{\s*VERSION\s*%|\bcut\b/,
+    "the resolution step must derive no floating alias",
+  );
   // GHCR has no registry-side tag immutability, so the workflow itself
   // must refuse to replace an existing sha-<commit> tag: a rerun of a
   // non-byte-reproducible build would otherwise silently move the tag off
@@ -818,7 +825,20 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(readme, /pr-<number>/, "the moving same-repo PR ref must be documented");
   assert.match(readme, /sha-<commit>/, "the immutable commit ref must be documented");
   assert.match(readme, /X\.Y\.Z/, "the exact SemVer release alias must be documented");
-  assert.match(readme, /X\.Y/, "the major.minor release alias must be documented");
+  // #1742: the exact version is the only release alias. The docs must not
+  // advertise a floating major.minor image reference, and they must state
+  // that the Helm chart is the intended destination for floating
+  // references.
+  assert.doesNotMatch(
+    readme,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  assert.match(
+    readme.replace(/\s+/g, " "),
+    /The Helm chart is the intended destination for floating references/,
+    "the docs must name the Helm chart as the destination for floating references",
+  );
   // The fork trust boundary must be stated.
   assert.match(readme, /[Ff]ork[\s\S]{0,200}publish(?:es)? nothing/, "the fork-PR no-publish contract must be documented");
   // No `latest` policy statement survives either.
@@ -831,6 +851,17 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(deploymentDoc, /sha-<commit>/);
   assert.match(deploymentDoc, /X\.Y\.Z/);
   assert.match(deploymentDoc, /[Ff]ork/);
+  // #1742: same single-alias contract in the deployment runbook.
+  assert.doesNotMatch(
+    deploymentDoc,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  assert.match(
+    deploymentDoc.replace(/\s+/g, " "),
+    /The Helm chart is the intended destination for floating references/,
+    "the deployment doc must name the Helm chart as the destination for floating references",
+  );
 });
 
 test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate-only, coordinates fail closed", () => {
