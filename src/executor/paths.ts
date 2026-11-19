@@ -45,8 +45,10 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 /** Cross-uid shared-claim exchange modes (#1631): when the run directory
  * crosses a uid boundary (the Kubernetes executor's controller pod vs.
- * worker pod), both sides share group 65532 via `fsGroup` and the claim
- * volume's setgid propagation keeps every created file/dir in that
+ * worker pod), both sides hold group 65532 through their pod groups (the
+ * controller's `fsGroup`, the worker's `runAsGroup` — never worker
+ * `fsGroup`, #1736) and the deployment-provisioned setgid bit on the
+ * claim root keeps every created file/dir in that
  * group. The remaining gap is MODE BITS, so exchanged FILES are
  * group-readable (`0o640`) and shared-claim DIRECTORIES are setgid +
  * group-rwx (`0o2770`). The single-uid defaults stay `0o600`/`0o700`. */

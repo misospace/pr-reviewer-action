@@ -453,12 +453,20 @@ fail-closed, so an unlistable cluster refuses the launch.
    is the worker's engine-cancellation window.
 - **Shared-claim file ownership (#1631).** The envelope/result exchange
   crosses a uid boundary (the controller pod runs as uid 1000, the
-  worker pod as uid 65532), so both sides share group 65532: the worker
-  pod pins `fsGroup: 65532` (`fsGroupChangePolicy: "OnRootMismatch"`,
-  the kubelet applies the group and the setgid bit to every mapped claim
-  at mount), and the chart pins the controller's `fsGroup` to the same
-  value. The modes are made deterministic and umask-proof with explicit
-  `fchmod`/`chmod`:
+  worker pod as uid 65532), so both sides share group 65532 through
+  their pod groups, never through kubelet group application on the
+  worker: the worker pod pins `runAsGroup: 65532` and MUST NOT carry
+  `fsGroup` (#1736 — with `fsGroup`, kubelet's `OnRootMismatch` skips
+  only when the claim root mode is a superset of `0770` *with* setgid,
+  so the controller's trusted non-group-writable `2750` root never
+  matches and every worker launch would recursively restyle the whole
+  claim, group-writable, mid-run; the shipped worker admission policy
+  rejects a pod-level `fsGroup`), and the chart pins the controller's
+  `fsGroup` to the same value while the chart's `fix-roots` init
+  container (#1725) provisions the claim roots (`2750`, owned by the
+  controller uid with the setgid bit) that carry the group onto
+  everything created below. The modes
+  are made deterministic and umask-proof with explicit `fchmod`/`chmod`:
   - exchanged FILES (envelope, result) are group-readable `0640`
     (`SHARED_CLAIM_FILE_MODE`); the single-uid (local) exchange stays
     `0600`;

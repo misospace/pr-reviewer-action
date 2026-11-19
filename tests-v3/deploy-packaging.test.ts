@@ -197,6 +197,129 @@ test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key,
   );
 });
 
+test("#1725: kubernetes-executor mode injects the fix-roots claim-root init container, CI pins both renders", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The kubelet applies fsGroup to freshly provisioned claim roots as
+  // group-WRITABLE (0775, uid 0), which the runtime's cache-root trust
+  // walk (assertTrustedDirChain in src/acquisition/mirror.ts) refuses —
+  // the chart must fix the roots to the documented shared-group shape
+  // (2750, owner = the pod's runAsUser, group = the shared fsGroup; the
+  // setgid bit keeps the #1631 group inheritance below the root).
+  assert.ok(
+    helpers.includes('{{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}'),
+    "the fix must chown to the pod's runAsUser (default 1000)",
+  );
+  assert.ok(
+    helpers.includes('{{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}'),
+    "the fix must keep the shared fsGroup (default 65532)",
+  );
+  assert.match(
+    helpers,
+    /\(list \$v\.paths\.runsRoot \$v\.paths\.workspaceCacheRoot\)/,
+    "the fix must target exactly the runs and workspace-cache roots",
+  );
+  assert.match(helpers, /chown %d:%d %s && chmod 2750 %s/, "the fix command must be chown + chmod 2750 (setgid preserved for #1631 group inheritance)");
+  assert.match(
+    helpers,
+    /\(mustMergeOverwrite \$operatorInitContainers \(dict "fix-roots"/,
+    "fix-roots must merge into controllers.main.initContainers, preserving operator-defined ones",
+  );
+  // The common library models initContainers as a map keyed by name; a
+  // raw Kubernetes container list must fail with that guidance instead of
+  // an opaque sprig merge type error.
+  assert.match(
+    helpers,
+    /\{\{- if not \(kindIs "map" \$operatorInitContainers\) -\}\}\n\{\{- fail "controller\.controllers\.main\.initContainers must be a map keyed by container name/,
+    "a list-shaped controllers.main.initContainers must fail closed with the map-shape guidance",
+  );
+  // The injection is scoped to the executor branch: a root init container
+  // renders only when workerExecutor.mode is kubernetes.
+  const executorBranch = helpers.indexOf("{{- if $kubeExecutor -}}");
+  const fixRoots = helpers.indexOf('"fix-roots"');
+  assert.notEqual(executorBranch, -1, "the executor branch must exist");
+  assert.ok(fixRoots > executorBranch, "fix-roots must be injected inside the executor branch");
+  assert.equal(helpers.indexOf('"fix-roots"', fixRoots + 1), -1, "fix-roots must appear exactly once");
+  assert.match(
+    helpers,
+    /"capabilities" \(dict "drop" \(list "ALL"\) "add" \(list "CHOWN" "FOWNER"\)\)/,
+    "the fix container must run with only CHOWN/FOWNER added",
+  );
+  // CI pins the behavior on both renders: present in the
+  // Kubernetes-executor Deployment, absent from the controller-only one.
+  // Substring checks on the literal CI lines (the rendered fix command is
+  // one folded YAML scalar, hence the tr-joining pipeline).
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes(
+      `awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "name: fix-roots"`,
+    ),
+    "charts.yaml must pin the fix-roots render assertion for the Kubernetes executor",
+  );
+  assert.ok(
+    workflow.includes(
+      String.raw`| tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '`,
+    ),
+    "charts.yaml must pin the exact chown/chmod fix command in the rendered Deployment",
+  );
+  assert.ok(
+    workflow.includes(`if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then`),
+    "charts.yaml must pin the controller-only absence assertion",
+  );
+  // Review follow-ups (#1736): CI must pin that fix-roots actually receives
+  // the claim-root mounts, that an operator-defined init container
+  // coexists with fix-roots, and that a list-shaped initContainers refuses.
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the runs mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-init-section.yaml | grep -q 'name: workspace-cache'`),
+    "charts.yaml must pin the workspace-cache mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: operator-init'`),
+    "charts.yaml must pin operator-defined init container preservation",
+  );
+  assert.ok(
+    workflow.includes("a raw list under controller.controllers.main.initContainers must refuse the render"),
+    "charts.yaml must pin the list-shaped initContainers refusal",
+  );
+  // The operator-facing contract is documented (acceptance criterion 3).
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.match(chartReadme, /`2750`, owner uid 1000,\s+group 65532/);
+  assert.match(chartReadme, /fix-roots/);
+});
+
+test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
+  // Kubelet OnRootMismatch skips group application only when the volume
+  // root mode is a superset of 0770 WITH setgid (requiresPermissionChange
+  // in kubernetes pkg/volume/volume_linux.go), so a trusted non-group-
+  // writable 2750 root NEVER matches. Any prose claiming the kubelet
+  // stops re-applying once the root carries the group must stay gone —
+  // that false premise was the review blocker on #1736.
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  assert.doesNotMatch(helpers, /never re-applies|treats\s*\n?\s*the fixed roots as matching/, "helper comment must not claim OnRootMismatch skips a fixed root");
+  assert.match(helpers, /superset of 0770[\s\S]*setgid set/, "helper comment must state the real skip condition");
+  assert.match(helpers, /volume_linux\.go/, "helper comment must cite the kubelet source");
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.doesNotMatch(chartReadme, /makes the fix durable: once the/, "chart README must not keep the OnRootMismatch durability claim");
+  assert.match(chartReadme, /no other workload mounts these claims with/, "chart README must name the real durability rule");
+  const deployment = read("docs/self-hosted-deployment.md");
+  assert.doesNotMatch(deployment, /kubelet no longer re-applies/, "deployment doc must not keep the OnRootMismatch durability claim");
+  assert.match(deployment, /worker Jobs carry no `fsGroup`/, "deployment doc must pin the no-fsGroup worker rule");
+  assert.match(deployment, /stat -c '%a %u %g'/, "deployment doc must keep the live root-shape check");
+  const boundary = read("docs/architecture/executor-boundary.md");
+  assert.doesNotMatch(boundary, /worker\s*\n?\s*pod pins `fsGroup/, "executor-boundary must not claim the worker pins fsGroup");
+  assert.match(boundary, /MUST NOT carry\s*\n?\s*`fsGroup`/, "executor-boundary must state the worker no-fsGroup rule");
+  // fix-roots needs uid 0, so the pod is not Pod Security `restricted`
+  // compatible — an operator-facing constraint the chart README must state.
+  assert.match(chartReadme, /Pod Security\s*\n?\s*`restricted`/, "chart README must name the Pod Security restricted constraint on fix-roots");
+  assert.match(chartReadme, /`baseline`/, "chart README must name the profile that accepts fix-roots");
+  // kubelet's restyle cannot be simulated in-repo: the durability check is
+  // operator-side, and the doc must say so instead of implying coverage.
+  assert.match(deployment, /[Nn]o repository test can simulate kubelet/, "deployment doc must state the live-cluster run is operator-side");
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);

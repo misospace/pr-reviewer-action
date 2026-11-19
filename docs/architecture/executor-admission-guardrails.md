@@ -57,6 +57,7 @@ module rule ids:
 | `noHostNamespaces` | `hostNetwork`, `hostPID`, and `hostIPC` are unset or false. |
 | `pvcVolumesOnly` | Every volume is a `persistentVolumeClaim`: no `hostPath`, no `secret`, no `projected`, no other type. |
 | `fixedPodSecurityContext` | `runAsNonRoot`, uid/gid 65532, `RuntimeDefault` seccomp. |
+| `noPodFsGroup` | No pod-level `fsGroup`/`fsGroupChangePolicy`: kubelet fsGroup processing restyles the shared claims at mount and strips the controller's trusted `2750` claim root (#1736). |
 | `fixedContainerSecurityContext` | `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `drop: [ALL]` with no `add`, `RuntimeDefault` seccomp. |
 | `boundedLifetime` | `activeDeadlineSeconds` is set and greater than 0. |
 | `noRetries` | `backoffLimit: 0` and `restartPolicy: Never`. |
