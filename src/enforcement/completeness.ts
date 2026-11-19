@@ -140,7 +140,11 @@ export function applyRequiredCheckValidation(
         ? coverage.status
         : reconciled.rows.every((row) => !isMergeAffectingRowClass(row.rowClass)
             || ((row.status === "satisfied" || row.status === "not_applicable")
-              && (row.reason === "ok" || row.reason === "ci-evidence")))
+              && (row.reason === "ok" || row.reason === "ci-evidence"
+                // #1726: the deterministic dependency-evidence settlement is
+                // a discharge like the CI one — validated receipts settled
+                // the row without a model disposition echo.
+                || row.reason === "dependency-evidence")))
           ? "complete"
           : "incomplete";
       coverage = { ...coverage, checks: reconciled.rows, status: recomputed };
