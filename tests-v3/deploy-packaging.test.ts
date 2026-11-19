@@ -6,7 +6,9 @@
  * `helm dependency build`/`lint`/`template`/kubeconform battery. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { parse } from "yaml";
 
 function read(path: string): string {
@@ -680,7 +682,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     jobs: Record<string, {
       if?: string;
       permissions: { contents: string; packages: string };
-      steps: { uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
+      steps: { id?: string; if?: string; uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
     }>;
   };
 
@@ -884,57 +886,67 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.match(coordsRun, /refusing to derive release aliases/);
   assert.match(coordsRun, /RELEASE_MAJOR_MINOR="\$\{version%\.\*\}"/);
   assert.match(coordsRun, /RELEASE_VERSION=""/, "non-tag events must derive no release alias");
-  // GHCR has no registry-side tag immutability, so the workflow itself
-  // must refuse to replace an existing sha-<commit> tag: a rerun of a
-  // non-byte-reproducible build would otherwise silently move the tag off
-  // the digest the run summary published. The guard must inspect the
-  // exact two sha-<commit> tags, fail on a present tag, fail closed on any
-  // uncertain registry answer, and run before the first push step.
-  // ── The immutability guard: GHCR has no registry-side tag immutability,
-  // so the workflow itself must refuse to replace an existing sha-<commit>
-  // tag: a rerun of a non-byte-reproducible build would otherwise silently
-  // move the tag off the digest the run summary published. The guard must
-  // inspect the exact two sha-<SOURCE_SHA> tags, fail on a present tag,
-  // fail closed on any uncertain registry answer, and run before the first
-  // push step.
-  const guardStep = publish.steps.find((step) => (step.run ?? "").includes("docker manifest inspect"));
-  assert.ok(guardStep, "a guard step must inspect the published sha tags");
-  const guardRun = guardStep.run ?? "";
-  assert.match(guardRun, /set -euo pipefail/);
-  assert.deepEqual(guardStep.env, {
+  // ── The resume resolver (#1741): GHCR has no registry-side tag
+  // immutability, so the workflow must never re-push an existing
+  // sha-<commit> tag — but it must also not refuse the whole run when only
+  // part of the pair is published. The per-target state is resolved by the
+  // standalone script (exercised deterministically in its own test below),
+  // and the workflow consumes it: the resolver runs before any push, and
+  // EACH push step is gated on its own target being absent, so a rerun
+  // reuses a present target and publishes only the missing one.
+  const resolverStep = publish.steps.find((step) =>
+    (step.run ?? "").includes("deploy/images/resolve-sha-tag-state.sh"),
+  );
+  assert.ok(resolverStep, "a step must resolve the published sha-tag state");
+  assert.equal(resolverStep.id, "sha_state", "the resolver step must publish its outputs under id sha_state");
+  assert.deepEqual(resolverStep.env, {
     CONTROLLER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}",
     WORKER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}",
   });
-  for (const tagVar of ["CONTROLLER_TAG", "WORKER_TAG"]) {
-    assert.match(guardRun, new RegExp(`\\$\\{?${tagVar}\\}?`), `the guard must check $${tagVar}`);
+  // Each target's build/push runs only when that target's sha tag is absent;
+  // a present target is reused untouched (never re-pushed, never moved).
+  for (const target of ["controller", "worker"]) {
+    const pushStep = publish.steps.find(
+      (step) => step.with?.["target"] === target && step.with?.["push"] === true,
+    );
+    assert.ok(pushStep, `the ${target} target must be built and pushed`);
+    assert.equal(
+      pushStep.if,
+      `steps.sha_state.outputs.${target}_state == 'absent'`,
+      `the ${target} push must be gated on its own resolved sha-tag state being absent`,
+    );
   }
-  // A present tag refuses the run...
-  assert.match(guardRun, /already exists/);
-  // ...and so does any registry answer that is not an explicit absence:
-  // only the spec's 404 codes (MANIFEST_UNKNOWN / NAME_UNKNOWN /
-  // not-found) pass, so ambiguous failures like TLS "unknown authority"
-  // or an OCI UNKNOWN error code fail closed (fail the job, never push
-  // blind).
-  assert.match(guardRun, /manifest\.unknown\|name\.unknown\|not found/);
-  // Orientation locks: the existing-tag refusal must sit in the branch
-  // where the inspect SUCCEEDED, and the uncertain-state refusal in the
-  // branch where the absence classifier did NOT match.
-  assert.match(
-    guardRun,
-    /if out=\$\(docker manifest inspect "\$tag" 2>&1\); then\s*\n\s*echo "::error::\$\{tag\} already exists/,
-    "the existing-tag refusal must be the inspect-success branch",
-  );
-  assert.match(
-    guardRun,
-    /if ! printf '%s\\n' "\$out" \| grep -Eqi/,
-    "the uncertain-state refusal must be the classifier-did-not-match branch",
-  );
-  assert.match(guardRun, /exit 1/);
-  const guardIndex = publish.steps.indexOf(guardStep);
+  const resolverIndex = publish.steps.indexOf(resolverStep);
   const firstPushIndex = publish.steps.findIndex((step) => step.with?.["push"] === true);
   assert.ok(
-    firstPushIndex !== -1 && guardIndex < firstPushIndex,
-    "the tag guard must run before any push step",
+    firstPushIndex !== -1 && resolverIndex < firstPushIndex,
+    "the sha-tag resolver must run before any push step",
+  );
+  // ── A reused target's build step is skipped, but its MOVING refs must
+  // still converge: a dedicated step repoints pr-<number>/SemVer/major.minor
+  // at the manifest the immutable sha tag already holds (no rebuild, so a
+  // moving ref can never drift off the immutable digest, and aliases lost
+  // when an earlier run died after the sha push are recovered on the rerun).
+  const aliasStep = publish.steps.find((step) =>
+    (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
+  );
+  assert.ok(aliasStep, "a step must republish the moving refs of reused targets");
+  assert.deepEqual(aliasStep.env, {
+    GHCR_OWNER: "${{ env.GHCR_OWNER }}",
+    SOURCE_SHA: "${{ env.SOURCE_SHA }}",
+    PR_REF: "${{ env.PR_REF }}",
+    RELEASE_VERSION: "${{ env.RELEASE_VERSION }}",
+    RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
+    CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
+    WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
+  });
+  const lastPushIndex = publish.steps.reduce(
+    (last, step, i) => (step.with?.["push"] === true ? i : last),
+    -1,
+  );
+  assert.ok(
+    publish.steps.indexOf(aliasStep) > lastPushIndex,
+    "the moving-refs step must run after the build-push steps",
   );
   // Both targets from the one Dockerfile, single-arch, pushed in one job —
   // the same checked-out commit is what makes the controller and worker
@@ -959,18 +971,42 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     );
   }
   // ── The run summary must carry the exact pull-able references for BOTH
-  // images and the source commit they were built from, wired from the
-  // build outputs and the resolved source SHA — the operator's only exact
-  // provenance record of a publish run.
+  // images and the source commit they were built from. Each digest is wired
+  // from BOTH sources the resume can produce: the freshly-built digest from
+  // the gated build step AND the reused digest the resolver read for an
+  // already-published tag (#1741) — so a recovery run still reports the full
+  // pair, including the image it did not build itself.
   for (const target of ["controller", "worker"]) {
+    const upper = target.toUpperCase();
     assert.match(
       workflow,
-      new RegExp(`${target.toUpperCase()}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+      new RegExp(`BUILT_${upper}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+      `the summary must receive the freshly built ${target} digest`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`RESOLVED_${upper}_DIGEST: \\$\\{\\{ steps\\.sha_state\\.outputs\\.${target}_digest \\}\\}`),
+      `the summary must receive the reused ${target} digest the resolver read`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`${upper}_STATE: \\$\\{\\{ steps\\.sha_state\\.outputs\\.${target}_state \\}\\}`),
+      `the summary must receive the resolved ${target} state`,
     );
   }
   const summaryStep = publish.steps.find((step) => (step.run ?? "").includes("GITHUB_STEP_SUMMARY"))?.run ?? "";
   assert.notEqual(summaryStep, "", "a step must write the run summary");
   assert.equal(summaryStep.includes("SOURCE_SHA"), true, "the summary step must receive the resolved source SHA");
+  // The summary picks the reused digest when present, else the built one, so a
+  // resume reports the immutable reference it preserved rather than a rebuild.
+  for (const target of ["controller", "worker"]) {
+    const upper = target.toUpperCase();
+    assert.match(
+      summaryStep,
+      new RegExp(`${upper}_DIGEST="\\$\\{RESOLVED_${upper}_DIGEST:-\\$BUILT_${upper}_DIGEST\\}"`),
+      `the summary must prefer the reused ${upper} digest over the built one`,
+    );
+  }
   // Anchor to the brace group redirected into the summary itself: the
   // same references are echoed to the job log, and the log echo alone
   // must not satisfy the contract.
@@ -1006,6 +1042,257 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     ["${{ secrets.GITHUB_TOKEN }}"],
     "the workflow's own GITHUB_TOKEN is the only secret in play",
   );
+});
+
+// #1741: the sha-tag state resolver is the single decision point for whether
+// each image target is reused or published. It is exercised here with a
+// STUBBED `docker` (no live registry writes), so the control flow is a
+// deterministic regression test, not a regex over YAML. The stub reads
+// CONTROLLER_STATE / WORKER_STATE (present | absent | ambiguous |
+// present-no-digest) plus the per-target digest, and emulates the two
+// registry reads the resolver makes: `docker manifest inspect` (presence +
+// the 404/ambiguous answer) and `docker buildx imagetools inspect` (the
+// digest a present tag resolves to).
+const RESOLVER = "deploy/images/resolve-sha-tag-state.sh";
+const CTRL_DIGEST = `sha256:${"a".repeat(64)}`;
+const WORKER_DIGEST = `sha256:${"b".repeat(64)}`;
+
+function runResolver(states: {
+  controller: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
+  worker: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
+}): { status: number | null; outputs: Record<string, string> } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "resolver-"));
+  const docker = join(dir, "docker");
+  writeFileSync(
+    docker,
+    [
+      "#!/usr/bin/env bash",
+      'sub="$1"; shift',
+      'tag="${@: -1}"',
+      'which=controller; [ "$tag" = "$WORKER_TAG" ] && which=worker',
+      'state_var="${which^^}_STATE"',
+      'if [ "$sub" = manifest ]; then',
+      '  case "${!state_var}" in',
+      '    present|present-no-digest) echo \'{"schemaVersion":2}\'; exit 0;;',
+      '    absent) echo "errors: MANIFEST_UNKNOWN: manifest unknown"; exit 1;;',
+      '    absent-notfound) echo "$tag: not found"; exit 1;;',
+      '    ambiguous) echo "error: x509: certificate signed by unknown authority"; exit 1;;',
+      '    auth-denial) echo "errors: unauthorized: basic credential not found"; exit 1;;',
+      "  esac",
+      "fi",
+      'if [ "$sub" = buildx ]; then',
+      '  case "${!state_var}" in',
+      '    present) echo "Name: $tag"; dvar="${which^^}_DIGEST"; echo "Digest: ${!dvar}"; exit 0;;',
+      '    present-no-digest) echo "Name: $tag"; exit 0;;',
+      "  esac",
+      '  echo "not found"; exit 1',
+      "fi",
+      "exit 1",
+    ].join("\n"),
+  );
+  chmodSync(docker, 0o755);
+  const outFile = join(dir, "github_output.txt");
+  const result = spawnSync("bash", [RESOLVER], {
+    encoding: "utf8",
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      HOME: process.env.HOME,
+      CONTROLLER_TAG: "ghcr.io/o/pr-reviewer-controller:sha-cafe",
+      WORKER_TAG: "ghcr.io/o/pr-reviewer-worker:sha-cafe",
+      CONTROLLER_STATE: states.controller,
+      WORKER_STATE: states.worker,
+      CONTROLLER_DIGEST: CTRL_DIGEST,
+      WORKER_DIGEST: WORKER_DIGEST,
+      GITHUB_OUTPUT: outFile,
+    },
+  });
+  const outputs: Record<string, string> = {};
+  try {
+    for (const line of readFileSync(outFile, "utf8").split("\n")) {
+      const i = line.indexOf("=");
+      if (i > 0) outputs[line.slice(0, i)!] = line.slice(i + 1);
+    }
+  } catch {
+    /* no output written */
+  }
+  return { status: result.status, outputs };
+}
+
+test("#1741 resolver resumes a half-published pair, reuses present tags, fails closed on ambiguity", () => {
+  // The exact bug: controller published, worker failed. The rerun must reuse
+  // the controller tag (its digest preserved, NOT re-pushed) and publish the
+  // worker — exit 0 with the full pair addressable.
+  const partial = runResolver({ controller: "present", worker: "absent" });
+  assert.equal(partial.status, 0, "a half-published pair resumes without error");
+  assert.equal(partial.outputs["controller_state"], "present");
+  assert.equal(partial.outputs["controller_digest"], CTRL_DIGEST, "the reused controller digest is preserved");
+  assert.equal(partial.outputs["worker_state"], "absent");
+  assert.equal(partial.outputs["worker_digest"], undefined, "an absent target carries no digest to reuse");
+
+  // The symmetric half: worker already present, controller missing.
+  const other = runResolver({ controller: "absent", worker: "present" });
+  assert.equal(other.status, 0);
+  assert.equal(other.outputs["controller_state"], "absent");
+  assert.equal(other.outputs["worker_state"], "present");
+  assert.equal(other.outputs["worker_digest"], WORKER_DIGEST);
+
+  // Both already published: the run verifies and reuses both, publishing
+  // neither (and moving nothing).
+  const both = runResolver({ controller: "present", worker: "present" });
+  assert.equal(both.status, 0);
+  assert.deepEqual(
+    { ...both.outputs },
+    {
+      controller_state: "present",
+      controller_digest: CTRL_DIGEST,
+      worker_state: "present",
+      worker_digest: WORKER_DIGEST,
+    },
+  );
+
+  // First publish: both absent, both built.
+  const fresh = runResolver({ controller: "absent", worker: "absent" });
+  assert.equal(fresh.status, 0);
+  assert.deepEqual(
+    { ...fresh.outputs },
+    { controller_state: "absent", worker_state: "absent" },
+  );
+
+  // Ambiguous registry answers still fail CLOSED — never push over uncertain
+  // state — whether the ambiguity is on the controller or the worker.
+  assert.notEqual(runResolver({ controller: "ambiguous", worker: "absent" }).status, 0, "controller ambiguity fails closed");
+  assert.notEqual(runResolver({ controller: "absent", worker: "ambiguous" }).status, 0, "worker ambiguity fails closed");
+  // #252 adversarial boundary: an authorization failure whose text contains
+  // the phrase "not found" ("basic credential not found") must NEVER classify
+  // as absent — only the registry's ": not found" suffix form counts, exactly
+  // like the chart guard in publish-chart.yaml.
+  assert.notEqual(
+    runResolver({ controller: "auth-denial", worker: "absent" }).status,
+    0,
+    "an auth error containing 'not found' fails closed, never classifies absent",
+  );
+  assert.notEqual(
+    runResolver({ controller: "absent", worker: "auth-denial" }).status,
+    0,
+    "a worker auth error containing 'not found' fails closed too",
+  );
+  // The strict form of the same phrase still classifies as absent, so the
+  // tightening does not refuse genuine 404s reported as "<ref>: not found".
+  const colonAbsence = runResolver({ controller: "absent-notfound", worker: "absent" });
+  assert.equal(colonAbsence.status, 0);
+  assert.equal(colonAbsence.outputs["controller_state"], "absent", '": not found" is an explicit registry absence');
+  // The classifier itself carries the load-bearing leading colon.
+  const resolverScript = read(RESOLVER);
+  assert.match(resolverScript, /: not found/, "the absent classifier requires the colon before 'not found'");
+  assert.doesNotMatch(resolverScript, /\|not found/, "a bare 'not found' alternative must not return");
+  // A present tag whose digest cannot be read is uncertain too: it must not be
+  // reused with a blank/unverifiable reference.
+  assert.notEqual(
+    runResolver({ controller: "present-no-digest", worker: "absent" }).status,
+    0,
+    "a present tag with an unreadable digest fails closed",
+  );
+});
+
+// #1741 review: a reused target's build step (and with it its alias pushes)
+// is skipped, so a dedicated script repoints the target's moving refs at the
+// preserved sha manifest. Exercised with a STUBBED `docker` that records each
+// invocation, so the exact registry writes are a deterministic regression
+// test, not a regex over YAML.
+const MOVING_REFS = "deploy/images/republish-moving-refs.sh";
+
+function runMovingRefs(env: {
+  controller: string;
+  worker: string;
+  prRef?: string;
+  releaseVersion?: string;
+  releaseMajorMinor?: string;
+  dockerFail?: boolean;
+}): { status: number | null; calls: string[] } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
+  const callsFile = join(dir, "calls.txt");
+  const docker = join(dir, "docker");
+  writeFileSync(
+    docker,
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$*" >> "$CALLS_FILE"',
+      'if [ -n "${DOCKER_FAIL:-}" ]; then exit 1; fi',
+    ].join("\n"),
+  );
+  chmodSync(docker, 0o755);
+  const result = spawnSync("bash", [MOVING_REFS], {
+    encoding: "utf8",
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      HOME: process.env.HOME,
+      GHCR_OWNER: "o",
+      SOURCE_SHA: "cafe",
+      CONTROLLER_STATE: env.controller,
+      WORKER_STATE: env.worker,
+      PR_REF: env.prRef ?? "",
+      RELEASE_VERSION: env.releaseVersion ?? "",
+      RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
+      CALLS_FILE: callsFile,
+      ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
+    },
+  });
+  let calls: string[] = [];
+  try {
+    calls = readFileSync(callsFile, "utf8").split("\n").filter((line) => line.length > 0);
+  } catch {
+    /* docker was never called */
+  }
+  return { status: result.status, calls };
+}
+
+test("#1741 moving refs of reused targets repoint at the preserved sha manifest", () => {
+  // Half-published PR rerun: the reused controller's pr ref must be repointed
+  // at the exact sha manifest it already holds (no rebuild); the absent
+  // worker publishes its own aliases through the gated build step, so nothing
+  // is written for it here.
+  const half = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
+  assert.equal(half.status, 0);
+  assert.deepEqual(half.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+  ]);
+
+  // Release-tag resume: every reused target gets BOTH SemVer aliases
+  // repointed, each at its own sha manifest.
+  const release = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+  });
+  assert.equal(release.status, 0);
+  assert.deepEqual(release.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-cafe",
+  ]);
+
+  // First publish: both targets push their own aliases from the build step,
+  // so the script performs no registry writes at all.
+  const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
+  assert.equal(fresh.status, 0);
+  assert.deepEqual(fresh.calls, []);
+
+  // A reused target of an event with no moving refs (a `main` push) is a
+  // no-op: imagetools is never invoked just to retag the sha ref onto itself.
+  const noAliases = runMovingRefs({ controller: "present", worker: "present" });
+  assert.equal(noAliases.status, 0);
+  assert.deepEqual(noAliases.calls, []);
+
+  // A failed retag must fail the step, not degrade into the no-op skip path.
+  const failed = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", dockerFail: true });
+  assert.notEqual(failed.status, 0, "a failed imagetools create propagates as a step failure");
+  assert.equal(failed.calls.length, 1, "the attempted write is still recorded");
+
+  // A state outside the resolver's present|absent vocabulary is uncertain
+  // publication state: refuse, never silently skip.
+  const unknown = runMovingRefs({ controller: "present-no-digest", worker: "absent", prRef: "pr-7" });
+  assert.notEqual(unknown.status, 0, "an unknown state fails closed");
+  assert.deepEqual(unknown.calls, [], "no registry write happens for an unknown state");
 });
 
 test("#1704 image coordinates are documented for PR, main, and release flows", () => {
