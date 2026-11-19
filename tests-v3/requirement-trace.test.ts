@@ -2905,6 +2905,194 @@ test("#1703 replay: test-first linked acceptance demands both code and test prov
   }
 });
 
+// ── #1724: material unknowns on clean investigated heads ─────────────────
+// The organic failure (PR #1720, review 5962748190, head e059b3ab, run
+// 44369814117): the model's wire decision for the linked-issue requirement
+// "Both webhook and polling must converge to one review generation per PR
+// head/config/installation…" was `status: "unknown"` with a `file` evidence
+// ref and NO detail, so the fold produced `unverifiable` with the notes
+// `coverage-status-mapped,model-declared-unknown,missing-reason` — a material
+// unresolved row that surfaced no explanation of what was not verified. The
+// disposition layer correctly withheld approval, but the published trace gave
+// nobody anything actionable. The validator's floor closes exactly that: the
+// row stays unresolved (fail closed) and the reason now names what was not
+// verified and the next check.
+
+/** The exact #1720 requirement (reconstructed deterministically from the
+ * linked issue #1719 body with the shipped ledger extractor; the content-id
+ * matches the organic run's trace row). */
+const WEBHOOK_POLL_CONVERGENCE_TEXT =
+  "Both webhook and polling must converge to **one review generation per PR head/config/installation**, and rejected handoffs release reservations so later sweeps retry.";
+const WEBHOOK_POLL_CONVERGENCE_ID = "req-2817f59a6e38";
+
+test("#1724: an unexplained wire unknown on a material row keeps its notes and gains a specific missing-reason (the #1720 shape)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The cited enforcement location resolves at head (the model read this
+    // file in the organic run), but the decision carries no explanation.
+    const mainLines = Array.from({ length: 470 }, (_, i) => `// line ${i + 1}`);
+    writeFile(workspace, "src/controller/main.ts", mainLines);
+    const ledger = ledgerWith([{ id: WEBHOOK_POLL_CONVERGENCE_ID, text: WEBHOOK_POLL_CONVERGENCE_TEXT, kind: "normative" }]);
+    const trace = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "unknown",
+        evidence: [{ kind: "file", ref: "src/controller/main.ts:469" }],
+      },
+    ], ledger, workspace);
+    const row = trace.rows[0]!;
+    // The organic fold result is preserved exactly — the row is still a
+    // material unresolved unknown and the validator notes are unchanged.
+    assert.equal(row.disposition, "unverifiable");
+    assert.equal(row.proof, "runtime_behavior");
+    assert.equal(row.resolution, "unresolved");
+    assert.equal(row.materiality, "material");
+    for (const note of ["coverage-status-mapped", "model-declared-unknown", "missing-reason"]) {
+      assert.ok(row.notes.includes(note), `note ${note} must survive: ${JSON.stringify(row.notes)}`);
+    }
+    assert.deepEqual(trace.summary.unresolved_material, [WEBHOOK_POLL_CONVERGENCE_ID]);
+    assert.equal(trace.incomplete, false, "a coverage gap is never a mechanical refutation");
+    // The floor: the row no longer exits with an empty reason — the
+    // explanation is bounded, deterministic, and actionable.
+    assert.ok(row.reason !== "", "an unexplained unknown must not render with no reason");
+    assert.ok(row.reason.length <= 300, `the synthesized reason is bounded: ${row.reason.length}`);
+    assert.match(row.reason, /unknown without naming what was not verified/);
+    assert.match(row.reason, /resolve at reviewed head but carry no stated conclusion/);
+    assert.match(row.reason, /next check:/);
+    // The published trace section surfaces the same explanation.
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.match(rendered, /unknown without naming what was not verified/);
+    assert.match(rendered, /src\/controller\/main\.ts:469/);
+    // The Actions-log diagnostic keeps its exact organic shape.
+    assert.match(finalTraceFailureLog(trace), /req-2817f59a6e38:unverifiable\/runtime_behavior\[coverage-status-mapped,model-declared-unknown,missing-reason\]/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724 positive: a genuinely relevant cited source and pre-existing test produce a fully reasoned validated material disposition without new tests", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/controller/main.ts", [
+      "// reconcile startup block",
+      "function startReconciliation() {",
+      "  for (const head of openPrHeads()) acquireGeneration(head);",
+      "}",
+    ]);
+    writeFile(workspace, "tests-v3/controller-daemon.test.ts", [
+      "test('webhook and poll converge to one generation per head', () => {});",
+    ]);
+    const ledger = ledgerWith([{ id: WEBHOOK_POLL_CONVERGENCE_ID, text: WEBHOOK_POLL_CONVERGENCE_TEXT, kind: "normative" }]);
+    // The reviewer read the implementation and the PRE-EXISTING convergence
+    // tests and asserts the behavior holds. No new test is demanded: a
+    // runtime row's proof is the resolvable enforcement citation plus the
+    // reviewer's own assessment.
+    const satisfied = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "satisfied",
+        evidence: [
+          { kind: "file", ref: "src/controller/main.ts:3", detail: "reconciliation acquires one generation per head/config/installation" },
+          { kind: "test", ref: "tests-v3/controller-daemon.test.ts:1", detail: "pre-existing convergence tests prove one job per generation" },
+        ],
+      },
+    ], ledger, workspace);
+    const row = satisfied.rows[0]!;
+    assert.equal(row.disposition, "met");
+    assert.equal(row.resolution, "evidenced");
+    assert.equal(row.materiality, "advisory");
+    assert.equal(row.proof, "runtime_behavior");
+    assert.deepEqual(satisfied.summary.unresolved_material, []);
+    assert.equal(finalTraceFailureLog(satisfied), "", "a fully evidenced disposition produces no unresolved diagnostic");
+    // Without a test citation the row still resolves: the requirement's own
+    // text does not demand a regression test.
+    const noTestCitation = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "satisfied",
+        evidence: [{ kind: "file", ref: "src/controller/main.ts:3", detail: "the generation identity is acquired once per head" }],
+      },
+    ], ledger, workspace);
+    assert.equal(noTestCitation.rows[0]?.disposition, "met");
+    assert.deepEqual(noTestCitation.summary.unresolved_material, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724 negative: genuinely unproven runtime behavior stays blocking with explicit reasons; absent evidence never becomes approval", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: WEBHOOK_POLL_CONVERGENCE_ID, text: WEBHOOK_POLL_CONVERGENCE_TEXT, kind: "normative" }]);
+    // A satisfied claim with NO location-bearing evidence cannot become a
+    // resolved row: it degrades fail-closed and now explains what proof is
+    // missing (the #1736 sharpening — never a bare generic phrase).
+    const absentEvidence = validateRequirementTrace([
+      { requirement_id: WEBHOOK_POLL_CONVERGENCE_ID, status: "satisfied", evidence: [] },
+    ], ledger, workspace);
+    const absentRow = absentEvidence.rows[0]!;
+    assert.equal(absentRow.disposition, "unverifiable");
+    assert.equal(absentRow.materiality, "material");
+    assert.ok(absentRow.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.match(absentRow.reason, /reported satisfied but cited no resolvable enforcement location/);
+    assert.match(absentRow.reason, /the proof this row demands is a resolvable enforcement citation at reviewed head/);
+    assert.deepEqual(absentEvidence.summary.unresolved_material, [WEBHOOK_POLL_CONVERGENCE_ID]);
+    // A well-formed violated claim is the reviewer's own gap claim —
+    // material, blocking, with the reviewer's explicit reason.
+    const violated = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "violated",
+        evidence: [{ kind: "file", ref: "src/controller/main.ts:1", detail: "the reconciliation timer has no in-flight sweep guard, so two sweeps can overlap" }],
+      },
+    ], ledger, workspace);
+    const violatedRow = violated.rows[0]!;
+    assert.equal(violatedRow.disposition, "unmet");
+    assert.equal(violatedRow.resolution, "unmet_claimed");
+    assert.equal(violatedRow.materiality, "material");
+    assert.match(violatedRow.reason, /in-flight sweep guard/);
+    assert.deepEqual(violated.summary.unmet_claimed, [WEBHOOK_POLL_CONVERGENCE_ID]);
+    // An unknown WITH a detail keeps the reviewer's own explanation — the
+    // floor never overrides a model-supplied reason.
+    const unknownWithDetail = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "unknown",
+        evidence: [{ kind: "file", ref: "src/controller/main.ts:1", detail: "the reservation release path was not read this run" }],
+      },
+    ], ledger, workspace);
+    assert.equal(unknownWithDetail.rows[0]?.reason, "the reservation release path was not read this run");
+    // A claim that never arrives is the not-traced path — unchanged (#959).
+    const notTraced = validateRequirementTrace([], ledger, workspace);
+    assert.equal(notTraced.rows[0]?.reason, "");
+    assert.ok(notTraced.rows[0]?.notes.includes("not-traced-by-reviewer"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724: a cited-but-unresolvable location is rendered as failed provenance, not as a live citation", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: WEBHOOK_POLL_CONVERGENCE_ID, text: WEBHOOK_POLL_CONVERGENCE_TEXT, kind: "normative" }]);
+    const trace = validateRequirementTrace([
+      {
+        requirement_id: WEBHOOK_POLL_CONVERGENCE_ID,
+        status: "satisfied",
+        evidence: [{ kind: "file", ref: "src/controller/absent.ts:42", detail: "the dedupe path" }],
+      },
+    ], ledger, workspace);
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.match(rendered, /the cited location does not resolve at reviewed head/);
+    assert.match(rendered, /src\/controller\/absent\.ts:42/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#985: multiple named config files do not form a vacuous structural claim", () => {
   const workspace = makeWorkspace();
   try {

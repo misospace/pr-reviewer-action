@@ -66,8 +66,9 @@ export const REQUIREMENT_DECISION_ROW_RULE =
   + "status is satisfied, violated, or unknown; "
   + "evidence is concrete entries (kind file, test, tool, ci, or diff, with ref and detail). "
   + "Answer satisfied only when your assessment of the relevant current-head evidence supports that the required behavior actually holds — a file or test citation identifies the evidence you relied on, but it does not establish semantic correctness by itself; "
+  + "sources and tests that already exist at the reviewed head count as that evidence when you actually read them, and no test is required beyond what the requirement text itself demands; "
   + "answer violated when you have a supported counterexample or evidence that the requirement is not met; "
-  + "answer unknown when you cannot establish whether the requirement holds, including when you located a likely implementation or test but cannot establish its adequacy. "
+  + "answer unknown when you cannot establish whether the requirement holds, including when you located a likely implementation or test but cannot establish its adequacy — an unknown row must carry an evidence detail naming the exact behavior you could not verify and what evidence would settle it, because an unknown with no detail is an unusable answer that leaves the requirement unresolved; "
   + "One genuine observation may support several requirements; cite it for each. "
   + "Never omit a required requirement ID — unknown is always preferable to omission.";
 
@@ -223,6 +224,9 @@ export function renderRequiredRequirementDecisionsBlock(contract: VerdictContrac
     "satisfied = current-head evidence establishes the requirement",
     "violated  = current-head evidence establishes it is not met",
     "unknown   = you cannot establish either conclusion",
+    "",
+    "An unknown row must name in an evidence detail what you could not",
+    "verify and what evidence would settle it.",
     "",
     "Never omit an ID.",
     "Unknown is preferable to omission.",
