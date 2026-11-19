@@ -3123,6 +3123,36 @@ test("#1724 r1: a failed deterministic structural check names the validator outc
   }
 });
 
+test("#1724 r2: a structural+test row failing BOTH the state check and the required test evidence names both (additive floor)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // `explicitlyRequiresTest` is independent of the structural
+    // classification, so this text classifies structural_state AND demands
+    // test evidence. a.json exists without the literal (state failure) and
+    // the satisfied claim carries no test citation (test gap): the reason
+    // must state the deterministic primary diagnosis AND the orthogonal
+    // missing-test gap (r2 review: never suppress an independent gap).
+    writeFile(workspace, "a.json", ["{}"]);
+    const text = "`a.json` must contain `secret` and must be covered by regression tests";
+    assert.notEqual(structuralStateClaim(text), null);
+    assert.equal(explicitlyRequiresTest(text), true);
+    const ledger = ledgerWith([{ id: "req-structural-test", text, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([
+      { requirement_id: "req-structural-test", disposition: "met", enforcement: [{ file: "a.json", line: 1 }], test: [], reason: "" },
+    ], ledger, workspace);
+    const row = trace.rows[0]!;
+    assert.equal(row.proof, "structural_state");
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("structural-proof-unconfirmed"));
+    assert.ok(row.notes.includes("downgraded-no-valid-test-location"));
+    assert.match(row.reason, /validator re-derived the required checkout state at the cited file and it does not hold at reviewed head/);
+    assert.match(row.reason, /additionally, no resolvable regression-test location/);
+    assert.doesNotMatch(row.reason, /reviewer decision carried no explanation/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1724 r1: a test_required row missing both proof dimensions names both gaps", () => {
   const workspace = makeWorkspace();
   try {

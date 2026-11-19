@@ -2588,6 +2588,21 @@ function missingReasonFloor(
   } else {
     parts.push("reviewer decision carried no explanation");
   }
+  // Part 1b — ORTHOGONAL citation gaps. A deterministic primary diagnosis
+  // does not consume independent proof gaps: `explicitlyRequiresTest` is
+  // independent of the structural classification (the proof-shape contract:
+  // a structural requirement that also demands tests needs both), so a
+  // structural+test row can fail the state re-derivation AND the required
+  // test evidence in the same fold. Any citation-gap note that still applies
+  // is surfaced additively after the primary diagnosis (r2 review: the floor
+  // must be additive across deterministic diagnoses and orthogonal proof
+  // gaps, never choose only one).
+  if (deterministicFailure && (enforcementGap || testGap)) {
+    const gaps: string[] = [];
+    if (enforcementGap) gaps.push("no resolvable enforcement location");
+    if (testGap) gaps.push("no resolvable regression-test location");
+    parts.push(`additionally, ${gaps.join(" and ")}`);
+  }
   // Part 2 — what evidence the row carries or demands. The deterministic and
   // citation-gap wordings above already state the citation outcome, so the
   // generic resolution-state clause applies only to the reviewer-shape paths
