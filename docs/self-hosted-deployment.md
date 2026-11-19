@@ -227,7 +227,11 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - optional NetworkPolicy (**default OFF**): no chart-managed traffic restrictions
   unless explicitly enabled; when enabled it denies ingress by default and
   limits egress to specified ports, requiring cluster-specific exceptions
-  for the Kubernetes API, model endpoint and admin/dashboard path;
+  for the Kubernetes API, model endpoint and admin/dashboard path.
+  Workers call the model endpoint themselves, so a non-TLS in-cluster
+  endpoint needs the worker-only `networkPolicy.workerAdditionalEgress`
+  exception in addition to any controller `additionalEgress` (#1709);
+  each extension applies to exactly one of the two policies;
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
 

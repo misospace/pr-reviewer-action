@@ -201,6 +201,87 @@ jobs:
             exit 1
           fi
 
+      - name: Render (worker model-endpoint egress #1709)
+        run: |
+          set -euo pipefail
+          github_example=deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+          controller_example=deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+          worker_egress='[{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"llm"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"litellm"}}}],"ports":[{"protocol":"TCP","port":4000}]}]'
+          controller_egress='[{"ports":[{"protocol":"TCP","port":6543}]}]'
+          # Bucket rendered documents by policy: the NetworkPolicy whose
+          # name carries the -worker / -controller suffix. Kind-scoping
+          # is required: the worker ServiceAccount shares the -worker
+          # name.
+          worker_doc() {
+            awk 'BEGIN{RS="---"} /kind: NetworkPolicy/ && $0 ~ /name: [-a-z0-9]+-worker/' "$1"
+          }
+          controller_doc() {
+            awk 'BEGIN{RS="---"} /kind: NetworkPolicy/ && $0 ~ /name: [-a-z0-9]+-controller/' "$1"
+          }
+          # Default opt-in posture: worker keeps DNS + TLS only, no 4000.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$github_example" \
+            --set networkPolicy.enabled=true > /var/tmp/netpol-default.yaml
+          worker_default="$(worker_doc /var/tmp/netpol-default.yaml)"
+          if printf '%s' "$worker_default" | grep -q "port: 4000"; then
+            echo "::error::worker policy allows port 4000 without the override" >&2
+            exit 1
+          fi
+          printf '%s' "$worker_default" | grep -q "port: 443"
+          printf '%s' "$worker_default" | grep -q "port: 53"
+          # Configured exception: renders TCP 4000 to the selected pods in
+          # the WORKER policy only; the controller keeps its own
+          # additionalEgress and never sees the worker rule.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$github_example" \
+            --set networkPolicy.enabled=true \
+            --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" \
+            --set-json "networkPolicy.additionalEgress=$controller_egress" \
+            > /var/tmp/netpol-worker-egress.yaml
+          worker="$(worker_doc /var/tmp/netpol-worker-egress.yaml)"
+          printf '%s' "$worker" | grep -q "port: 4000"
+          printf '%s' "$worker" | grep -q 'kubernetes.io/metadata.name: llm'
+          printf '%s' "$worker" | grep -q 'app.kubernetes.io/name: litellm'
+          if printf '%s' "$worker" | grep -q "port: 6543"; then
+            echo "::error::controller additionalEgress leaked into the worker policy" >&2
+            exit 1
+          fi
+          controller="$(controller_doc /var/tmp/netpol-worker-egress.yaml)"
+          printf '%s' "$controller" | grep -q "port: 6543"
+          if printf '%s' "$controller" | grep -q "port: 4000"; then
+            echo "::error::workerAdditionalEgress leaked into the controller policy" >&2
+            exit 1
+          fi
+          if printf '%s' "$controller" | grep -q "litellm"; then
+            echo "::error::worker selector labels leaked into the controller policy" >&2
+            exit 1
+          fi
+          # Selector families stay disjoint: exactly the two policies.
+          policy_count="$(grep -c '^kind: NetworkPolicy$' /var/tmp/netpol-worker-egress.yaml || true)"
+          if [ "$policy_count" -ne 2 ]; then
+            echo "::error::expected 2 opt-in policies; found $policy_count" >&2
+            exit 1
+          fi
+          # Fail closed: a worker exception with no rendered worker policy
+          # (controller-only deployment, or the policy disabled) refuses
+          # with the guard's own message, not any unrelated breakage.
+          refusal="$(helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$controller_example" \
+            --set networkPolicy.enabled=true \
+            --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" 2>&1 >/dev/null || true)"
+          if ! printf '%s' "$refusal" | grep -q "workerAdditionalEgress requires"; then
+            echo "::error::workerAdditionalEgress without a kubernetes worker executor must refuse the render with the guard message" >&2
+            exit 1
+          fi
+          refusal="$(helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$github_example" \
+            --set networkPolicy.enabled=false \
+            --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" 2>&1 >/dev/null || true)"
+          if ! printf '%s' "$refusal" | grep -q "workerAdditionalEgress requires"; then
+            echo "::error::workerAdditionalEgress with networkPolicy disabled must refuse the render with the guard message" >&2
+            exit 1
+          fi
+
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
         # release binary with its CHECKSUMS-verified tarball instead.

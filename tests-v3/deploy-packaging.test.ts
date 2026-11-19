@@ -211,6 +211,79 @@ test("values.schema.json is structurally valid with fail-closed top level", () =
   assert.equal((properties.global as Record<string, unknown>).additionalProperties, true);
 });
 
+test("#1709: worker model-endpoint egress exception is worker-only and fail-closed", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    networkPolicy: Record<string, unknown>;
+  };
+  assert.deepEqual(
+    values.networkPolicy.workerAdditionalEgress,
+    [],
+    "worker egress must default to the DNS + TLS posture without an override",
+  );
+  const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as {
+    properties: {
+      networkPolicy: {
+        additionalProperties: boolean;
+        properties: Record<string, { type?: string }>;
+      };
+    };
+  };
+  const netpolSchema = schema.properties.networkPolicy;
+  assert.equal(netpolSchema.additionalProperties, false, "unknown policy keys must stay rejected");
+  assert.equal(netpolSchema.properties.workerAdditionalEgress?.type, "array");
+  const template = read("deploy/charts/pr-reviewer/templates/networkpolicy.yaml");
+  // Each extension is consumed exactly once.
+  assert.equal(
+    template.match(/\{\{- with \.Values\.networkPolicy\.additionalEgress \}\}/g)?.length,
+    1,
+    "additionalEgress must be consumed exactly once (controller policy)",
+  );
+  assert.equal(
+    template.match(/\{\{- with \.Values\.networkPolicy\.workerAdditionalEgress \}\}/g)?.length,
+    1,
+    "workerAdditionalEgress must be consumed exactly once (worker policy)",
+  );
+  // The worker consumption sits inside the worker policy document: after
+  // the worker policy name, and the controller consumption before it.
+  const workerDoc = template.indexOf("}}-worker");
+  assert.ok(workerDoc > -1, "worker policy document marker must remain");
+  assert.ok(
+    template.indexOf("with .Values.networkPolicy.workerAdditionalEgress") > workerDoc,
+    "workerAdditionalEgress must render only into the worker policy",
+  );
+  assert.ok(
+    template.indexOf("with .Values.networkPolicy.additionalEgress") < workerDoc,
+    "additionalEgress must stay in the controller policy",
+  );
+  // Fail closed: an exception with no rendered worker policy refuses,
+  // and the guard shares ONE condition with the worker document gate
+  // (a second mode-check could desynchronize from the guard).
+  assert.match(
+    template,
+    /\{\{- fail "networkPolicy\.workerAdditionalEgress requires/,
+    "a silently-dropped worker exception must refuse the render",
+  );
+  assert.equal(
+    template.match(/dig "mode"/g)?.length,
+    1,
+    "the worker-policy render condition must be computed exactly once",
+  );
+  assert.match(template, /\{\{- if \$workerPolicy \}\}/, "the worker document must reuse the shared condition");
+  // CI renders both leak directions and the refusals.
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.match(workflow, /workerAdditionalEgress leaked into the controller policy/);
+  assert.match(workflow, /additionalEgress leaked into the worker policy/);
+  assert.match(
+    workflow,
+    /workerAdditionalEgress without a kubernetes worker executor must refuse/,
+  );
+  // Docs state the product fact: workers, not only the controller, need
+  // the model endpoint.
+  assert.match(read("deploy/charts/pr-reviewer/README.md"), /workerAdditionalEgress/);
+  assert.match(read("deploy/charts/pr-reviewer/examples/README.md"), /workerAdditionalEgress/);
+  assert.match(read("docs/self-hosted-deployment.md"), /workerAdditionalEgress/);
+});
+
 test("example values parse and stay non-privileged", () => {
   for (const example of [
     "values-controller-only.yaml",

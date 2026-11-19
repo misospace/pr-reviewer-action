@@ -113,6 +113,15 @@ helm install pr-reviewer \
   webhook and admin paths. When disabled the chart renders no NetworkPolicies; the worker selector matches the executor's
   `app.kubernetes.io/managed-by: pr-reviewer-action` pod label
   (WORKER_NETWORK_POSTURE in `src/executor/kubernetes.ts`).
+  Workers call the configured model endpoint themselves, so a plain-HTTP
+  (non-TLS) in-cluster endpoint such as `http://litellm.llm:4000/v1`
+  needs `networkPolicy.workerAdditionalEgress` (#1709): a rule list
+  appended only to the worker policy's egress, e.g. TCP 4000 scoped to
+  the LiteLLM namespace/pod labels. It never opens controller egress,
+  and `additionalEgress` stays controller-only and never opens worker
+  egress. Configuring it without a rendered worker policy (policy off or
+  `workerExecutor.mode: disabled`) refuses the render instead of
+  silently dropping the exception.
 - `serviceMonitor` (default OFF) — the admin listener serves `/metrics`;
   the chart binds it to the pod-wide wildcard when the admin surface is
   enabled, so a Prometheus scrape works out of the box (still guarded by
