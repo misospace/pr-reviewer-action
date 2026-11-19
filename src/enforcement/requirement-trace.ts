@@ -1395,6 +1395,18 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
     // way — an over-count or malformed list drops whole, never truncated
     // (a lost owner could be the very child the PR references).
     const linkedRefs: LinkedScopeRef[] = [];
+    // #1750 review round: EXACT-duplicate provenance entries are dropped
+    // BEFORE the bound. A merged duplicate's provenance can repeat the same
+    // linked document once per scanned line; repeats carry identical
+    // semantics for the scope predicate (same ref, closing state, label
+    // class and ownership evidence), so they must never consume the bound —
+    // otherwise hostile repetition of one non-closing umbrella document
+    // could push a DISTINCT closing reference (another linked document's
+    // metadata line) past the bound and violate the 'every ref is
+    // non-closing' guarantee. Distinct linked documents are already capped
+    // at MAX_LINKED_ISSUES at intake, so honest artifacts never reach the
+    // bound; it stays as boundedness defense against forged artifacts.
+    const seenLinkedRefs = new Set<string>();
     if (Array.isArray(provenance)) {
       for (const p of provenance) {
         if (!p || typeof p !== "object") continue;
@@ -1403,18 +1415,22 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
           const ref = rec.ref.toLowerCase();
           if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
         }
-        if (linkedRefs.length >= MAX_LINKED_SCOPE_REFS) continue;
         if (rec.source !== "linked_issues") continue;
         const closing = typeof rec.closing === "boolean" ? rec.closing : undefined;
         const umbrella = Array.isArray(rec.labels) && rec.labels
           .slice(0, 8)
           .some((label) => typeof label === "string"
             && UMBRELLA_ISSUE_LABELS.has(label.slice(0, MAX_UMBRELLA_LABEL_MATCH_CHARS).trim().toLowerCase()));
+        const childRefs = boundedChildRefs(rec.childRefs) ?? [];
+        const identity = `${typeof rec.ref === "string" ? rec.ref : ""}|${closing === undefined ? "?" : closing ? "1" : "0"}|${umbrella ? "1" : "0"}|${childRefs.join(",")}`;
+        if (seenLinkedRefs.has(identity)) continue;
+        seenLinkedRefs.add(identity);
+        if (linkedRefs.length >= MAX_LINKED_SCOPE_REFS) continue;
         linkedRefs.push({
           ref: typeof rec.ref === "string" ? rec.ref : "",
           closing,
           umbrella,
-          childRefs: boundedChildRefs(rec.childRefs) ?? [],
+          childRefs,
         });
       }
     }

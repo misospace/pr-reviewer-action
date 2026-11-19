@@ -5181,6 +5181,48 @@ test("#1749 scope: the umbrella narrowing never crosses a non-linked provenance,
   );
 });
 
+test("#1750 review round: hostile repetition of one linked provenance cannot push a closing reference past the scope bound", () => {
+  // The reviewer's minor #2: ledgerTraceCandidates bounds linked provenance
+  // at MAX_LINKED_SCOPE_REFS. A merged duplicate whose first provenance
+  // entries are exact repeats from one non-closing umbrella document could
+  // push a DISTINCT closing reference (another linked document's metadata
+  // line) past the bound, where the dropped entry's closing=true can no
+  // longer veto the umbrella narrowing — the 'every ref is non-closing'
+  // guarantee would be violated. Exact repeats carry identical semantics
+  // for the predicate, so they must never consume the bound.
+  const repeat = { source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] };
+  const ledger = {
+    requirements: [{
+      id: "req-umb",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: [
+        ...Array.from({ length: 9 }, () => ({ ...repeat })),
+        { source: "linked_issues", ref: "#43", line: 1, closing: true, labels: ["umbrella"] },
+      ],
+    }],
+  };
+  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-umb"], "the closing reference past the repeats keeps the criterion mandatory");
+  assert.deepEqual(scope.outOfScope, []);
+  // Control: a distinct NON-closing second umbrella document still narrows
+  // (dedupe must not weaken the narrowing's honest path).
+  const nonClosingLedger = {
+    requirements: [{
+      id: "req-umb2",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: [
+        ...Array.from({ length: 9 }, () => ({ ...repeat })),
+        { source: "linked_issues", ref: "#44", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#102"] },
+      ],
+    }],
+  };
+  const narrow = requirementTraceScope(nonClosingLedger, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
+  assert.deepEqual(narrow.inScope, [], "distinct non-closing umbrella provenance still narrows");
+  assert.match(narrow.outOfScope[0]!.reason, /o\/r#101, o\/r#102/, "the owning children of both documents are cited");
+});
+
 test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exact-matched", () => {
   const text = "The planner and the scheduler engine MUST share one feed.";
   // #1750: the ownership evidence is present (childRefs), so this isolates
