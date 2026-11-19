@@ -3093,6 +3093,122 @@ test("#1724: a cited-but-unresolvable location is rendered as failed provenance,
   }
 });
 
+test("#1724 r1: a failed deterministic structural check names the validator outcome, never the reviewer", () => {
+  const workspace = makeWorkspace();
+  try {
+    // `a.json` must contain `secret`: the file exists but the validator's
+    // re-derivation fails, and the satisfied claim carried no explanation —
+    // the reason must state the validator's own outcome (r1 review: the
+    // generic wording misdescribes deterministic failures).
+    writeFile(workspace, "a.json", ["{}"]);
+    const ledger = ledgerWith([{ id: "req-structural-fail", text: "`a.json` must contain `secret`", kind: "acceptance" }]);
+    const failedState = validateRequirementTrace([
+      { requirement_id: "req-structural-fail", disposition: "met", enforcement: [{ file: "a.json", line: 1 }], test: [], reason: "" },
+    ], ledger, workspace);
+    const row = failedState.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("structural-proof-unconfirmed"));
+    assert.match(row.reason, /validator re-derived the required checkout state at the cited file and it does not hold at reviewed head/);
+    assert.doesNotMatch(row.reason, /reviewer decision carried no explanation/);
+    assert.doesNotMatch(row.reason, /reviewer reported/);
+    // An out-of-range citation line names the citation rejection instead.
+    const outOfRange = validateRequirementTrace([
+      { requirement_id: "req-structural-fail", disposition: "met", enforcement: [{ file: "a.json", line: 999 }], test: [], reason: "" },
+    ], ledger, workspace);
+    assert.ok(outOfRange.rows[0]?.notes.includes("structural-citation-line-out-of-range"));
+    assert.match(outOfRange.rows[0]!.reason, /validator rejected the citation: the cited line is outside the cited file at reviewed head/);
+    assert.doesNotMatch(outOfRange.rows[0]!.reason, /reviewer decision carried no explanation/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724 r1: a test_required row missing both proof dimensions names both gaps", () => {
+  const workspace = makeWorkspace();
+  try {
+    // A satisfied claim with no citations on an explicitly test-demanding
+    // requirement fails BOTH the enforcement and the test citation check;
+    // the synthesized reason must compose every established gap (r1 review).
+    const ledger = ledgerWith([{ id: "req-both-gaps", text: "The sync must be covered by regression tests.", kind: "acceptance" }]);
+    const trace = validateRequirementTrace([
+      { requirement_id: "req-both-gaps", status: "satisfied", evidence: [] },
+    ], ledger, workspace);
+    const row = trace.rows[0]!;
+    assert.equal(row.proof, "test_required");
+    assert.equal(row.disposition, "unverifiable");
+    assert.equal(row.materiality, "material");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.ok(row.notes.includes("downgraded-no-valid-test-location"));
+    assert.match(row.reason, /reviewer reported satisfied but cited no resolvable enforcement location and no resolvable regression-test location/);
+    assert.match(row.reason, /the proof this row demands is resolvable enforcement and regression-test citations/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724 r1: a topology-overflow row names the deterministic outcome, never the reviewer", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The #962.22 overflow shape with an EMPTY claim reason: the validator
+    // (not a missing reviewer explanation) is why the row is unresolved.
+    const groups = Array.from({ length: 5 }, (_unused, index) => {
+      const seam = `seam-${index + 1}`;
+      const enforcementFile = `src/overflow/${seam}.ts`;
+      const testFile = `tests-v3/overflow/${seam}.test.ts`;
+      writeFile(workspace, enforcementFile, ["if (topology !== expectedTopology) throw new Error('mismatch');"]);
+      writeFile(workspace, testFile, ["assert.ok(topology);"]);
+      return { name: seam, owners: [enforcementFile], tests: [testFile] };
+    });
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-overflow",
+        groups.map((group) => ({ file: group.owners[0]!, line: 1 })),
+        groups.map((group) => ({ file: group.tests[0]!, line: 1 })),
+        { reason: "" },
+      )],
+      traceLedger("req-overflow", "Overflow topology enforcement must remain protected."),
+      workspace,
+      undefined,
+      { ownership: [{ match: ["overflow", "topology"], owners: ["src/overflow/**"], groups }] },
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("distributed-topology-overflow"));
+    assert.match(row.reason, /the declared seam topology exceeds the representable bound, so no citation set can validate this row/);
+    assert.doesNotMatch(row.reason, /reviewer decision carried no explanation/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1724 r1: an uncovered enforcement seam names the seam gap, never the reviewer", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Two declared seams, only seam-a cited: the row is unresolved because
+    // the validator found the uncovered seam, with the claim carrying no
+    // explanation of its own.
+    writeFile(workspace, "src/seams/a.ts", ["if (seamA !== expected) throw new Error('mismatch');"]);
+    writeFile(workspace, "src/seams/b.ts", ["if (seamB !== expected) throw new Error('mismatch');"]);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-seams", [{ file: "src/seams/a.ts", line: 1 }], [VALID_TEST_LOCATION], { reason: "" })],
+      traceLedger("req-seams", "Seam routing and seam durability must stay enforced."),
+      workspace,
+      undefined,
+      { ownership: [{ match: ["seam"], owners: ["src/seams/**"], groups: [
+        { name: "seam-a", owners: ["src/seams/a.ts"], tests: ["tests/real.test.ts"] },
+        { name: "seam-b", owners: ["src/seams/b.ts"], tests: ["tests/real.test.ts"] },
+      ] }] },
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.some((note) => note.startsWith("distributed-enforcement-group-uncovered:")));
+    assert.match(row.reason, /the reviewer's citations left declared enforcement seam\(s\) without a resolvable location/);
+    assert.doesNotMatch(row.reason, /reviewer decision carried no explanation/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#985: multiple named config files do not form a vacuous structural claim", () => {
   const workspace = makeWorkspace();
   try {

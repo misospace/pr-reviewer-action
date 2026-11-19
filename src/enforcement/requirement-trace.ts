@@ -2552,23 +2552,54 @@ function missingReasonFloor(
   cache: FileTextCache,
 ): string {
   const parts: string[] = [];
-  if (notes.includes("model-declared-unknown")) {
+  // Part 1 — WHY the row is unresolved. A DETERMINISTIC validator failure
+  // states the validator's own outcome: there the reviewer did supply a
+  // decision, and the gap is the checkout state / declared topology, never a
+  // missing explanation (r1 review: the generic wording must never blame the
+  // reviewer for a failure the validator produced). The reviewer-shape
+  // wordings apply only when the fold has no deterministic diagnosis, and a
+  // row can miss several independent proof dimensions at once — every
+  // established gap is composed (r1 review: a `test_required` row can fail
+  // both the enforcement and the test citation check).
+  const structuralFailed = notes.includes("structural-proof-unconfirmed");
+  const structuralRange = notes.includes("structural-citation-line-out-of-range");
+  const topologyOverflow = notes.includes("distributed-topology-overflow");
+  const seamUncovered = notes.some((note) => note.startsWith("distributed-enforcement-group-uncovered:"));
+  const enforcementGap = notes.includes("downgraded-no-valid-enforcement-location");
+  const testGap = notes.includes("downgraded-no-valid-test-location");
+  const deterministicFailure = structuralFailed || structuralRange || topologyOverflow || seamUncovered;
+  if (structuralFailed) {
+    parts.push("validator re-derived the required checkout state at the cited file and it does not hold at reviewed head");
+  } else if (structuralRange) {
+    parts.push("validator rejected the citation: the cited line is outside the cited file at reviewed head");
+  } else if (topologyOverflow) {
+    parts.push("the declared seam topology exceeds the representable bound, so no citation set can validate this row");
+  } else if (seamUncovered) {
+    parts.push("the reviewer's citations left declared enforcement seam(s) without a resolvable location");
+  } else if (notes.includes("model-declared-unknown")) {
     parts.push("reviewer reported unknown without naming what was not verified");
   } else if (notes.includes("disposition-invalid")) {
     parts.push("reviewer decision row carried no usable status or explanation");
-  } else if (notes.includes("downgraded-no-valid-test-location")) {
-    parts.push("reviewer reported satisfied but cited no resolvable regression-test location");
-  } else if (notes.includes("downgraded-no-valid-enforcement-location")) {
-    parts.push("reviewer reported satisfied but cited no resolvable enforcement location");
+  } else if (enforcementGap || testGap) {
+    const gaps: string[] = [];
+    if (enforcementGap) gaps.push("no resolvable enforcement location");
+    if (testGap) gaps.push("no resolvable regression-test location");
+    parts.push(`reviewer reported satisfied but cited ${gaps.join(" and ")}`);
   } else {
     parts.push("reviewer decision carried no explanation");
   }
+  // Part 2 — what evidence the row carries or demands. The deterministic and
+  // citation-gap wordings above already state the citation outcome, so the
+  // generic resolution-state clause applies only to the reviewer-shape paths
+  // where it adds information.
   if (enforcement.length === 0 && test.length === 0) {
     parts.push(PROOF_DEMAND_TEXT[proof] ?? "the proof this row demands was not established");
-  } else if (anyLocationValid(enforcement, cache) || anyTestLocationValid(test, cache)) {
-    parts.push("the cited locations resolve at reviewed head but carry no stated conclusion");
-  } else {
-    parts.push("the cited locations do not resolve at reviewed head");
+  } else if (!deterministicFailure && !enforcementGap && !testGap) {
+    if (anyLocationValid(enforcement, cache) || anyTestLocationValid(test, cache)) {
+      parts.push("the cited locations resolve at reviewed head but carry no stated conclusion");
+    } else {
+      parts.push("the cited locations do not resolve at reviewed head");
+    }
   }
   parts.push("next check: answer satisfied or violated from the evidence actually read at the reviewed head, or keep unknown naming the exact unverified behavior");
   return capReason(parts.join("; "));
