@@ -510,9 +510,13 @@ export function evaluateWorkerJobAdmission(
         && ctx.seccompProfile.type === "RuntimeDefault";
     },
     noPodFsGroup: () => {
-      // CEL `has()` on an absent securityContext is false (the map key is
-      // missing), so this rule passes when securityContext is absent —
-      // fixedPodSecurityContext rejects that object separately.
+      // Real CEL `has(podSpec.securityContext.fsGroup)` ERRORS when the
+      // intermediate securityContext is absent (the VAP then denies under
+      // Fail). The reference evaluator stays total here instead: an absent
+      // pod securityContext is already rejected by fixedPodSecurityContext,
+      // so the accept/reject outcome is identical and only the reported
+      // reason set differs — the absence PASS keeps this rule about
+      // fsGroup alone.
       const securityContext = podSpecOf(object).securityContext;
       if (securityContext === undefined) return true;
       if (!isRecord(securityContext)) {

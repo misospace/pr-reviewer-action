@@ -463,8 +463,9 @@ fail-closed, so an unlistable cluster refuses the launch.
   claim, group-writable, mid-run; the shipped worker admission policy
   rejects a pod-level `fsGroup`), and the chart pins the controller's
   `fsGroup` to the same value while the chart's `fix-roots` init
-  container (#1725) provisions the claim roots (`2750`, root-owned
-  setgid) that carry the group onto everything created below. The modes
+  container (#1725) provisions the claim roots (`2750`, owned by the
+  controller uid with the setgid bit) that carry the group onto
+  everything created below. The modes
   are made deterministic and umask-proof with explicit `fchmod`/`chmod`:
   - exchanged FILES (envelope, result) are group-readable `0640`
     (`SHARED_CLAIM_FILE_MODE`); the single-uid (local) exchange stays

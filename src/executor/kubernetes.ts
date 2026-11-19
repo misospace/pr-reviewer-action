@@ -495,7 +495,7 @@ async function shareRunDirectoryGroup(
     return `${runDir} is not covered by any configured volume mapping, so its components cannot be made group-accessible for the shared claim`;
   }
   if (runDir === root) {
-    return `${runDir} is the volume mapping's claim root itself, whose mode the executor must never change (the kubelet owns the claim root's mode), so a run directory equal to the claim root is not supported`;
+    return `${runDir} is the volume mapping's claim root itself, whose mode the executor must never change (the deployment-provisioned root shape owns its mode, #1725), so a run directory equal to the claim root is not supported`;
   }
   // The chain covers every component STRICTLY BELOW the claim root: it
   // walks the parents down TO the root but never past it — the root
