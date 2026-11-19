@@ -21,6 +21,22 @@ export interface LinkedIssueRef {
 
 export const MAX_LINKED_ISSUES = 8;
 
+/** #1749: the deterministic relationship line `buildLinkedIssueContext`
+ * renders into `linked-issues.md` directly under each ACCEPTED issue's
+ * heading, recording the reference shape the PR itself used (the
+ * {@link LinkedIssueRef.closing} classification). `linked-issues.md` is the
+ * requirement ledger's only channel to the linked-issue metadata, and the
+ * ledger previously reduced each issue to `{ref, body}` — discarding the
+ * one signal that distinguishes an issue the PR claims to close (whose
+ * acceptance criteria stay mandatory) from a non-closing parent/umbrella/
+ * context link (whose acceptance set is not automatically this PR's merge
+ * contract). The lines are exact-match constants: the heading and the
+ * metadata line are intake-authored (issue content only ever appears inside
+ * the JSON fence), so the ledger parser can trust an exact match outside a
+ * fence and nothing else. */
+export const LINKED_AS_CLOSING_LINE = "(linked as: closing reference)";
+export const LINKED_AS_NON_CLOSING_LINE = "(linked as: non-closing reference)";
+
 /** Hard safety bound on raw extraction (#872 follow-up): the accepted-issue
  * cap (`MAX_LINKED_ISSUES`) is enforced downstream, over issues that
  * actually get fetched and accepted (see `buildLinkedIssueContext`), not

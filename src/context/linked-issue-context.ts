@@ -31,14 +31,19 @@
  *   a skip (not a failure — it never marks linked-metadata uncertain), and
  *   never reaches the requirement ledger. Closing-keyword refs (`Closes`/
  *   `Fixes`/`Resolves`) are unaffected — parity with the pre-#872 fetch
- *   behavior is preserved for them. */
+ *   behavior is preserved for them.
+ * - (#1749) every ACCEPTED issue renders one exact-match relationship line
+ *   under its heading (`(linked as: closing|non-closing reference)`), so the
+ *   reference shape the PR itself used survives into `linked-issues.md` —
+ *   the requirement ledger's only channel — instead of being dropped with
+ *   the processed-ref representation. */
 
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqError } from "../platform/jq.js";
 import { pyOr, pyStr, pyStrip } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, type LinkedIssueRef } from "../precheck/linked-issues.js";
+import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE, type LinkedIssueRef } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 import { redactPrTextLines } from "./redact.js";
 
@@ -255,6 +260,11 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
       const filtered = projectLinkedIssue(outcome.data);
       labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
       anyLabels = true;
+      // #1749: the reference shape the PR itself used — the one relationship
+      // signal the requirement ledger can trust — rendered as an exact-match
+      // line between the heading and the embedded issue JSON. The issue's
+      // own content stays fenced below it; this line is intake-authored.
+      md.push(enc(`${item.closing ? LINKED_AS_CLOSING_LINE : LINKED_AS_NON_CLOSING_LINE}\n`));
       md.push(enc("```json\n"), enc(`${jqPretty(filtered)}\n`).subarray(0, LINKED_ISSUE_EMBED_BYTES), enc("\n```\n"));
     } else {
       md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));

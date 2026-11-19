@@ -283,3 +283,81 @@ test("#1095: the advisory-heading skip ends at the next non-advisory heading; up
   assert.ok(texts.every((text) => !text.includes("should pause")), JSON.stringify(texts));
   assert.ok(texts.some((text) => text.includes("return 404")));
 });
+
+// ── #1749: linked-issue relationship provenance ───────────────────────────
+// Intake renders the PR's own closing/non-closing reference shape into
+// linked-issues.md (the ledger's only channel); the ledger must carry it —
+// and the fetched issue's forge labels — into the linked_issues provenance
+// so the trace scope can tell a closing implementation target from a
+// non-closing parent/umbrella context issue. The fields are present ONLY
+// when known: an artifact without them keeps the exact legacy shape.
+
+const UMBRELLA_MD_BODY = "## Acceptance criteria\n- The planner and the scheduler engine MUST share one feed.\n";
+
+function linkedMd(record: Record<string, unknown>, linkedAs: string | null): string {
+  const meta = linkedAs === null ? [] : [linkedAs];
+  return ["## o/r#42", ...meta, "```json", JSON.stringify(record), "```", ""].join("\n") + "\n";
+}
+
+test("#1749: the linked-as metadata line and forge labels ride the linked_issues provenance", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, title: "Umbrella", state: "open", html_url: "u", labels: ["umbrella", "tracker"], body: UMBRELLA_MD_BODY }, "(linked as: non-closing reference)"),
+  });
+  assert.equal(ledger.requirements.length, 1);
+  assert.deepEqual(ledger.requirements[0]?.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella", "tracker"] },
+  ]);
+  const closing = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [], body: UMBRELLA_MD_BODY }, "(linked as: closing reference)"),
+  });
+  assert.deepEqual(closing.requirements[0]?.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2, closing: true },
+  ]);
+});
+
+test("#1749: without the metadata line or labels the provenance keeps the exact legacy shape", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, title: "Umbrella", state: "open", html_url: "u", body: UMBRELLA_MD_BODY }, null),
+  });
+  assert.deepEqual(ledger.requirements[0]?.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2 },
+  ]);
+});
+
+test("#1749: provenance labels are bounded — trimmed, deduplicated, capped in count and length", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd(
+      {
+        number: 42,
+        labels: ["", "  ", " umbrella ", "umbrella", "x".repeat(70), ...Array.from({ length: 9 }, (_, i) => `l${i}`)],
+        body: UMBRELLA_MD_BODY,
+      },
+      "(linked as: non-closing reference)",
+    ),
+  });
+  const labels = (ledger.requirements[0]?.provenance[0] as { labels?: string[] } | undefined)?.labels;
+  assert.deepEqual(labels?.slice(0, 3), ["umbrella", "x".repeat(64), "l0"], "empties drop, names trim and dedupe, length caps at 64");
+  assert.equal(labels?.length, 8, "at most 8 labels survive");
+});
+
+test("#1749: a merged duplicate keeps the relationship on the linked provenance entry only", () => {
+  const ledger = extractRequirementLedger({
+    prJson: JSON.stringify({ title: "t", body: "## Acceptance criteria\n- The planner and the scheduler engine MUST share one feed.\n" }),
+    linkedIssuesMarkdown: linkedMd({ number: 42, labels: ["umbrella"], body: UMBRELLA_MD_BODY }, "(linked as: non-closing reference)"),
+  });
+  assert.equal(ledger.requirements.length, 1);
+  assert.deepEqual(ledger.requirements[0]?.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella"] },
+    { source: "pr_body", ref: "pr", line: 3 },
+  ]);
+});
+
+test("#1749: the tolerant ledger loader preserves the relationship provenance", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, labels: ["umbrella"], body: UMBRELLA_MD_BODY }, "(linked as: non-closing reference)"),
+  });
+  const loaded = loadLedgerFromValue(ledgerToArtifact(ledger));
+  assert.deepEqual(loaded.requirements[0]?.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella"] },
+  ]);
+});

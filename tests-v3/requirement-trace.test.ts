@@ -30,6 +30,7 @@ DOC_SCAN_MAX_FILE_BYTES,
 PENDING_DISPOSITION,
   unresolvedTraceRequirementIds,
   validateRequirementTrace,
+  traceUnmetClaimedInScopeRows,
   finalTraceFailureLog,
   MAX_TRACE_FINAL_DIAGNOSTIC_ROWS,
   type ChangedFileLines,
@@ -37,6 +38,9 @@ PENDING_DISPOSITION,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
 import { workspacePathHasSymlinkComponent } from "../src/context/workspace-path.js";
+import { buildLinkedIssueContext } from "../src/context/index.js";
+import { extractRequirementLedger } from "../src/requirements/index.js";
+import type { ReadResult } from "../src/platform/types.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
   return { verdict: "approve", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact;
@@ -4851,4 +4855,333 @@ test("#1690: implementation requirements met + external bookkeeping unverifiable
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+// ── #1749: linked umbrella requirements must not force false INCOMPLETE ──
+//
+// The organic failure (PR #1733 vs umbrella #740): a non-closing scoped
+// child PR touching the parent criterion's vocabulary was forced INCOMPLETE
+// by the parent's unmet acceptance criterion, although the PR explicitly did
+// not claim parent closure and named the remaining child owner. The
+// deterministic pipeline discarded the relationship metadata between
+// linked-issue intake and the trace scope. The fixtures below rebuild that
+// SHAPE generically — forge labels and the PR's own closing/non-closing
+// refs are the only relationship signals; no issue number, label-free
+// subsystem name, or repository identity is special-cased anywhere.
+
+/** The generic umbrella fixture: a parent issue labeled `umbrella` with two
+ * acceptance criteria, linked by the PR's title `(#N)` convention (the
+ * intentional non-closing convention, #872). Criterion A shares vocabulary
+ * with the increment's diff; criterion B does not. */
+const UMBRELLA_ISSUE = {
+  number: 42,
+  title: "Umbrella: one scheduler feed",
+  state: "open",
+  html_url: "https://forge.example/o/r/issues/42",
+  labels: [{ name: "umbrella" }],
+  body: "## Acceptance criteria\n- The planner and the scheduler engine MUST share one feed.\n- The release pipeline MUST publish both artifacts.\n",
+};
+
+const UMBRELLA_PR_TITLE = "feat(planner): incremental planning feed (#42)";
+
+/** Build the requirement ledger the way the engine does: real linked-issue
+ * intake over a mocked forge, real linked-issues.md, real ledger extraction. */
+async function umbrellaLedger(prBody: string): Promise<unknown> {
+  const pr = { title: UMBRELLA_PR_TITLE, body: prBody };
+  const linked = await buildLinkedIssueContext({
+    pr,
+    repo: "o/r",
+    adapter: {
+      getIssue: async (): Promise<ReadResult<unknown>> => ({ ok: true, data: UMBRELLA_ISSUE }),
+    },
+    isForkPr: "false",
+    linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+  });
+  return extractRequirementLedger({
+    prJson: pr,
+    linkedIssuesMarkdown: Buffer.from(linked.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8"),
+  });
+}
+
+/** The scoped increment's changed boundary — it necessarily repeats the
+ * parent criterion's subject vocabulary (a child PR touches the same
+ * subsystem by definition, the #1733 mechanism). */
+const UMBRELLA_CHANGED = changedSubjectText(
+  "diff --git a/src/planner/feed.ts b/src/planner/feed.ts\n+++ b/src/planner/feed.ts\n+// the planner feeds the scheduler engine\n+export const feed = planInto(engine);\n",
+  ["src/planner/feed.ts"],
+);
+
+const UMBRELLA_OWN_BODY = "## Acceptance criteria\n- The planner feed MUST keep the legacy path selectable.\n";
+
+test("#1749 repro: a non-closing umbrella criterion does not force INCOMPLETE on a clean scoped increment", async () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = await umbrellaLedger(UMBRELLA_OWN_BODY);
+    const requirements = (ledger as { requirements: Array<{ id: string; text: string }> }).requirements;
+    const shared = requirements.find((r) => r.text.includes("share one feed"));
+    assert.ok(shared, "the umbrella criterion reached the ledger");
+    const own = requirements.find((r) => r.text.includes("legacy path selectable"));
+    assert.ok(own, "the increment's own criterion reached the ledger");
+    // The relationship metadata must survive intake → ledger (this is the
+    // seam the bug lost): the title `(#N)` link is non-closing and the
+    // forge labels name the umbrella shape.
+    const sharedProvenance = (
+      ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }
+    ).requirements.find((r) => r.text.includes("share one feed"))!.provenance;
+    assert.deepEqual(sharedProvenance, [
+      { source: "linked_issues", ref: "#42", line: 2, closing: false, labels: ["umbrella"] },
+    ]);
+
+    // The reviewer understands the deferral (the #1733 review) and approves;
+    // the increment's own criterion is met with a valid citation.
+    const claims = [
+      {
+        requirement_id: shared!.id,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "deferred to the separately linked engine-composition child; this PR does not claim the parent",
+      },
+      {
+        requirement_id: own!.id,
+        disposition: "met",
+        enforcement: [{ file: "src/real.ts", line: 1 }],
+        test: [],
+        reason: "the legacy path remains selectable",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED);
+    const umbrellaRow = trace.rows.find((row) => row.requirement_id === shared!.id);
+    assert.ok(umbrellaRow, "the umbrella criterion is still traced");
+    // The criterion stays VISIBLE and honest — reported unmet, never
+    // dropped, never pretended satisfied — with the machine reason for its
+    // scope class.
+    assert.equal(umbrellaRow.disposition, "unmet");
+    assert.equal(umbrellaRow.resolution, "unmet_claimed");
+    assert.ok(umbrellaRow.notes.includes("out-of-scope-umbrella-parent"), "the umbrella parent reason is machine-readable");
+    assert.ok(umbrellaRow.notes.includes("out-of-scope-reported-unmet"), "the claim stays disclosure-only");
+    // …but the claim rides the disclosure marker: it cannot withhold
+    // approval for an increment whose own requirements are settled.
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace), [], "the deferred umbrella claim must not gate this increment");
+    assert.deepEqual(trace.summary.unresolved_material, [], "no material unknown");
+    assert.equal(trace.incomplete, false);
+
+    // The umbrella's OTHER criterion (no model claim at all) settles as the
+    // explainable out-of-scope advisory — visible in the artifact with the
+    // machine reason, not silently dropped.
+    const other = trace.rows.find((row) => row.requirement_id !== shared!.id && row.requirement_id !== own!.id);
+    assert.ok(other, "the second umbrella criterion is still traced");
+    assert.equal(other.disposition, "not_applicable");
+    assert.equal(other.materiality, "advisory");
+    assert.match(other.reason, /parent umbrella criterion/);
+    assert.match(other.reason, /does not claim parent closure/);
+    assert.ok(other.notes.includes("out-of-scope-umbrella-parent"));
+
+    // Publication control: the deferred parent work stays visible in the
+    // published trace section — the row, its id, and the deferral reason
+    // render; nothing material withholds approval.
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.match(rendered, new RegExp(umbrellaRow.requirement_id), "the deferred criterion's row renders in the published section");
+    assert.match(rendered, /unmet/, "it renders as the reviewer's disclosed gap");
+    assert.match(rendered, /deferred to the separately linked engine-composition child/, "the deferral reason travels with it");
+    // The increment's own criterion is settled and does not render as a gap.
+    const ownRow = trace.rows.find((row) => row.requirement_id === own!.id);
+    assert.equal(ownRow?.resolution, "evidenced");
+    assert.equal(ownRow?.materiality, "advisory");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 closing control: a PR that claims to close the umbrella keeps its unmet criterion mandatory", async () => {
+  const workspace = makeWorkspace();
+  try {
+    // The title `(#N)` ref is upgraded to a closing ref by the body's
+    // closing keyword — the PR genuinely claims the parent, so its
+    // acceptance criteria remain this PR's merge contract.
+    const ledger = await umbrellaLedger(`${UMBRELLA_OWN_BODY}\nCloses #42.\n`);
+    const requirements = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<{ closing?: boolean }> }> }).requirements;
+    const shared = requirements.find((r) => r.text.includes("share one feed"));
+    assert.ok(shared, "the umbrella criterion reached the ledger");
+    assert.equal(shared.provenance[0]?.closing, true, "the closing claim must survive intake");
+    const claims = [
+      {
+        requirement_id: shared!.id,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "the shared feed is not implemented",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED);
+    const row = trace.rows.find((r) => r.requirement_id === shared!.id);
+    assert.ok(row);
+    assert.equal(row.resolution, "unmet_claimed");
+    assert.ok(!row.notes.includes("out-of-scope-umbrella-parent"), "a closing claim is never umbrella-narrowed");
+    assert.ok(!row.notes.includes("out-of-scope-reported-unmet"), "the claim is in scope, not disclosure-only");
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace).map((r) => r.requirement_id), [shared!.id], "the unmet parent criterion withholds approval");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 control: an ordinary non-umbrella implementation ref keeps its current scope behavior", async () => {
+  const workspace = makeWorkspace();
+  try {
+    // The linked issue IS the implementation target (no umbrella label):
+    // `Implements`/`Refs`/title `(#N)` behavior is unchanged — its
+    // requirement is in scope when the change touches it.
+    const issue = {
+      number: 7,
+      title: "Widget retry",
+      state: "open",
+      html_url: "https://forge.example/o/r/issues/7",
+      labels: [{ name: "enhancement" }],
+      body: "## Acceptance criteria\n- The widget MUST retry failed scrapes.\n",
+    };
+    const pr = { title: "feat(widget): retry scrapes (#7)", body: "Implements #7.\n" };
+    const linked = await buildLinkedIssueContext({
+      pr,
+      repo: "o/r",
+      adapter: { getIssue: async (): Promise<ReadResult<unknown>> => ({ ok: true, data: issue }) },
+      isForkPr: "false",
+      linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+    });
+    const ledger = extractRequirementLedger({
+      prJson: pr,
+      linkedIssuesMarkdown: Buffer.from(linked.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8"),
+    });
+    const entry = (ledger as { requirements: Array<{ id: string; text: string }> }).requirements[0];
+    assert.ok(entry, "the implementation target's criterion reached the ledger");
+    const changed = changedSubjectText(
+      "diff --git a/src/widget.ts b/src/widget.ts\n+++ b/src/widget.ts\n+const retries = scrape.retry();\n",
+      ["src/widget.ts"],
+    );
+    const trace = validateRequirementTrace(
+      [{ requirement_id: entry!.id, disposition: "unmet", enforcement: [], test: [], reason: "no retry is implemented" }],
+      ledger,
+      workspace,
+      changed,
+    );
+    const row = trace.rows[0];
+    assert.ok(row);
+    assert.equal(row.resolution, "unmet_claimed", "an implementation-target claim is an in-scope gap");
+    assert.ok(!row.notes.includes("out-of-scope-umbrella-parent"));
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace).map((r) => r.requirement_id), [entry!.id]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 security control: an umbrella-parent criterion with explicit trust-boundary vocabulary is never narrowed", async () => {
+  const workspace = makeWorkspace();
+  try {
+    const issue = {
+      ...UMBRELLA_ISSUE,
+      number: 43,
+      body: "## Acceptance criteria\n- The planner MUST sanitize every untrusted feed boundary.\n",
+    };
+    const pr = { title: "feat(planner): incremental planning feed (#43)", body: UMBRELLA_OWN_BODY };
+    const linked = await buildLinkedIssueContext({
+      pr,
+      repo: "o/r",
+      adapter: { getIssue: async (): Promise<ReadResult<unknown>> => ({ ok: true, data: issue }) },
+      isForkPr: "false",
+      linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+    });
+    const ledger = extractRequirementLedger({
+      prJson: pr,
+      linkedIssuesMarkdown: Buffer.from(linked.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8"),
+    });
+    const entry = (ledger as { requirements: Array<{ id: string; text: string }> }).requirements[0];
+    assert.ok(entry, "the security criterion reached the ledger");
+    const changed = changedSubjectText(
+      "diff --git a/src/planner/feed.ts b/src/planner/feed.ts\n+++ b/src/planner/feed.ts\n+// the planner feeds the scheduler engine\n",
+      ["src/planner/feed.ts"],
+    );
+    const trace = validateRequirementTrace(
+      [{ requirement_id: entry!.id, disposition: "unmet", enforcement: [], test: [], reason: "the boundary is not sanitized" }],
+      ledger,
+      workspace,
+      changed,
+    );
+    const row = trace.rows[0];
+    assert.ok(row);
+    assert.equal(row.resolution, "unmet_claimed", "an affected security requirement originating in a parent stays material");
+    assert.ok(!row.notes.includes("out-of-scope-umbrella-parent"), "the security veto outranks the umbrella relationship");
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace).map((r) => r.requirement_id), [entry!.id]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 scope: a non-closing umbrella criterion is out of scope with the machine reason, with or without diff overlap", () => {
+  const ledger = {
+    requirements: [{
+      id: "req-umb",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+    }],
+  };
+  // Even WITH the boundary overlap that used to force the criterion into
+  // scope (the #1733 mechanism), the relationship scopes it out.
+  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED);
+  assert.deepEqual(scope.inScope, []);
+  assert.equal(scope.outOfScope.length, 1);
+  assert.match(scope.outOfScope[0]!.reason, /parent umbrella criterion from #42/);
+  assert.match(scope.outOfScope[0]!.reason, /separately linked\/decomposed child/);
+  assert.match(scope.outOfScope[0]!.reason, /does not claim parent closure/);
+  assert.equal((scope.outOfScope[0] as { note?: string }).note, "out-of-scope-umbrella-parent");
+  // The relationship — not diff overlap — is what scopes it: the decision
+  // holds with no change evidence at all (the PR's own refs are available
+  // without a diff).
+  const withoutDiff = requirementTraceScope(ledger);
+  assert.deepEqual(withoutDiff.inScope, []);
+  assert.equal(withoutDiff.outOfScope.length, 1);
+});
+
+test("#1749 scope: the umbrella narrowing never crosses a non-linked provenance, a closing ref, or missing metadata", () => {
+  const text = "The planner and the scheduler engine MUST share one feed.";
+  const scopeOf = (provenance: Array<Record<string, unknown>>): string[] =>
+    requirementTraceScope({ requirements: [{ id: "r", text, kind: "acceptance", provenance }] }, UMBRELLA_CHANGED).inScope.map((e) => e.id);
+  // The PR's own body demanding the same text keeps it mandatory.
+  assert.deepEqual(scopeOf([
+    { source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] },
+    { source: "pr_body", ref: "pr", line: 2 },
+  ]), ["r"]);
+  // Any closing reference for the text keeps it mandatory.
+  assert.deepEqual(scopeOf([
+    { source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] },
+    { source: "linked_issues", ref: "#43", line: 1, closing: true, labels: ["umbrella"] },
+  ]), ["r"]);
+  // Legacy persisted artifacts without relationship metadata fail closed.
+  assert.deepEqual(scopeOf([{ source: "linked_issues", ref: "#42", line: 1 }]), ["r"]);
+  // Entries without provenance always stay in scope.
+  assert.deepEqual(
+    requirementTraceScope({ requirements: [{ id: "r", text, kind: "acceptance" }] }, UMBRELLA_CHANGED).inScope.map((e) => e.id),
+    ["r"],
+  );
+});
+
+test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exact-matched", () => {
+  const text = "The planner and the scheduler engine MUST share one feed.";
+  const scopeOf = (labels: string[]): string[] =>
+    requirementTraceScope({
+      requirements: [{
+        id: "r",
+        text,
+        kind: "acceptance",
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels }],
+      }],
+    }, UMBRELLA_CHANGED).inScope.map((e) => e.id);
+  assert.deepEqual(scopeOf(["umbrella"]), []);
+  assert.deepEqual(scopeOf(["Umbrella"]), []);
+  assert.deepEqual(scopeOf(["  umbrella  "]), []);
+  assert.deepEqual(scopeOf(["epic"]), []);
+  // A label merely containing the vocabulary is not the vocabulary.
+  assert.deepEqual(scopeOf(["umbrella-tracker"]), ["r"]);
+  assert.deepEqual(scopeOf(["epics"]), ["r"]);
+  assert.deepEqual(scopeOf(["enhancement"]), ["r"]);
+  assert.deepEqual(scopeOf([]), ["r"]);
 });

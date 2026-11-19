@@ -36,7 +36,12 @@ function writeFile(workspace: string, relPath: string, lines: readonly string[])
   mkdirSync(join(workspace, ...relPath.split("/").slice(0, -1)), { recursive: true });
   writeFileSync(join(workspace, relPath), `${lines.join("\n")}\n`);
 }
-function ledgerWith(entries: Array<{ id: string; text: string; kind: string; provenance?: Array<{ source: string }> }>): unknown {
+function ledgerWith(entries: Array<{
+  id: string;
+  text: string;
+  kind: string;
+  provenance?: Array<{ source: string; ref?: string; line?: number; closing?: boolean; labels?: string[] }>;
+}>): unknown {
   return { requirements: entries };
 }
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
@@ -540,6 +545,82 @@ test("an out-of-scope unmet claim alone never prevents APPROVE (scope marker com
     assert.equal(disposition.kind, "approve", "approval eligibility is unchanged");
     assert.equal(disposition.nativeEvent, "APPROVE");
     assert.equal(disposition.approvalCertified, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749: a deferred umbrella criterion is disclosure-only — the clean scoped increment reaches native APPROVE (real composition)", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    // The umbrella shape from the PR's own metadata: a non-closing ref to an
+    // umbrella-labeled parent. The criterion shares the increment's
+    // vocabulary — under the pre-#1749 scope rule that overlap alone made
+    // the parent criterion a merge contract.
+    const ledger = ledgerWith([
+      {
+        id: "req-umb",
+        text: "The planner and the scheduler engine MUST share one feed.",
+        kind: "acceptance",
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+      },
+    ]);
+    const claims = [{
+      requirement_id: "req-umb",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "deferred to the separately linked engine-composition child; this PR does not claim the parent",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the planner feeds the scheduler engine");
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-umb");
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(row?.notes.includes("out-of-scope-umbrella-parent"), "the umbrella relationship is machine-readable on the row");
+    assert.ok(row?.notes.includes("out-of-scope-reported-unmet"), "the claim stays disclosure-only");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence, [], "a deferred umbrella claim produces no disposition evidence");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "approve", "the clean increment is not held at INCOMPLETE by parent work");
+    assert.equal(disposition.reason, "approval_certified");
+    assert.equal(disposition.nativeEvent, "APPROVE");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 closing control: the same umbrella criterion claimed by a closing PR stays material (real composition)", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    // Identical criterion, identical vocabulary — but the PR claims the
+    // parent (a closing-keyword ref), so the criterion is a merge contract
+    // and its unmet claim withholds certification.
+    const ledger = ledgerWith([
+      {
+        id: "req-umb",
+        text: "The planner and the scheduler engine MUST share one feed.",
+        kind: "acceptance",
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: true, labels: ["umbrella"] }],
+      },
+    ]);
+    const claims = [{
+      requirement_id: "req-umb",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the planner feeds the scheduler engine");
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-umb");
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(!row?.notes.includes("out-of-scope-umbrella-parent"), "a closing claim is never umbrella-narrowed");
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the in-scope claim is material");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "incomplete");
+    assert.equal(disposition.reason, "material_unknown");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

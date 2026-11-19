@@ -26,6 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { escapeControlChars } from "../context/fence.js";
+import { LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE } from "../precheck/linked-issues.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { HARNESS_SOURCE, obligationText } from "./obligations.js";
 
@@ -36,6 +37,14 @@ export const MAX_REQUIREMENTS = 48;
 export const MAX_REQUIREMENT_CHARS = 400;
 export const MAX_LEDGER_MARKDOWN_BYTES = 8192;
 export const MAX_SOURCES = 32;
+
+/** #1749: bounds for the forge-label provenance carried on `linked_issues`
+ * provenance entries — the linked issue's own labels, read from the
+ * embedded projection in `linked-issues.md` and re-bounded at every
+ * serialization boundary (parse, tolerant reload), so a hostile label list
+ * cannot grow a ledger entry without limit. */
+export const MAX_LINKED_ISSUE_LABELS = 8;
+export const MAX_LINKED_ISSUE_LABEL_CHARS = 64;
 
 export const TRUNCATION_MARKER = "…";
 
@@ -49,6 +58,17 @@ export interface LedgerProvenance {
   source: string;
   ref: string;
   line: number;
+  /** #1749: linked-issue relationship provenance, present on `linked_issues`
+   * entries ONLY when known. `closing` records the reference shape the PR
+   * itself used (a closing-keyword ref vs an `Implements`/`Refs`/title-
+   * `(#N)` link); `labels` carries the linked issue's bounded forge-label
+   * list. The trace scope consumes both to tell an issue the PR claims to
+   * close (whose acceptance criteria stay mandatory) from a non-closing
+   * parent/umbrella/context link (whose acceptance set is not automatically
+   * this PR's merge contract). Absent fields mean unknown — the scope
+   * predicate fails closed on them. */
+  closing?: boolean;
+  labels?: string[];
 }
 
 /** The typed canonical requirement-ledger entry (#675). Internal fields are
@@ -314,14 +334,42 @@ function scanDocument(text: string): ScannedLine[] {
   return found;
 }
 
+/** #1749: bound one linked issue's forge-label list for provenance — trim,
+ * drop empties, deduplicate, cap count and per-label length (codepoint-safe,
+ * so a long label never splits a surrogate pair). `undefined` when nothing
+ * usable survives, so the provenance field stays absent rather than empty. */
+function boundedLinkedIssueLabels(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (names.length >= MAX_LINKED_ISSUE_LABELS) break;
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(Array.from(name).slice(0, MAX_LINKED_ISSUE_LABEL_CHARS).join(""));
+  }
+  return names.length > 0 ? names : undefined;
+}
+
 /** Parse rendered `linked-issues.md` into (ref, body) documents. Each
  * `## <repo>#<number>` heading (or any heading, as a fallback ref) owns the
  * fenced JSON blocks that follow it; a block decodes to a dict with a string
  * `body` to contribute that body for scanning. Malformed blocks are skipped
- * fail-soft. */
-function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string }[] {
-  const documents: { ref: string; body: string }[] = [];
+ * fail-soft.
+ *
+ * #1749: the relationship metadata the intake renders between the heading
+ * and the fence is parsed too — an exact-match `(linked as: …)` line records
+ * the reference shape the PR itself used, and the embedded projection's
+ * `labels` array (the linked issue's forge labels) is carried bounded. Both
+ * fields are OPTIONAL provenance: a document without them keeps the exact
+ * legacy `{ref, body}` shape, and the scope predicate fails closed on the
+ * unknown relationship. */
+function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[] }[] {
+  const documents: { ref: string; body: string; closing?: boolean; labels?: string[] }[] = [];
   let currentRef = "";
+  let currentClosing: boolean | undefined = undefined;
   let inFence = false;
   let fenceChar = "";
   let fenceLines: string[] = [];
@@ -337,9 +385,19 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
           obj = null;
         }
         if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
-          const body = (obj as Record<string, unknown>).body;
+          const record = obj as Record<string, unknown>;
+          const body = record.body;
           if (typeof body === "string" && body.trim()) {
-            documents.push({ ref: currentRef, body });
+            const labels = boundedLinkedIssueLabels(record.labels);
+            documents.push({
+              ref: currentRef,
+              body,
+              // The relationship line is intake-authored and exact-matched
+              // outside the fence; absent means unknown (fail closed
+              // downstream), never a guess.
+              ...(currentClosing !== undefined ? { closing: currentClosing } : {}),
+              ...(labels !== undefined ? { labels } : {}),
+            });
           }
         }
       } else {
@@ -354,7 +412,19 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
       continue;
     }
     const heading = HEADING_RE.exec(raw);
-    if (heading !== null) currentRef = (heading[1] ?? "").trim();
+    if (heading !== null) {
+      currentRef = (heading[1] ?? "").trim();
+      currentClosing = undefined;
+      continue;
+    }
+    if (currentRef !== "") {
+      const line = raw.trim();
+      if (line === LINKED_AS_CLOSING_LINE) {
+        currentClosing = true;
+      } else if (line === LINKED_AS_NON_CLOSING_LINE) {
+        currentClosing = false;
+      }
+    }
   }
   return documents;
 }
@@ -394,6 +464,28 @@ export interface LedgerInput {
   harnessObligations?: readonly import("./obligations.js").HarnessObligation[] | undefined;
 }
 
+/** One bounded input document to scan. #1749: linked-issue documents carry
+ * the optional relationship provenance parsed from `linked-issues.md`. */
+interface SourceDoc {
+  source: string;
+  ref: string;
+  text: string;
+  closing?: boolean;
+  labels?: string[];
+}
+
+/** #1749: build one provenance entry, carrying the linked-issue relationship
+ * provenance (`closing`/`labels`) only on `linked_issues` entries and only
+ * when known — every other source, and unknown state, keeps the exact
+ * legacy `{source, ref, line}` shape. */
+function provenanceFor(doc: SourceDoc, line: number): LedgerProvenance {
+  const provenance: LedgerProvenance = { source: doc.source, ref: doc.ref, line };
+  if (doc.source !== "linked_issues") return provenance;
+  if (doc.closing !== undefined) provenance.closing = doc.closing;
+  if (doc.labels !== undefined) provenance.labels = doc.labels;
+  return provenance;
+}
+
 /** Build the version-1 requirement ledger from bounded review inputs. Never
  * throws on malformed input; ids are computed from post-truncation
  * normalized text; duplicate text (casefolded) merges into one entry whose
@@ -404,12 +496,17 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
   let resolvedRef = typeof standardsRef === "string" ? standardsRef : "";
   if (!resolvedRef.trim()) resolvedRef = "standards";
 
-  type SourceDoc = { source: string; ref: string; text: string };
   const documents: SourceDoc[] = [];
   if (typeof standardsText === "string") documents.push({ source: "standards", ref: resolvedRef, text: standardsText });
   if (typeof linkedIssuesMarkdown === "string") {
     for (const doc of parseLinkedIssueDocuments(linkedIssuesMarkdown)) {
-      documents.push({ source: "linked_issues", ref: doc.ref, text: doc.body });
+      documents.push({
+        source: "linked_issues",
+        ref: doc.ref,
+        text: doc.body,
+        ...(doc.closing !== undefined ? { closing: doc.closing } : {}),
+        ...(doc.labels !== undefined ? { labels: doc.labels } : {}),
+      });
     }
   }
   const prText = prDocumentText(prJson);
@@ -452,12 +549,12 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
           kind: found.kind,
           verificationRequired: found.kind === "invariant",
           truncated: found.truncated,
-          provenance: [{ source: doc.source, ref: doc.ref, line: found.line }],
+          provenance: [provenanceFor(doc, found.line)],
         });
       } else {
         // Merged duplicate: the first occurrence owns the entry (position,
         // kind, flags); provenance is appended.
-        entries[index]?.provenance.push({ source: doc.source, ref: doc.ref, line: found.line });
+        entries[index]?.provenance.push(provenanceFor(doc, found.line));
       }
     }
   }
@@ -537,7 +634,18 @@ function tolerantEntry(item: unknown): RequirementLedgerEntry | null {
       const ref = typeof prec.ref === "string" ? prec.ref : "";
       const rawLine = prec.line;
       const line = typeof rawLine === "number" && Number.isInteger(rawLine) && rawLine >= 0 ? rawLine : 0;
-      provenance.push({ source, ref, line });
+      // #1749: the linked-issue relationship provenance survives the
+      // deserialization boundary under the same strict bounds the parse
+      // applies — present only when well-formed, never guessed.
+      const closing = typeof prec.closing === "boolean" ? prec.closing : undefined;
+      const labels = boundedLinkedIssueLabels(prec.labels);
+      provenance.push({
+        source,
+        ref,
+        line,
+        ...(closing !== undefined ? { closing } : {}),
+        ...(labels !== undefined ? { labels } : {}),
+      });
     }
   }
   return {

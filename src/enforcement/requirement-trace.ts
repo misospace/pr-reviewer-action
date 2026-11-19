@@ -1371,10 +1371,10 @@ const MAX_STANDARDS_REFS = 8;
  * the trusted boundary-defining document(s) the requirement was extracted
  * from, used to keep a standards row in scope when its own source file is
  * among the changed paths. */
-function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] {
+function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[]; linkedRefs: LinkedScopeRef[] }[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];
-  const out: { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] = [];
+  const out: { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[]; linkedRefs: LinkedScopeRef[] }[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
@@ -1386,17 +1386,30 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
       ? provenance.map((p) => (p && typeof p === "object" ? String((p as { source?: unknown }).source ?? "") : "")).filter((s) => s !== "")
       : null;
     const standardsRefs: string[] = [];
+    // #1749: the linked-issue relationship provenance, re-read under the
+    // same bounds the ledger parse applied. `closing` is strict — only an
+    // explicit boolean survives; a legacy artifact's missing field is
+    // unknown and never reads as "non-closing".
+    const linkedRefs: LinkedScopeRef[] = [];
     if (Array.isArray(provenance)) {
       for (const p of provenance) {
-        if (standardsRefs.length >= MAX_STANDARDS_REFS) break;
         if (!p || typeof p !== "object") continue;
-        const rec = p as { source?: unknown; ref?: unknown };
-        if (rec.source !== "standards" || typeof rec.ref !== "string" || rec.ref === "") continue;
-        const ref = rec.ref.toLowerCase();
-        if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
+        const rec = p as { source?: unknown; ref?: unknown; closing?: unknown; labels?: unknown };
+        if (standardsRefs.length < MAX_STANDARDS_REFS && rec.source === "standards" && typeof rec.ref === "string" && rec.ref !== "") {
+          const ref = rec.ref.toLowerCase();
+          if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
+        }
+        if (linkedRefs.length >= MAX_LINKED_SCOPE_REFS) continue;
+        if (rec.source !== "linked_issues") continue;
+        const closing = typeof rec.closing === "boolean" ? rec.closing : undefined;
+        const umbrella = Array.isArray(rec.labels) && rec.labels
+          .slice(0, 8)
+          .some((label) => typeof label === "string"
+            && UMBRELLA_ISSUE_LABELS.has(label.slice(0, MAX_UMBRELLA_LABEL_MATCH_CHARS).trim().toLowerCase()));
+        linkedRefs.push({ ref: typeof rec.ref === "string" ? rec.ref : "", closing, umbrella });
       }
     }
-    out.push({ entry: { id, text, kind }, sources, standardsRefs });
+    out.push({ entry: { id, text, kind }, sources, standardsRefs, linkedRefs });
   }
   return out;
 }
@@ -2254,8 +2267,43 @@ function executableExampleTouched(
 
 export interface RequirementTraceScope {
   inScope: TracedLedgerEntry[];
-  outOfScope: { entry: TracedLedgerEntry; reason: string }[];
+  outOfScope: { entry: TracedLedgerEntry; reason: string; /** #1749: the machine-readable scope class of the decision, when it is a relationship decision rather than a change-evidence one. */ note?: string }[];
 }
+
+/** #1749: the bounded relationship provenance of one `linked_issues`
+ * provenance entry, re-read from the persisted ledger artifact. `closing`
+ * is three-state: `true`/`false` when the intake-rendered relationship line
+ * said so, `undefined` when the artifact predates the metadata (unknown —
+ * the scope predicate fails closed on it). */
+interface LinkedScopeRef {
+  ref: string;
+  closing: boolean | undefined;
+  umbrella: boolean;
+}
+
+/** #1749: the bounded forge-label vocabulary that marks a linked issue as a
+ * parent/umbrella tracker — an issue whose acceptance set is decomposed
+ * into separately owned child work rather than being one PR's merge
+ * contract. Exact, casefolded match on the forge label (a label merely
+ * containing the vocabulary is not the vocabulary), consumed only as the
+ * narrowest of narrowings: a NON-CLOSING link, on an entry whose every
+ * provenance source is the linked issue, whose text carries no explicit
+ * security/trust-boundary vocabulary. */
+const UMBRELLA_ISSUE_LABELS: ReadonlySet<string> = new Set(["umbrella", "epic"]);
+
+/** #1749: the row note marking an out-of-scope decision made on the
+ * umbrella relationship (as opposed to the change-evidence narrowing), so
+ * the artifact alone explains why a valid parent criterion is not this
+ * increment's merge contract. */
+export const UMBRELLA_PARENT_OUT_OF_SCOPE_NOTE = "out-of-scope-umbrella-parent";
+
+/** Bound on the linked-issue provenance entries one candidate's scope
+ * decision considers — the accepted-issue cap, so a merged-duplicate entry
+ * cannot grow the decision input beyond what intake could have linked. */
+const MAX_LINKED_SCOPE_REFS = 8;
+/** Bound on a single label's matched length, so a hostile label string
+ * cannot grow the vocabulary match's work. */
+const MAX_UMBRELLA_LABEL_MATCH_CHARS = 256;
 
 /** #935/#958: which requirements the trace demands. A linked-issue
  * requirement (what the PR was asked to deliver, #874), an entry without
@@ -2307,6 +2355,29 @@ export interface RequirementTraceScope {
  * provenance are untouched (always in scope — fail closed). The narrowing
  * also needs changed-path evidence: when `paths` is missing or empty the
  * lexical match keeps its full weight (fail closed).
+ *
+ * #1749 adds a relationship-based narrowing that is independent of change
+ * evidence, for the failure shape the #1658 boundary rule cannot represent:
+ * a NON-CLOSING parent/umbrella link whose acceptance criterion shares the
+ * child PR's vocabulary by construction (a scoped increment touches the
+ * same subsystem the umbrella criterion names), so the criterion rides the
+ * boundary signal into scope and its known-unmet state forces a false
+ * INCOMPLETE on an otherwise approvable increment. When EVERY provenance
+ * source of an entry is `linked_issues`, EVERY linked reference is
+ * explicitly non-closing (the PR's own refs — a `Closes/Fixes/Resolves`
+ * claim, any non-linked provenance, or a legacy artifact with unknown
+ * relationship state keeps the entry mandatory, fail closed), EVERY linked
+ * issue carries an umbrella label ({@link UMBRELLA_ISSUE_LABELS}, bounded
+ * forge metadata), and the text carries no explicit security/trust-boundary
+ * vocabulary, the umbrella's acceptance set is not this increment's merge
+ * contract: the entry is scoped out with a reason naming the relationship
+ * (`out-of-scope-umbrella-parent`), never silently dropped — the row stays
+ * in the artifact, and a semantic `unmet` claim on it rides the trusted
+ * out-of-scope disclosure marker. Narrowing on the closing side is
+ * impossible by construction: any closing reference, any non-linked
+ * provenance source, and any security vocabulary each independently keep
+ * the entry in scope.
+ *
  * Proof validation, blocker classification, and the approval/attestation
  * gates are unchanged; the out-of-scope reason records which boundary
  * signals the change missed, so the `not_applicable` row is explainable from
@@ -2346,7 +2417,7 @@ export function requirementTraceScope(
   // weight — fail closed), and unrelated lines are never borrowed.
   const attributed = Array.isArray(context.fileLines);
   const scope: RequirementTraceScope = { inScope: [], outOfScope: [] };
-  for (const { entry, sources, standardsRefs } of ledgerTraceCandidates(ledger)) {
+  for (const { entry, sources, standardsRefs, linkedRefs } of ledgerTraceCandidates(ledger)) {
     const owned = compiledOwnership.length > 0 && ownershipTouched(compiledOwnership, entry.text, paths);
     let touched = changed !== undefined && subjectTouched(entry.text, changed);
     // #1600: for a pure standards-sourced requirement, corroborate the lexical
@@ -2389,8 +2460,21 @@ export function requirementTraceScope(
     // fail closed. Non-linked rows keep the #1600 rule unchanged.
     const linked = sources !== null && sources.includes("linked_issues");
     const boundarySignals = touched || owned || sourceTouched || namedPathTouched || policyTouched;
+    // #1749: the umbrella-parent relationship decision — see the doc
+    // comment. Every condition is fail-closed: one closing ref, one
+    // non-linked provenance source, one unknown relationship state, one
+    // missing umbrella label, or one security-vocabulary token keeps the
+    // entry on its existing (mandatory) path.
+    const allLinked = sources !== null && sources.length > 0 && sources.every((source) => source === "linked_issues");
+    const umbrellaParent = allLinked
+      && linkedRefs.length > 0
+      && linkedRefs.every((ref) => ref.closing === false && ref.umbrella)
+      && !securityBoundaryRequirement(entry.text);
+    const umbrellaRefs = [...new Set(linkedRefs.map((ref) => ref.ref.slice(0, 64)).filter((ref) => ref !== ""))].join(", ");
     let entryInScope: boolean;
-    if (changed === undefined || sources === null) {
+    if (umbrellaParent) {
+      entryInScope = false;
+    } else if (changed === undefined || sources === null) {
       entryInScope = true;
     } else if (linked) {
       entryInScope = boundarySignals
@@ -2405,11 +2489,14 @@ export function requirementTraceScope(
     } else {
       scope.outOfScope.push({
         entry,
-        reason: linked
-          ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
-          : boundaryNarrowed
-            ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
-            : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        reason: umbrellaParent
+          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the criterion is owned by the umbrella's separately linked/decomposed child work and the current PR does not claim parent closure (linked only by non-closing refs), so the umbrella's acceptance set is not this increment's merge contract`
+          : linked
+            ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
+            : boundaryNarrowed
+              ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
+              : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        ...(umbrellaParent ? { note: UMBRELLA_PARENT_OUT_OF_SCOPE_NOTE } : {}),
       });
     }
   }
@@ -2981,8 +3068,10 @@ export function validateRequirementTrace(
   // out-of-scope row is still the reviewer's own gap claim — exposed as
   // `unmet_claimed`/material, but it no longer sets `incomplete` (only a
   // deterministic refutation does; the final-disposition layer weighs the
-  // claim).
-  for (const { entry, reason } of outOfScope) {
+  // claim). #1749: the umbrella-relationship decisions carry their own
+  // machine-readable note alongside the scope class, so the artifact alone
+  // explains why a valid parent criterion is not this increment's contract.
+  for (const { entry, reason, note } of outOfScope) {
     const claim = claimsById.get(entry.id);
     const claimReason = claim !== undefined
       ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(coverageClaimEvidence(claim).details.join("; ")))
@@ -3001,9 +3090,9 @@ export function validateRequirementTrace(
       : claim !== undefined && coverageStatusDisposition(claim) === "unmet");
     if (claimedUnmet) {
       unmetClaimedIds.push(entry.id);
-      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: ["out-of-scope-reported-unmet"] });
+      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: [...(note !== undefined ? [note] : []), "out-of-scope-reported-unmet"] });
     } else {
-      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
+      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: [...(note !== undefined ? [note] : []), "out-of-scope"] });
     }
   }
 

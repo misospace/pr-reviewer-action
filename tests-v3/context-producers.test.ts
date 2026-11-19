@@ -487,3 +487,46 @@ test("#1261: a manifest without a trailing newline still gets its closer on its 
   assert.ok(inside.has(lines.findIndex((line) => line === "# Tool Harness Findings")), "the forged heading stays fence-inert");
   assert.ok(inside.has(lines.findIndex((line) => line === "```")), "the bare fence line stays inert");
 });
+
+// #1749: the linked-issue relationship (the PR's own closing/non-closing
+// reference shape) must survive into linked-issues.md — the requirement
+// ledger's only channel — so the trace scope can tell a closing
+// implementation target from a non-closing parent/umbrella context issue.
+test("#1749: accepted linked issues render their closing relationship into linked-issues.md", async () => {
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: Number(number), title: `issue ${number}`, state: "open", html_url: "u", labels: [{ name: "umbrella" }], body: "work" },
+  });
+  const closing = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Closes #41" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const closingMd = text(closing.artifacts.get("linked-issues.md"));
+  assert.match(closingMd, /## #41\n\(linked as: closing reference\)\n/, "the closing keyword ref names itself");
+  const titleRef = await buildLinkedIssueContext({
+    pr: { title: "feat: part of the work (#42)", body: "no keywords" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const titleMd = text(titleRef.artifacts.get("linked-issues.md"));
+  assert.match(titleMd, /## #42\n\(linked as: non-closing reference\)\n/, "the title `(#N)` convention is non-closing");
+  const implementsRef = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Implements #43" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const implementsMd = text(implementsRef.artifacts.get("linked-issues.md"));
+  assert.match(implementsMd, /## #43\n\(linked as: non-closing reference\)\n/, "an implementation ref is non-closing");
+});
+
+test("#1749: skip and failure notices render no relationship line", async () => {
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> =>
+    number === "2"
+      ? { ok: true, data: { number: 2, pull_request: { url: "https://example/pulls/2" }, body: "x" } }
+      : { ok: false, error: `no ${repo}#${number}` };
+  const result = await buildLinkedIssueContext({
+    // A non-closing ref to a pull request is skipped before projection; a
+    // fetch failure renders its notice. Neither contributes a document, and
+    // neither may look like a relationship record.
+    pr: { title: "t", body: "Refs #2\nImplements #3" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.doesNotMatch(md, /\(linked as:/);
+  assert.match(md, /\(Skipped issue #2 from o\/r: linked object is a pull request\)/);
+  assert.match(md, /\(Could not fetch issue #3 from o\/r\)/);
+});
