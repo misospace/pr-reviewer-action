@@ -1395,17 +1395,19 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
     // way — an over-count or malformed list drops whole, never truncated
     // (a lost owner could be the very child the PR references).
     const linkedRefs: LinkedScopeRef[] = [];
-    // #1750 review round: EXACT-duplicate provenance entries are dropped
-    // BEFORE the bound. A merged duplicate's provenance can repeat the same
-    // linked document once per scanned line; repeats carry identical
-    // semantics for the scope predicate (same ref, closing state, label
-    // class and ownership evidence), so they must never consume the bound —
-    // otherwise hostile repetition of one non-closing umbrella document
-    // could push a DISTINCT closing reference (another linked document's
-    // metadata line) past the bound and violate the 'every ref is
-    // non-closing' guarantee. Distinct linked documents are already capped
-    // at MAX_LINKED_ISSUES at intake, so honest artifacts never reach the
-    // bound; it stays as boundedness defense against forged artifacts.
+    // #1750 review rounds 1+2: EXACT-duplicate provenance entries are
+    // dropped, and DISTINCT records are never dropped at all. A merged
+    // duplicate's provenance can repeat the same linked document once per
+    // scanned line; repeats carry identical semantics for the scope
+    // predicate (same ref, closing state, label class and ownership
+    // evidence), so deduping them is semantics-preserving. Every DISTINCT
+    // relationship participates in the semantics — a bound that silently
+    // dropped a ninth distinct record could ignore a late closing reference
+    // while the umbrella narrowing proceeded. The provenance array is
+    // already fully materialized by the ledger parse (no new iteration
+    // surface); boundedness is preserved where it matters — the RENDERED
+    // reason cites a bounded prefix of the refs and owning children (see
+    // MAX_SCOPE_REASON_REFS), while the every/some semantics stay complete.
     const seenLinkedRefs = new Set<string>();
     if (Array.isArray(provenance)) {
       for (const p of provenance) {
@@ -1425,7 +1427,6 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
         const identity = `${typeof rec.ref === "string" ? rec.ref : ""}|${closing === undefined ? "?" : closing ? "1" : "0"}|${umbrella ? "1" : "0"}|${childRefs.join(",")}`;
         if (seenLinkedRefs.has(identity)) continue;
         seenLinkedRefs.add(identity);
-        if (linkedRefs.length >= MAX_LINKED_SCOPE_REFS) continue;
         linkedRefs.push({
           ref: typeof rec.ref === "string" ? rec.ref : "",
           closing,
@@ -2326,10 +2327,13 @@ const UMBRELLA_ISSUE_LABELS: ReadonlySet<string> = new Set(["umbrella", "epic"])
  * increment's merge contract. */
 export const UMBRELLA_PARENT_OUT_OF_SCOPE_NOTE = "out-of-scope-umbrella-parent";
 
-/** Bound on the linked-issue provenance entries one candidate's scope
- * decision considers — the accepted-issue cap, so a merged-duplicate entry
- * cannot grow the decision input beyond what intake could have linked. */
-const MAX_LINKED_SCOPE_REFS = 8;
+/** #1750 review round 2: bound on the refs the rendered out-of-scope REASON
+ * cites. The scope SEMANTICS never drop a distinct linked record (see
+ * ledgerTraceCandidates); only the human-readable citation is truncated
+ * (bounded prefix + a visible `(+N more)` count), so a hostile artifact
+ * cannot grow the reason string without limit while the decision itself
+ * stays complete. */
+const MAX_SCOPE_REASON_REFS = 8;
 /** Bound on a single label's matched length, so a hostile label string
  * cannot grow the vocabulary match's work. */
 const MAX_UMBRELLA_LABEL_MATCH_CHARS = 256;
@@ -2561,7 +2565,12 @@ export function requirementTraceScope(
       && owningChildren.length > 0
       && !owningChildren.some((child) => prLinkedRefSet.has(child))
       && !securityBoundaryRequirement(entry.text);
-    const umbrellaRefs = [...new Set(linkedRefs.map((ref) => ref.ref.slice(0, 64)).filter((ref) => ref !== ""))].join(", ");
+    const citeList = (items: readonly string[]): string =>
+      items.length <= MAX_SCOPE_REASON_REFS
+        ? items.join(", ")
+        : `${items.slice(0, MAX_SCOPE_REASON_REFS).join(", ")} (+${items.length - MAX_SCOPE_REASON_REFS} more)`;
+    const umbrellaRefs = citeList([...new Set(linkedRefs.map((ref) => ref.ref.slice(0, 64)).filter((ref) => ref !== ""))]);
+    const owningChildrenCited = citeList(owningChildren);
     let entryInScope: boolean;
     if (umbrellaParent) {
       entryInScope = false;
@@ -2581,7 +2590,7 @@ export function requirementTraceScope(
       scope.outOfScope.push({
         entry,
         reason: umbrellaParent
-          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the umbrella's own trusted decomposition associates this criterion with separately tracked child work (${owningChildren.join(", ")}) and the current PR does not claim parent closure (linked only by non-closing refs) nor reference the owning child, so the umbrella's acceptance set is not this increment's merge contract`
+          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the umbrella's own trusted decomposition associates this criterion with separately tracked child work (${owningChildrenCited}) and the current PR does not claim parent closure (linked only by non-closing refs) nor reference the owning child, so the umbrella's acceptance set is not this increment's merge contract`
           : linked
             ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
             : boundaryNarrowed

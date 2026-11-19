@@ -5223,6 +5223,50 @@ test("#1750 review round: hostile repetition of one linked provenance cannot pus
   assert.match(narrow.outOfScope[0]!.reason, /o\/r#101, o\/r#102/, "the owning children of both documents are cited");
 });
 
+test("#1750 review round 2: no DISTINCT linked provenance record is silently dropped by the scope bound", () => {
+  // The reviewer's major: even after exact-repeat dedupe, the eighth-entry
+  // bound still silently dropped a NINTH DISTINCT linked record — so a late
+  // closing reference could be ignored while the umbrella narrowing
+  // proceeded. Every distinct relationship must participate in the
+  // semantics; only the rendered reason's citation may be bounded.
+  const provenance = [
+    ...Array.from({ length: 9 }, (_, i) => ({
+      source: "linked_issues",
+      ref: `#2${String(i + 1).padStart(2, "0")}`,
+      line: 1,
+      closing: false,
+      labels: ["umbrella"],
+      childRefs: [`o/r#2${String(i + 1).padStart(2, "0")}`],
+    })),
+    { source: "linked_issues", ref: "#299", line: 1, closing: true, labels: ["umbrella"] },
+  ];
+  const ledger = {
+    requirements: [{
+      id: "req-umb",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance,
+    }],
+  };
+  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-umb"], "the distinct closing reference keeps the criterion mandatory");
+  assert.deepEqual(scope.outOfScope, []);
+  // The scoping-out path still works over many distinct records, and its
+  // reason stays bounded while citing the owning children.
+  const nonClosing = {
+    requirements: [{
+      id: "req-umb2",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: provenance.slice(0, 9),
+    }],
+  };
+  const narrow = requirementTraceScope(nonClosing, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
+  assert.deepEqual(narrow.inScope, []);
+  assert.match(narrow.outOfScope[0]!.reason, /\(\+1 more\)/, "the reason cites a bounded prefix of the owning children");
+  assert.equal(narrow.outOfScope[0]!.reason.length < 2000, true, "the reason stays bounded with many distinct records");
+});
+
 test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exact-matched", () => {
   const text = "The planner and the scheduler engine MUST share one feed.";
   // #1750: the ownership evidence is present (childRefs), so this isolates
