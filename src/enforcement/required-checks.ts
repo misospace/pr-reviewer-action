@@ -253,6 +253,27 @@ export function evaluateRequiredCheckCoverage(
       if (row.evidence === undefined) {
         row.evidence = evaluateRowEvidence(evidenceTagFor(row.check, tagIndex), row.check, ledger);
       }
+      // #1726: the deterministic dependency-evidence settlement — the SAME
+      // settle the #1381 obligation fold applies (one evaluation, one
+      // reason, so the two artifacts agree row-for-row). A valid ledger
+      // whose validated receipts jointly cover every obligation kind × every
+      // trusted scope entry has deterministically established the
+      // acquisition an objective dependency row asks for, whatever the
+      // closing verdict's dispositions echoed (`receipt-backed` is the only
+      // crediting state; never prose, never a bare successful call). A
+      // refused ledger can never settle, and there is deliberately no
+      // settlement for the other gates: `ci-evidence` rows settle only
+      // through the #1594/#1612 reconciliation, `source-identity` rows keep
+      // the disposition-gated contract.
+      const tag = evidenceTagFor(row.check, tagIndex);
+      if (row.status === "unresolved"
+        && row.rowClass === "objective"
+        && tag?.gate === "dependency-evidence"
+        && row.evidence?.state === "receipt-backed") {
+        row.status = "satisfied";
+        row.rationale = `validated upstream dependency-evidence receipts cover the required obligations (${row.evidence.receipts.join(", ")})`;
+        row.reason = "dependency-evidence";
+      }
     }
   }
 
@@ -270,7 +291,13 @@ export function evaluateRequiredCheckCoverage(
   // incomplete. Uniform across disposition states.
   const complete = checkRows.length > 0
     && checkRows.every((row) => !isMergeAffectingRowClass(row.rowClass)
-      || (row.reason === "ok" && (row.status === "satisfied" || row.status === "not_applicable")));
+      || ((row.reason === "ok"
+          // #1726: the deterministic dependency-evidence settlement is a
+          // discharge — validated receipts settled the row without a model
+          // disposition echo (the #1381 obligation fold carries the same
+          // reason, so the two artifacts agree).
+          || row.reason === "dependency-evidence")
+        && (row.status === "satisfied" || row.status === "not_applicable")));
   return {
     version: 1,
     structured: dispositions !== null,

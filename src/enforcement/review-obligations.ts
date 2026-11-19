@@ -130,6 +130,23 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  *   the harness artifact's executed-call trace is present but this runtime
  *   cannot parse it (or its aligned results), so nothing is verifiable and no
  *   `satisfied` objective answer can discharge.
+ * - `dependency-evidence` — #1726: NOT a rejection — the row was settled
+ *   deterministically by VALIDATED upstream evidence receipts (the
+ *   `dependencyReceiptCoverage` gate: every obligation kind × every trusted
+ *   scope entry covered by acquired, complete, web/forge-trust receipts
+ *   carrying the exact slug and version identities) without a matching model
+ *   disposition. The receipt gate only ever REJECTED unproven satisfactions;
+ *   the organic #1721 failure shape — a closing verdict whose structured
+ *   dispositions matched no row identity (`no-disposition`) after the run had
+ *   actually acquired the evidence — needs the settle half too, or gathered
+ *   evidence is silently lost at the fold while the narrative claims it.
+ * - `ci-evidence-<code>` — #1726 (mirror of the #1594 coverage-side
+ *   refinement, now also written on the obligation side): an unresolved
+ *   test-run row the CI evidence answers — `ci-evidence-head-mismatch`,
+ *   `ci-evidence-no-matching-test-check`, `ci-evidence-test-check-not-success`,
+ *   `ci-evidence-test-check-contradicted` — so the obligation artifact says
+ *   exactly WHY the row stayed open instead of the generic answer-level
+ *   reason, and the two folds agree row-for-row.
  * The retired #1627/#1634 citation-gate reasons (`uncited-satisfaction`,
  * `citation-already-used`, `unrelated-executed-call`,
  * `malformed-executed-trace`) are no longer written; the strict artifact
@@ -148,7 +165,12 @@ export type ReviewObligationReason =
   | "receipt-absent"
   | "receipt-unverified"
   | "receipt-mismatch"
-  | "trace-refused";
+  | "trace-refused"
+  | "dependency-evidence"
+  | "ci-evidence-head-mismatch"
+  | "ci-evidence-no-matching-test-check"
+  | "ci-evidence-test-check-not-success"
+  | "ci-evidence-test-check-contradicted";
 
 export interface ReviewObligation {
   id: string;
@@ -868,7 +890,7 @@ export function foldObligationDispositions(
   // runs every `must_check` row carries its validated `evidence` state.
    // only: no policy branch reads these fields to change a status — the
    // #1656 disposition layer consumes them.
-  const disclosed = folded.map((obligation) => {
+  const disclosed: ReviewObligation[] = folded.map((obligation) => {
     if (obligation.source !== "must_check") return obligation;
     // Untagged rows are `legacy` (pre-#1657 gating semantics; no prose
     // classification); the tag comes from the producer metadata the row
@@ -879,6 +901,32 @@ export function foldObligationDispositions(
         ? { rowClass: withClass.rowClass, gate: withClass.gate ?? null, obligations: withClass.obligations ?? [], dependencyScope: withClass.dependencyScope ?? [] }
         : null;
       withClass.evidence = evaluateRowEvidence(tag, obligation.text, ledger);
+    }
+    // #1726: the deterministic dependency-evidence settlement. The receipt
+    // gate above only ever REJECTED unproven `satisfied` answers — a closing
+    // verdict whose structured dispositions failed to echo the exact check
+    // texts (the organic #1721 `no-disposition` shape: the log reads
+    // `no-disposition=5` with zero parser drops while the run's narrative
+    // describes the gathered evidence) left every objective dependency row
+    // unresolved no matter what the run had actually acquired. A VALID
+    // ledger whose validated receipts JOINTLY cover every obligation kind ×
+    // every trusted scope entry (exact slug/version identities, web/forge
+    // trust, acquired AND complete — the full `dependencyReceiptCoverage`
+    // gate) has deterministically established the acquisition the row asks
+    // for, so the row settles with the receipts as provenance. Never from
+    // prose, never from a bare successful call, never over a confirmed
+    // negative (`unmet` stays forcing), and never behind a ledger this
+    // runtime cannot read (`trace-refused` is never receipt-backed) — a
+    // no-ledger run keeps the pre-#1657 fold byte-identical. The SAME
+    // settlement runs in the #750 completeness fold (`evaluateRequiredCheckCoverage`)
+    // so the two artifacts agree row-for-row.
+    if (withClass.status === "unresolved"
+      && withClass.rowClass === "objective"
+      && withClass.gate === "dependency-evidence"
+      && withClass.evidence?.state === "receipt-backed"
+      && ledger !== undefined
+      && ledger.state === "valid") {
+      return { ...withClass, status: "satisfied", cause: null, reason: "dependency-evidence" };
     }
     return withClass;
   });
@@ -1262,6 +1310,11 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   "unresolved-disposition",
   // #1657 vocabulary.
   "receipt-absent", "receipt-unverified", "receipt-mismatch", "trace-refused",
+  // #1726 vocabulary: the deterministic dependency-evidence settlement and
+  // the obligation-side CI-evidence reason refinement.
+  "dependency-evidence",
+  "ci-evidence-head-mismatch", "ci-evidence-no-matching-test-check",
+  "ci-evidence-test-check-not-success", "ci-evidence-test-check-contradicted",
   // Retired #1627/#1634 vocabulary — accepted for backward compatibility only.
   "uncited-satisfaction", "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
 ]);
