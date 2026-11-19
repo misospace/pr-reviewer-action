@@ -268,7 +268,10 @@ mounting the same claims), then re-run
 `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`
 inside the controller pod — the roots must still read `2750 1000 65532`
 and the follow-up job must not fail "cache root is writable by group or
-other". Operators mounting pre-existing claims must provide
+other". No repository test can simulate kubelet's fsGroup restyle, so
+this sequence is operator-side verification: run it once on a live
+install, and again after any executor or storage-driver change.
+Operators mounting pre-existing claims must provide
 the same root shape themselves; the contract is documented in the chart
 README.
 

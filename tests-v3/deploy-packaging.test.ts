@@ -311,6 +311,13 @@ test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping —
   const boundary = read("docs/architecture/executor-boundary.md");
   assert.doesNotMatch(boundary, /worker\s*\n?\s*pod pins `fsGroup/, "executor-boundary must not claim the worker pins fsGroup");
   assert.match(boundary, /MUST NOT carry\s*\n?\s*`fsGroup`/, "executor-boundary must state the worker no-fsGroup rule");
+  // fix-roots needs uid 0, so the pod is not Pod Security `restricted`
+  // compatible — an operator-facing constraint the chart README must state.
+  assert.match(chartReadme, /Pod Security\s*\n?\s*`restricted`/, "chart README must name the Pod Security restricted constraint on fix-roots");
+  assert.match(chartReadme, /`baseline`/, "chart README must name the profile that accepts fix-roots");
+  // kubelet's restyle cannot be simulated in-repo: the durability check is
+  // operator-side, and the doc must say so instead of implying coverage.
+  assert.match(deployment, /[Nn]o repository test can simulate kubelet/, "deployment doc must state the live-cluster run is operator-side");
 });
 
 test("values.schema.json is structurally valid with fail-closed top level", () => {

@@ -162,6 +162,14 @@ and configured concurrency/model costs before first enabling the poll.
   in Kubernetes-executor mode): it runs as root with only `CHOWN`/`FOWNER`
   added, `chown`s the runs and workspace-cache claim roots to the
   controller uid plus the shared group, and `chmod`s them to `2750`.
+  `fix-roots` is the only root container in the pod: it runs as uid 0
+  with `runAsNonRoot: false`, so a namespace enforcing the Pod Security
+  `restricted` profile rejects the controller pod in
+  Kubernetes-executor mode. Use `baseline` for that namespace (every
+  other container in the pod already satisfies `restricted`), or keep
+  the Kubernetes executor off. The root shape stays minimal: all
+  capabilities dropped except `CHOWN`/`FOWNER`, no privilege
+  escalation, read-only root filesystem, `RuntimeDefault` seccomp.
   `2750` keeps the shared group's read/execute (which the #1631 exchange
   needs) while stripping the group write the check refuses, and keeps the
   setgid bit that fsGroup provisioning itself carries: the runtime
