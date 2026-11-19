@@ -361,10 +361,30 @@ test("update title-only (no oldrev, no labels change) is unknown", () => {
   assert.equal(event?.kind, "unknown");
 });
 
-test("update adding the rereview label (object-form changes) is rereview_label", () => {
+/** A real GitLab label object exactly as the webhook contract serializes it:
+ * `{ id, title, color, project_id, created_at, updated_at, template,
+ * description, type, group_id }` — the name is `title`, never `name`. */
+function gitlabLabel(id: number, title: string): Record<string, unknown> {
+  return {
+    id,
+    title,
+    color: "#123123",
+    project_id: 14,
+    created_at: "2013-12-03T17:15:43.000Z",
+    updated_at: "2013-12-03T17:15:43.000Z",
+    template: false,
+    description: `${title} related issues`,
+    type: "ProjectLabel",
+    group_id: 41,
+  };
+}
+
+test("update adding the rereview label (object-form changes, documented title shape) is rereview_label", () => {
   const event = parseGitLabWebhookEvent(
     "Merge Request Hook",
-    updatePayload({ changes: { labels: { previous: [], current: [{ name: "ai-review", color: "0e8a16" }] } } }),
+    updatePayload({
+      changes: { labels: { previous: [gitlabLabel(206, "API")], current: [gitlabLabel(206, "API"), gitlabLabel(205, "ai-review")] } },
+    }),
   );
   assert.equal(event?.kind, "rereview_label");
   assert.equal(event?.labelName, "ai-review");
@@ -374,7 +394,7 @@ test("update adding the rereview label (array-form changes, minus previous)", ()
   const hit = parseGitLabWebhookEvent(
     "Merge Request Hook",
     updatePayload({
-      changes: [{ key: "labels", previous: [{ name: "docs" }], current: ["docs", "ai-review"] }],
+      changes: [{ key: "labels", previous: [gitlabLabel(1, "docs")], current: [gitlabLabel(1, "docs"), gitlabLabel(2, "ai-review")] }],
     }),
   );
   assert.equal(hit?.kind, "rereview_label");
@@ -382,10 +402,37 @@ test("update adding the rereview label (array-form changes, minus previous)", ()
   const noAdd = parseGitLabWebhookEvent(
     "Merge Request Hook",
     updatePayload({
-      changes: [{ key: "labels", previous: ["ai-review"], current: ["ai-review", "docs"] }],
+      changes: [{ key: "labels", previous: [gitlabLabel(2, "ai-review")], current: [gitlabLabel(2, "ai-review"), gitlabLabel(1, "docs")] }],
     }),
   );
   assert.equal(noAdd?.kind, "unknown");
+});
+
+test("label objects use the documented title field; name-only is the tolerated REST alias", () => {
+  // The regression: the documented webhook object shape carries `title`.
+  const titled = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [gitlabLabel(205, "ai-review")] } } }),
+  );
+  assert.equal(titled?.kind, "rereview_label");
+  // title wins when both fields disagree with the trigger.
+  const disagree = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [{ title: "ai-review", name: "other" }] } } }),
+  );
+  assert.equal(disagree?.kind, "rereview_label");
+  // A name-only entry remains accepted as the REST-API alias.
+  const named = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [{ name: "ai-review" }] } } }),
+  );
+  assert.equal(named?.kind, "rereview_label");
+  // An object with neither field contributes nothing.
+  const bare = parseGitLabWebhookEvent(
+    "Merge Request Hook",
+    updatePayload({ changes: { labels: { previous: [], current: [{ id: 9, color: "#ffffff" }] } } }),
+  );
+  assert.equal(bare?.kind, "unknown");
 });
 
 test("synchronize is checked before the labels branch (oldrev wins over a label add)", () => {

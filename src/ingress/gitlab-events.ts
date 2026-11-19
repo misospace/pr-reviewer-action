@@ -289,11 +289,19 @@ function commitIdOf(commit: unknown): string {
     : "";
 }
 
-/** One closed label-entry form: a string, or a plain object with a string
- * `name`. Anything else contributes nothing. */
+/** One closed label-entry form: a string, or a plain object carrying the
+ * documented GitLab label name. Webhook payloads serialize label objects with
+ * `title` (every documented `labels` / `changes.labels.previous` /
+ * `changes.labels.current` example uses `title`, e.g.
+ * `{ id, title: "Platform", color }`), so `title` is the field read here. A
+ * string `name` is tolerated only as an alias for payloads built from the
+ * REST-API label representation, which spells the same value `name`; `title`
+ * wins when both are present. Anything else contributes nothing. */
 function labelEntryName(entry: unknown): string | null {
   if (typeof entry === "string") return entry;
-  if (isPlainObject(entry) && typeof entry.name === "string") return entry.name;
+  if (!isPlainObject(entry)) return null;
+  if (typeof entry.title === "string") return entry.title;
+  if (typeof entry.name === "string") return entry.name;
   return null;
 }
 
