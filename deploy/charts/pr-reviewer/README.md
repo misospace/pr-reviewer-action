@@ -89,10 +89,11 @@ helm install pr-reviewer \
   (`instanceConfig`, `controlPlaneUrl`, `webhook`, `admin`,
   `reconcile`, `forgeAuth`, `credentials`, `followUp`, `paths`, `env`)
   PLUS the bjw-s common passthrough sections (`controllers`, `service`,
-  `persistence`, `secrets`, `serviceAccount`, `defaultPodOptions`, …)
-  rendered for the controller component. The common library reads its
-  API keys from the component's section (the chart re-roots the render
-  values), so operator-side overrides work exactly like app-template.
+  `route`, `persistence`, `secrets`, `serviceAccount`,
+  `defaultPodOptions`, …) rendered for the controller component. The
+  common library reads its API keys from the component's section (the
+  chart re-roots the render values), so operator-side overrides work
+  exactly like app-template.
 - `workerExecutor` — provisions the objects AROUND the worker Jobs
   (`mode: kubernetes`): dedicated worker ServiceAccount
   (token never mounted), namespace-scoped Role/RoleBinding granting the
@@ -195,3 +196,93 @@ stays off by default: `controller.admin.dashboard: false` leaves
 means nothing without the listener). The shell holds no data and needs
 no token; every value it shows comes from the bearer-protected
 `/admin/*` API. See `docs/architecture/operations-dashboard.md`.
+
+## Reaching the dashboard from outside the pod
+
+The chart's values define a single Service, `controller.service.webhook`
+(port 8080 — the POST-only forge intake). The admin listener (port 8081,
+which serves the `/dashboard` shell and the `/admin/*` API) has no Service of
+its own. So `controller.admin.dashboard: true` makes the pod serve the shell,
+but nothing routes to it from outside the pod. That split is deliberate:
+whether the admin surface leaves the pod is an operator ingress decision, and
+the shell is intentionally unauthenticated because it carries no data, so
+network access control is the remaining guard on who can reach it. Every
+value stays bearer-token protected regardless.
+
+Before the route is useful, the listener itself must exist and serve the
+shell: set `controller.admin.enabled: true` (without it there is no admin
+listener, and the `dashboard` flag fails the render) and
+`controller.admin.dashboard: true`.
+
+Making the dashboard reachable then needs two things, both plain bjw-s
+`common` passthrough under `controller` — no chart change and no
+hand-written HTTPRoute:
+
+1. **A Service port for the admin listener.** Add an `admin` port to a
+   controller Service. Reusing the `webhook` Service is the simplest; you can
+   instead define a dedicated `controller.service.admin`. The port number must
+   match `controller.admin.port` (default 8081).
+2. **A `route` that sends the dashboard and admin paths to that port** and
+   keeps the forge intake on its own path.
+
+This Gateway route splits one hostname by path (the shape verified in the
+#725 operator pilot). It has no catch-all rule, so `/metrics` and `/healthz`
+stay off the public route and unmatched paths 404 at the gateway:
+
+```yaml
+controller:
+  service:
+    webhook:
+      enabled: true
+      ports:
+        webhook: { port: 8080 }
+        admin: { port: 8081 } # admin listener: /dashboard and /admin/*
+  route:
+    main:
+      hostnames: ["pr-reviewer.example.com"]
+      parentRefs: [{ name: <gateway>, namespace: <gateway-namespace> }]
+      rules:
+        # Forge intake (POST-only). GitHub delivery ignores the path, but
+        # Forgejo/Gitea mount the EXACT canonical route, so the example
+        # uses one of them: keep /webhooks/forgejo (or /webhooks/gitea)
+        # here for those forges; any non-admin path is safe for GitHub.
+        - matches: [{ path: { type: PathPrefix, value: /webhooks/forgejo } }]
+          backendRefs: [{ identifier: webhook, port: 8080 }]
+        # Bearer-guarded admin API. It MUST ride the same origin as the
+        # shell: the dashboard script fetches /admin/* from the listener
+        # that served it (CSP connect-src 'self').
+        - matches: [{ path: { type: PathPrefix, value: /admin } }]
+          backendRefs: [{ identifier: webhook, port: 8081 }]
+        # The dashboard shell and its app.js.
+        - matches: [{ path: { type: PathPrefix, value: /dashboard } }]
+          backendRefs: [{ identifier: webhook, port: 8081 }]
+        # Bare domain -> dashboard. The bjw-s route class rejects a
+        # RequestRedirect rule that also carries backendRefs, so this has none.
+        - matches: [{ path: { type: Exact, value: / } }]
+          filters:
+            - type: RequestRedirect
+              requestRedirect:
+                statusCode: 301
+                path: { type: ReplaceFullPath, replaceFullPath: /dashboard }
+```
+
+`backendRefs[].identifier` names the Service key under `controller.service`
+(here `webhook`), never the rendered resource name. Three rules to keep:
+
+- **Route `/admin` and `/dashboard` to the same origin** (the admin port).
+  The dashboard script only calls `/admin/*` on the origin that served the
+  shell, so splitting them across hostnames breaks every data request.
+- **Never choose `/dashboard*` or `/admin*` as the forge intake path.** The
+  GitHub intake ignores the path and the Forgejo/Gitea intake mounts a fixed
+  canonical route; either way those two prefixes belong to the admin listener
+  and must not collide with delivery.
+- **With `networkPolicy.enabled: true`, open the admin port to the gateway.**
+  The chart's default-deny ingress allows only the webhook port, plus the
+  admin port for Prometheus scrapes from the release namespace when
+  `serviceMonitor` is on — a gateway in another namespace cannot reach 8081.
+  Add a matching rule (gateway pod/namespace selector, port 8081) under
+  `networkPolicy.additionalIngress`.
+
+To keep a browser surface off entirely, leave `controller.admin.dashboard`
+at its default `false`; then `/dashboard` answers the fixed 404 and only the
+bearer-protected admin API can be exposed the same way.
