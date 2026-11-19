@@ -143,6 +143,32 @@ const LOW_BUDGET_TURN_NOTE =
   "evidence still needed for the verdict.";
 
 /**
+ * #1729: the model-confirmed completion gate's turn note — the one turn the
+ * loop spends between a satisfied deterministic coverage gate and the
+ * `investigation-complete` stop. Deliberately not a "[loop budget]" note (a
+ * confirmation round may carry the regular budget note beside it; the #1396
+ * single-budget-note invariant is about budget notes only). Trusted driver
+ * text: names no untrusted content. It carries the issue's two distinctions
+ * in the model's own decision: cheaply checkable questions are resolved with
+ * tools BEFORE the stop (they are not resolved by externalizing them to the
+ * human), and only questions the available tools and evidence genuinely
+ * cannot settle are a legitimate reason to confirm completion.
+ */
+export const INVESTIGATION_COMPLETION_CONFIRMATION_TURN_NOTE =
+  "[loop coverage] The deterministic coverage gate is satisfied: every changed " +
+  "file and file-bound specialist lead is covered by successful reads or a " +
+  "certified complete corpus diff, and no " +
+  "required evidence is outstanding — but the investigation is not complete " +
+  "until YOU confirm it. Before you stop: any open verification, unknown, or " +
+  "\"please confirm\" question you intend to raise must first be checked with " +
+  "your tools while budget remains — a question an ordinary repository read or " +
+  "search can answer is not resolved by handing it to the human instead. " +
+  "Continue investigating now if such questions remain; when the only questions " +
+  "left are ones your available tools and evidence genuinely cannot settle, " +
+  "reply with NO tool calls to confirm the investigation is complete and " +
+  "proceed to the verdict.";
+
+/**
  * #1379: deterministic tool-loop prioritization for dependency-update PRs.
  * When the caller (the harness, keyed on the PR's classification) reserves a
  * tail of the request budget for required dependency evidence, the driver —
@@ -607,6 +633,14 @@ export interface NativeLoopRoundTelemetry extends AcceptedAttemptTiming {
   wall_clock_remaining_sec: number;
   /** True when this turn's streamed transport fell back to a non-streamed call. */
   streamed_fallback: boolean;
+  /**
+   * #1729: true when this turn's request carried the investigation-completion
+   * confirmation note — the model-confirmed completion gate's single
+   * driver-to-model question ("resolve the cheaply checkable verification
+   * questions first, then confirm with no tool calls"). Content-free
+   * boolean; never set on a round whose loop had not armed the gate.
+   */
+  completion_confirmation_requested: boolean;
   /**
    * #1628: the turn's DISCARDED streamed attempt, with its own reason,
    * status, elapsed time, and wire-observation — the record that makes two
@@ -1316,6 +1350,9 @@ export async function driveToolLoop(
     finishReason: string;
     /** #1628: the turn's discarded streamed attempt (null when none). */
     streamFailure: StreamedAttemptFailureRecord | null;
+    /** #1729: the turn's request carried the investigation-completion
+     * confirmation note (the model-confirmed completion gate). */
+    confirmationNote: boolean;
   }): void => {
     if (options.onRound === undefined) return;
     // #1466: the accepted attempt's probe and the turn's call counts. The
@@ -1338,6 +1375,10 @@ export async function driveToolLoop(
       rounds_remaining: Math.max(0, budgets.maxRounds - outcome.rounds),
       wall_clock_remaining_sec: roundSec(Math.max(0, budgets.wallClockSec - (nowFn() - telemetryStart))),
       streamed_fallback: record.fellBack,
+      // #1729: the model-confirmed completion gate — true when this turn's
+      // request carried the completion-confirmation note. Content-free
+      // boolean, the same field policy as `streamed_fallback`.
+      completion_confirmation_requested: record.confirmationNote === true,
       // #1628: the discarded streamed attempt's OWN record (reason, status,
       // elapsed, observation) when this turn made a fallback. Null otherwise
       // — never a zero-filled stand-in.
@@ -1367,7 +1408,33 @@ export async function driveToolLoop(
   // requests even when the round budget runs out first.
   let roundCeiling = budgets.maxRounds;
   let extensionRounds = 0;
+  // #1729: the model-confirmed completion gate. When the deterministic
+  // completion predicate holds with budget AND a round slot remaining, the
+  // loop no longer declares the investigation complete on the model's
+  // behalf: the NEXT round carries
+  // INVESTIGATION_COMPLETION_CONFIRMATION_TURN_NOTE (resolve the cheaply
+  // checkable questions first, then confirm), and only the model's own
+  // no-tool-calls reply on that round selects STOP_INVESTIGATION_COMPLETE.
+  // Set at the end of a clean covered round; cleared the moment the model
+  // answers the confirmation with further tool calls (it is still
+  // investigating); never set when no confirmation turn is possible — that
+  // path reports the ordinary exhaustion stop (`tool-call-budget-exhausted`
+  // or `max-rounds`), never a completion the model did not confirm. False
+  // here so a first-round no-tool-calls reply keeps its
+  // model-stopped/no-tool-calls meaning.
+  let completionConfirmationPending = false;
   loop: while (outcome.rounds < roundCeiling) {
+    // #1729: whether THIS round's request carried the completion-confirmation
+    // note — the per-round fact the round telemetry record persists (the
+    // pending flag is cleared mid-round the moment the model answers with
+    // calls, so the flag alone cannot describe the record). Also whether the
+    // coverage gate was SATISFIED this round (armed or not): a satisfied round
+    // suppresses the #1627 obligations-settled check below for the round (the
+    // #1702 precedence — coverage completion beats the settled stop — survives
+    // the gate, and an exhausted covered round must report the exhaustion
+    // stop, not the settled one).
+    let carriedConfirmationNote = false;
+    let coverageGateSatisfiedThisRound = false;
     if (
       wallClockDeadline !== null
         ? timeFn() >= wallClockDeadline
@@ -1576,6 +1643,18 @@ export async function driveToolLoop(
       }
     }
 
+    // #1729: deliver the completion-confirmation note on the round the gate
+    // armed. Delivered HERE — after the wall-clock checks and beside the
+    // budget-note selection — so a wall-clock stop or a #1627
+    // obligations-settled stop that breaks before this round never leaves a
+    // stale confirmation request in the transcript the verdict turn reads.
+    // The note rides beside (never replaces) the regular budget note; it is
+    // a different note class with its own prefix.
+    if (completionConfirmationPending) {
+      conversation.addTurnNote(INVESTIGATION_COMPLETION_CONFIRMATION_TURN_NOTE);
+      carriedConfirmationNote = true;
+    }
+
     const payload = conversation.toRequestPayload(options.apiFormat, options.model, {
       stream,
       maxTokens,
@@ -1631,6 +1710,7 @@ export async function driveToolLoop(
       streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason: "",
+        confirmationNote: carriedConfirmationNote,
       });
       broke = true;
       break;
@@ -1649,7 +1729,14 @@ export async function driveToolLoop(
 
     if (calls.length === 0) {
       outcome.finalText = text;
-      outcome.stopReason = outcome.toolCallsIssued > 0 ? STOP_MODEL_DONE : STOP_NO_TOOL_CALLS;
+      // #1729: on the confirmation turn the model's own no-tool-calls reply
+      // IS the completion confirmation — `investigation-complete` now
+      // requires it (the deterministic gate alone stopped arming the
+      // confirmation; a no-calls reply on a non-confirmation round keeps its
+      // model-stopped / no-tool-calls meaning unchanged).
+      outcome.stopReason = completionConfirmationPending
+        ? STOP_INVESTIGATION_COMPLETE
+        : outcome.toolCallsIssued > 0 ? STOP_MODEL_DONE : STOP_NO_TOOL_CALLS;
       emitRound({
         roundIndex: outcome.rounds,
         requested: 0,
@@ -1663,10 +1750,16 @@ export async function driveToolLoop(
       streamFailure: turnStreamFailure,
         probes: turnProbes,
         finishReason,
+        confirmationNote: carriedConfirmationNote,
       });
       broke = true;
       break;
     }
+
+    // #1729: the model answered the completion-confirmation request with
+    // more work — it is still investigating. The gate disarms; the next
+    // clean covered round re-arms with a fresh note.
+    completionConfirmationPending = false;
 
     if (text) {
       // Interleaved reasoning text rides along inside the same assistant turn
@@ -1957,6 +2050,7 @@ export async function driveToolLoop(
       streamFailure: turnStreamFailure,
       probes: turnProbes,
       finishReason,
+      confirmationNote: carriedConfirmationNote,
     });
 
     // #1388; #1396: round-ceiling extension for the reserved window.
@@ -1992,9 +2086,41 @@ export async function driveToolLoop(
     if (!materialPending && roundExecuted > 0 && roundRefused === 0
       && [...resultsByIdx.values()].every((result) => result.status === "ok")
       && options.coverageComplete?.(outcome) === true) {
-      outcome.stopReason = STOP_INVESTIGATION_COMPLETE;
-      broke = true;
-      break loop;
+      // #1729: the deterministic coverage gate alone no longer selects
+      // `investigation-complete` while the model can still act on it. File
+      // coverage says nothing about the open verification / "please confirm"
+      // questions the model may still intend to raise (issue #1728 review
+      // 5963272114: a 2-call review stopped `investigation-complete` with
+      // 38/40 calls unused and externalized questions answerable by ordinary
+      // repository reads). While budget AND a round slot remain, the gate
+      // ARMS instead of stopping: the next round carries
+      // INVESTIGATION_COMPLETION_CONFIRMATION_TURN_NOTE — resolve the
+      // cheaply-checkable questions with the unused budget first, then
+      // confirm — and the model's own no-tool-calls reply on that round is
+      // what selects the stop (the calls.length === 0 branch above). The
+      // gate re-arms after every round the model answers with more work, so
+      // a review only ever ends `investigation-complete` when the model
+      // confirmed completion with the unused budget in view.
+      //
+      // No confirmation turn possible — the last request was just spent, or
+      // the round ceiling is reached — is NOT a completion: nobody confirmed
+      // one. The loop falls through to the ordinary exhaustion stops instead
+      // (`tool-call-budget-exhausted` from the budget check below, or
+      // `max-rounds` when the round ceiling ends the loop), so a covered run
+      // cut short still reads as an incomplete investigation to the coverage
+      // machinery, and `investigation-complete` keeps meaning exactly one
+      // thing: the model confirmed it.
+      coverageGateSatisfiedThisRound = true;
+      if (callsExecuted < budgets.maxToolCalls && outcome.rounds < roundCeiling) {
+        completionConfirmationPending = true;
+      }
+      // #1702 precedence preserved: a round that satisfies the coverage gate
+      // kept beating the #1627 obligations-settled stop (a trace row may have
+      // settled in the same round) — including the exhausted covered round,
+      // which must report its exhaustion stop rather than `obligations-settled`.
+      // The settled check below is suppressed for THIS round only; it still
+      // fires on any later round that did not satisfy the gate (failed calls,
+      // incomplete coverage).
     }
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;
@@ -2035,7 +2161,8 @@ export async function driveToolLoop(
     const traceNeedsCoverage = pendingRows.some((row) =>
       row.tools !== undefined && row.obligation === undefined);
     if (obligationsSeenActive && !hasActiveRow()
-      && (!traceNeedsCoverage || options.coverageComplete?.(outcome) === true)) {
+      && (!traceNeedsCoverage || options.coverageComplete?.(outcome) === true)
+      && !coverageGateSatisfiedThisRound) {
       const strandedSettlement = pendingRows.some((row) => {
         if (discharged.has(row.id)) {
           return !seededDischarged.has(row.id) && !rowSuccessfulAttempt.has(row.id);

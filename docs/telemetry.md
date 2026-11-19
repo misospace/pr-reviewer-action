@@ -186,6 +186,7 @@ credentials.
 | `wire_calls` | The number of HTTP requests the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value counts the retries that the transport made. |
 | `finish_reason` | The provider's stop reason for the accepted attempt. The value is reduced to a short token, so a provider cannot put free text in the artifact. |
 | `streamed_fallback` | True when a streamed answer was unusable and the turn called the provider again without streaming. |
+| `completion_confirmation_requested` | True when the turn's request carried the investigation-completion confirmation note (#1729): the deterministic coverage gate was satisfied, the model was asked to resolve its remaining cheaply-checkable verification questions first and then confirm, and this was that round. The stop that follows a no-tool-calls reply on such a round is `investigation-complete`. |
 | `tools_requested` | The tool calls the model asked for in the turn. |
 | `tools_executed` | The tool calls the turn ran. |
 | `tools_refused` | The tool calls the turn refused, because they were over budget or had invalid arguments. |
