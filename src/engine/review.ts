@@ -135,6 +135,7 @@ import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArt
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { extractLinkedIssueRefs } from "../precheck/linked-issues.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2203,6 +2204,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // authoritative platform PR snapshot, never model output, and is never used to
   // confirm a code obligation — the validator's classifier gates that out.
   const tracePrBody = `${String(pr.title ?? "")}\n${String(pr.body ?? "")}`;
+  // #1750: the current PR's own linked-issue references, as canonical
+  // casefolded `repo#N` identities — derived with the SAME pure extraction
+  // grammar the linked-issue intake used (so the two stages cannot disagree
+  // about what the PR references). Consumed ONLY by the umbrella-parent
+  // ownership boundary in `requirementTraceScope`: a parent criterion whose
+  // trusted decomposition names an owning child this PR references — in any
+  // form — stays mandatory, because this PR may be that child's implementer.
+  const tracePrLinkedRefs = extractLinkedIssueRefs(String(pr.body ?? ""), repo, String(pr.title ?? ""))
+    .map((ref) => `${ref.repo.toLowerCase()}#${ref.number}`);
   // #1062 review follow-up: when the CI gate finalized during this run, hand its
   // exact-head conclusion to the requirement-trace advisory diagnostics (an
   // `external_state` row reports the known state, or explicitly that none was
@@ -2227,7 +2237,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // pass below, so the prompt, the repair and the validator all see the same
   // scope.
   const traceScopeIds = requirementTraceEnabled
-    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines }).inScope.map((entry) => entry.id)
+    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs }).inScope.map((entry) => entry.id)
     : [];
   const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
@@ -2661,7 +2671,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState });
     // #1658 removed the #1145 confirmed-unmet ESCALATION — the trace no
     // longer synthesizes findings or touches the verdict. The #1656
     // round-3 signal survives through the disposition instead: the
@@ -2741,7 +2751,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState });
     // #1658 removed the #1145 escalation and its synthesized blocker (the
     // relaxers' `requirement_trace_incomplete` refusal still holds the
     // non-strict composition); the mechanical refutation COUNT feeds the

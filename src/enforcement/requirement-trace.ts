@@ -145,6 +145,7 @@ import { type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
+import { boundedChildRefs } from "../precheck/linked-issues.js";
 import { parseCitationLocation } from "./citations.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
@@ -1389,12 +1390,15 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
     // #1749: the linked-issue relationship provenance, re-read under the
     // same bounds the ledger parse applied. `closing` is strict — only an
     // explicit boolean survives; a legacy artifact's missing field is
-    // unknown and never reads as "non-closing".
+    // unknown and never reads as "non-closing". #1750: the trusted
+    // criterion→child ownership evidence (`childRefs`) re-bounds the same
+    // way — an over-count or malformed list drops whole, never truncated
+    // (a lost owner could be the very child the PR references).
     const linkedRefs: LinkedScopeRef[] = [];
     if (Array.isArray(provenance)) {
       for (const p of provenance) {
         if (!p || typeof p !== "object") continue;
-        const rec = p as { source?: unknown; ref?: unknown; closing?: unknown; labels?: unknown };
+        const rec = p as { source?: unknown; ref?: unknown; closing?: unknown; labels?: unknown; childRefs?: unknown };
         if (standardsRefs.length < MAX_STANDARDS_REFS && rec.source === "standards" && typeof rec.ref === "string" && rec.ref !== "") {
           const ref = rec.ref.toLowerCase();
           if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
@@ -1406,7 +1410,12 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
           .slice(0, 8)
           .some((label) => typeof label === "string"
             && UMBRELLA_ISSUE_LABELS.has(label.slice(0, MAX_UMBRELLA_LABEL_MATCH_CHARS).trim().toLowerCase()));
-        linkedRefs.push({ ref: typeof rec.ref === "string" ? rec.ref : "", closing, umbrella });
+        linkedRefs.push({
+          ref: typeof rec.ref === "string" ? rec.ref : "",
+          closing,
+          umbrella,
+          childRefs: boundedChildRefs(rec.childRefs) ?? [],
+        });
       }
     }
     out.push({ entry: { id, text, kind }, sources, standardsRefs, linkedRefs });
@@ -2274,11 +2283,15 @@ export interface RequirementTraceScope {
  * provenance entry, re-read from the persisted ledger artifact. `closing`
  * is three-state: `true`/`false` when the intake-rendered relationship line
  * said so, `undefined` when the artifact predates the metadata (unknown —
- * the scope predicate fails closed on it). */
+ * the scope predicate fails closed on it). #1750: `childRefs` carries the
+ * trusted criterion→child ownership evidence parsed from the linked
+ * umbrella's own decomposition — canonical `repo#N` identities, empty when
+ * no well-formed association exists (the fail-closed reading). */
 interface LinkedScopeRef {
   ref: string;
   closing: boolean | undefined;
   umbrella: boolean;
+  childRefs: string[];
 }
 
 /** #1749: the bounded forge-label vocabulary that marks a linked issue as a
@@ -2378,6 +2391,28 @@ const MAX_UMBRELLA_LABEL_MATCH_CHARS = 256;
  * provenance source, and any security vocabulary each independently keep
  * the entry in scope.
  *
+ * #1750 (operator CR on the first #1749 cut) tightens that narrowing with a
+ * trusted OWNERSHIP requirement: the umbrella label + non-closing-ref shape
+ * alone does not prove that the SPECIFIC criterion belongs to separately
+ * decomposed child work — it only proves the parent holds several pieces of
+ * work, one of which may be this very PR's responsibility — yet the machine
+ * reason claimed child ownership anyway, so a touched, correctly-reported-
+ * unmet parent criterion was scoped out and the disposition could reach
+ * APPROVE. The narrowing now additionally requires evidence from the
+ * bounded forge-metadata channel built for it: the linked umbrella's OWN
+ * body decomposition (task-list items referencing child issues, parsed
+ * conservatively at intake and carried through the ledger provenance as
+ * canonical child identities — see `src/precheck/linked-issues.ts` and
+ * `src/requirements/requirement-id.ts`). The criterion scopes out only when
+ * a well-formed association names child work for it AND the current PR
+ * (its `prLinkedRefs`, canonical identities from the same extraction
+ * grammar intake used) references NONE of the owning children — in any
+ * form, closing or non-closing, since a PR referencing the owning child may
+ * be that child's implementer. Without the association the criterion stays
+ * in scope and NO out-of-scope reason is emitted at all; with it, the
+ * reason cites the owning child. Umbrella label + non-closing ref alone is
+ * NEVER ownership evidence, and neither is model prose or PR text.
+ *
  * Proof validation, blocker classification, and the approval/attestation
  * gates are unchanged; the out-of-scope reason records which boundary
  * signals the change missed, so the `not_applicable` row is explainable from
@@ -2394,11 +2429,32 @@ export function requirementTraceScope(
      * `changed` text — so the lexical match keeps full weight (fail closed)
      * rather than dropping a requirement on unproven attribution. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own linked-issue references, as canonical
+     * casefolded `repo#N` identities (the engine derives them with the same
+     * pure extraction grammar intake used). Consumed ONLY by the
+     * umbrella-parent ownership boundary: a criterion whose trusted
+     * decomposition names an owning child the PR itself references — in any
+     * form, closing or non-closing — stays mandatory, because the PR may be
+     * that child's implementer. Non-canonical entries are dropped (never
+     * matched), so an unparseable identity can never silently count as "not
+     * referenced". */
+    prLinkedRefs?: readonly string[] | undefined;
   } = {},
 ): RequirementTraceScope {
   const ownership = context.ownership ?? [];
   const paths = context.paths ?? [];
   const compiledOwnership = ownership.length > 0 && paths.length > 0 ? compileOwnership(ownership) : [];
+  // #1750: canonical identity set of the refs the current PR itself uses —
+  // casefolded before the shape test, since identity comparison is
+  // casefolded on the repo (the same convention extractLinkedIssueRefs
+  // dedupes by), and matching MORE is the safe direction here: a matched
+  // owning child keeps the criterion mandatory.
+  const prLinkedRefSet = new Set(
+    (context.prLinkedRefs ?? [])
+      .filter((ref) => typeof ref === "string")
+      .map((ref) => (ref as string).toLowerCase())
+      .filter((ref) => /^(?:[a-z0-9_.-]+\/[a-z0-9_.-]+)?#[0-9]+$/.test(ref)),
+  );
   // #1600 content/path classes are computed from the same bounded change
   // evidence for every standards row. The document/example lists are path
   // classifications only; whether one is relevant to a requirement is decided
@@ -2465,10 +2521,29 @@ export function requirementTraceScope(
     // non-linked provenance source, one unknown relationship state, one
     // missing umbrella label, or one security-vocabulary token keeps the
     // entry on its existing (mandatory) path.
+    // #1750 (operator CR): the umbrella label + non-closing ref shape alone
+    // is NO LONGER sufficient — that shape does not prove the SPECIFIC
+    // criterion belongs to separately decomposed child work, yet the machine
+    // reason claimed exactly that. The narrowing now additionally requires
+    // trusted ownership evidence: the linked umbrella's own body
+    // decomposition (task-list items referencing child issues, parsed
+    // conservatively at intake and carried through the ledger provenance as
+    // canonical child identities) must associate THIS criterion with child
+    // work. Without that association the criterion stays in scope — the
+    // unsafe case (the PR is actually responsible for one of the parent's
+    // criteria, the reviewer correctly reports it unmet, and the row was
+    // scoped out anyway) cannot recur. The evidence is also void when the
+    // current PR references ANY owning child, in any form: a PR referencing
+    // the owning child may be that child's implementer, so the criterion
+    // stays mandatory. Model prose and PR text claiming "deferred"/"not my
+    // scope" never reach this decision — only the deterministic channel does.
     const allLinked = sources !== null && sources.length > 0 && sources.every((source) => source === "linked_issues");
+    const owningChildren = [...new Set(linkedRefs.flatMap((ref) => ref.childRefs))];
     const umbrellaParent = allLinked
       && linkedRefs.length > 0
       && linkedRefs.every((ref) => ref.closing === false && ref.umbrella)
+      && owningChildren.length > 0
+      && !owningChildren.some((child) => prLinkedRefSet.has(child))
       && !securityBoundaryRequirement(entry.text);
     const umbrellaRefs = [...new Set(linkedRefs.map((ref) => ref.ref.slice(0, 64)).filter((ref) => ref !== ""))].join(", ");
     let entryInScope: boolean;
@@ -2490,7 +2565,7 @@ export function requirementTraceScope(
       scope.outOfScope.push({
         entry,
         reason: umbrellaParent
-          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the criterion is owned by the umbrella's separately linked/decomposed child work and the current PR does not claim parent closure (linked only by non-closing refs), so the umbrella's acceptance set is not this increment's merge contract`
+          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the umbrella's own trusted decomposition associates this criterion with separately tracked child work (${owningChildren.join(", ")}) and the current PR does not claim parent closure (linked only by non-closing refs) nor reference the owning child, so the umbrella's acceptance set is not this increment's merge contract`
           : linked
             ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
             : boundaryNarrowed
@@ -2735,6 +2810,10 @@ export function validateRequirementTrace(
      * content-based scope evidence can never combine one path with another
      * file's text. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own linked-issue references, as canonical
+     * casefolded `repo#N` identities — consumed ONLY by the umbrella-parent
+     * ownership boundary (see {@link requirementTraceScope}). */
+    prLinkedRefs?: readonly string[] | undefined;
     /** #1062: the trusted PR description (title + body) at head, used ONLY as
      * the positive-confirmation source for a `documentation`-domain obligation
      * that names a single literal. `null` (the default) means no trusted body is
@@ -3312,6 +3391,10 @@ export function applyRequirementTraceEnforcement(
     /** #1600: added/removed lines attributed to each changed file, for
      * content-based scope evidence. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own linked-issue references, as canonical
+     * casefolded `repo#N` identities — consumed ONLY by the umbrella-parent
+     * ownership boundary (see {@link requirementTraceScope}). */
+    prLinkedRefs?: readonly string[] | undefined;
     /** #1062 trusted PR description (title + body) at head — the only source a
      * `documentation`-domain row may be positively confirmed against. */
     prBody?: string | null | undefined;
@@ -3336,6 +3419,7 @@ export function applyRequirementTraceEnforcement(
     ownership: options.ownership,
     paths: options.paths,
     fileLines: options.fileLines,
+    prLinkedRefs: options.prLinkedRefs,
     prBody: options.prBody,
     ciState: options.ciState,
   });

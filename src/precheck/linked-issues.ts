@@ -37,6 +37,127 @@ export const MAX_LINKED_ISSUES = 8;
 export const LINKED_AS_CLOSING_LINE = "(linked as: closing reference)";
 export const LINKED_AS_NON_CLOSING_LINE = "(linked as: non-closing reference)";
 
+// ---------------------------------------------------------------------------
+// #1750: trusted criterion→child ownership evidence (the umbrella
+// decomposition channel)
+//
+// The umbrella-parent scope narrowing may treat an acceptance criterion as
+// not-this-increment's-merge-contract ONLY when trusted deterministic
+// evidence shows the SPECIFIC criterion is owned by separately decomposed
+// child work. The trusted channel is the linked umbrella's OWN body: its
+// task-list decomposition structure — task-list items referencing child
+// issues, inline in the criterion item or on list items nested under it —
+// which is forge metadata fetched at intake, never PR-authored prose. Intake
+// parses that structure conservatively and renders ONE exact-structure
+// metadata line per associated criterion:
+//
+//     (decomposition: req-<content id> -> o/r#101, o/r#102)
+//
+// The `<content id>` is the requirement ledger's own content-derived id
+// (src/requirements/requirement-id.ts), so issue content never appears
+// outside the JSON fence in `linked-issues.md` — the exact-match trust model
+// for metadata lines is preserved — and a decomposition line can only ever
+// affect the ledger entry whose id it names. Everything here is a pure leaf
+// (no imports): the context stage renders the lines, the requirement ledger
+// parses them into provenance, and the trace scope consumes the provenance.
+// Every bound fails closed: a malformed or over-count association renders no
+// line and parses to nothing, and the scope predicate treats a missing
+// association as "criterion stays in scope" — never as ownership.
+// ---------------------------------------------------------------------------
+
+/** At most 16 association lines per linked issue (the ledger's per-document
+ * association budget matches). Over-count criteria render no line — an
+ * association that cannot be carried is never approximated. */
+export const MAX_DECOMPOSITION_LINES_PER_ISSUE = 16;
+
+/** At most 4 owning child refs per criterion. An item naming more children
+ * than this renders no line at all: a truncated owner list could silently
+ * drop the very child the PR references, which is the unsafe direction. */
+export const MAX_DECOMPOSITION_REFS_PER_CRITERION = 4;
+
+/** A canonical child identity: bare same-repo `#N` refs are resolved against
+ * the linked issue's own repo at intake, so everything crossing the seam is
+ * an explicit, casefolded `repo#N`. */
+export const CANONICAL_CHILD_REF_PATTERN = /^(?:[a-z0-9_.-]+\/[a-z0-9_.-]+)?#[0-9]+$/;
+
+export function canonicalChildRef(repo: string, number: number): string {
+  return `${repo.toLowerCase()}#${number}`;
+}
+
+/** Issue references inside one line of text, as canonical `repo#N`
+ * identities: explicit `owner/repo#N` keeps its repo (casefolded); a bare
+ * `#N` is resolved against `ownerRepo` (the linked issue's own repository —
+ * a bare ref inside an issue body refers to that issue's repo, not the
+ * reviewed repo). Word- or slash-attached tokens (`xfoor#1`, `a/b/c#12`) are
+ * deliberately not matched, and URL tails (`…/issues/1677`) carry no `#` and
+ * never match. Deduplicated in order of appearance. */
+export function childRefsInText(text: string, ownerRepo: string): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/(?<![\w/])((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)(?!\w)/g)) {
+    const token = match[1] ?? "";
+    const hash = token.indexOf("#");
+    const repo = token.includes("/") ? token.slice(0, hash) : ownerRepo;
+    const number = token.slice(hash + 1);
+    if (!repo || !/^\d+$/.test(number)) continue;
+    const canonical = canonicalChildRef(repo, Number.parseInt(number, 10));
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    refs.push(canonical);
+  }
+  return refs;
+}
+
+/** Render the exact-structure metadata line. Intake renders at most one line
+ * per associated criterion, in body order. */
+export function renderDecompositionLine(requirementId: string, childRefs: readonly string[]): string {
+  return `(decomposition: ${requirementId} -> ${childRefs.join(", ")})`;
+}
+
+const DECOMPOSITION_LINE_RE = /^\(decomposition: (req-[0-9a-f]{12}) -> (.+)\)$/;
+
+/** Parse one metadata line. Strict: the id must be a well-formed content id,
+ * every child ref must already be canonical, and the ref count must be within
+ * bounds — anything else parses to `null` and the association does not exist
+ * (fail closed). Repeated ids for the same criterion never occur in honest
+ * intake output; the ledger keeps only the FIRST line per id, so a repeated
+ * line can neither merge nor replace an association. */
+export function parseDecompositionLine(line: string): { requirementId: string; childRefs: string[] } | null {
+  const match = DECOMPOSITION_LINE_RE.exec(line.trim());
+  if (match === null) return null;
+  const childRefs: string[] = [];
+  const seen = new Set<string>();
+  for (const token of (match[2] ?? "").split(", ")) {
+    if (!CANONICAL_CHILD_REF_PATTERN.test(token)) return null;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    childRefs.push(token);
+  }
+  if (childRefs.length === 0 || childRefs.length > MAX_DECOMPOSITION_REFS_PER_CRITERION) return null;
+  return { requirementId: match[1] ?? "", childRefs };
+}
+
+/** Re-bound a `childRefs` list crossing the deserialization boundary (the
+ * persisted ledger artifact is untrusted data). Non-string or non-canonical
+ * entries are dropped; an over-count list drops WHOLLY — truncating to the
+ * first N would silently lose real owners, and a lost owner can only make the
+ * scope predicate miss a PR reference to the owning child (the unsafe
+ * direction). `undefined` when nothing trustworthy survives, so the field
+ * stays absent rather than empty. */
+export function boundedChildRefs(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || !CANONICAL_CHILD_REF_PATTERN.test(item)) continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    refs.push(item);
+  }
+  if (refs.length === 0 || refs.length > MAX_DECOMPOSITION_REFS_PER_CRITERION) return undefined;
+  return refs;
+}
+
 /** Hard safety bound on raw extraction (#872 follow-up): the accepted-issue
  * cap (`MAX_LINKED_ISSUES`) is enforced downstream, over issues that
  * actually get fetched and accepted (see `buildLinkedIssueContext`), not

@@ -530,3 +530,91 @@ test("#1749: skip and failure notices render no relationship line", async () => 
   assert.match(md, /\(Skipped issue #2 from o\/r: linked object is a pull request\)/);
   assert.match(md, /\(Could not fetch issue #3 from o\/r\)/);
 });
+
+// ── #1750 (operator CR): trusted criterion→child ownership evidence ───────
+// The umbrella-parent scope-out needs evidence that the SPECIFIC criterion is
+// owned by separately decomposed child work. The trusted channel is the
+// linked umbrella's OWN body: task-list items referencing child issues
+// (inline refs, or child refs on items nested under the criterion item).
+// Intake parses that conservatively and renders one exact-structure
+// `(decomposition: req-<content-id> -> <canonical child refs>)` metadata line
+// per associated criterion — the content id is the requirement ledger's own
+// id recipe, so issue content never appears outside the JSON fence and the
+// ledger can only attach the association to the entry the id names. A body
+// without task-list decomposition (the organic umbrella shape today) renders
+// no lines and the scope predicate fails closed.
+
+import { createHash } from "node:crypto";
+
+const reqIdOf = (text: string): string =>
+  "req-" + createHash("sha256").update(Buffer.from(text.toLowerCase(), "utf8")).digest("hex").slice(0, 12);
+
+test("#1750: intake renders decomposition lines for task-list criteria that reference child work", async () => {
+  const body = [
+    "## Acceptance criteria",
+    "- [ ] Criterion alpha MUST hold. (#101)",
+    "- [ ] Criterion beta MUST hold.",
+    "  - [ ] #102 beta child work",
+    "- [ ] Criterion gamma MUST hold.",
+    "",
+  ].join("\n");
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment (#42)", body: "Part of the umbrella." }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  const rendered = md.split("\n").filter((line) => line.startsWith("(decomposition: "));
+  assert.deepEqual(rendered, [
+    `(decomposition: ${reqIdOf("Criterion alpha MUST hold. (#101)")} -> o/r#101)`,
+    `(decomposition: ${reqIdOf("Criterion beta MUST hold.")} -> o/r#102)`,
+    `(decomposition: ${reqIdOf("#102 beta child work")} -> o/r#102)`,
+  ], "inline refs and nested child refs both associate; bare child refs canonicalize against the linked issue's repo");
+  assert.ok(!rendered.some((line) => line.includes(reqIdOf("Criterion gamma MUST hold."))), "a criterion with no child work renders no ownership evidence");
+});
+
+test("#1750: a body without task-list decomposition renders no ownership evidence (organic shape)", async () => {
+  // The organic umbrella shape: task-list criteria WITHOUT child refs, plus a
+  // flat decomposition list of child issues. Neither associates a specific
+  // criterion with a child, so nothing renders — fail closed.
+  const body = [
+    "## Acceptance criteria",
+    "- [ ] GitLab and Gitea feed the same scheduler/engine.",
+    "- [ ] Forge capability differences remain adapter-local.",
+    "",
+    "## Decomposition",
+    "",
+    "- #1677: https://forge.example/o/r/issues/1677",
+    "- #1678: https://forge.example/o/r/issues/1678",
+    "",
+  ].join("\n");
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment (#42)", body: "Part of the umbrella." }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith("(decomposition: ")).length, 0, "no trusted criterion→child association → no evidence");
+});
+
+test("#1750: decomposition evidence is bounded — 16 lines per issue, and an over-count item renders none", async () => {
+  const bodies: string[] = [];
+  for (let i = 0; i < 17; i += 1) bodies.push(`- [ ] Criterion ${i} MUST hold. (#2${String(i).padStart(2, "0")})`);
+  bodies.push("- [ ] Criterion wide MUST hold. #1 #2 #3 #4 #5");
+  const body = `## Acceptance criteria\n${bodies.join("\n")}\n`;
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment (#42)", body: "Part of the umbrella." }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  const rendered = md.split("\n").filter((line) => line.startsWith("(decomposition: "));
+  assert.equal(rendered.length, 16, "at most 16 association lines per linked issue");
+  assert.ok(!rendered.some((line) => line.includes(reqIdOf("Criterion wide MUST hold."))), "an item with more than 4 child refs renders no line (fail closed)");
+});

@@ -26,15 +26,18 @@
 
 import { createHash } from "node:crypto";
 import { escapeControlChars } from "../context/fence.js";
-import { LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE } from "../precheck/linked-issues.js";
+import { boundedChildRefs, LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_DECOMPOSITION_LINES_PER_ISSUE, parseDecompositionLine } from "../precheck/linked-issues.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { HARNESS_SOURCE, obligationText } from "./obligations.js";
+import { MAX_REQUIREMENT_TEXT_CHARS, normalizeRequirementText, requirementIdOfText } from "./requirement-id.js";
 
 export const ARTIFACT_VERSION = 1;
 
-/** Hard caps (defaults per #624). */
+/** Hard caps (defaults per #624). The text cap is the shared
+ * {@link MAX_REQUIREMENT_TEXT_CHARS} — one source of truth for the id recipe
+ * intake and the ledger both apply (#1750). */
 export const MAX_REQUIREMENTS = 48;
-export const MAX_REQUIREMENT_CHARS = 400;
+export const MAX_REQUIREMENT_CHARS = MAX_REQUIREMENT_TEXT_CHARS;
 export const MAX_LEDGER_MARKDOWN_BYTES = 8192;
 export const MAX_SOURCES = 32;
 
@@ -69,6 +72,16 @@ export interface LedgerProvenance {
    * predicate fails closed on them. */
   closing?: boolean;
   labels?: string[];
+  /** #1750: trusted criterion→child ownership evidence — the canonical
+   * `repo#N` identities of the child work that the linked umbrella's OWN
+   * body decomposition (task-list items referencing child issues) associates
+   * with THIS criterion, parsed from intake-rendered `(decomposition: …)`
+   * metadata lines and attached only to the entry whose content id the line
+   * names. Present ONLY when a well-formed association exists; absent means
+   * no trusted ownership evidence, and the scope predicate fails closed on
+   * it (the criterion stays in scope — umbrella label + non-closing ref
+   * alone is never ownership evidence). */
+  childRefs?: string[];
 }
 
 /** The typed canonical requirement-ledger entry (#675). Internal fields are
@@ -243,7 +256,7 @@ export function pySplitLines(text: string): string[] {
 
 /** Content-derived entry id (first 12 hex of sha256 of casefolded text). */
 function requirementId(text: string): string {
-  return "req-" + createHash("sha256").update(Buffer.from(text.toLowerCase(), "utf8")).digest("hex").slice(0, 12);
+  return requirementIdOfText(text);
 }
 
 /** First 16 hex of sha256 over the canonical JSON of the entries array.
@@ -265,14 +278,12 @@ export function emptyLedger(): RequirementLedger {
 }
 
 /** Normalize one line; `null` when it is empty after normalization. The id is
- * derived from this (post-truncation) text. */
+ * derived from this (post-truncation) text. The squeeze+truncate step is the
+ * shared {@link normalizeRequirementText} — intake applies it to
+ * decomposition task-item content to derive the ids it renders (#1750), so
+ * both sides of that seam normalize identically by construction. */
 function normalizeLine(raw: string): { text: string; truncated: boolean } | null {
-  const text = raw.replace(MARKER_STRIP_RE, "").replace(WS_RE, " ").trim();
-  if (!text) return null;
-  if (text.length > MAX_REQUIREMENT_CHARS) {
-    return { text: text.slice(0, MAX_REQUIREMENT_CHARS - 1) + TRUNCATION_MARKER, truncated: true };
-  }
-  return { text, truncated: false };
+  return normalizeRequirementText(raw.replace(MARKER_STRIP_RE, ""));
 }
 
 interface ScannedLine {
@@ -365,11 +376,22 @@ function boundedLinkedIssueLabels(value: unknown): string[] | undefined {
  * `labels` array (the linked issue's forge labels) is carried bounded. Both
  * fields are OPTIONAL provenance: a document without them keeps the exact
  * legacy `{ref, body}` shape, and the scope predicate fails closed on the
- * unknown relationship. */
-function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[] }[] {
-  const documents: { ref: string; body: string; closing?: boolean; labels?: string[] }[] = [];
+ * unknown relationship.
+ *
+ * #1750: the exact-structure `(decomposition: req-<id> -> <child refs>)`
+ * ownership lines are parsed into a per-document id→childRefs map. Strictly
+ * structural (a malformed line parses to nothing and contributes no
+ * association), bounded to at most {@link MAX_DECOMPOSITION_LINES_PER_ISSUE}
+ * accepted lines per document, and FIRST line per id wins — honest intake
+ * renders exactly one line per criterion, so repeats never merge or replace.
+ * The map keys are the ledger's own content ids, so the association can only
+ * ever attach to the entry the id names; issue content itself never leaves
+ * the fence. */
+function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[]; decompositions?: ReadonlyMap<string, readonly string[]> }[] {
+  const documents: { ref: string; body: string; closing?: boolean; labels?: string[]; decompositions?: ReadonlyMap<string, readonly string[]> }[] = [];
   let currentRef = "";
   let currentClosing: boolean | undefined = undefined;
+  let decompositions: Map<string, string[]> | null = null;
   let inFence = false;
   let fenceChar = "";
   let fenceLines: string[] = [];
@@ -397,6 +419,7 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
               // downstream), never a guess.
               ...(currentClosing !== undefined ? { closing: currentClosing } : {}),
               ...(labels !== undefined ? { labels } : {}),
+              ...(decompositions !== null && decompositions.size > 0 ? { decompositions } : {}),
             });
           }
         }
@@ -415,6 +438,7 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
     if (heading !== null) {
       currentRef = (heading[1] ?? "").trim();
       currentClosing = undefined;
+      decompositions = null;
       continue;
     }
     if (currentRef !== "") {
@@ -423,6 +447,18 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
         currentClosing = true;
       } else if (line === LINKED_AS_NON_CLOSING_LINE) {
         currentClosing = false;
+      } else {
+        // #1750: the ownership-evidence lines. Only well-formed lines count;
+        // the budget bounds ACCEPTED associations, and the first line for an
+        // id wins.
+        const decomposition = parseDecompositionLine(line);
+        if (decomposition !== null) {
+          if (decompositions === null) decompositions = new Map();
+          if (!decompositions.has(decomposition.requirementId)
+            && decompositions.size < MAX_DECOMPOSITION_LINES_PER_ISSUE) {
+            decompositions.set(decomposition.requirementId, decomposition.childRefs);
+          }
+        }
       }
     }
   }
@@ -465,24 +501,32 @@ export interface LedgerInput {
 }
 
 /** One bounded input document to scan. #1749: linked-issue documents carry
- * the optional relationship provenance parsed from `linked-issues.md`. */
+ * the optional relationship provenance parsed from `linked-issues.md`.
+ * #1750: plus the document's trusted criterion→child decomposition map (id →
+ * canonical child refs). */
 interface SourceDoc {
   source: string;
   ref: string;
   text: string;
   closing?: boolean;
   labels?: string[];
+  decompositions?: ReadonlyMap<string, readonly string[]>;
 }
 
 /** #1749: build one provenance entry, carrying the linked-issue relationship
  * provenance (`closing`/`labels`) only on `linked_issues` entries and only
  * when known — every other source, and unknown state, keeps the exact
- * legacy `{source, ref, line}` shape. */
-function provenanceFor(doc: SourceDoc, line: number): LedgerProvenance {
+ * legacy `{source, ref, line}` shape. #1750: the ownership evidence attaches
+ * to exactly the entry whose content id a decomposition line named — the id
+ * is computed from the same normalized text the entry was built from, so a
+ * metadata line can never associate another entry's criterion. */
+function provenanceFor(doc: SourceDoc, line: number, entryId?: string): LedgerProvenance {
   const provenance: LedgerProvenance = { source: doc.source, ref: doc.ref, line };
   if (doc.source !== "linked_issues") return provenance;
   if (doc.closing !== undefined) provenance.closing = doc.closing;
   if (doc.labels !== undefined) provenance.labels = doc.labels;
+  const childRefs = entryId !== undefined ? doc.decompositions?.get(entryId) : undefined;
+  if (childRefs !== undefined) provenance.childRefs = [...childRefs];
   return provenance;
 }
 
@@ -506,6 +550,7 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
         text: doc.body,
         ...(doc.closing !== undefined ? { closing: doc.closing } : {}),
         ...(doc.labels !== undefined ? { labels: doc.labels } : {}),
+        ...(doc.decompositions !== undefined ? { decompositions: doc.decompositions } : {}),
       });
     }
   }
@@ -543,18 +588,19 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
       const index = indexByKey.get(key);
       if (index === undefined) {
         indexByKey.set(key, entries.length);
+        const entryId = requirementId(found.normalized);
         entries.push({
-          id: requirementId(found.normalized),
+          id: entryId,
           text: found.normalized,
           kind: found.kind,
           verificationRequired: found.kind === "invariant",
           truncated: found.truncated,
-          provenance: [provenanceFor(doc, found.line)],
+          provenance: [provenanceFor(doc, found.line, entryId)],
         });
       } else {
         // Merged duplicate: the first occurrence owns the entry (position,
         // kind, flags); provenance is appended.
-        entries[index]?.provenance.push(provenanceFor(doc, found.line));
+        entries[index]?.provenance.push(provenanceFor(doc, found.line, entries[index]?.id));
       }
     }
   }
@@ -637,14 +683,19 @@ function tolerantEntry(item: unknown): RequirementLedgerEntry | null {
       // #1749: the linked-issue relationship provenance survives the
       // deserialization boundary under the same strict bounds the parse
       // applies — present only when well-formed, never guessed.
+      // #1750: the ownership evidence re-bounds the same way; an over-count
+      // list drops WHOLLY ({@link boundedChildRefs}) because a truncated
+      // owner list could silently lose the very child the PR references.
       const closing = typeof prec.closing === "boolean" ? prec.closing : undefined;
       const labels = boundedLinkedIssueLabels(prec.labels);
+      const childRefs = boundedChildRefs(prec.childRefs);
       provenance.push({
         source,
         ref,
         line,
         ...(closing !== undefined ? { closing } : {}),
         ...(labels !== undefined ? { labels } : {}),
+        ...(childRefs !== undefined ? { childRefs } : {}),
       });
     }
   }

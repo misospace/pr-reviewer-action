@@ -4871,15 +4871,19 @@ test("#1690: implementation requirements met + external bookkeeping unverifiable
 
 /** The generic umbrella fixture: a parent issue labeled `umbrella` with two
  * acceptance criteria, linked by the PR's title `(#N)` convention (the
- * intentional non-closing convention, #872). Criterion A shares vocabulary
- * with the increment's diff; criterion B does not. */
+ * intentional non-closing convention, #872). #1750: the body carries the
+ * RICH TRUSTED SHAPE the honest out-of-scope path requires — GitHub
+ * task-list criteria, each referencing (inline) the child issue that owns
+ * it, neither of which the PR references. The umbrella label + non-closing
+ * ref alone is never ownership evidence; this decomposition is. Criterion A
+ * shares vocabulary with the increment's diff; criterion B does not. */
 const UMBRELLA_ISSUE = {
   number: 42,
   title: "Umbrella: one scheduler feed",
   state: "open",
   html_url: "https://forge.example/o/r/issues/42",
   labels: [{ name: "umbrella" }],
-  body: "## Acceptance criteria\n- The planner and the scheduler engine MUST share one feed.\n- The release pipeline MUST publish both artifacts.\n",
+  body: "## Acceptance criteria\n- [ ] The planner and the scheduler engine MUST share one feed. (#101)\n- [ ] The release pipeline MUST publish both artifacts. (#102)\n",
 };
 
 const UMBRELLA_PR_TITLE = "feat(planner): incremental planning feed (#42)";
@@ -4923,13 +4927,15 @@ test("#1749 repro: a non-closing umbrella criterion does not force INCOMPLETE on
     const own = requirements.find((r) => r.text.includes("legacy path selectable"));
     assert.ok(own, "the increment's own criterion reached the ledger");
     // The relationship metadata must survive intake → ledger (this is the
-    // seam the bug lost): the title `(#N)` link is non-closing and the
-    // forge labels name the umbrella shape.
+    // seam the bug lost): the title `(#N)` link is non-closing, the
+    // forge labels name the umbrella shape, and the umbrella's own trusted
+    // decomposition associates THIS criterion with the child work that owns
+    // it (#1750) — the evidence without which no scope-out may fire.
     const sharedProvenance = (
       ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }
     ).requirements.find((r) => r.text.includes("share one feed"))!.provenance;
     assert.deepEqual(sharedProvenance, [
-      { source: "linked_issues", ref: "#42", line: 2, closing: false, labels: ["umbrella"] },
+      { source: "linked_issues", ref: "#42", line: 2, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] },
     ]);
 
     // The reviewer understands the deferral (the #1733 review) and approves;
@@ -4950,7 +4956,11 @@ test("#1749 repro: a non-closing umbrella criterion does not force INCOMPLETE on
         reason: "the legacy path remains selectable",
       },
     ];
-    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED);
+    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED, {
+      // The PR's own linked refs: the umbrella (non-closing). It does NOT
+      // reference either owning child — the trusted decomposition stands.
+      prLinkedRefs: ["o/r#42"],
+    });
     const umbrellaRow = trace.rows.find((row) => row.requirement_id === shared!.id);
     assert.ok(umbrellaRow, "the umbrella criterion is still traced");
     // The criterion stays VISIBLE and honest — reported unmet, never
@@ -4968,12 +4978,16 @@ test("#1749 repro: a non-closing umbrella criterion does not force INCOMPLETE on
 
     // The umbrella's OTHER criterion (no model claim at all) settles as the
     // explainable out-of-scope advisory — visible in the artifact with the
-    // machine reason, not silently dropped.
-    const other = trace.rows.find((row) => row.requirement_id !== shared!.id && row.requirement_id !== own!.id);
+    // machine reason, not silently dropped. The reason cites the criterion's
+    // OWN owning child from the trusted decomposition (#1750).
+    const otherEntry = requirements.find((r) => r.text.includes("publish both artifacts"));
+    assert.ok(otherEntry, "the second umbrella criterion is still extracted");
+    const other = trace.rows.find((row) => row.requirement_id === otherEntry!.id);
     assert.ok(other, "the second umbrella criterion is still traced");
     assert.equal(other.disposition, "not_applicable");
     assert.equal(other.materiality, "advisory");
-    assert.match(other.reason, /parent umbrella criterion/);
+    assert.match(other.reason, /parent umbrella criterion from #42/);
+    assert.match(other.reason, /o\/r#102/, "the reason cites the criterion's own owning child");
     assert.match(other.reason, /does not claim parent closure/);
     assert.ok(other.notes.includes("out-of-scope-umbrella-parent"));
 
@@ -5115,28 +5129,31 @@ test("#1749 security control: an umbrella-parent criterion with explicit trust-b
   }
 });
 
-test("#1749 scope: a non-closing umbrella criterion is out of scope with the machine reason, with or without diff overlap", () => {
+test("#1749 scope: a non-closing umbrella criterion with trusted child ownership is out of scope with the machine reason, with or without diff overlap", () => {
   const ledger = {
     requirements: [{
       id: "req-umb",
       text: "The planner and the scheduler engine MUST share one feed.",
       kind: "acceptance",
-      provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+      provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] }],
     }],
   };
   // Even WITH the boundary overlap that used to force the criterion into
-  // scope (the #1733 mechanism), the relationship scopes it out.
-  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED);
+  // scope (the #1733 mechanism), the relationship scopes it out — and since
+  // #1750 only because the trusted decomposition names the criterion's
+  // owning child, which the PR does not reference.
+  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
   assert.deepEqual(scope.inScope, []);
   assert.equal(scope.outOfScope.length, 1);
   assert.match(scope.outOfScope[0]!.reason, /parent umbrella criterion from #42/);
-  assert.match(scope.outOfScope[0]!.reason, /separately linked\/decomposed child/);
+  assert.match(scope.outOfScope[0]!.reason, /o\/r#101/, "the reason cites the owning child");
   assert.match(scope.outOfScope[0]!.reason, /does not claim parent closure/);
+  assert.match(scope.outOfScope[0]!.reason, /nor reference the owning child/);
   assert.equal((scope.outOfScope[0] as { note?: string }).note, "out-of-scope-umbrella-parent");
   // The relationship — not diff overlap — is what scopes it: the decision
   // holds with no change evidence at all (the PR's own refs are available
   // without a diff).
-  const withoutDiff = requirementTraceScope(ledger);
+  const withoutDiff = requirementTraceScope(ledger, undefined, { prLinkedRefs: ["o/r#42"] });
   assert.deepEqual(withoutDiff.inScope, []);
   assert.equal(withoutDiff.outOfScope.length, 1);
 });
@@ -5166,15 +5183,17 @@ test("#1749 scope: the umbrella narrowing never crosses a non-linked provenance,
 
 test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exact-matched", () => {
   const text = "The planner and the scheduler engine MUST share one feed.";
+  // #1750: the ownership evidence is present (childRefs), so this isolates
+  // the LABEL dimension — the umbrella vocabulary itself, exact-matched.
   const scopeOf = (labels: string[]): string[] =>
     requirementTraceScope({
       requirements: [{
         id: "r",
         text,
         kind: "acceptance",
-        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels }],
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels, childRefs: ["o/r#101"] }],
       }],
-    }, UMBRELLA_CHANGED).inScope.map((e) => e.id);
+    }, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] }).inScope.map((e) => e.id);
   assert.deepEqual(scopeOf(["umbrella"]), []);
   assert.deepEqual(scopeOf(["Umbrella"]), []);
   assert.deepEqual(scopeOf(["  umbrella  "]), []);
@@ -5184,4 +5203,148 @@ test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exa
   assert.deepEqual(scopeOf(["epics"]), ["r"]);
   assert.deepEqual(scopeOf(["enhancement"]), ["r"]);
   assert.deepEqual(scopeOf([]), ["r"]);
+});
+
+// ── #1750 (operator CR): the umbrella-parent narrowing requires TRUSTED
+// criterion→child ownership evidence ─────────────────────────────────────
+//
+// The first #1749 cut scoped a criterion out whenever every provenance
+// source was a non-closing umbrella-labeled link. That is too broad: it does
+// NOT prove the specific criterion belongs to separately decomposed child
+// work, yet the machine reason claimed exactly that. The unsafe case: a
+// parent labeled umbrella, referenced non-closing because it holds several
+// pieces of work, with THIS PR responsible for one of the parent's criteria
+// — the diff materially touches it, the reviewer correctly reports it unmet,
+// and the row was scoped out anyway, so `traceUnmetClaimedInScopeRows`
+// ignored it and the disposition could reach APPROVE.
+//
+// The fix: the narrowing applies ONLY when the linked umbrella's own body
+// carries a trusted decomposition associating THIS criterion with child work
+// (task-list items referencing child issues, parsed conservatively at intake
+// and carried through the same seams), AND the current PR does not reference
+// the owning child in any form. Umbrella label + non-closing ref alone is
+// NEVER ownership evidence; model prose and PR text never are.
+
+test("#1750 NEGATIVE: non-closing umbrella label without trusted child ownership keeps a touched criterion in scope", () => {
+  // The exact unsafe case from the CR: umbrella parent, non-closing ref, the
+  // diff materially touches the criterion — the row stays a merge contract.
+  const ledger = {
+    requirements: [{
+      id: "req-umb",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+    }],
+  };
+  const scope = requirementTraceScope(ledger, UMBRELLA_CHANGED);
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-umb"], "no trusted ownership evidence → the criterion stays in scope");
+  assert.deepEqual(scope.outOfScope, [], "no out-of-scope reason is emitted at all without the evidence");
+});
+
+test("#1750 BOUNDARY: trusted ownership evidence is void when the PR references the owning child", () => {
+  const ledger = {
+    requirements: [{
+      id: "req-umb",
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] }],
+    }],
+  };
+  // A PR that references the owning child — in ANY form, closing or
+  // non-closing — may be that child's implementer: the criterion stays
+  // mandatory. (The engine passes canonical `repo#N` identities; the label /
+  // closing shape of the child reference is irrelevant.)
+  const inScope = (prRefs: readonly string[]): string[] =>
+    requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: prRefs }).inScope.map((e) => e.id);
+  assert.deepEqual(inScope(["o/r#101"]), ["req-umb"], "a canonical reference to the owning child keeps it in scope");
+  assert.deepEqual(inScope(["o/r#99", "O/R#101"]), ["req-umb"], "identity matching is casefolded on the repo");
+  assert.deepEqual(inScope(["o/r#101", "o/r#102"]), ["req-umb"], "one owning child referenced is enough");
+  // Without the reference the trusted evidence scopes the criterion out —
+  // with the reason citing the owning child.
+  const out = requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#42"] });
+  assert.deepEqual(out.inScope, []);
+  assert.equal(out.outOfScope.length, 1);
+  assert.match(out.outOfScope[0]!.reason, /o\/r#101/, "the reason cites the owning child");
+  assert.equal((out.outOfScope[0] as { note?: string }).note, "out-of-scope-umbrella-parent");
+});
+
+test("#1750 NEGATIVE: the umbrella shape without decomposition keeps the reviewer's unmet report material (trace-level)", async () => {
+  const workspace = makeWorkspace();
+  try {
+    // The organic unsafe case end to end: umbrella-labeled parent, non-closing
+    // title ref, criterion whose vocabulary the diff touches, and NO
+    // decomposition structure in the parent body (the shape the organic #740
+    // body actually has today). The reviewer correctly reports the criterion
+    // unmet — it must remain in scope and withhold approval.
+    const issue = {
+      ...UMBRELLA_ISSUE,
+      body: "## Acceptance criteria\n- The planner and the scheduler engine MUST share one feed.\n",
+    };
+    const pr = { title: UMBRELLA_PR_TITLE, body: UMBRELLA_OWN_BODY };
+    const linked = await buildLinkedIssueContext({
+      pr,
+      repo: "o/r",
+      adapter: { getIssue: async (): Promise<ReadResult<unknown>> => ({ ok: true, data: issue }) },
+      isForkPr: "false",
+      linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+    });
+    const ledger = extractRequirementLedger({
+      prJson: pr,
+      linkedIssuesMarkdown: Buffer.from(linked.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8"),
+    });
+    const shared = (ledger as unknown as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> })
+      .requirements.find((r) => r.text.includes("share one feed"));
+    assert.ok(shared, "the umbrella criterion reached the ledger");
+    assert.equal(
+      (shared!.provenance[0] as { childRefs?: string[] }).childRefs,
+      undefined,
+      "no trusted decomposition → no ownership evidence in the provenance",
+    );
+    const claims = [{
+      requirement_id: shared!.id,
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED);
+    const row = trace.rows.find((r) => r.requirement_id === shared!.id);
+    assert.ok(row);
+    assert.equal(row.resolution, "unmet_claimed", "the reviewer's report stays an in-scope gap claim");
+    assert.ok(!row.notes.includes("out-of-scope-umbrella-parent"), "no machine reason is emitted without the evidence");
+    assert.ok(!row.notes.includes("out-of-scope-reported-unmet"), "the claim is NOT disclosure-only");
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace).map((r) => r.requirement_id), [shared!.id], "the unmet parent criterion withholds approval");
+    assert.equal(trace.incomplete, false, "a claim alone is never a refutation, but it stays material");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1750 BOUNDARY (trace-level): a PR that references the owning child keeps its unmet umbrella criterion material", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = {
+      requirements: [{
+        id: "req-umb",
+        text: "The planner and the scheduler engine MUST share one feed.",
+        kind: "acceptance",
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] }],
+      }],
+    };
+    const claims = [{
+      requirement_id: "req-umb",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, UMBRELLA_CHANGED, { prLinkedRefs: ["o/r#101"] });
+    const row = trace.rows.find((r) => r.requirement_id === "req-umb");
+    assert.ok(row);
+    assert.equal(row.resolution, "unmet_claimed", "referencing the owning child voids the ownership evidence");
+    assert.ok(!row.notes.includes("out-of-scope-umbrella-parent"));
+    assert.deepEqual(traceUnmetClaimedInScopeRows(trace).map((r) => r.requirement_id), ["req-umb"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });

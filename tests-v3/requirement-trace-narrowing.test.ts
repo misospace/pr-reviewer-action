@@ -40,7 +40,7 @@ function ledgerWith(entries: Array<{
   id: string;
   text: string;
   kind: string;
-  provenance?: Array<{ source: string; ref?: string; line?: number; closing?: boolean; labels?: string[] }>;
+  provenance?: Array<{ source: string; ref?: string; line?: number; closing?: boolean; labels?: string[]; childRefs?: string[] }>;
 }>): unknown {
   return { requirements: entries };
 }
@@ -425,7 +425,7 @@ test("no trace-only model pass or validator tutoring exists to make an adequate 
 
 import { buildDispositionEvidence } from "../src/disposition/engine-evidence.js";
 import { computeFinalDisposition } from "../src/disposition/final.js";
-import { confirmedUnmetRows, traceUnmetClaimedInScopeRows } from "../src/enforcement/requirement-trace.js";
+import { confirmedUnmetRows, requirementTraceScope, traceUnmetClaimedInScopeRows } from "../src/enforcement/requirement-trace.js";
 
 /** The EXACT part derivation review.ts performs over an applied trace —
  * one seam, exercised against real validator output. */
@@ -557,15 +557,23 @@ test("#1749: a deferred umbrella criterion is disclosure-only — the clean scop
     // The umbrella shape from the PR's own metadata: a non-closing ref to an
     // umbrella-labeled parent. The criterion shares the increment's
     // vocabulary — under the pre-#1749 scope rule that overlap alone made
-    // the parent criterion a merge contract.
+    // the parent criterion a merge contract. #1750: the provenance also
+    // carries the RICH TRUSTED SHAPE — the umbrella's own decomposition
+    // associating this criterion with an owning child the PR does not
+    // reference — without which the row now (correctly) stays in scope.
     const ledger = ledgerWith([
       {
         id: "req-umb",
         text: "The planner and the scheduler engine MUST share one feed.",
         kind: "acceptance",
-        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] }],
       },
     ]);
+    // The scope decision itself is proven first: out of scope, with the
+    // machine reason citing the owning child.
+    const scope = requirementTraceScope(ledger, "+// the planner feeds the scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    assert.deepEqual(scope.inScope, []);
+    assert.match(scope.outOfScope[0]!.reason, /o\/r#101/, "the reason cites the owning child from the trusted decomposition");
     const claims = [{
       requirement_id: "req-umb",
       disposition: "unmet",
@@ -573,7 +581,7 @@ test("#1749: a deferred umbrella criterion is disclosure-only — the clean scop
       test: [],
       reason: "deferred to the separately linked engine-composition child; this PR does not claim the parent",
     }];
-    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the planner feeds the scheduler engine");
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the planner feeds the scheduler engine", { prLinkedRefs: ["o/r#42"] });
     const row = trace.rows.find((candidate) => candidate.requirement_id === "req-umb");
     assert.equal(row?.resolution, "unmet_claimed");
     assert.ok(row?.notes.includes("out-of-scope-umbrella-parent"), "the umbrella relationship is machine-readable on the row");
@@ -589,19 +597,63 @@ test("#1749: a deferred umbrella criterion is disclosure-only — the clean scop
   }
 });
 
+// #1750 (operator CR) NEGATIVE: the first #1749 cut let "non-closing ref +
+// umbrella label" scope a criterion out on its own — the machine reason then
+// claimed the criterion was owned by separate child work with no evidence
+// that this was true. Without trusted ownership evidence the row stays in
+// scope, the reviewer's unmet report is a material unknown, and the real
+// disposition composition withholds as INCOMPLETE.
+test("#1750 NEGATIVE: umbrella label + non-closing ref without trusted child ownership withholds approval (real composition)", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    // The UNSAFE fixture: umbrella shape, no childRefs — the provenance
+    // carries no trusted criterion→child association, so nothing may scope
+    // the criterion out.
+    const ledger = ledgerWith([
+      {
+        id: "req-umb",
+        text: "The planner and the scheduler engine MUST share one feed.",
+        kind: "acceptance",
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"] }],
+      },
+    ]);
+    const claims = [{
+      requirement_id: "req-umb",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the planner feeds the scheduler engine");
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-umb");
+    assert.equal(row?.resolution, "unmet_claimed", "the criterion stayed in scope");
+    assert.ok(!row?.notes.includes("out-of-scope-umbrella-parent"), "no ownership claim without the evidence");
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the claim is material");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "incomplete", "the unsafe scope-out would have approved here");
+    assert.equal(disposition.reason, "material_unknown");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1749 closing control: the same umbrella criterion claimed by a closing PR stays material (real composition)", () => {
   const workspace = makeWorkspace();
   try {
     writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
     // Identical criterion, identical vocabulary — but the PR claims the
     // parent (a closing-keyword ref), so the criterion is a merge contract
-    // and its unmet claim withholds certification.
+    // and its unmet claim withholds certification. #1750: the trusted
+    // ownership evidence is present too — a closing claim outranks it.
     const ledger = ledgerWith([
       {
         id: "req-umb",
         text: "The planner and the scheduler engine MUST share one feed.",
         kind: "acceptance",
-        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: true, labels: ["umbrella"] }],
+        provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: true, labels: ["umbrella"], childRefs: ["o/r#101"] }],
       },
     ]);
     const claims = [{

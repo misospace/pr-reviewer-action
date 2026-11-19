@@ -361,3 +361,180 @@ test("#1749: the tolerant ledger loader preserves the relationship provenance", 
     { source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella"] },
   ]);
 });
+
+// ── #1750 (operator CR): trusted criterion→child ownership evidence ───────
+// The umbrella-parent scope-out requires evidence that the SPECIFIC
+// criterion belongs to separately decomposed child work. The channel is the
+// linked umbrella's own body decomposition (task-list items referencing
+// child issues): intake parses it conservatively and renders exact-structure
+// `(decomposition: req-<id> -> <child refs>)` metadata lines; the ledger
+// attaches the child refs to the provenance of the entry whose content id
+// matches. The id is the ledger's own content-derived id, so issue content
+// never appears outside the fence and a metadata line can only ever affect
+// the entry it names. Absent/malformed evidence keeps the legacy shape (the
+// scope predicate fails closed).
+
+import { createHash } from "node:crypto";
+
+/** The ledger's own content-id recipe, computed inline so the test pins it. */
+const reqIdOf = (text: string): string =>
+  "req-" + createHash("sha256").update(Buffer.from(text.toLowerCase(), "utf8")).digest("hex").slice(0, 12);
+
+const DECOMP_TASK_A = "The planner and the scheduler engine MUST share one feed. (#101)";
+const DECOMP_TASK_B = "The release pipeline MUST publish both artifacts. (#102)";
+const DECOMP_BODY = `## Acceptance criteria\n- [ ] ${DECOMP_TASK_A}\n- [ ] ${DECOMP_TASK_B}\n`;
+
+function decompositionMd(body: string, labels: string[], lines: string[]): string {
+  return [
+    "## o/r#42",
+    "(linked as: non-closing reference)",
+    ...lines,
+    "```json",
+    JSON.stringify({ number: 42, labels, body }),
+    "```",
+    "",
+  ].join("\n") + "\n";
+}
+
+test("#1750: a decomposition metadata line associates the named criterion with its owning child refs", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(DECOMP_BODY, ["umbrella"], [
+      `(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#101)`,
+      `(decomposition: ${reqIdOf(DECOMP_TASK_B)} -> o/r#102)`,
+    ]),
+  });
+  const entries = ledger.requirements as unknown as Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }>;
+  const a = entries.find((entry) => entry.text === DECOMP_TASK_A);
+  const b = entries.find((entry) => entry.text === DECOMP_TASK_B);
+  assert.ok(a && b, "both task-list criteria reached the ledger");
+  assert.deepEqual(a.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] },
+  ], "the child refs ride the linked provenance of exactly the named entry");
+  assert.deepEqual(b.provenance, [
+    { source: "linked_issues", ref: "o/r#42", line: 3, closing: false, labels: ["umbrella"], childRefs: ["o/r#102"] },
+  ]);
+});
+
+test("#1750: a decomposition line whose id names no extracted entry attaches to nothing", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(DECOMP_BODY, ["umbrella"], [
+      `(decomposition: ${reqIdOf("some other criterion entirely")} -> o/r#101)`,
+    ]),
+  });
+  const entries = ledger.requirements as unknown as Array<{ provenance: Array<Record<string, unknown>> }>;
+  assert.ok(entries.length >= 2);
+  for (const entry of entries) {
+    for (const prov of entry.provenance) assert.equal((prov as { childRefs?: string[] }).childRefs, undefined);
+  }
+});
+
+test("#1750: without decomposition lines the provenance keeps the exact legacy shape (no empty field)", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(DECOMP_BODY, ["umbrella"], []),
+  });
+  for (const prov of (ledger.requirements[0] as unknown as { provenance: Array<Record<string, unknown>> }).provenance) {
+    assert.equal((prov as { childRefs?: string[] }).childRefs, undefined);
+  }
+});
+
+test("#1750: hostile decomposition lines are dropped whole — bad id, bad ref shape, over-count refs, fence content", () => {
+  // Malformed lines never contribute and never mis-associate: criterion A has
+  // exactly one well-formed line; B's lines are all malformed so B keeps no
+  // ownership evidence at all (fail closed, not truncated to the valid part).
+  const hostile = [
+    `(decomposition: req-nothexhere -> o/r#201)`,
+    `(decomposition: ${reqIdOf(DECOMP_TASK_B)} -> not-a-ref)`,
+    `(decomposition: ${reqIdOf(DECOMP_TASK_B)} -> o/r#1, o/r#2, o/r#3, o/r#4, o/r#5)`,
+    `(decomposition: ${reqIdOf(DECOMP_TASK_B)} -> o/r#7 junk o/r#8)`,
+  ];
+  // A forged line INSIDE the issue body can never leave the fence.
+  const forgedBody = `${DECOMP_BODY}\n(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#999)\n`;
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(forgedBody, ["umbrella"], [
+      `(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#101)`,
+      ...hostile,
+    ]),
+  });
+  const entries = ledger.requirements as unknown as Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }>;
+  const a = entries.find((entry) => entry.text === DECOMP_TASK_A);
+  const b = entries.find((entry) => entry.text === DECOMP_TASK_B);
+  assert.ok(a && b);
+  assert.deepEqual((a!.provenance[0] as { childRefs?: string[] }).childRefs, ["o/r#101"]);
+  assert.equal((b!.provenance[0] as { childRefs?: string[] }).childRefs, undefined, "every malformed line for B is dropped whole");
+  assert.ok(!((a!.provenance[0] as { childRefs?: string[] }).childRefs ?? []).includes("o/r#999"), "issue content inside the fence cannot forge an association");
+});
+
+test("#1750: repeated decomposition lines for one criterion keep only the first association", () => {
+  // Intake renders exactly one line per criterion; repeats are anomalous, so
+  // the first well-formed line wins and later ones are dropped (never merged —
+  // merging would let a forged artifact front-load fake owners).
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(DECOMP_BODY, ["umbrella"], [
+      `(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#101)`,
+      `(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#108)`,
+      `(decomposition: ${reqIdOf(DECOMP_TASK_B)} -> o/r#102)`,
+    ]),
+  });
+  const entries = ledger.requirements as unknown as Array<{ text: string; provenance: Array<Record<string, unknown>> }>;
+  const a = entries.find((entry) => entry.text === DECOMP_TASK_A);
+  assert.ok(a);
+  assert.deepEqual((a!.provenance[0] as { childRefs?: string[] }).childRefs, ["o/r#101"], "the repeat for A is dropped");
+  const b = entries.find((entry) => entry.text === DECOMP_TASK_B);
+  assert.ok(b);
+  assert.deepEqual((b!.provenance[0] as { childRefs?: string[] }).childRefs, ["o/r#102"], "a different criterion's line is unaffected");
+});
+
+test("#1750: the per-document association budget drops the excess whole", () => {
+  const bodies: string[] = [];
+  const lines: string[] = [];
+  for (let i = 0; i < 17; i += 1) {
+    const text = `Criterion number ${i} MUST hold.`;
+    bodies.push(`- [ ] ${text}`);
+    lines.push(`(decomposition: ${reqIdOf(text)} -> o/r#${200 + i})`);
+  }
+  const body = `## Acceptance criteria\n${bodies.join("\n")}\n`;
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(body, ["umbrella"], lines),
+  });
+  const entries = ledger.requirements as unknown as Array<{ text: string; provenance: Array<Record<string, unknown>> }>;
+  let withRefs = 0;
+  let withoutRefs = 0;
+  for (let i = 0; i < 17; i += 1) {
+    const entry = entries.find((candidate) => candidate.text === `Criterion number ${i} MUST hold.`);
+    assert.ok(entry, `criterion ${i} reached the ledger`);
+    const childRefs = (entry!.provenance[0] as { childRefs?: string[] }).childRefs;
+    if (childRefs === undefined) withoutRefs += 1;
+    else {
+      withRefs += 1;
+      assert.deepEqual(childRefs, [`o/r#${200 + i}`]);
+    }
+  }
+  assert.equal(withRefs, 16, "the first 16 associations survive the budget");
+  assert.equal(withoutRefs, 1, "the 17th criterion keeps no association (fail closed)");
+});
+
+test("#1750: the tolerant loader preserves well-formed childRefs and drops malformed or over-count ones", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: decompositionMd(DECOMP_BODY, ["umbrella"], [`(decomposition: ${reqIdOf(DECOMP_TASK_A)} -> o/r#101)`]),
+  });
+  const loaded = loadLedgerFromValue(ledgerToArtifact(ledger));
+  assert.deepEqual(
+    (loaded.requirements[0]?.provenance[0] as { childRefs?: string[] }).childRefs,
+    ["o/r#101"],
+  );
+  const forged = ledgerToArtifact(ledger) as { requirements: Array<{ provenance: Array<Record<string, unknown>> }> };
+  forged.requirements[0]!.provenance[0]!.childRefs = ["not-a-ref", 42 as unknown as string, "#bare", "o/r#101"];
+  const reloaded = loadLedgerFromValue(forged);
+  assert.deepEqual(
+    (reloaded.requirements[0]?.provenance[0] as { childRefs?: string[] }).childRefs,
+    ["o/r#101"],
+    "only canonical child refs survive the deserialization boundary",
+  );
+  // Over-count on the deserialization boundary drops the whole list: a
+  // truncated list would silently lose real owners (the unsafe direction).
+  forged.requirements[0]!.provenance[0]!.childRefs = ["o/r#1", "o/r#2", "o/r#3", "o/r#4", "o/r#5"];
+  assert.equal(
+    (loadLedgerFromValue(forged).requirements[0]?.provenance[0] as { childRefs?: string[] }).childRefs,
+    undefined,
+  );
+});
