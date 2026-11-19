@@ -91,6 +91,10 @@ test("#1702: explicit trace test reads block premature investigation-complete un
     openAiCall("code", "read_file", '{"path":"src/enforcement/required-check-ci.ts"}'),
     openAiCall("test1", "read_file", '{"path":"tests-v3/required-check-ci.test.ts"}'),
     openAiCall("test2", "read_file", '{"path":"tests-v3/requirement-trace.test.ts"}'),
+    // #1729: the fourth turn is the model-confirmed completion round — the
+    // coverage gate armed at the end of round 3 and the model confirms with
+    // no tool calls.
+    openAiText("confirmed"),
   ], [
     { tool: "read_file", status: "ok", result: { content: "production code" } },
     { tool: "read_file", status: "ok", result: { content: "CI matching regression tests" } },
@@ -3427,9 +3431,12 @@ test("#1627: a run with no obligation surface never fires the settled stop", asy
   assert.equal(outcome.requiredEvidenceRequired, 0);
 });
 
-test("coverage completion preempts last-call budget, but not gaps or failed tools", async () => {
+test("coverage completion never preempts an exhausted call budget (#1729)", async () => {
+  // #1729: a covered round that spent the last request has no confirmation
+  // turn left, so it reports the ordinary exhaustion stop — never a
+  // completion the model did not confirm.
   for (const scenario of [
-    { covered: true, status: "ok", reason: "investigation-complete" },
+    { covered: true, status: "ok", reason: STOP_BUDGET },
     { covered: false, status: "ok", reason: STOP_BUDGET },
     { covered: true, status: "error", reason: STOP_BUDGET },
   ]) {
@@ -3447,7 +3454,10 @@ test("coverage completion preempts last-call budget, but not gaps or failed tool
 });
 
 test("coverage completion leaves material evidence outstanding but not advisory attention", async () => {
-  for (const [rowClass, expected] of [["attention", "investigation-complete"], [undefined, STOP_BUDGET]] as const) {
+  // #1729: both shapes spend the only request, so neither can be confirmed —
+  // the attention row is simply not material, which lands on the same
+  // exhaustion stop.
+  for (const [rowClass, expected] of [["attention", STOP_BUDGET], [undefined, STOP_BUDGET]] as const) {
     const conversation = new Conversation();
     conversation.addUser("corpus");
     const outcome = await driveToolLoop(conversation,
@@ -3472,12 +3482,17 @@ test("coverage completion waits for a refused call to be repaired", async () => 
         { id: "good", type: "function", function: { name: "read_file", arguments: '{"path":"a.ts"}' } },
         { id: "bad", type: "function", function: { name: "read_file", arguments: '{"path":' } },
       ] } }] };
-      return repair ? openAiCall("fixed", "read_file", '{"path":"b.ts"}') : openAiText("stop");
+      if (repair) {
+        // #1729: turn 2 repairs the refusal; turn 3 is the model-confirmed
+        // completion round (the gate armed at the end of turn 2).
+        return turns === 2 ? openAiCall("fixed", "read_file", '{"path":"b.ts"}') : openAiText("confirmed");
+      }
+      return openAiText("stop");
     }, async (tool) => ({ tool, status: "ok", result: {} }), {
       apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(4, 4, 120), timeFn: () => 0,
       coverageComplete: () => true,
     });
-    assert.equal(turns, 2);
+    assert.equal(turns, repair ? 3 : 2);
     assert.equal(outcome.stopReason, repair ? "investigation-complete" : STOP_MODEL_DONE);
     assert.equal(outcome.executed.length, repair ? 2 : 1);
     assert.equal(outcome.toolCallsRefused, 1);
@@ -3485,16 +3500,162 @@ test("coverage completion waits for a refused call to be repaired", async () => 
 });
 
 test("coverage completion requires a successful attempt for discharged material evidence", async () => {
-  for (const status of ["ok", "error"]) {
+  // The successful attempt discharges the material row, coverage completes,
+  // and the #1729 confirmation turn settles the stop.
+  {
+    const conversation = new Conversation();
+    conversation.addUser("corpus");
+    let turn = 0;
+    const outcome = await driveToolLoop(conversation,
+      async () => (turn++ === 0
+        ? openAiCall("c", "read_file", '{"path":"mandatory.ts"}')
+        : openAiText("confirmed")),
+      async () => ({ tool: "read_file", status: "ok", result: {} }),
+      { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(4, 4, 120), timeFn: () => 0,
+        reserveForRequiredEvidence: 1, requiredEvidence: [{ id: "material", tokens: ["mandatory"] }],
+        coverageComplete: () => true },
+    );
+    assert.equal(outcome.stopReason, "investigation-complete");
+    assert.equal(outcome.rounds, 2);
+  }
+  // A failed attempt cannot discharge material evidence: coverage never
+  // completes and the run reads as the budget exhaustion it is.
+  {
     const conversation = new Conversation();
     conversation.addUser("corpus");
     const outcome = await driveToolLoop(conversation,
       async () => openAiCall("c", "read_file", '{"path":"mandatory.ts"}'),
-      async () => ({ tool: "read_file", status, result: {} }),
+      async () => ({ tool: "read_file", status: "error", result: {} }),
       { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(4, 1, 120), timeFn: () => 0,
         reserveForRequiredEvidence: 1, requiredEvidence: [{ id: "material", tokens: ["mandatory"] }],
         coverageComplete: () => true },
     );
-    assert.equal(outcome.stopReason, status === "ok" ? "investigation-complete" : STOP_BUDGET);
+    assert.equal(outcome.stopReason, STOP_BUDGET);
   }
 });
+
+// ── #1729: the model-confirmed completion gate ─────────────────────────────
+
+test("#1729: coverage completion with unused budget arms a confirmation round instead of stopping", async () => {
+  // The #1728 review 5963272114 shape: one round covers the changed files,
+  // the model still holds open verification questions, and 38 of 40 requests
+  // remain. The loop must NOT stop `investigation-complete` on the coverage
+  // gate alone: the next round carries the confirmation note, the model
+  // resolves the cheaply-checkable question with the unused budget, and only
+  // its own no-tool-calls reply — after the re-armed second confirmation —
+  // selects the stop.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const payloads: string[] = [];
+  let turn = 0;
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"src/a.ts"}'),
+    // The model answers the first confirmation with MORE WORK — the cheap
+    // verification read the review would otherwise have externalized as a
+    // "please confirm" finding.
+    openAiCall("verify", "read_file", '{"path":"values.schema.json"}'),
+    openAiText("confirmed — nothing cheaply checkable remains"),
+  ];
+  const outcome = await driveToolLoop(conversation,
+    async (payload) => {
+      payloads.push(JSON.stringify(payload));
+      return responses[turn++];
+    },
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(6, 40, 120), timeFn: () => 0,
+      coverageComplete: () => true },
+  );
+  assert.equal(outcome.stopReason, STOP_INVESTIGATION_COMPLETE);
+  assert.equal(outcome.rounds, 3, "coverage round + verification round + confirmation round");
+  assert.equal(outcome.executed.length, 2, "the model spent unused budget on the verification read");
+  assert.equal(outcome.requestsRemaining, 38);
+  // The confirmation note rode BOTH armed rounds: the first asking, and the
+  // re-arm after the model answered it with more work.
+  assert.match(payloads[1]!, /\[loop coverage\]/);
+  assert.match(payloads[1]!, /please confirm/);
+  assert.match(payloads[2]!, /\[loop coverage\]/);
+});
+
+test("#1729: a model with nothing cheaply checkable left confirms on the first armed round", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const payloads: string[] = [];
+  let turn = 0;
+  const outcome = await driveToolLoop(conversation,
+    async (payload) => {
+      payloads.push(JSON.stringify(payload));
+      return turn++ === 0 ? openAiCall("c1", "read_file", '{"path":"src/a.ts"}') : openAiText("confirmed");
+    },
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(6, 40, 120), timeFn: () => 0,
+      coverageComplete: () => true },
+  );
+  assert.equal(outcome.stopReason, STOP_INVESTIGATION_COMPLETE,
+    "genuinely-unverifiable questions are a legitimate completion confirmation");
+  assert.equal(outcome.rounds, 2);
+  assert.equal(outcome.executed.length, 1);
+  assert.match(payloads[1]!, /\[loop coverage\]/);
+});
+
+test("#1729: no confirmation round at the round ceiling — the covered run reports max-rounds", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const outcome = await driveToolLoop(conversation,
+    async () => openAiCall("c", "read_file", '{"path":"src/a.ts"}'),
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    // adaptiveLoopBudgets doubles its rounds argument; pin the ceiling at 1
+    // explicitly so round 1 is the last round slot there is.
+    { apiFormat: "openai", model: "m", budgets: { ...adaptiveLoopBudgets(6, 40, 120), maxRounds: 1 }, timeFn: () => 0,
+      coverageComplete: () => true },
+  );
+  // #1729: no confirmation turn is possible, so nobody confirmed a
+  // completion — the covered run reports the ordinary exhaustion stop.
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS,
+    "an unconfirmable covered round is an exhausted investigation, not a completion");
+  assert.equal(outcome.rounds, 1);
+});
+
+test("#1729: a covered last-call round reports tool-call-budget-exhausted, not a completion", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const outcome = await driveToolLoop(conversation,
+    async () => openAiCall("c", "read_file", '{"path":"src/a.ts"}'),
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(6, 1, 120), timeFn: () => 0,
+      coverageComplete: () => true },
+  );
+  assert.equal(outcome.stopReason, STOP_BUDGET);
+  assert.equal(outcome.rounds, 1);
+  assert.equal(outcome.toolCallsIssued, 1);
+});
+
+test("#1729: the confirmation round's telemetry record carries completion_confirmation_requested", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const rounds: NativeLoopRoundTelemetry[] = [];
+  let turn = 0;
+  await driveToolLoop(conversation,
+    async () => (turn++ === 0 ? openAiCall("c1", "read_file", '{"path":"src/a.ts"}') : openAiText("confirmed")),
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(6, 40, 120), timeFn: () => 0,
+      coverageComplete: () => true,
+      onRound: (rec) => rounds.push(rec) },
+  );
+  assert.deepEqual(rounds.map((rec) => rec.completion_confirmation_requested), [false, true]);
+});
+
+test("#1729: a no-tool-calls reply on an ordinary round keeps model-stopped", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let turn = 0;
+  const outcome = await driveToolLoop(conversation,
+    async () => (turn++ === 0 ? openAiCall("c1", "read_file", '{"path":"src/a.ts"}') : openAiText("done early")),
+    async (name) => ({ tool: name, status: "ok", result: {} }),
+    { apiFormat: "openai", model: "m", budgets: adaptiveLoopBudgets(6, 40, 120), timeFn: () => 0,
+      coverageComplete: () => false },
+  );
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE,
+    "without a satisfied coverage gate there is no confirmation to give");
+  assert.equal(outcome.rounds, 2);
+});
+

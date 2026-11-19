@@ -748,11 +748,12 @@ test("#1094 REPRO: the NATIVE-LOOP success path persists a PROJECTION — a gate
   }
 
   // The run still reviewed, through the reuse fast path: the harness verdict
-  // was accepted and the separate review call was skipped (2 model requests).
+  // was accepted and the separate review call was skipped (3 model requests —
+  // #1729: loop turn, model-confirmed completion turn, closing verdict turn).
   const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
   assert.equal(harness.native_loop_verdict_produced, true);
   assert.equal(harness.native_loop_verdict_status, "accepted");
-  assert.equal(requests, 2, "the separate review call must be skipped by the reuse path");
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
   assert.equal(run.output.verdict, "approve");
   // The persisted artifact is the projection: the gateway metadata is GONE.
   const persisted = JSON.parse(run.response) as Record<string, unknown>;
@@ -807,11 +808,14 @@ test("#1094: a canary in IGNORED content-part metadata of an OpenAI-style conten
   }, { IS_FORK_PR: "false" });
 
   // The verdict still reused/parsed: the harness accepted it and the reuse
-  // fast path skipped the separate review call (2 model requests).
+  // fast path skipped the separate review call (#1729: 3 model requests).
   const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
   assert.equal(harness.native_loop_verdict_produced, true);
   assert.equal(harness.native_loop_verdict_status, "accepted");
-  assert.equal(requests, 2, "the separate review call must be skipped by the reuse path");
+  // #1729: the confirmation round adds one model request (loop turn +
+  // model-confirmed completion turn + closing verdict turn); the separate
+  // review call is still skipped by the reuse path.
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
   assert.equal(run.output.verdict, "approve");
 
   // The canary appears in NO persisted artifact, the summary, or the logs.
@@ -871,7 +875,10 @@ test("#1094: a canary in IGNORED content-part metadata of an Anthropic top-level
   const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
   assert.equal(harness.native_loop_verdict_produced, true);
   assert.equal(harness.native_loop_verdict_status, "accepted");
-  assert.equal(requests, 2, "the separate review call must be skipped by the reuse path");
+  // #1729: the confirmation round adds one model request (loop turn +
+  // model-confirmed completion turn + closing verdict turn); the separate
+  // review call is still skipped by the reuse path.
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
   assert.equal(run.output.verdict, "approve");
 
   for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
@@ -923,7 +930,10 @@ test("#1094: a canary echoed as a USAGE KEY reaches no artifact (the envelope dr
   const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
   assert.equal(harness.native_loop_verdict_produced, true);
   assert.equal(harness.native_loop_verdict_status, "accepted");
-  assert.equal(requests, 2, "the separate review call must be skipped by the reuse path");
+  // #1729: the confirmation round adds one model request (loop turn +
+  // model-confirmed completion turn + closing verdict turn); the separate
+  // review call is still skipped by the reuse path.
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
   assert.equal(run.output.verdict, "approve");
 
   for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
@@ -952,6 +962,10 @@ test("#1094: a canary embedded in a native-loop VERDICT BODY reaches no artifact
   // the persisted response artifact, and from there in the step summary.
   const scripted = [
     { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: "{}" } }] } }] },
+    // #1729: the model-confirmed completion round (the coverage gate armed
+    // after the read) — a no-tool-calls reply selects investigation-complete
+    // before the verdict turn runs.
+    { choices: [{ message: { content: "confirmed" } }], finish_reason: "stop" },
     { choices: [{ message: { content: JSON.stringify({ verdict: CANARY, review_markdown: "## Review\nLooks fine." }) } }], finish_reason: "stop" },
     verdictBody(),
   ];
