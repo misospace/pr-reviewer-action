@@ -4,15 +4,33 @@ Default-deny network policies (#738). Two policies, one per pod family:
 - Controller pods (release namespace): deny-all ingress; egress limited
   to DNS, PostgreSQL (5432), and TLS (443 — the forge API and the model
   endpoints). `networkPolicy.additionalIngress`/`additionalEgress` are
-  operator-extensible rule lists appended verbatim.
+  operator-extensible rule lists appended verbatim. In Kubernetes-
+  executor mode the controller also needs the Kubernetes API: the 443
+  rule covers the ClusterIP under classic kube-proxy, but Cilium
+  kube-proxy-replacement redirects it to the hostNetwork'd API server
+  (`nodeIP:6443`) and policy is evaluated against that backend, so KPR
+  clusters must add a 6443 exception via `additionalEgress` (#1714 —
+  see docs/self-hosted-deployment.md).
 - Worker pods (worker namespace): the selector MUST cover every worker
   pod the executor creates — src/executor/kubernetes.ts
   (WORKER_NETWORK_POSTURE.selector) stamps
   `app.kubernetes.io/managed-by: pr-reviewer-action` onto every worker
   pod template. Ingress: deny-all (the worker never serves anything).
   Egress: DNS and TLS only — the worker's request/result travel over the
-  shared volumes, never the network.
+  shared volumes, never the network. #1709: the worker ALSO calls the
+  configured model endpoint directly, so a plain-HTTP (non-TLS) in-cluster
+  endpoint needs `networkPolicy.workerAdditionalEgress`, an explicit
+  worker-only extension appended verbatim to the worker policy's egress.
+  It never touches the controller policy, and `additionalEgress` never
+  touches the worker policy.
 */}}
+{{/* ONE condition decides whether the worker policy renders; the
+  #1709 guard and the worker document must never disagree. */}}
+{{- $workerPolicy := and .Values.networkPolicy.enabled
+  (eq (dig "mode" "disabled" (.Values.workerExecutor | default dict)) "kubernetes") }}
+{{- if and .Values.networkPolicy.workerAdditionalEgress (not $workerPolicy) }}
+{{- fail "networkPolicy.workerAdditionalEgress requires networkPolicy.enabled and workerExecutor.mode: kubernetes; without a rendered worker policy the exception would be silently dropped" }}
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -84,7 +102,7 @@ spec:
     {{- with .Values.networkPolicy.additionalEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-{{- if eq (dig "mode" "disabled" (.Values.workerExecutor | default dict)) "kubernetes" }}
+{{- if $workerPolicy }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -123,5 +141,8 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+    {{- with .Values.networkPolicy.workerAdditionalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}
 {{- end }}

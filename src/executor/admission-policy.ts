@@ -221,6 +221,14 @@ export const WORKER_JOB_VALIDATIONS: readonly AdmissionValidation[] = Object.fre
     message: `worker pods must carry the fixed non-root security context (runAsNonRoot, uid/gid ${WORKER_RUN_AS_ID}, RuntimeDefault seccomp)`,
   }),
   Object.freeze({
+    id: "noPodFsGroup",
+    expression:
+      `!has(${POD}.securityContext.fsGroup)` +
+      ` && !has(${POD}.securityContext.fsGroupChangePolicy)`,
+    message:
+      "worker pods must never carry fsGroup (#1736): kubelet fsGroup processing restyles the shared claims at mount — the controller's trusted 2750 claim root never matches OnRootMismatch — stripping the controller's trust check mid-run; the exchange relies on the worker's runAsGroup plus the provisioned setgid root",
+  }),
+  Object.freeze({
     id: "fixedContainerSecurityContext",
     expression:
       `${CONTAINERS}.all(c, has(c.securityContext)` +
@@ -500,6 +508,22 @@ export function evaluateWorkerJobAdmission(
         && ctx.runAsGroup === WORKER_RUN_AS_ID
         && isRecord(ctx.seccompProfile)
         && ctx.seccompProfile.type === "RuntimeDefault";
+    },
+    noPodFsGroup: () => {
+      // Real CEL `has(podSpec.securityContext.fsGroup)` ERRORS when the
+      // intermediate securityContext is absent (the VAP then denies under
+      // Fail). The reference evaluator stays total here instead: an absent
+      // pod securityContext is already rejected by fixedPodSecurityContext,
+      // so the accept/reject outcome is identical and only the reported
+      // reason set differs — the absence PASS keeps this rule about
+      // fsGroup alone.
+      const securityContext = podSpecOf(object).securityContext;
+      if (securityContext === undefined) return true;
+      if (!isRecord(securityContext)) {
+        throw new TypeError("podSpec.securityContext is malformed");
+      }
+      return securityContext.fsGroup === undefined
+        && securityContext.fsGroupChangePolicy === undefined;
     },
     fixedContainerSecurityContext: () =>
       containersOf(podSpecOf(object)).every((c) => {

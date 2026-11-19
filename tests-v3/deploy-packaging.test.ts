@@ -6,7 +6,9 @@
  * `helm dependency build`/`lint`/`template`/kubeconform battery. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { parse } from "yaml";
 
 function read(path: string): string {
@@ -197,6 +199,129 @@ test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key,
   );
 });
 
+test("#1725: kubernetes-executor mode injects the fix-roots claim-root init container, CI pins both renders", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The kubelet applies fsGroup to freshly provisioned claim roots as
+  // group-WRITABLE (0775, uid 0), which the runtime's cache-root trust
+  // walk (assertTrustedDirChain in src/acquisition/mirror.ts) refuses —
+  // the chart must fix the roots to the documented shared-group shape
+  // (2750, owner = the pod's runAsUser, group = the shared fsGroup; the
+  // setgid bit keeps the #1631 group inheritance below the root).
+  assert.ok(
+    helpers.includes('{{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}'),
+    "the fix must chown to the pod's runAsUser (default 1000)",
+  );
+  assert.ok(
+    helpers.includes('{{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}'),
+    "the fix must keep the shared fsGroup (default 65532)",
+  );
+  assert.match(
+    helpers,
+    /\(list \$v\.paths\.runsRoot \$v\.paths\.workspaceCacheRoot\)/,
+    "the fix must target exactly the runs and workspace-cache roots",
+  );
+  assert.match(helpers, /chown %d:%d %s && chmod 2750 %s/, "the fix command must be chown + chmod 2750 (setgid preserved for #1631 group inheritance)");
+  assert.match(
+    helpers,
+    /\(mustMergeOverwrite \$operatorInitContainers \(dict "fix-roots"/,
+    "fix-roots must merge into controllers.main.initContainers, preserving operator-defined ones",
+  );
+  // The common library models initContainers as a map keyed by name; a
+  // raw Kubernetes container list must fail with that guidance instead of
+  // an opaque sprig merge type error.
+  assert.match(
+    helpers,
+    /\{\{- if not \(kindIs "map" \$operatorInitContainers\) -\}\}\n\{\{- fail "controller\.controllers\.main\.initContainers must be a map keyed by container name/,
+    "a list-shaped controllers.main.initContainers must fail closed with the map-shape guidance",
+  );
+  // The injection is scoped to the executor branch: a root init container
+  // renders only when workerExecutor.mode is kubernetes.
+  const executorBranch = helpers.indexOf("{{- if $kubeExecutor -}}");
+  const fixRoots = helpers.indexOf('"fix-roots"');
+  assert.notEqual(executorBranch, -1, "the executor branch must exist");
+  assert.ok(fixRoots > executorBranch, "fix-roots must be injected inside the executor branch");
+  assert.equal(helpers.indexOf('"fix-roots"', fixRoots + 1), -1, "fix-roots must appear exactly once");
+  assert.match(
+    helpers,
+    /"capabilities" \(dict "drop" \(list "ALL"\) "add" \(list "CHOWN" "FOWNER"\)\)/,
+    "the fix container must run with only CHOWN/FOWNER added",
+  );
+  // CI pins the behavior on both renders: present in the
+  // Kubernetes-executor Deployment, absent from the controller-only one.
+  // Substring checks on the literal CI lines (the rendered fix command is
+  // one folded YAML scalar, hence the tr-joining pipeline).
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes(
+      `awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "name: fix-roots"`,
+    ),
+    "charts.yaml must pin the fix-roots render assertion for the Kubernetes executor",
+  );
+  assert.ok(
+    workflow.includes(
+      String.raw`| tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '`,
+    ),
+    "charts.yaml must pin the exact chown/chmod fix command in the rendered Deployment",
+  );
+  assert.ok(
+    workflow.includes(`if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then`),
+    "charts.yaml must pin the controller-only absence assertion",
+  );
+  // Review follow-ups (#1736): CI must pin that fix-roots actually receives
+  // the claim-root mounts, that an operator-defined init container
+  // coexists with fix-roots, and that a list-shaped initContainers refuses.
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the runs mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-init-section.yaml | grep -q 'name: workspace-cache'`),
+    "charts.yaml must pin the workspace-cache mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: operator-init'`),
+    "charts.yaml must pin operator-defined init container preservation",
+  );
+  assert.ok(
+    workflow.includes("a raw list under controller.controllers.main.initContainers must refuse the render"),
+    "charts.yaml must pin the list-shaped initContainers refusal",
+  );
+  // The operator-facing contract is documented (acceptance criterion 3).
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.match(chartReadme, /`2750`, owner uid 1000,\s+group 65532/);
+  assert.match(chartReadme, /fix-roots/);
+});
+
+test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
+  // Kubelet OnRootMismatch skips group application only when the volume
+  // root mode is a superset of 0770 WITH setgid (requiresPermissionChange
+  // in kubernetes pkg/volume/volume_linux.go), so a trusted non-group-
+  // writable 2750 root NEVER matches. Any prose claiming the kubelet
+  // stops re-applying once the root carries the group must stay gone —
+  // that false premise was the review blocker on #1736.
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  assert.doesNotMatch(helpers, /never re-applies|treats\s*\n?\s*the fixed roots as matching/, "helper comment must not claim OnRootMismatch skips a fixed root");
+  assert.match(helpers, /superset of 0770[\s\S]*setgid set/, "helper comment must state the real skip condition");
+  assert.match(helpers, /volume_linux\.go/, "helper comment must cite the kubelet source");
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.doesNotMatch(chartReadme, /makes the fix durable: once the/, "chart README must not keep the OnRootMismatch durability claim");
+  assert.match(chartReadme, /no other workload mounts these claims with/, "chart README must name the real durability rule");
+  const deployment = read("docs/self-hosted-deployment.md");
+  assert.doesNotMatch(deployment, /kubelet no longer re-applies/, "deployment doc must not keep the OnRootMismatch durability claim");
+  assert.match(deployment, /worker Jobs carry no `fsGroup`/, "deployment doc must pin the no-fsGroup worker rule");
+  assert.match(deployment, /stat -c '%a %u %g'/, "deployment doc must keep the live root-shape check");
+  const boundary = read("docs/architecture/executor-boundary.md");
+  assert.doesNotMatch(boundary, /worker\s*\n?\s*pod pins `fsGroup/, "executor-boundary must not claim the worker pins fsGroup");
+  assert.match(boundary, /MUST NOT carry\s*\n?\s*`fsGroup`/, "executor-boundary must state the worker no-fsGroup rule");
+  // fix-roots needs uid 0, so the pod is not Pod Security `restricted`
+  // compatible — an operator-facing constraint the chart README must state.
+  assert.match(chartReadme, /Pod Security\s*\n?\s*`restricted`/, "chart README must name the Pod Security restricted constraint on fix-roots");
+  assert.match(chartReadme, /`baseline`/, "chart README must name the profile that accepts fix-roots");
+  // kubelet's restyle cannot be simulated in-repo: the durability check is
+  // operator-side, and the doc must say so instead of implying coverage.
+  assert.match(deployment, /[Nn]o repository test can simulate kubelet/, "deployment doc must state the live-cluster run is operator-side");
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);
@@ -209,6 +334,79 @@ test("values.schema.json is structurally valid with fail-closed top level", () =
   // The bjw-s passthrough sections under controller stay permissive.
   assert.equal((properties.controller as Record<string, unknown>).additionalProperties, true);
   assert.equal((properties.global as Record<string, unknown>).additionalProperties, true);
+});
+
+test("#1709: worker model-endpoint egress exception is worker-only and fail-closed", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    networkPolicy: Record<string, unknown>;
+  };
+  assert.deepEqual(
+    values.networkPolicy.workerAdditionalEgress,
+    [],
+    "worker egress must default to the DNS + TLS posture without an override",
+  );
+  const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as {
+    properties: {
+      networkPolicy: {
+        additionalProperties: boolean;
+        properties: Record<string, { type?: string }>;
+      };
+    };
+  };
+  const netpolSchema = schema.properties.networkPolicy;
+  assert.equal(netpolSchema.additionalProperties, false, "unknown policy keys must stay rejected");
+  assert.equal(netpolSchema.properties.workerAdditionalEgress?.type, "array");
+  const template = read("deploy/charts/pr-reviewer/templates/networkpolicy.yaml");
+  // Each extension is consumed exactly once.
+  assert.equal(
+    template.match(/\{\{- with \.Values\.networkPolicy\.additionalEgress \}\}/g)?.length,
+    1,
+    "additionalEgress must be consumed exactly once (controller policy)",
+  );
+  assert.equal(
+    template.match(/\{\{- with \.Values\.networkPolicy\.workerAdditionalEgress \}\}/g)?.length,
+    1,
+    "workerAdditionalEgress must be consumed exactly once (worker policy)",
+  );
+  // The worker consumption sits inside the worker policy document: after
+  // the worker policy name, and the controller consumption before it.
+  const workerDoc = template.indexOf("}}-worker");
+  assert.ok(workerDoc > -1, "worker policy document marker must remain");
+  assert.ok(
+    template.indexOf("with .Values.networkPolicy.workerAdditionalEgress") > workerDoc,
+    "workerAdditionalEgress must render only into the worker policy",
+  );
+  assert.ok(
+    template.indexOf("with .Values.networkPolicy.additionalEgress") < workerDoc,
+    "additionalEgress must stay in the controller policy",
+  );
+  // Fail closed: an exception with no rendered worker policy refuses,
+  // and the guard shares ONE condition with the worker document gate
+  // (a second mode-check could desynchronize from the guard).
+  assert.match(
+    template,
+    /\{\{- fail "networkPolicy\.workerAdditionalEgress requires/,
+    "a silently-dropped worker exception must refuse the render",
+  );
+  assert.equal(
+    template.match(/dig "mode"/g)?.length,
+    1,
+    "the worker-policy render condition must be computed exactly once",
+  );
+  assert.match(template, /\{\{- if \$workerPolicy \}\}/, "the worker document must reuse the shared condition");
+  // CI renders both leak directions and the refusals.
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.match(workflow, /workerAdditionalEgress leaked into the controller policy/);
+  assert.match(workflow, /additionalEgress leaked into the worker policy/);
+  assert.match(
+    workflow,
+    /workerAdditionalEgress without a kubernetes worker executor must refuse/,
+  );
+  // Docs state the product fact: workers, not only the controller, need
+  // the model endpoint.
+  assert.match(read("deploy/charts/pr-reviewer/README.md"), /workerAdditionalEgress/);
+  assert.match(read("deploy/charts/pr-reviewer/examples/README.md"), /workerAdditionalEgress/);
+  assert.match(read("docs/self-hosted-deployment.md"), /workerAdditionalEgress/);
 });
 
 test("example values parse and stay non-privileged", () => {
@@ -484,7 +682,7 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     jobs: Record<string, {
       if?: string;
       permissions: { contents: string; packages: string };
-      steps: { uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
+      steps: { id?: string; if?: string; uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
     }>;
   };
 
@@ -688,57 +886,67 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.match(coordsRun, /refusing to derive release aliases/);
   assert.match(coordsRun, /RELEASE_MAJOR_MINOR="\$\{version%\.\*\}"/);
   assert.match(coordsRun, /RELEASE_VERSION=""/, "non-tag events must derive no release alias");
-  // GHCR has no registry-side tag immutability, so the workflow itself
-  // must refuse to replace an existing sha-<commit> tag: a rerun of a
-  // non-byte-reproducible build would otherwise silently move the tag off
-  // the digest the run summary published. The guard must inspect the
-  // exact two sha-<commit> tags, fail on a present tag, fail closed on any
-  // uncertain registry answer, and run before the first push step.
-  // ── The immutability guard: GHCR has no registry-side tag immutability,
-  // so the workflow itself must refuse to replace an existing sha-<commit>
-  // tag: a rerun of a non-byte-reproducible build would otherwise silently
-  // move the tag off the digest the run summary published. The guard must
-  // inspect the exact two sha-<SOURCE_SHA> tags, fail on a present tag,
-  // fail closed on any uncertain registry answer, and run before the first
-  // push step.
-  const guardStep = publish.steps.find((step) => (step.run ?? "").includes("docker manifest inspect"));
-  assert.ok(guardStep, "a guard step must inspect the published sha tags");
-  const guardRun = guardStep.run ?? "";
-  assert.match(guardRun, /set -euo pipefail/);
-  assert.deepEqual(guardStep.env, {
+  // ── The resume resolver (#1741): GHCR has no registry-side tag
+  // immutability, so the workflow must never re-push an existing
+  // sha-<commit> tag — but it must also not refuse the whole run when only
+  // part of the pair is published. The per-target state is resolved by the
+  // standalone script (exercised deterministically in its own test below),
+  // and the workflow consumes it: the resolver runs before any push, and
+  // EACH push step is gated on its own target being absent, so a rerun
+  // reuses a present target and publishes only the missing one.
+  const resolverStep = publish.steps.find((step) =>
+    (step.run ?? "").includes("deploy/images/resolve-sha-tag-state.sh"),
+  );
+  assert.ok(resolverStep, "a step must resolve the published sha-tag state");
+  assert.equal(resolverStep.id, "sha_state", "the resolver step must publish its outputs under id sha_state");
+  assert.deepEqual(resolverStep.env, {
     CONTROLLER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}",
     WORKER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}",
   });
-  for (const tagVar of ["CONTROLLER_TAG", "WORKER_TAG"]) {
-    assert.match(guardRun, new RegExp(`\\$\\{?${tagVar}\\}?`), `the guard must check $${tagVar}`);
+  // Each target's build/push runs only when that target's sha tag is absent;
+  // a present target is reused untouched (never re-pushed, never moved).
+  for (const target of ["controller", "worker"]) {
+    const pushStep = publish.steps.find(
+      (step) => step.with?.["target"] === target && step.with?.["push"] === true,
+    );
+    assert.ok(pushStep, `the ${target} target must be built and pushed`);
+    assert.equal(
+      pushStep.if,
+      `steps.sha_state.outputs.${target}_state == 'absent'`,
+      `the ${target} push must be gated on its own resolved sha-tag state being absent`,
+    );
   }
-  // A present tag refuses the run...
-  assert.match(guardRun, /already exists/);
-  // ...and so does any registry answer that is not an explicit absence:
-  // only the spec's 404 codes (MANIFEST_UNKNOWN / NAME_UNKNOWN /
-  // not-found) pass, so ambiguous failures like TLS "unknown authority"
-  // or an OCI UNKNOWN error code fail closed (fail the job, never push
-  // blind).
-  assert.match(guardRun, /manifest\.unknown\|name\.unknown\|not found/);
-  // Orientation locks: the existing-tag refusal must sit in the branch
-  // where the inspect SUCCEEDED, and the uncertain-state refusal in the
-  // branch where the absence classifier did NOT match.
-  assert.match(
-    guardRun,
-    /if out=\$\(docker manifest inspect "\$tag" 2>&1\); then\s*\n\s*echo "::error::\$\{tag\} already exists/,
-    "the existing-tag refusal must be the inspect-success branch",
-  );
-  assert.match(
-    guardRun,
-    /if ! printf '%s\\n' "\$out" \| grep -Eqi/,
-    "the uncertain-state refusal must be the classifier-did-not-match branch",
-  );
-  assert.match(guardRun, /exit 1/);
-  const guardIndex = publish.steps.indexOf(guardStep);
+  const resolverIndex = publish.steps.indexOf(resolverStep);
   const firstPushIndex = publish.steps.findIndex((step) => step.with?.["push"] === true);
   assert.ok(
-    firstPushIndex !== -1 && guardIndex < firstPushIndex,
-    "the tag guard must run before any push step",
+    firstPushIndex !== -1 && resolverIndex < firstPushIndex,
+    "the sha-tag resolver must run before any push step",
+  );
+  // ── A reused target's build step is skipped, but its MOVING refs must
+  // still converge: a dedicated step repoints pr-<number>/SemVer/major.minor
+  // at the manifest the immutable sha tag already holds (no rebuild, so a
+  // moving ref can never drift off the immutable digest, and aliases lost
+  // when an earlier run died after the sha push are recovered on the rerun).
+  const aliasStep = publish.steps.find((step) =>
+    (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
+  );
+  assert.ok(aliasStep, "a step must republish the moving refs of reused targets");
+  assert.deepEqual(aliasStep.env, {
+    GHCR_OWNER: "${{ env.GHCR_OWNER }}",
+    SOURCE_SHA: "${{ env.SOURCE_SHA }}",
+    PR_REF: "${{ env.PR_REF }}",
+    RELEASE_VERSION: "${{ env.RELEASE_VERSION }}",
+    RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
+    CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
+    WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
+  });
+  const lastPushIndex = publish.steps.reduce(
+    (last, step, i) => (step.with?.["push"] === true ? i : last),
+    -1,
+  );
+  assert.ok(
+    publish.steps.indexOf(aliasStep) > lastPushIndex,
+    "the moving-refs step must run after the build-push steps",
   );
   // Both targets from the one Dockerfile, single-arch, pushed in one job —
   // the same checked-out commit is what makes the controller and worker
@@ -763,18 +971,42 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     );
   }
   // ── The run summary must carry the exact pull-able references for BOTH
-  // images and the source commit they were built from, wired from the
-  // build outputs and the resolved source SHA — the operator's only exact
-  // provenance record of a publish run.
+  // images and the source commit they were built from. Each digest is wired
+  // from BOTH sources the resume can produce: the freshly-built digest from
+  // the gated build step AND the reused digest the resolver read for an
+  // already-published tag (#1741) — so a recovery run still reports the full
+  // pair, including the image it did not build itself.
   for (const target of ["controller", "worker"]) {
+    const upper = target.toUpperCase();
     assert.match(
       workflow,
-      new RegExp(`${target.toUpperCase()}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+      new RegExp(`BUILT_${upper}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+      `the summary must receive the freshly built ${target} digest`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`RESOLVED_${upper}_DIGEST: \\$\\{\\{ steps\\.sha_state\\.outputs\\.${target}_digest \\}\\}`),
+      `the summary must receive the reused ${target} digest the resolver read`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`${upper}_STATE: \\$\\{\\{ steps\\.sha_state\\.outputs\\.${target}_state \\}\\}`),
+      `the summary must receive the resolved ${target} state`,
     );
   }
   const summaryStep = publish.steps.find((step) => (step.run ?? "").includes("GITHUB_STEP_SUMMARY"))?.run ?? "";
   assert.notEqual(summaryStep, "", "a step must write the run summary");
   assert.equal(summaryStep.includes("SOURCE_SHA"), true, "the summary step must receive the resolved source SHA");
+  // The summary picks the reused digest when present, else the built one, so a
+  // resume reports the immutable reference it preserved rather than a rebuild.
+  for (const target of ["controller", "worker"]) {
+    const upper = target.toUpperCase();
+    assert.match(
+      summaryStep,
+      new RegExp(`${upper}_DIGEST="\\$\\{RESOLVED_${upper}_DIGEST:-\\$BUILT_${upper}_DIGEST\\}"`),
+      `the summary must prefer the reused ${upper} digest over the built one`,
+    );
+  }
   // Anchor to the brace group redirected into the summary itself: the
   // same references are echoed to the job log, and the log echo alone
   // must not satisfy the contract.
@@ -810,6 +1042,257 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     ["${{ secrets.GITHUB_TOKEN }}"],
     "the workflow's own GITHUB_TOKEN is the only secret in play",
   );
+});
+
+// #1741: the sha-tag state resolver is the single decision point for whether
+// each image target is reused or published. It is exercised here with a
+// STUBBED `docker` (no live registry writes), so the control flow is a
+// deterministic regression test, not a regex over YAML. The stub reads
+// CONTROLLER_STATE / WORKER_STATE (present | absent | ambiguous |
+// present-no-digest) plus the per-target digest, and emulates the two
+// registry reads the resolver makes: `docker manifest inspect` (presence +
+// the 404/ambiguous answer) and `docker buildx imagetools inspect` (the
+// digest a present tag resolves to).
+const RESOLVER = "deploy/images/resolve-sha-tag-state.sh";
+const CTRL_DIGEST = `sha256:${"a".repeat(64)}`;
+const WORKER_DIGEST = `sha256:${"b".repeat(64)}`;
+
+function runResolver(states: {
+  controller: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
+  worker: "present" | "absent" | "absent-notfound" | "ambiguous" | "auth-denial" | "present-no-digest";
+}): { status: number | null; outputs: Record<string, string> } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "resolver-"));
+  const docker = join(dir, "docker");
+  writeFileSync(
+    docker,
+    [
+      "#!/usr/bin/env bash",
+      'sub="$1"; shift',
+      'tag="${@: -1}"',
+      'which=controller; [ "$tag" = "$WORKER_TAG" ] && which=worker',
+      'state_var="${which^^}_STATE"',
+      'if [ "$sub" = manifest ]; then',
+      '  case "${!state_var}" in',
+      '    present|present-no-digest) echo \'{"schemaVersion":2}\'; exit 0;;',
+      '    absent) echo "errors: MANIFEST_UNKNOWN: manifest unknown"; exit 1;;',
+      '    absent-notfound) echo "$tag: not found"; exit 1;;',
+      '    ambiguous) echo "error: x509: certificate signed by unknown authority"; exit 1;;',
+      '    auth-denial) echo "errors: unauthorized: basic credential not found"; exit 1;;',
+      "  esac",
+      "fi",
+      'if [ "$sub" = buildx ]; then',
+      '  case "${!state_var}" in',
+      '    present) echo "Name: $tag"; dvar="${which^^}_DIGEST"; echo "Digest: ${!dvar}"; exit 0;;',
+      '    present-no-digest) echo "Name: $tag"; exit 0;;',
+      "  esac",
+      '  echo "not found"; exit 1',
+      "fi",
+      "exit 1",
+    ].join("\n"),
+  );
+  chmodSync(docker, 0o755);
+  const outFile = join(dir, "github_output.txt");
+  const result = spawnSync("bash", [RESOLVER], {
+    encoding: "utf8",
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      HOME: process.env.HOME,
+      CONTROLLER_TAG: "ghcr.io/o/pr-reviewer-controller:sha-cafe",
+      WORKER_TAG: "ghcr.io/o/pr-reviewer-worker:sha-cafe",
+      CONTROLLER_STATE: states.controller,
+      WORKER_STATE: states.worker,
+      CONTROLLER_DIGEST: CTRL_DIGEST,
+      WORKER_DIGEST: WORKER_DIGEST,
+      GITHUB_OUTPUT: outFile,
+    },
+  });
+  const outputs: Record<string, string> = {};
+  try {
+    for (const line of readFileSync(outFile, "utf8").split("\n")) {
+      const i = line.indexOf("=");
+      if (i > 0) outputs[line.slice(0, i)!] = line.slice(i + 1);
+    }
+  } catch {
+    /* no output written */
+  }
+  return { status: result.status, outputs };
+}
+
+test("#1741 resolver resumes a half-published pair, reuses present tags, fails closed on ambiguity", () => {
+  // The exact bug: controller published, worker failed. The rerun must reuse
+  // the controller tag (its digest preserved, NOT re-pushed) and publish the
+  // worker — exit 0 with the full pair addressable.
+  const partial = runResolver({ controller: "present", worker: "absent" });
+  assert.equal(partial.status, 0, "a half-published pair resumes without error");
+  assert.equal(partial.outputs["controller_state"], "present");
+  assert.equal(partial.outputs["controller_digest"], CTRL_DIGEST, "the reused controller digest is preserved");
+  assert.equal(partial.outputs["worker_state"], "absent");
+  assert.equal(partial.outputs["worker_digest"], undefined, "an absent target carries no digest to reuse");
+
+  // The symmetric half: worker already present, controller missing.
+  const other = runResolver({ controller: "absent", worker: "present" });
+  assert.equal(other.status, 0);
+  assert.equal(other.outputs["controller_state"], "absent");
+  assert.equal(other.outputs["worker_state"], "present");
+  assert.equal(other.outputs["worker_digest"], WORKER_DIGEST);
+
+  // Both already published: the run verifies and reuses both, publishing
+  // neither (and moving nothing).
+  const both = runResolver({ controller: "present", worker: "present" });
+  assert.equal(both.status, 0);
+  assert.deepEqual(
+    { ...both.outputs },
+    {
+      controller_state: "present",
+      controller_digest: CTRL_DIGEST,
+      worker_state: "present",
+      worker_digest: WORKER_DIGEST,
+    },
+  );
+
+  // First publish: both absent, both built.
+  const fresh = runResolver({ controller: "absent", worker: "absent" });
+  assert.equal(fresh.status, 0);
+  assert.deepEqual(
+    { ...fresh.outputs },
+    { controller_state: "absent", worker_state: "absent" },
+  );
+
+  // Ambiguous registry answers still fail CLOSED — never push over uncertain
+  // state — whether the ambiguity is on the controller or the worker.
+  assert.notEqual(runResolver({ controller: "ambiguous", worker: "absent" }).status, 0, "controller ambiguity fails closed");
+  assert.notEqual(runResolver({ controller: "absent", worker: "ambiguous" }).status, 0, "worker ambiguity fails closed");
+  // #252 adversarial boundary: an authorization failure whose text contains
+  // the phrase "not found" ("basic credential not found") must NEVER classify
+  // as absent — only the registry's ": not found" suffix form counts, exactly
+  // like the chart guard in publish-chart.yaml.
+  assert.notEqual(
+    runResolver({ controller: "auth-denial", worker: "absent" }).status,
+    0,
+    "an auth error containing 'not found' fails closed, never classifies absent",
+  );
+  assert.notEqual(
+    runResolver({ controller: "absent", worker: "auth-denial" }).status,
+    0,
+    "a worker auth error containing 'not found' fails closed too",
+  );
+  // The strict form of the same phrase still classifies as absent, so the
+  // tightening does not refuse genuine 404s reported as "<ref>: not found".
+  const colonAbsence = runResolver({ controller: "absent-notfound", worker: "absent" });
+  assert.equal(colonAbsence.status, 0);
+  assert.equal(colonAbsence.outputs["controller_state"], "absent", '": not found" is an explicit registry absence');
+  // The classifier itself carries the load-bearing leading colon.
+  const resolverScript = read(RESOLVER);
+  assert.match(resolverScript, /: not found/, "the absent classifier requires the colon before 'not found'");
+  assert.doesNotMatch(resolverScript, /\|not found/, "a bare 'not found' alternative must not return");
+  // A present tag whose digest cannot be read is uncertain too: it must not be
+  // reused with a blank/unverifiable reference.
+  assert.notEqual(
+    runResolver({ controller: "present-no-digest", worker: "absent" }).status,
+    0,
+    "a present tag with an unreadable digest fails closed",
+  );
+});
+
+// #1741 review: a reused target's build step (and with it its alias pushes)
+// is skipped, so a dedicated script repoints the target's moving refs at the
+// preserved sha manifest. Exercised with a STUBBED `docker` that records each
+// invocation, so the exact registry writes are a deterministic regression
+// test, not a regex over YAML.
+const MOVING_REFS = "deploy/images/republish-moving-refs.sh";
+
+function runMovingRefs(env: {
+  controller: string;
+  worker: string;
+  prRef?: string;
+  releaseVersion?: string;
+  releaseMajorMinor?: string;
+  dockerFail?: boolean;
+}): { status: number | null; calls: string[] } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
+  const callsFile = join(dir, "calls.txt");
+  const docker = join(dir, "docker");
+  writeFileSync(
+    docker,
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$*" >> "$CALLS_FILE"',
+      'if [ -n "${DOCKER_FAIL:-}" ]; then exit 1; fi',
+    ].join("\n"),
+  );
+  chmodSync(docker, 0o755);
+  const result = spawnSync("bash", [MOVING_REFS], {
+    encoding: "utf8",
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      HOME: process.env.HOME,
+      GHCR_OWNER: "o",
+      SOURCE_SHA: "cafe",
+      CONTROLLER_STATE: env.controller,
+      WORKER_STATE: env.worker,
+      PR_REF: env.prRef ?? "",
+      RELEASE_VERSION: env.releaseVersion ?? "",
+      RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
+      CALLS_FILE: callsFile,
+      ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
+    },
+  });
+  let calls: string[] = [];
+  try {
+    calls = readFileSync(callsFile, "utf8").split("\n").filter((line) => line.length > 0);
+  } catch {
+    /* docker was never called */
+  }
+  return { status: result.status, calls };
+}
+
+test("#1741 moving refs of reused targets repoint at the preserved sha manifest", () => {
+  // Half-published PR rerun: the reused controller's pr ref must be repointed
+  // at the exact sha manifest it already holds (no rebuild); the absent
+  // worker publishes its own aliases through the gated build step, so nothing
+  // is written for it here.
+  const half = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
+  assert.equal(half.status, 0);
+  assert.deepEqual(half.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:pr-7 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+  ]);
+
+  // Release-tag resume: every reused target gets BOTH SemVer aliases
+  // repointed, each at its own sha manifest.
+  const release = runMovingRefs({
+    controller: "present",
+    worker: "present",
+    releaseVersion: "1.2.3",
+    releaseMajorMinor: "1.2",
+  });
+  assert.equal(release.status, 0);
+  assert.deepEqual(release.calls, [
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-cafe",
+    "buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-cafe",
+  ]);
+
+  // First publish: both targets push their own aliases from the build step,
+  // so the script performs no registry writes at all.
+  const fresh = runMovingRefs({ controller: "absent", worker: "absent", prRef: "pr-7" });
+  assert.equal(fresh.status, 0);
+  assert.deepEqual(fresh.calls, []);
+
+  // A reused target of an event with no moving refs (a `main` push) is a
+  // no-op: imagetools is never invoked just to retag the sha ref onto itself.
+  const noAliases = runMovingRefs({ controller: "present", worker: "present" });
+  assert.equal(noAliases.status, 0);
+  assert.deepEqual(noAliases.calls, []);
+
+  // A failed retag must fail the step, not degrade into the no-op skip path.
+  const failed = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7", dockerFail: true });
+  assert.notEqual(failed.status, 0, "a failed imagetools create propagates as a step failure");
+  assert.equal(failed.calls.length, 1, "the attempted write is still recorded");
+
+  // A state outside the resolver's present|absent vocabulary is uncertain
+  // publication state: refuse, never silently skip.
+  const unknown = runMovingRefs({ controller: "present-no-digest", worker: "absent", prRef: "pr-7" });
+  assert.notEqual(unknown.status, 0, "an unknown state fails closed");
+  assert.deepEqual(unknown.calls, [], "no registry write happens for an unknown state");
 });
 
 test("#1704 image coordinates are documented for PR, main, and release flows", () => {

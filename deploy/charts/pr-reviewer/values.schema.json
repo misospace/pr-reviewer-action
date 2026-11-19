@@ -251,6 +251,10 @@
         "additionalEgress": {
           "type": "array",
           "items": { "type": "object", "additionalProperties": true }
+        },
+        "workerAdditionalEgress": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
         }
       }
     },

@@ -455,10 +455,20 @@ test("the manifest pins the restrictive security defaults field by field", () =>
     runAsNonRoot: true,
     runAsUser: WORKER_RUN_AS_ID,
     runAsGroup: WORKER_RUN_AS_ID,
-    fsGroup: WORKER_RUN_AS_ID,
-    fsGroupChangePolicy: "OnRootMismatch",
     seccompProfile: { type: "RuntimeDefault" },
   });
+  // #1736: the worker pod must carry NO fsGroup/fsGroupChangePolicy.
+  // Kubelet OnRootMismatch skips group application only when the volume
+  // root mode is a superset of 0770 WITH setgid
+  // (requiresPermissionChange, kubernetes pkg/volume/volume_linux.go),
+  // so the controller's trusted non-group-writable 2750 claim root can
+  // never match: an fsGroup worker mount would recursively restyle the
+  // whole claim (chgrp + group-writable) and strip the controller's
+  // trust check mid-run. The exchange needs only the worker's own gid
+  // plus the provisioned setgid root. deepEqual above already proves
+  // absence of any key; these name the invariant for the next reader.
+  assert.equal("fsGroup" in manifest.pod.securityContext, false, "no fsGroup on worker pods (#1736)");
+  assert.equal("fsGroupChangePolicy" in manifest.pod.securityContext, false, "no fsGroupChangePolicy without fsGroup (#1736)");
   assert.equal(manifest.pod.containers.length, 1);
   const container = manifest.pod.containers[0]!;
   assert.deepEqual(container.securityContext, {
@@ -553,7 +563,8 @@ test("the chmod walk restyles every nested component but never the claim root it
   const fixture = makeFixture({ kind: "succeed", result: "ok" });
   try {
     // A DISTINCT initial claim-root mode: the claim root is the volume
-    // mount point whose mode the kubelet owns (fsGroup) — the executor's
+    // mount point whose mode the deployment provisioning owns (the
+    // chart's fix-roots init container, #1725) — the executor's
     // walk must leave it exactly as it found it, whatever it was.
     chmodSync(fixture.root, 0o755);
     const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
@@ -592,7 +603,8 @@ test("a run directory equal to the claim root refuses the launch instead of chmo
     const claimRootModeBefore = statSync(fixture.root).mode & 0o7777;
     // The run directory IS the claim root: there is no component strictly
     // below the root for the walk to restyle, and the executor must never
-    // restyle the root itself (the kubelet owns its mode) — so the launch
+    // restyle the root itself (the deployment provisioning owns its
+    // mode, #1725) — so the launch
     // is refused cleanly instead.
     const request = validateExecutionRequest({
       ...fixture.request,
@@ -699,10 +711,8 @@ test("the pod template carries the operator's RuntimeClass pin only when the spe
     runAsNonRoot: true,
     runAsUser: WORKER_RUN_AS_ID,
     runAsGroup: WORKER_RUN_AS_ID,
-    fsGroup: WORKER_RUN_AS_ID,
-    fsGroupChangePolicy: "OnRootMismatch",
     seccompProfile: { type: "RuntimeDefault" },
-  }, "the fixed pod security context survives the pin unchanged");
+  }, "the fixed pod security context survives the pin unchanged (no fsGroup, #1736)");
   assert.deepEqual(manifest.pod.containers[0]!.securityContext, {
     allowPrivilegeEscalation: false,
     readOnlyRootFilesystem: true,

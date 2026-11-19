@@ -468,8 +468,9 @@ function coveringControllerRoot(
  * of umask. The claim root itself is never chmod-ed — in NO case does it
  * enter the walk's chmod list (a nested run directory walks its parents
  * down TO the root but never past it into the root; its group access is
- * the kubelet's fsGroup application to own, and restyling it would
- * change a shared volume root other workloads depend on) — and a
+ * the deployment-provisioned shape — the chart's `fix-roots` init
+ * container (#1725) — to own, and restyling it would change a shared
+ * volume root other workloads depend on) — and a
  * covering root of `/` (a pathological mapping) narrows the walk to
  * `runDir` alone — never system directories. A run directory EQUAL to
  * the claim root is refused outright: there is no component strictly
@@ -494,7 +495,7 @@ async function shareRunDirectoryGroup(
     return `${runDir} is not covered by any configured volume mapping, so its components cannot be made group-accessible for the shared claim`;
   }
   if (runDir === root) {
-    return `${runDir} is the volume mapping's claim root itself, whose mode the executor must never change (the kubelet owns the claim root's mode), so a run directory equal to the claim root is not supported`;
+    return `${runDir} is the volume mapping's claim root itself, whose mode the executor must never change (the deployment-provisioned root shape owns its mode, #1725), so a run directory equal to the claim root is not supported`;
   }
   // The chain covers every component STRICTLY BELOW the claim root: it
   // walks the parents down TO the root but never past it — the root
@@ -583,12 +584,18 @@ export interface KubernetesJobManifest {
       readonly runAsNonRoot: true;
       readonly runAsUser: number;
       readonly runAsGroup: number;
-      /** The shared-claim group (#1631): the kubelet applies this group
-       * (and the setgid bit) to every mapped claim volume at mount, so
-       * files/dirs created on the shared claim inherit the group both
-       * sides of the envelope/result exchange share. */
-      readonly fsGroup: number;
-      readonly fsGroupChangePolicy: "OnRootMismatch";
+      /** NO `fsGroup`/`fsGroupChangePolicy` — and never one again (#1736).
+       * The worker's shared-claim access is its explicit `runAsGroup`
+       * plus the setgid bit the deployment provisions on the claim root
+       * (#1631/#1725); kubelet group application must stay out. With
+       * fsGroup set, OnRootMismatch skips only when the root GID matches
+       * AND the root mode is a superset of 0770 WITH setgid
+       * (`requiresPermissionChange`, kubernetes `pkg/volume/volume_linux.go`),
+       * so the controller's trusted non-group-writable `2750` root can
+       * never match: every worker launch would recursively restyle the
+       * whole claim (chgrp + group-writable) and strip the controller's
+       * trusted root mid-run. With fsGroup absent, kubelet performs no
+       * volume ownership work at all. */
       readonly seccompProfile: { readonly type: "RuntimeDefault" };
     };
     readonly containers: readonly [{
@@ -713,12 +720,12 @@ export function buildReviewJobManifest(
         runAsNonRoot: true,
         runAsUser: WORKER_RUN_AS_ID,
         runAsGroup: WORKER_RUN_AS_ID,
-        // The kubelet applies group 65532 (and the setgid bit) to every
-        // mapped claim at mount, so files/dirs created on the shared
-        // claim inherit the group both sides share — the ownership model
-        // the envelope/result exchange depends on (#1631).
-        fsGroup: WORKER_RUN_AS_ID,
-        fsGroupChangePolicy: "OnRootMismatch",
+        // No fsGroup (#1736): any worker pod carrying it restyles the
+        // shared claims at mount (a trusted 2750 root never matches
+        // OnRootMismatch's 0770+setgid superset), and the envelope/result
+        // exchange needs no kubelet group application — the worker's own
+        // gid 65532 plus the setgid bit on the deployment-provisioned
+        // claim root carry the group on both sides (#1631/#1725).
         seccompProfile: { type: "RuntimeDefault" },
       },
       containers: [{

@@ -82,11 +82,16 @@ How it runs:
   copy-paste-ready `image@sha256:...` reference plus the exact source
   commit and the trigger. No `latest` anywhere.
 - **Tag immutability.** GHCR has no registry-side immutable-tag setting,
-  so the job enforces it before building: it inspects both `sha-<commit>`
-  tags and stops the run when one already exists, or when the registry
-  state is uncertain (fail closed). Within this workflow a rerun can
-  never move a published tag; publish a new commit instead. The
-  `pr-<number>` ref is the only intentionally moving ref.
+  so the job enforces it before building: it resolves each `sha-<commit>`
+  tag's state and never re-pushes one that already exists. A rerun RESUMES a
+  half-published pair — it reuses a target whose tag is present (keeping its
+  digest) and publishes only the missing target. A reused target's moving
+  refs (`pr-<number>` and the release aliases) are repointed at the preserved
+  digest without a rebuild, so a rerun also recovers aliases an earlier run
+  failed to push. If either registry answer
+  is uncertain, the run stops instead of pushing (fail closed). A rerun can
+  therefore never move a published tag. The `pr-<number>` ref is the only
+  intentionally moving ref.
 - **Permissions.** The publish job runs with `contents: read` and
   `packages: write` and logs into GHCR with `GITHUB_TOKEN`. Image building
   is fully separate from the Action release pipeline (which owns
@@ -227,9 +232,65 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - optional NetworkPolicy (**default OFF**): no chart-managed traffic restrictions
   unless explicitly enabled; when enabled it denies ingress by default and
   limits egress to specified ports, requiring cluster-specific exceptions
-  for the Kubernetes API, model endpoint and admin/dashboard path;
+  for the Kubernetes API, model endpoint and admin/dashboard path.
+  Workers call the model endpoint themselves, so a non-TLS in-cluster
+  endpoint needs the worker-only `networkPolicy.workerAdditionalEgress`
+  exception in addition to any controller `additionalEgress` (#1709);
+  each extension applies to exactly one of the two policies;
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
+
+### Kubernetes API egress for Kubernetes-executor mode (#1714)
+
+When `networkPolicy.enabled` is on and `workerExecutor.mode` is
+`kubernetes`, the controller needs egress to the Kubernetes API: it creates
+and polls the per-review worker Jobs (`src/executor/kubernetes.ts`) and
+manages the per-run credential Secrets (`src/executor/kubernetes-credential-store.ts`,
+including the lifetime sweep). The chart's base egress rules — DNS, TCP
+443, and PostgreSQL 5432 — do **not** cover this on every cluster.
+
+Why: the API server's `kubernetes` Service is a ClusterIP on port 443, but
+the real API server listens on node port 6443 and runs with
+`hostNetwork: true`. How egress policy sees the connection depends on the
+CNI data plane:
+
+- **Classic kube-proxy (iptables/IPVS):** the pod's connection to the
+  ClusterIP is policy-evaluated **before** DNAT, so the generic TCP 443
+  egress rule already allows it. No exception needed.
+- **Cilium with `kube-proxy-replacement=true`:** the connection is
+  redirected at socket level to the API server backend
+  (`<nodeIP>:6443`), and egress policy is evaluated against that
+  redirected destination. The 443 rule never matches and the connection
+  is silently dropped. Verified live in the #725 pilot on Talos + Cilium
+  (kube-proxy-replacement strict): from the controller pod,
+  `<ClusterIP>:443` timed out while a real API server endpoint
+  `<nodeIP>:6443` was dropped by policy, even though RBAC passed.
+
+The symptom is silent: Job creation and the credential sweep fail with
+"the API call did not complete" (status `null`), not a permission error —
+`kubectl auth can-i` succeeds because only the network path is missing.
+
+Fix: add an `additionalEgress` rule for the API server on TCP 6443. Node
+addresses are cluster-specific, so the chart ships no default. The
+verified pilot snippet (controller policy is the only one that needs the
+API — worker pods never mount a token and never call it):
+
+```yaml
+networkPolicy:
+  enabled: true
+  additionalEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.69.1.20/29 # your control-plane/node subnet
+      ports:
+        - protocol: TCP
+          port: 6443
+```
+
+Operators on Cilium can instead express the same allowance with a
+CiliumNetworkPolicy using `toEntities: [kube-apiserver]`, which resolves
+the API server endpoints automatically; the chart's stock NetworkPolicy
+cannot do that, so the ipBlock exception above is the portable form.
 
 The Kubernetes worker executor pins worker pods to uid/gid 65532, so the
 controller deployment must share group 65532 with the worker pin (the
@@ -242,6 +303,38 @@ unknown), and mount the shared claims on storage whose driver honors
 `fsGroupPolicy: File` (standard PVC CSI drivers do; hostPath and
 `None`-policy drivers get no group application and the exchange fails
 closed).
+
+Kubelet applies `fsGroup` to a freshly provisioned claim with a
+group-WRITABLE root (`0775`, uid 0), which the runtime's own cache-root
+trust check refuses — every job would fail "cache root is writable by
+group or other" before dispatch (#1725). In Kubernetes-executor mode the
+chart therefore renders a `fix-roots` init container that fixes the runs
+and workspace-cache claim roots to the shared-group shape before the
+controller starts: mode `2750`, owner uid 1000, group 65532 — owner-write
+only, with the shared group keeping the read/execute the #1631 exchange
+needs and the setgid bit keeping group inheritance for everything the
+runtime creates below the root (it chmods those components but never
+chgroups them). The fix is durable because no workload mounts these claims
+with `fsGroup` except the controller pod itself (#1736): kubelet's
+`OnRootMismatch` skips only when the root mode is a superset of `0770`
+*with* setgid, so a trusted `2750` root always re-triggers a full
+recursive restyle for an `fsGroup` mount — which is why the executor's
+worker Jobs carry no `fsGroup` (the shipped worker admission policy
+rejects one), and why any other workload mounting these claims must not
+either. The controller pod's own kubelet processing runs before
+`fix-roots`, so the repair repeats deterministically at every controller
+start, ahead of the controller process. Verify the sequence on a live
+install: run one executor job, launch a second one (a fresh worker pod
+mounting the same claims), then re-run
+`stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`
+inside the controller pod — the roots must still read `2750 1000 65532`
+and the follow-up job must not fail "cache root is writable by group or
+other". No repository test can simulate kubelet's fsGroup restyle, so
+this sequence is operator-side verification: run it once on a live
+install, and again after any executor or storage-driver change.
+Operators mounting pre-existing claims must provide
+the same root shape themselves; the contract is documented in the chart
+README.
 
 External secret handling is the operator's choice: every secret can come
 from an `existingSecret`, so External Secrets, Sealed Secrets, or your vault
@@ -334,6 +427,29 @@ loopback-only and off the network. The #742 operations dashboard
 ON; the chart exposes it as `controller.admin.dashboard` (default
 `false`, which leaves the flag unset; `true` requires the admin surface)
 — see `docs/architecture/operations-dashboard.md`.
+
+The chart's values define a single Service (`controller.service.webhook`, the
+POST-only intake on 8080); the admin listener on 8081 has no Service of its
+own. That is why turning on the dashboard alone does not make it reachable:
+exposing the admin surface is the operator's ingress decision, and because
+the shell carries no data it is served unauthenticated, so network access
+control is the remaining guard on who can reach it (all admin data stays
+bearer-protected). Reach it with the bjw-s `common` `service` and `route`
+passthrough — add an `admin` port to a controller Service and route the
+dashboard/admin paths to it. The chart README ("Reaching the dashboard from
+outside the pod") carries the full Gateway values. Two contract notes hold
+wherever you route it:
+
+- `/admin` and `/dashboard` must reach the same origin (the admin port). The
+  dashboard script fetches `/admin/*` from the listener that served the shell
+  (its CSP `connect-src 'self'` forbids any other origin), so splitting them
+  across hostnames breaks every data request.
+- Never expose `/dashboard*` or `/admin*` as the forge intake path. The GitHub
+  intake ignores the request path, and the Forgejo/Gitea intake mounts its
+  fixed canonical route (`/webhooks/forgejo` / `/webhooks/gitea`, above), so
+  point the intake at a dedicated path that is neither prefix. A path-split
+  route with no catch-all rule also keeps `/metrics` and `/healthz` off the
+  public route.
 
 ## Upgrades
 

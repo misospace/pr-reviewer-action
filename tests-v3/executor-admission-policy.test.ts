@@ -489,6 +489,53 @@ test("rejects a worker Job whose fixed pod security context is broken or missing
   assert.ok(idsOf(evaluateWorkerJobAdmission(missing, reviewContext())).includes("fixedPodSecurityContext"));
 });
 
+test("#1736: rejects a worker pod carrying fsGroup — kubelet would restyle the shared claims mid-run", () => {
+  // Any pod-level fsGroup makes kubelet restyle every mapped claim at
+  // mount (the controller's trusted 2750 root never matches
+  // OnRootMismatch's 0770+setgid superset), so the policy refuses it
+  // even if some mutating webhook or hand-written Job adds one.
+  const withFsGroup = mutate(normalJobObject(), (o) => {
+    (((o.spec as any).template.spec as any).securityContext.fsGroup = 65532);
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withFsGroup, reviewContext())).includes("noPodFsGroup"));
+  const withChangePolicy = mutate(normalJobObject(), (o) => {
+    (((o.spec as any).template.spec as any).securityContext.fsGroupChangePolicy = "OnRootMismatch");
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withChangePolicy, reviewContext())).includes("noPodFsGroup"));
+  // An ABSENT pod securityContext is fixedPodSecurityContext's rejection,
+  // not this rule's (the evaluator's documented total-pass on absence —
+  // same accept/reject outcome as the real policy, smaller reason set).
+  const missingCtx = mutate(normalJobObject(), (o) => {
+    delete ((o.spec as any).template.spec as any).securityContext;
+  });
+  const missingIds = idsOf(evaluateWorkerJobAdmission(missingCtx, reviewContext()));
+  assert.ok(missingIds.includes("fixedPodSecurityContext"));
+  assert.ok(!missingIds.includes("noPodFsGroup"), "noPodFsGroup must stay about fsGroup alone");
+  // A non-object pod securityContext is CEL's error shape (select on a
+  // string): the errored rule lands as a violation (the runner turns a
+  // CEL error into a deny, matching failurePolicy: Fail).
+  const malformedCtx = mutate(normalJobObject(), (o) => {
+    ((o.spec as any).template.spec as any).securityContext = "not-an-object";
+  });
+  const malformedIds = idsOf(evaluateWorkerJobAdmission(malformedCtx, reviewContext()));
+  assert.ok(malformedIds.includes("fixedPodSecurityContext"));
+  assert.ok(malformedIds.includes("noPodFsGroup"), "an unprovable pod securityContext is refused, not passed");
+});
+
+test("#1736: the guardrails doc enumerates exactly the Job-policy rule ids", () => {
+  const doc = readFileSync(
+    path.resolve("docs/architecture/executor-admission-guardrails.md"),
+    "utf8",
+  );
+  const jobSection = doc.split("## Enforced invariants")[1]?.split("The Secret policy")[0] ?? "";
+  const rows = [...jobSection.matchAll(/^\| `([A-Za-z]+)` \|/gm)].map((match) => match[1]!);
+  assert.deepEqual(
+    rows,
+    WORKER_JOB_VALIDATIONS.map((v) => v.id),
+    "the Job-policy table must list every rule id, in order — a new validation without a row is silent drift",
+  );
+});
+
 test("rejects a worker container without the fixed container security context", () => {
   const missing = mutate(normalJobObject(), (o) => {
     delete ((o.spec as any).template.spec as any).containers[0].securityContext;

@@ -144,3 +144,14 @@ itself is served unauthenticated, network-level access control is the
 operator's remaining control for who can REACH the shell: the admin bind
 address (`PR_REVIEWER_ADMIN_BIND`, loopback by default) and network
 policy. All data stays bearer-protected regardless.
+
+Reaching `/dashboard` from outside the pod is a separate step from turning
+the flag on. The chart binds the admin listener to the pod-wide wildcard when
+the admin surface is enabled, but it defines only the webhook Service, so the
+dashboard port has no route by default. Exposing it is the operator's ingress
+choice: add a Service port for the admin listener and route the dashboard and
+admin paths to it, keeping `/admin` on the same origin as `/dashboard` (the
+script's `connect-src 'self'` only ever calls the origin that served it) and
+never routing `/dashboard*` or `/admin*` as the forge intake path. The chart
+README ("Reaching the dashboard from outside the pod") and
+`docs/self-hosted-deployment.md` carry the verified Gateway values.

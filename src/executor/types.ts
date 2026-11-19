@@ -304,7 +304,8 @@ export interface ExecutionRequest {
    * (SHARED_CLAIM_FILE_MODE / SHARED_CLAIM_DIR_MODE in paths.ts); absent
    * means the single-uid exchange (0o600/0o700). The executor that sets
    * this field owns making the group actually shared (it pins the worker's
-   * runAsGroup/fsGroup to the same value). Never credential material. */
+   * runAsGroup to the same value; worker pods must never carry fsGroup —
+   * #1736). Never credential material. */
   readonly sharedGroupId?: number;
 }
 
