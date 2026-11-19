@@ -44,15 +44,17 @@
  *   umbrella-parent scope boundary, parsed conservatively (task-list items
  *   only, bounded, fail-closed) and keyed by the ledger's own content id so
  *   issue content never appears outside the fence.
- * - (#1750 round 3) the organic umbrella shape — acceptance criteria with no
- *   child refs plus a flat decomposition list — attests ownership through
+ * - (#1750 round 3/4) the organic umbrella shape — acceptance criteria with
+ *   no child refs plus a flat decomposition list — attests ownership through
  *   the DECOMPOSED CHILD ISSUES themselves: for a non-closing umbrella-class
  *   linked issue, intake fetches the decomposition's children (bounded) and
  *   renders the same `(decomposition: …)` line when the child's own body
  *   names the parent AND carries a criterion sharing the parent criterion's
- *   requirement identity. Ambiguous, one-sided, or unreadable shapes render
- *   nothing (fail closed); the ledger and scope predicate seams are
- *   unchanged. */
+ *   requirement identity. Round 4 (operator follow-up 7025382962): several
+ *   children independently passing every gate for one criterion is JOINT
+ *   OWNERSHIP — the line carries the full bounded owner set. Cross-matched,
+ *   one-sided, or unreadable shapes render nothing (fail closed); the
+ *   ledger and scope predicate seams are unchanged. */
 
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqError } from "../platform/jq.js";
@@ -233,24 +235,31 @@ function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
 //       #740/#1677 texts, whose criterion wording differs but shares the
 //       requirement-bearing phrase `same scheduler engine`).
 //
-// Exactly one child attesting a criterion renders ONE
-// `(decomposition: req-<content id> -> <canonical child>)` line — the seam
-// cbdb6287 built — so the ledger provenance parse and the scope predicate
-// consume it unchanged. More than one child attesting the same criterion
-// (many-to-many) or a child criterion matching several parent criteria is
-// AMBIGUOUS and renders nothing. Any UNREADABLE child — fetch failure,
-// pull-request payload, over-size body, refused cross-repo read on a fork —
-// voids this umbrella's attestation WHOLE: a partial child set could hide a
-// second attesting child and make a many-to-many mapping look 1:1 (the
-// unsafe direction). A fetched child that simply does not attest (wrong or
-// missing parentage, no matching criterion) is positive non-attestation
-// evidence and only removes itself. No model prose and no PR prose
-// participates: every input here is forge-fetched issue content, every
-// output is a content id plus a canonical ref. The intake pre-gate (fetch
-// children only for a NON-CLOSING linked issue carrying an umbrella-class
-// forge label) mirrors the consumer's per-ref gate, so the bounded fetches
-// happen only where the evidence could be consumed; drift in either
-// direction degrades to fewer or inert fetches, never to unsafe ownership.
+// A criterion with at least one attesting child renders ONE
+// `(decomposition: req-<content id> -> <canonical children>)` line — the
+// seam cbdb6287 built — so the ledger provenance parse and the scope
+// predicate consume it unchanged. Round 4 (operator follow-up 7025382962):
+// MULTIPLE children independently passing every gate for the same parent
+// criterion is JOINT OWNERSHIP, not ambiguity — the line carries the FULL
+// bounded owner set (at most MAX_DECOMPOSITION_REFS_PER_CRITERION refs, the
+// existing childRefs contract the consumer already unions; the criterion
+// stays mandatory when the PR references ANY owning child). A child
+// criterion matching several parent criteria is a cross-matched identity
+// that cannot be disambiguated and attests nothing, and an owner set over
+// the per-line bound drops the association whole. Any UNREADABLE child —
+// fetch failure, pull-request payload, over-size body, refused cross-repo
+// read on a fork — voids this umbrella's attestation WHOLE: a partial child
+// set could hide a second attesting child and make a jointly-owned
+// criterion look like a smaller owner set (the unsafe direction). A fetched
+// child that simply does not attest (wrong or missing parentage, no
+// matching criterion) is positive non-attestation evidence and only removes
+// itself. No model prose and no PR prose participates: every input here is
+// forge-fetched issue content, every output is a content id plus canonical
+// refs. The intake pre-gate (fetch children only for a NON-CLOSING linked
+// issue carrying an umbrella-class forge label) mirrors the consumer's
+// per-ref gate, so the bounded fetches happen only where the evidence could
+// be consumed; drift in either direction degrades to fewer or inert
+// fetches, never to unsafe ownership.
 // ---------------------------------------------------------------------------
 
 /** The umbrella-label vocabulary of the consumer's per-ref gate
@@ -438,7 +447,10 @@ function childParentRefs(childBody: string, childRepo: string): string[] {
  * attestation. */
 interface ChildAttestation {
   requirementId: string;
-  childRef: string;
+  /** The full bounded owner set (joint ownership, round 4) — canonical
+   * `repo#N` identities in decomposition order, at most
+   * MAX_DECOMPOSITION_REFS_PER_CRITERION entries. */
+  childRefs: string[];
 }
 
 interface CanonicalChild {
@@ -534,8 +546,10 @@ async function attestedDecompositionAssociations(
     }
   }
   if (edges.length === 0) return [];
-  // A child criterion that matches SEVERAL parent criteria is itself an
-  // ambiguous identity — it attests nothing for either.
+  // Round 4 (operator follow-up 7025382962): a child criterion that matches
+  // SEVERAL parent criteria is a cross-matched identity that cannot be
+  // disambiguated deterministically — it attests nothing for either (the
+  // fail-closed genuinely-ambiguous shape).
   const parentsPerChildCriterion = new Map<string, Set<number>>();
   for (const edge of edges) {
     const key = `${edge.child}:${edge.criterion}`;
@@ -543,8 +557,13 @@ async function attestedDecompositionAssociations(
     if (seen === undefined) parentsPerChildCriterion.set(key, new Set([edge.parent]));
     else seen.add(edge.parent);
   }
-  // Many-to-many stays ambiguous: a parent criterion attested by more than
-  // one child renders no association at all.
+  // A parent criterion attested by MULTIPLE children that each independently
+  // pass every gate is JOINT OWNERSHIP, not ambiguity: the association
+  // carries the full owner set (decomposition order), within the existing
+  // 4-ref childRefs contract the consumer already unions. An owner set over
+  // the bound drops the association WHOLE — never truncated (a truncated
+  // owner list could silently lose the very child the PR references, the
+  // unsafe direction).
   const ownersByParent = new Map<number, string[]>();
   for (const edge of edges) {
     if ((parentsPerChildCriterion.get(`${edge.child}:${edge.criterion}`)?.size ?? 0) !== 1) continue;
@@ -556,12 +575,12 @@ async function attestedDecompositionAssociations(
   }
   const associations: ChildAttestation[] = [];
   for (const [parentIndex, owners] of [...ownersByParent.entries()].sort((a, b) => a[0] - b[0])) {
-    if (owners.length !== 1) continue;
+    if (owners.length === 0 || owners.length > MAX_DECOMPOSITION_REFS_PER_CRITERION) continue;
     const parentText = parents.texts[parentIndex];
     if (parentText === undefined) continue;
-    associations.push({ requirementId: requirementIdOfText(parentText), childRef: owners[0] ?? "" });
+    associations.push({ requirementId: requirementIdOfText(parentText), childRefs: [...owners] });
   }
-  return associations.filter((association) => association.childRef !== "");
+  return associations.filter((association) => association.childRefs.length > 0);
 }
 
 /** Decimal value of a Unicode `Nd` digit: Nd characters come in contiguous
@@ -765,7 +784,7 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
           input.repo,
         );
         for (const association of attested) {
-          addDecompositionLine(renderDecompositionLine(association.requirementId, [association.childRef]));
+          addDecompositionLine(renderDecompositionLine(association.requirementId, association.childRefs));
         }
       }
       for (const line of decompositionLines) {

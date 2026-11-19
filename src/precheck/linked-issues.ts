@@ -187,18 +187,26 @@ export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
 //       (`requirementIdentityAttests`, calibrated on the real
 //       #740/#1677 bodies).
 //
-// One attesting child per criterion renders ONE `(decomposition: …)` line —
-// the exact seam cbdb6287 built, so the ledger provenance parse and the
-// scope predicate consume it unchanged (the fail-closed consumer conjunction
-// stays). More than one child attesting the same criterion is AMBIGUOUS
-// (many-to-many) and renders nothing; any unreadable child (fetch failure,
-// pull-request payload, over-size body, refused cross-repo read on a fork)
-// voids the umbrella's attestation WHOLE, because a partial child set could
-// hide a second attesting child and make a many-to-many mapping look 1:1 —
-// the unsafe direction. Everything here is deterministic: no model prose and
-// no PR prose participates in ownership, and the bounds below all fail
-// closed (a bound that cannot be carried whole drops the association, never
-// approximates it).
+// One attested criterion renders ONE `(decomposition: …)` line — the exact
+// seam cbdb6287 built, so the ledger provenance parse and the scope
+// predicate consume it unchanged (the fail-closed consumer conjunction
+// stays). Round 4 (operator follow-up 7025382962): MULTIPLE children
+// independently passing every gate for the same parent criterion is JOINT
+// OWNERSHIP, not ambiguity — the line carries the full bounded owner set
+// (`(decomposition: req-… -> repo#1677, repo#1678)`), which fits the
+// existing `childRefs` contract ({@link MAX_DECOMPOSITION_REFS_PER_CRITERION}
+// refs per line) and the consumer's own union semantics (a parent criterion
+// stays mandatory when the PR references ANY owning child). The genuinely
+// ambiguous shapes stay fail closed: a child criterion attesting several
+// parent criteria (a cross-matched identity attests nothing), an owner set
+// over the bound (dropped whole — never truncated), an unreadable child
+// (fetch failure, pull-request payload, over-size body, refused cross-repo
+// read on a fork voids the umbrella's attestation WHOLE, because a partial
+// child set could hide a second attesting child), one-sided
+// parentage/decomposition, and malformed evidence. Everything here is
+// deterministic: no model prose and no PR prose participates in ownership,
+// and every bound that cannot be carried whole drops the association, never
+// approximates it.
 // ---------------------------------------------------------------------------
 
 /** At most 8 decomposition children are fetched per umbrella issue (the same
@@ -209,11 +217,14 @@ export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
 export const MAX_DECOMPOSITION_CHILDREN_PER_ISSUE = 8;
 
 /** A fetched child's projected (credential-redacted) body is admitted to
- * attestation only when it fits this many UTF-8 bytes — the same bound class
- * as the linked-issue embed cut (12000). An over-size body is a FAILURE, not
- * a truncation: reading only a prefix could miss a second attesting
- * criterion and turn a genuinely many-to-many mapping into a false 1:1. */
-export const MAX_ATTESTED_CHILD_BODY_BYTES = 12000;
+ * attestation only when it fits this many UTF-8 bytes. This is a
+ * hostile-input bound, NOT the v2 embed cut (12000): the real decomposed
+ * children must be admissible — measured real bodies are #1677 at 5808 and
+ * #1678 at 12314 bytes — so the organic #740/#1677/#1678 shape can attest in
+ * the wild. An over-size body is still a FAILURE, not a truncation: reading
+ * only a prefix could miss a second attesting criterion and turn a jointly-
+ * owned criterion into a false smaller owner set. */
+export const MAX_ATTESTED_CHILD_BODY_BYTES = 65536;
 
 /** At most 32 acceptance-criterion texts are extracted per body for
  * attestation (real umbrellas and children carry a handful; the ledger's

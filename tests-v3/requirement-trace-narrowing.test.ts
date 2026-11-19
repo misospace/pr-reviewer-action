@@ -787,13 +787,16 @@ test("#1750 r3 organic: the flat-decomposition umbrella criterion scopes out via
   }
 });
 
-test("#1750 r3: two children attesting one criterion stay in scope and withhold (real #740/#1677/#1678 shape)", async () => {
+test("#1750 r4 organic: the real #740/#1677/#1678 JOINT ownership scopes the scheduler/engine criterion out — the clean increment reaches native APPROVE (real texts)", async () => {
   const workspace = makeWorkspace();
   try {
     writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
-    // Both decomposition children carry a twin of the parent criterion (the
-    // real GitLab/Gitea texts), so the mapping is many-to-many → ambiguous →
-    // no ownership evidence renders and the criterion stays mandatory.
+    // Operator follow-up 7025382962: both decomposition children carry a twin
+    // of the parent criterion (the real GitLab/Gitea texts) and each
+    // independently passes every attestation gate, so this is JOINT
+    // OWNERSHIP — the ledger entry carries the full bounded owner set and
+    // the unchanged consumer scopes the criterion out of a clean increment
+    // that references neither child.
     const ledger = await organicLedger(
       ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
       [ORGANIC_CHILD_CRITERION, ORGANIC_TWIN_CHILD_CRITERION],
@@ -801,9 +804,54 @@ test("#1750 r3: two children attesting one criterion stay in scope and withhold 
     const umb = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }).requirements
       .find((entry) => entry.text === ORGANIC_PARENT_CRITERION);
     assert.ok(umb, "the umbrella criterion reached the ledger");
-    assert.equal(umb.provenance[0]?.childRefs, undefined, "an ambiguous attestation renders no evidence");
+    assert.deepEqual(umb.provenance[0]?.childRefs, ["o/r#1677", "o/r#1678"], "the joint owner set rode the ledger provenance seam unchanged");
+    assert.equal(umb.provenance[0]?.closing, false);
+    assert.deepEqual(umb.provenance[0]?.labels, ["umbrella"]);
     const scope = requirementTraceScope(ledger, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
-    assert.equal(scope.inScope.length, 1, "the criterion stays in scope");
+    assert.deepEqual(scope.inScope, []);
+    assert.equal(scope.outOfScope.length, 1);
+    assert.match(scope.outOfScope[0]!.reason, /o\/r#1677/, "the machine reason cites the first owning child");
+    assert.match(scope.outOfScope[0]!.reason, /o\/r#1678/, "the machine reason cites the second owning child");
+    const claims = [{
+      requirement_id: umb.id,
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "jointly owned by the two attested decomposition children; this PR does not claim the parent",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    const row = trace.rows.find((candidate) => candidate.requirement_id === umb.id);
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.ok(row?.notes.includes("out-of-scope-umbrella-parent"), "the joint ownership is machine-readable on the row");
+    assert.ok(row?.notes.includes("out-of-scope-reported-unmet"), "the claim stays disclosure-only");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence, [], "a jointly-owned deferred criterion produces no disposition evidence");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "approve", "the clean increment is not held at INCOMPLETE by jointly-owned parent work");
+    assert.equal(disposition.reason, "approval_certified");
+    assert.equal(disposition.nativeEvent, "APPROVE");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1750 r4 boundary: a PR referencing EITHER jointly-owning child keeps the parent criterion mandatory (real texts)", async () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    // The joint owner set is two children; the operator's boundary control
+    // holds per-child: a PR whose body references EITHER owner through the
+    // trusted title/Implements/Refs grammar may be that child's implementer,
+    // so the criterion stays mandatory (consumer semantics, unchanged).
+    const ledger = await organicLedger(
+      ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
+      [ORGANIC_CHILD_CRITERION, ORGANIC_TWIN_CHILD_CRITERION],
+    );
+    const umb = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }).requirements
+      .find((entry) => entry.text === ORGANIC_PARENT_CRITERION);
+    assert.ok(umb, "the umbrella criterion reached the ledger");
+    const scope = requirementTraceScope(ledger, "+// the gitlab adapter normalizes webhook events", { prLinkedRefs: ["o/r#42", "o/r#1677"] });
+    assert.equal(scope.inScope.length, 1, "referencing the first joint owner keeps the criterion in scope");
     assert.deepEqual(scope.outOfScope, []);
     const claims = [{
       requirement_id: umb.id,
@@ -812,15 +860,15 @@ test("#1750 r3: two children attesting one criterion stay in scope and withhold 
       test: [],
       reason: "the shared scheduler/engine feed is not implemented",
     }];
-    const trace = validateRequirementTrace(claims, ledger, workspace, "+// feeds the same scheduler engine", { prLinkedRefs: ["o/r#42"] });
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// the gitlab adapter normalizes webhook events", { prLinkedRefs: ["o/r#42", "o/r#1677"] });
     const row = trace.rows.find((candidate) => candidate.requirement_id === umb.id);
     assert.equal(row?.resolution, "unmet_claimed");
-    assert.ok(!row?.notes.includes("out-of-scope-umbrella-parent"), "no ownership claim without unambiguous evidence");
+    assert.ok(!row?.notes.includes("out-of-scope-umbrella-parent"), "referencing an owning child voids the ownership evidence");
     assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the claim is material");
     const build = dispositionFromTrace(trace);
     assert.deepEqual(build.evidence.map((entry) => entry.subject), ["requirement-trace:unmet-claimed"]);
     const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
-    assert.equal(disposition.kind, "incomplete", "many-to-many ownership withholds");
+    assert.equal(disposition.kind, "incomplete", "referencing either jointly-owning child withholds");
     assert.equal(disposition.reason, "material_unknown");
   } finally {
     rmSync(workspace, { recursive: true, force: true });

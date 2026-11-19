@@ -629,12 +629,18 @@ test("#1750: decomposition evidence is bounded — 16 lines per issue, and an ov
 // `Parent:` line, resolved canonically), and the child's own acceptance
 // criterion carries the parent criterion's requirement identity — a shared
 // contiguous run of substantial tokens (calibrated on the real #740/#1677
-// bodies; see `requirementIdentityAttests`). Any missing attestation, a
-// child-fetch failure, an over-size child body, an over-count child list, or
-// more than one child attesting the same criterion drops the association
-// whole — the criterion stays in scope. The consumer (ledger provenance →
-// scope predicate) is unchanged: these lines ride the exact seams
-// `(decomposition: …)` already uses.
+// bodies; see `requirementIdentityAttests`). Round 4 (operator follow-up
+// 7025382962): multiple children INDEPENDENTLY passing every gate for the
+// same parent criterion is JOINT OWNERSHIP, not ambiguity — the association
+// renders the full bounded owner set (`(decomposition: req-… -> a#1, b#2)`,
+// at most 4 refs, the existing `childRefs` contract the consumer already
+// unions). Fail-closed shapes: a child criterion attesting several parent
+// criteria (cross-matched identity attests nothing), an owner set over the
+// bound, a child-fetch failure, an over-size child body, an over-count child
+// list, one-sided parentage/decomposition, or malformed evidence drops the
+// association whole — the criterion stays in scope. The consumer (ledger
+// provenance → scope predicate) is unchanged: these lines ride the exact
+// seams `(decomposition: …)` already uses.
 
 const ORGANIC_PARENT_CRITERION = "GitLab and Gitea feed the same scheduler/engine.";
 
@@ -735,11 +741,15 @@ test("#1750 r3: a flat decomposition list plus a parent-naming child attests the
   ], "the bidirectionally attested criterion renders exactly one ownership line; the other criteria are below the identity bar and render none");
 });
 
-test("#1750 r3: two children attesting the same criterion stay ambiguous — no ownership line renders", async () => {
+test("#1750 r4: two children independently attesting one parent criterion render the full JOINT owner set (real #740/#1677/#1678 texts)", async () => {
   // The real #740 shape: BOTH decomposition children carry a criterion with
   // the parent's requirement identity (#1677's GitLab text and #1678's Gitea
-  // twin share the `same scheduler engine` run). A many-to-many mapping is
-  // ambiguous by rule — the criterion stays in scope, nothing renders.
+  // twin share the `same scheduler engine` run). Operator follow-up
+  // 7025382962: each child independently passes every attestation gate
+  // (decomposition lists it, its body names the parent, its criterion
+  // attests), so this is JOINT OWNERSHIP — one line carrying the full owner
+  // set in decomposition order, within the existing 4-ref childRefs
+  // contract the consumer already unions.
   const giteaChild = organicChildBody(
     "Parent: https://github.com/o/r/issues/42",
     [
@@ -761,7 +771,63 @@ test("#1750 r3: two children attesting the same criterion stay ambiguous — no 
     pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
   });
   const md = text(result.artifacts.get("linked-issues.md"));
-  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "many-to-many attestation → no ownership evidence");
+  assert.deepEqual(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)), [
+    `(decomposition: ${reqIdOf(ORGANIC_PARENT_CRITERION)} -> o/r#1677, o/r#1678)`,
+  ], "joint ownership renders one line with the full owner set in decomposition order");
+});
+
+test("#1750 r4: a child criterion that attests MULTIPLE parent criteria is a cross-matched identity — it attests nothing", async () => {
+  // The genuinely ambiguous shape (operator follow-up 7025382962): one child
+  // criterion whose text carries the requirement identity of TWO distinct
+  // parent criteria cannot be disambiguated deterministically, so its edges
+  // attest nothing — with it the only child, neither parent criterion gets
+  // evidence.
+  const twinCriterionA = "- [ ] GitLab and Gitea feed the same scheduler/engine.";
+  const twinCriterionB = "- [ ] GitLab and Gitea feed the same scheduler/engine pool.";
+  const crossChild = organicChildBody(
+    "Parent: https://github.com/o/r/issues/42",
+    ["- [ ] The adapters enter the same scheduler/engine on every forge and the same scheduler/engine pool per forge"],
+  );
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [twinCriterionA, twinCriterionB],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: crossChild } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "a cross-matched child criterion attests nothing for either parent");
+});
+
+test("#1750 r4: an owner set exceeding the 4-ref childRefs bound drops the association whole", async () => {
+  // Five children independently attest the same parent criterion: the owner
+  // set (5) exceeds MAX_DECOMPOSITION_REFS_PER_CRITERION (4) — the
+  // association cannot be carried whole, so it renders nothing and the
+  // criterion stays in scope.
+  const children = new Map<string, ReadResult<unknown>>();
+  const list: string[] = [];
+  for (let i = 0; i < 5; i += 1) {
+    const number = 1670 + i;
+    list.push(`- #${number}: https://forge.example/o/r/issues/${number}`);
+    children.set(String(number), {
+      ok: true,
+      data: { number, title: `Child ${number}`, state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) },
+    });
+  }
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody([`- [ ] ${ORGANIC_PARENT_CRITERION}`], list),
+    children,
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "an owner set that cannot be carried whole is never approximated");
 });
 
 test("#1750 r3: a child that does not name the parent attests nothing (one-sided)", async () => {
@@ -856,10 +922,41 @@ test("#1750 r3: attestation drops whole when a listed child resolves to a pull r
   assert.equal(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "a pull request is not a child issue contract — whole drop");
 });
 
+test("#1750 r4: a child body at the real #1678 size (12314 bytes) is admitted and attests", async () => {
+  // Round 4: the admission bound is a hostile-input bound (65536 bytes), not
+  // the v2 embed cut — the real #1678 body measures 12314 bytes and MUST be
+  // admissible, or the organic #740/#1677/#1678 case could never attest in
+  // the wild. Over-size remains a whole-void failure (next test).
+  const filler = "Grooming provenance prose line carried by the real decomposed child.\n".repeat(320);
+  const realSizedTwin = `${organicChildBody(
+    "Parent: https://github.com/o/r/issues/42",
+    ["- [ ] Gitea pull_request webhook events normalize to CanonicalForgeEvent and produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo"],
+  )}\n${filler}`;
+  assert.ok(Buffer.byteLength(realSizedTwin, "utf8") > 12000, "fixture is over the old embed-cut bound");
+  assert.ok(Buffer.byteLength(realSizedTwin, "utf8") <= 65536, "fixture fits the admission bound");
+  const { adapter } = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677", "- #1678: https://forge.example/o/r/issues/1678"],
+    ),
+    children: new Map([
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1)) } }],
+      ["1678", { ok: true, data: { number: 1678, title: "Child 2", state: "closed", html_url: "u", labels: [], body: realSizedTwin } }],
+    ]),
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.deepEqual(md.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)), [
+    `(decomposition: ${reqIdOf(ORGANIC_PARENT_CRITERION)} -> o/r#1677, o/r#1678)`,
+  ], "the real-size twin is admitted and jointly owns the parent criterion");
+});
+
 test("#1750 r3: attestation drops whole when a child body exceeds the size bound", async () => {
-  const filler = "Filler prose line to push the child body over the admission bound.\n".repeat(400);
+  const filler = "Filler prose line to push the child body over the admission bound.\n".repeat(2200);
   const oversized = `${organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1))}\n${filler}`;
-  assert.ok(Buffer.byteLength(oversized, "utf8") > 12000, "fixture is over the admission bound");
+  assert.ok(Buffer.byteLength(oversized, "utf8") > 65536, "fixture is over the admission bound");
   const { adapter } = organicAdapter({
     umbrellaBody: organicUmbrellaBody(
       [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
