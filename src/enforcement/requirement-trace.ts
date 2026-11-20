@@ -145,6 +145,7 @@ import { type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
+import { boundedChildRefs } from "../precheck/linked-issues.js";
 import { parseCitationLocation } from "./citations.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
@@ -1371,10 +1372,10 @@ const MAX_STANDARDS_REFS = 8;
  * the trusted boundary-defining document(s) the requirement was extracted
  * from, used to keep a standards row in scope when its own source file is
  * among the changed paths. */
-function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] {
+function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[]; linkedRefs: LinkedScopeRef[] }[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];
-  const out: { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] = [];
+  const out: { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[]; linkedRefs: LinkedScopeRef[] }[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
@@ -1386,17 +1387,55 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
       ? provenance.map((p) => (p && typeof p === "object" ? String((p as { source?: unknown }).source ?? "") : "")).filter((s) => s !== "")
       : null;
     const standardsRefs: string[] = [];
+    // #1749: the linked-issue relationship provenance, re-read under the
+    // same bounds the ledger parse applied. `closing` is strict — only an
+    // explicit boolean survives; a legacy artifact's missing field is
+    // unknown and never reads as "non-closing". #1750: the trusted
+    // criterion→child ownership evidence (`childRefs`) re-bounds the same
+    // way — an over-count or malformed list drops whole, never truncated
+    // (a lost owner could be the very child the PR references).
+    const linkedRefs: LinkedScopeRef[] = [];
+    // #1750 review rounds 1+2: EXACT-duplicate provenance entries are
+    // dropped, and DISTINCT records are never dropped at all. A merged
+    // duplicate's provenance can repeat the same linked document once per
+    // scanned line; repeats carry identical semantics for the scope
+    // predicate (same ref, closing state, label class and ownership
+    // evidence), so deduping them is semantics-preserving. Every DISTINCT
+    // relationship participates in the semantics — a bound that silently
+    // dropped a ninth distinct record could ignore a late closing reference
+    // while the umbrella narrowing proceeded. The provenance array is
+    // already fully materialized by the ledger parse (no new iteration
+    // surface); boundedness is preserved where it matters — the RENDERED
+    // reason cites a bounded prefix of the refs and owning children (see
+    // MAX_SCOPE_REASON_REFS), while the every/some semantics stay complete.
+    const seenLinkedRefs = new Set<string>();
     if (Array.isArray(provenance)) {
       for (const p of provenance) {
-        if (standardsRefs.length >= MAX_STANDARDS_REFS) break;
         if (!p || typeof p !== "object") continue;
-        const rec = p as { source?: unknown; ref?: unknown };
-        if (rec.source !== "standards" || typeof rec.ref !== "string" || rec.ref === "") continue;
-        const ref = rec.ref.toLowerCase();
-        if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
+        const rec = p as { source?: unknown; ref?: unknown; closing?: unknown; labels?: unknown; childRefs?: unknown };
+        if (standardsRefs.length < MAX_STANDARDS_REFS && rec.source === "standards" && typeof rec.ref === "string" && rec.ref !== "") {
+          const ref = rec.ref.toLowerCase();
+          if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
+        }
+        if (rec.source !== "linked_issues") continue;
+        const closing = typeof rec.closing === "boolean" ? rec.closing : undefined;
+        const umbrella = Array.isArray(rec.labels) && rec.labels
+          .slice(0, 8)
+          .some((label) => typeof label === "string"
+            && UMBRELLA_ISSUE_LABELS.has(label.slice(0, MAX_UMBRELLA_LABEL_MATCH_CHARS).trim().toLowerCase()));
+        const childRefs = boundedChildRefs(rec.childRefs) ?? [];
+        const identity = `${typeof rec.ref === "string" ? rec.ref : ""}|${closing === undefined ? "?" : closing ? "1" : "0"}|${umbrella ? "1" : "0"}|${childRefs.join(",")}`;
+        if (seenLinkedRefs.has(identity)) continue;
+        seenLinkedRefs.add(identity);
+        linkedRefs.push({
+          ref: typeof rec.ref === "string" ? rec.ref : "",
+          closing,
+          umbrella,
+          childRefs,
+        });
       }
     }
-    out.push({ entry: { id, text, kind }, sources, standardsRefs });
+    out.push({ entry: { id, text, kind }, sources, standardsRefs, linkedRefs });
   }
   return out;
 }
@@ -2254,8 +2293,50 @@ function executableExampleTouched(
 
 export interface RequirementTraceScope {
   inScope: TracedLedgerEntry[];
-  outOfScope: { entry: TracedLedgerEntry; reason: string }[];
+  outOfScope: { entry: TracedLedgerEntry; reason: string; /** #1749: the machine-readable scope class of the decision, when it is a relationship decision rather than a change-evidence one. */ note?: string }[];
 }
+
+/** #1749: the bounded relationship provenance of one `linked_issues`
+ * provenance entry, re-read from the persisted ledger artifact. `closing`
+ * is three-state: `true`/`false` when the intake-rendered relationship line
+ * said so, `undefined` when the artifact predates the metadata (unknown —
+ * the scope predicate fails closed on it). #1750: `childRefs` carries the
+ * trusted criterion→child ownership evidence parsed from the linked
+ * umbrella's own decomposition — canonical `repo#N` identities, empty when
+ * no well-formed association exists (the fail-closed reading). */
+interface LinkedScopeRef {
+  ref: string;
+  closing: boolean | undefined;
+  umbrella: boolean;
+  childRefs: string[];
+}
+
+/** #1749: the bounded forge-label vocabulary that marks a linked issue as a
+ * parent/umbrella tracker — an issue whose acceptance set is decomposed
+ * into separately owned child work rather than being one PR's merge
+ * contract. Exact, casefolded match on the forge label (a label merely
+ * containing the vocabulary is not the vocabulary), consumed only as the
+ * narrowest of narrowings: a NON-CLOSING link, on an entry whose every
+ * provenance source is the linked issue, whose text carries no explicit
+ * security/trust-boundary vocabulary. */
+const UMBRELLA_ISSUE_LABELS: ReadonlySet<string> = new Set(["umbrella", "epic"]);
+
+/** #1749: the row note marking an out-of-scope decision made on the
+ * umbrella relationship (as opposed to the change-evidence narrowing), so
+ * the artifact alone explains why a valid parent criterion is not this
+ * increment's merge contract. */
+export const UMBRELLA_PARENT_OUT_OF_SCOPE_NOTE = "out-of-scope-umbrella-parent";
+
+/** #1750 review round 2: bound on the refs the rendered out-of-scope REASON
+ * cites. The scope SEMANTICS never drop a distinct linked record (see
+ * ledgerTraceCandidates); only the human-readable citation is truncated
+ * (bounded prefix + a visible `(+N more)` count), so a hostile artifact
+ * cannot grow the reason string without limit while the decision itself
+ * stays complete. */
+const MAX_SCOPE_REASON_REFS = 8;
+/** Bound on a single label's matched length, so a hostile label string
+ * cannot grow the vocabulary match's work. */
+const MAX_UMBRELLA_LABEL_MATCH_CHARS = 256;
 
 /** #935/#958: which requirements the trace demands. A linked-issue
  * requirement (what the PR was asked to deliver, #874), an entry without
@@ -2307,6 +2388,55 @@ export interface RequirementTraceScope {
  * provenance are untouched (always in scope — fail closed). The narrowing
  * also needs changed-path evidence: when `paths` is missing or empty the
  * lexical match keeps its full weight (fail closed).
+ *
+ * #1749 adds a relationship-based narrowing that is independent of change
+ * evidence, for the failure shape the #1658 boundary rule cannot represent:
+ * a NON-CLOSING parent/umbrella link whose acceptance criterion shares the
+ * child PR's vocabulary by construction (a scoped increment touches the
+ * same subsystem the umbrella criterion names), so the criterion rides the
+ * boundary signal into scope and its known-unmet state forces a false
+ * INCOMPLETE on an otherwise approvable increment. When EVERY provenance
+ * source of an entry is `linked_issues`, EVERY linked reference is
+ * explicitly non-closing (the PR's own refs — a `Closes/Fixes/Resolves`
+ * claim, any non-linked provenance, or a legacy artifact with unknown
+ * relationship state keeps the entry mandatory, fail closed), EVERY linked
+ * issue carries an umbrella label ({@link UMBRELLA_ISSUE_LABELS}, bounded
+ * forge metadata), and the text carries no explicit security/trust-boundary
+ * vocabulary, the umbrella's acceptance set is not this increment's merge
+ * contract: the entry is scoped out with a reason naming the relationship
+ * (`out-of-scope-umbrella-parent`), never silently dropped — the row stays
+ * in the artifact, and a semantic `unmet` claim on it rides the trusted
+ * out-of-scope disclosure marker. Narrowing on the closing side is
+ * impossible by construction: any closing reference, any non-linked
+ * provenance source, and any security vocabulary each independently keep
+ * the entry in scope.
+ *
+ * #1750 (operator CR on the first #1749 cut) tightens that narrowing with a
+ * trusted OWNERSHIP requirement: the umbrella label + non-closing-ref shape
+ * alone does not prove that the SPECIFIC criterion belongs to separately
+ * decomposed child work — it only proves the parent holds several pieces of
+ * work, one of which may be this very PR's responsibility — yet the machine
+ * reason claimed child ownership anyway, so a touched, correctly-reported-
+ * unmet parent criterion was scoped out and the disposition could reach
+ * APPROVE. The narrowing now additionally requires evidence from the
+ * bounded forge-metadata channel built for it: the linked umbrella's OWN
+ * body decomposition (task-list items referencing child issues, parsed
+ * conservatively at intake and carried through the ledger provenance as
+ * canonical child identities — see `src/precheck/linked-issues.ts` and
+ * `src/requirements/requirement-id.ts`). The criterion scopes out only when
+ * a well-formed association names child work for it AND the current PR
+ * (its `prLinkedRefs`, canonical identities from the recognized
+ * CONTRACT-relationship grammar intake used — closing keyword,
+ * `Implements`/`Part of`/`Addresses`, or the title `(#N)` convention)
+ * references NONE of the owning children — a plain `Refs`/`Ref` context
+ * link, a bare `#N` prose mention, or an issue URL naming the owning child
+ * is NOT an implementation claim, so it does not void the evidence; only a
+ * contract relationship does, since a PR contractually referencing the
+ * owning child may be that child's implementer. Without the association the criterion stays
+ * in scope and NO out-of-scope reason is emitted at all; with it, the
+ * reason cites the owning child. Umbrella label + non-closing ref alone is
+ * NEVER ownership evidence, and neither is model prose or PR text.
+ *
  * Proof validation, blocker classification, and the approval/attestation
  * gates are unchanged; the out-of-scope reason records which boundary
  * signals the change missed, so the `not_applicable` row is explainable from
@@ -2323,11 +2453,35 @@ export function requirementTraceScope(
      * `changed` text — so the lexical match keeps full weight (fail closed)
      * rather than dropping a requirement on unproven attribution. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own CONTRACT issue references, as canonical
+     * casefolded `repo#N` identities (the engine derives them with the
+     * recognized-relationship grammar intake used: closing keywords,
+     * `Implements`/`Part of`/`Addresses`, and the title `(#N)` convention).
+     * Consumed ONLY by the umbrella-parent ownership boundary: a criterion
+     * whose trusted decomposition names an owning child the PR itself
+     * contractually references stays mandatory, because the PR may be
+     * that child's implementer. A plain `Refs`/`Ref` context link, a bare
+     * `#N` prose mention, or an issue URL is NOT a contract relationship
+     * and never voids the evidence. Non-canonical entries are dropped (never
+     * matched), so an unparseable identity can never silently count as "not
+     * referenced". */
+    prLinkedRefs?: readonly string[] | undefined;
   } = {},
 ): RequirementTraceScope {
   const ownership = context.ownership ?? [];
   const paths = context.paths ?? [];
   const compiledOwnership = ownership.length > 0 && paths.length > 0 ? compileOwnership(ownership) : [];
+  // #1750: canonical identity set of the refs the current PR itself uses —
+  // casefolded before the shape test, since identity comparison is
+  // casefolded on the repo (the same convention extractLinkedIssueRefs
+  // dedupes by), and matching MORE is the safe direction here: a matched
+  // owning child keeps the criterion mandatory.
+  const prLinkedRefSet = new Set(
+    (context.prLinkedRefs ?? [])
+      .filter((ref) => typeof ref === "string")
+      .map((ref) => (ref as string).toLowerCase())
+      .filter((ref) => /^(?:[a-z0-9_.-]+\/[a-z0-9_.-]+)?#[0-9]+$/.test(ref)),
+  );
   // #1600 content/path classes are computed from the same bounded change
   // evidence for every standards row. The document/example lists are path
   // classifications only; whether one is relevant to a requirement is decided
@@ -2346,7 +2500,7 @@ export function requirementTraceScope(
   // weight — fail closed), and unrelated lines are never borrowed.
   const attributed = Array.isArray(context.fileLines);
   const scope: RequirementTraceScope = { inScope: [], outOfScope: [] };
-  for (const { entry, sources, standardsRefs } of ledgerTraceCandidates(ledger)) {
+  for (const { entry, sources, standardsRefs, linkedRefs } of ledgerTraceCandidates(ledger)) {
     const owned = compiledOwnership.length > 0 && ownershipTouched(compiledOwnership, entry.text, paths);
     let touched = changed !== undefined && subjectTouched(entry.text, changed);
     // #1600: for a pure standards-sourced requirement, corroborate the lexical
@@ -2389,8 +2543,48 @@ export function requirementTraceScope(
     // fail closed. Non-linked rows keep the #1600 rule unchanged.
     const linked = sources !== null && sources.includes("linked_issues");
     const boundarySignals = touched || owned || sourceTouched || namedPathTouched || policyTouched;
+    // #1749: the umbrella-parent relationship decision — see the doc
+    // comment. Every condition is fail-closed: one closing ref, one
+    // non-linked provenance source, one unknown relationship state, one
+    // missing umbrella label, or one security-vocabulary token keeps the
+    // entry on its existing (mandatory) path.
+    // #1750 (operator CR): the umbrella label + non-closing ref shape alone
+    // is NO LONGER sufficient — that shape does not prove the SPECIFIC
+    // criterion belongs to separately decomposed child work, yet the machine
+    // reason claimed exactly that. The narrowing now additionally requires
+    // trusted ownership evidence: the linked umbrella's own body
+    // decomposition (task-list items referencing child issues, parsed
+    // conservatively at intake and carried through the ledger provenance as
+    // canonical child identities) must associate THIS criterion with child
+    // work. Without that association the criterion stays in scope — the
+    // unsafe case (the PR is actually responsible for one of the parent's
+    // criteria, the reviewer correctly reports it unmet, and the row was
+    // scoped out anyway) cannot recur. The evidence is also void when the
+    // current PR CONTRACTUALLY references an owning child — a recognized
+    // relationship form (closing keyword, `Implements`/`Part of`/
+    // `Addresses`, or the title `(#N)` convention), because such a PR may be
+    // that child's implementer. A plain `Refs`/`Ref` context link, a bare
+    // `#N` prose mention, or an issue URL only DISCUSSES the child and keeps
+    // the narrowing intact. Model prose and PR text claiming "deferred"/"not my
+    // scope" never reach this decision — only the deterministic channel does.
+    const allLinked = sources !== null && sources.length > 0 && sources.every((source) => source === "linked_issues");
+    const owningChildren = [...new Set(linkedRefs.flatMap((ref) => ref.childRefs))];
+    const umbrellaParent = allLinked
+      && linkedRefs.length > 0
+      && linkedRefs.every((ref) => ref.closing === false && ref.umbrella)
+      && owningChildren.length > 0
+      && !owningChildren.some((child) => prLinkedRefSet.has(child))
+      && !securityBoundaryRequirement(entry.text);
+    const citeList = (items: readonly string[]): string =>
+      items.length <= MAX_SCOPE_REASON_REFS
+        ? items.join(", ")
+        : `${items.slice(0, MAX_SCOPE_REASON_REFS).join(", ")} (+${items.length - MAX_SCOPE_REASON_REFS} more)`;
+    const umbrellaRefs = citeList([...new Set(linkedRefs.map((ref) => ref.ref.slice(0, 64)).filter((ref) => ref !== ""))]);
+    const owningChildrenCited = citeList(owningChildren);
     let entryInScope: boolean;
-    if (changed === undefined || sources === null) {
+    if (umbrellaParent) {
+      entryInScope = false;
+    } else if (changed === undefined || sources === null) {
       entryInScope = true;
     } else if (linked) {
       entryInScope = boundarySignals
@@ -2405,11 +2599,14 @@ export function requirementTraceScope(
     } else {
       scope.outOfScope.push({
         entry,
-        reason: linked
-          ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
-          : boundaryNarrowed
-            ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
-            : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        reason: umbrellaParent
+          ? `out of scope: parent umbrella criterion from ${umbrellaRefs} — the umbrella's own trusted decomposition associates this criterion with separately tracked child work (${owningChildrenCited}) and the current PR does not claim parent closure (linked only by non-closing refs) nor reference the owning child, so the umbrella's acceptance set is not this increment's merge contract`
+          : linked
+            ? `out of scope: from ${[...new Set(sources)].join("/")}, but the change carries no affected-boundary connection for this requirement (its subject terms appear in no changed line, no declared owner path, no requirement-named path, and the trusted policy file is untouched) and its text carries no explicit security/trust-boundary requirement`
+            : boundaryNarrowed
+              ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary with no affected-boundary connection for this requirement (no declared owner path, no standards-source or trusted-policy edit, no requirement-named path, and no requirement-relevant security runbook or executable example/script among the changed files)`
+              : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        ...(umbrellaParent ? { note: UMBRELLA_PARENT_OUT_OF_SCOPE_NOTE } : {}),
       });
     }
   }
@@ -2648,6 +2845,10 @@ export function validateRequirementTrace(
      * content-based scope evidence can never combine one path with another
      * file's text. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own linked-issue references, as canonical
+     * casefolded `repo#N` identities — consumed ONLY by the umbrella-parent
+     * ownership boundary (see {@link requirementTraceScope}). */
+    prLinkedRefs?: readonly string[] | undefined;
     /** #1062: the trusted PR description (title + body) at head, used ONLY as
      * the positive-confirmation source for a `documentation`-domain obligation
      * that names a single literal. `null` (the default) means no trusted body is
@@ -2981,8 +3182,10 @@ export function validateRequirementTrace(
   // out-of-scope row is still the reviewer's own gap claim — exposed as
   // `unmet_claimed`/material, but it no longer sets `incomplete` (only a
   // deterministic refutation does; the final-disposition layer weighs the
-  // claim).
-  for (const { entry, reason } of outOfScope) {
+  // claim). #1749: the umbrella-relationship decisions carry their own
+  // machine-readable note alongside the scope class, so the artifact alone
+  // explains why a valid parent criterion is not this increment's contract.
+  for (const { entry, reason, note } of outOfScope) {
     const claim = claimsById.get(entry.id);
     const claimReason = claim !== undefined
       ? (capReason(claim.reason) !== "" ? capReason(claim.reason) : capReason(coverageClaimEvidence(claim).details.join("; ")))
@@ -3001,9 +3204,9 @@ export function validateRequirementTrace(
       : claim !== undefined && coverageStatusDisposition(claim) === "unmet");
     if (claimedUnmet) {
       unmetClaimedIds.push(entry.id);
-      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: ["out-of-scope-reported-unmet"] });
+      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", resolution: "unmet_claimed", materiality: "material", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: claimReason, notes: [...(note !== undefined ? [note] : []), "out-of-scope-reported-unmet"] });
     } else {
-      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
+      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", resolution: "not_applicable", materiality: "advisory", enforcement: [], test: [], reason, notes: [...(note !== undefined ? [note] : []), "out-of-scope"] });
     }
   }
 
@@ -3223,6 +3426,10 @@ export function applyRequirementTraceEnforcement(
     /** #1600: added/removed lines attributed to each changed file, for
      * content-based scope evidence. */
     fileLines?: readonly ChangedFileLines[] | undefined;
+    /** #1750: the current PR's own linked-issue references, as canonical
+     * casefolded `repo#N` identities — consumed ONLY by the umbrella-parent
+     * ownership boundary (see {@link requirementTraceScope}). */
+    prLinkedRefs?: readonly string[] | undefined;
     /** #1062 trusted PR description (title + body) at head — the only source a
      * `documentation`-domain row may be positively confirmed against. */
     prBody?: string | null | undefined;
@@ -3247,6 +3454,7 @@ export function applyRequirementTraceEnforcement(
     ownership: options.ownership,
     paths: options.paths,
     fileLines: options.fileLines,
+    prLinkedRefs: options.prLinkedRefs,
     prBody: options.prBody,
     ciState: options.ciState,
   });

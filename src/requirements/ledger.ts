@@ -26,16 +26,37 @@
 
 import { createHash } from "node:crypto";
 import { escapeControlChars } from "../context/fence.js";
+import { boundedChildRefs, LINKED_AS_CLOSING_LINE, LINKED_AS_CONTEXT_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_DECOMPOSITION_LINES_PER_ISSUE, parseDecompositionLine } from "../precheck/linked-issues.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { HARNESS_SOURCE, obligationText } from "./obligations.js";
+import { MAX_REQUIREMENT_TEXT_CHARS, normalizeRequirementText, requirementIdOfText } from "./requirement-id.js";
 
 export const ARTIFACT_VERSION = 1;
 
-/** Hard caps (defaults per #624). */
+/** Hard caps (defaults per #624). The text cap is the shared
+ * {@link MAX_REQUIREMENT_TEXT_CHARS} — one source of truth for the id recipe
+ * intake and the ledger both apply (#1750). */
 export const MAX_REQUIREMENTS = 48;
-export const MAX_REQUIREMENT_CHARS = 400;
+export const MAX_REQUIREMENT_CHARS = MAX_REQUIREMENT_TEXT_CHARS;
 export const MAX_LEDGER_MARKDOWN_BYTES = 8192;
 export const MAX_SOURCES = 32;
+
+/** #1749: bounds for the forge-label provenance carried on `linked_issues`
+ * provenance entries — the linked issue's own labels, read from the
+ * embedded projection in `linked-issues.md` and re-bounded at every
+ * serialization boundary (parse, tolerant reload), so a hostile label list
+ * cannot grow a ledger entry without limit. */
+export const MAX_LINKED_ISSUE_LABELS = 8;
+export const MAX_LINKED_ISSUE_LABEL_CHARS = 64;
+/** #1749 follow-up (review round): bounds the disclosure list of context-
+ * excluded linked documents — the honest exclusion COUNT is always disclosed,
+ * refs are listed up to this cap in the raw spellings the intake rendered.
+ * Honest intake renders at most
+ * eight linked-issue documents, so the cap never bites real input; it exists
+ * so a hostile `linked-issues.md` heading barrage cannot grow the artifact
+ * without limit. Per-ref length cap keeps one forged heading bounded too. */
+export const MAX_CONTEXT_EXCLUDED_REFS = 16;
+export const MAX_CONTEXT_EXCLUDED_REF_CHARS = 128;
 
 export const TRUNCATION_MARKER = "…";
 
@@ -49,6 +70,28 @@ export interface LedgerProvenance {
   source: string;
   ref: string;
   line: number;
+  /** #1749: linked-issue relationship provenance, present on `linked_issues`
+   * entries ONLY when known. `closing` records the reference shape the PR
+   * itself used (a closing-keyword ref vs an `Implements`/`Addresses`/title-
+   * `(#N)` contract link, or a plain `Refs`/`Ref` context link); `labels`
+   * carries the linked issue's bounded forge-label
+   * list. The trace scope consumes both to tell an issue the PR claims to
+   * close (whose acceptance criteria stay mandatory) from a non-closing
+   * parent/umbrella/context link (whose acceptance set is not automatically
+   * this PR's merge contract). Absent fields mean unknown — the scope
+   * predicate fails closed on them. */
+  closing?: boolean;
+  labels?: string[];
+  /** #1750: trusted criterion→child ownership evidence — the canonical
+   * `repo#N` identities of the child work that the linked umbrella's OWN
+   * body decomposition (task-list items referencing child issues) associates
+   * with THIS criterion, parsed from intake-rendered `(decomposition: …)`
+   * metadata lines and attached only to the entry whose content id the line
+   * names. Present ONLY when a well-formed association exists; absent means
+   * no trusted ownership evidence, and the scope predicate fails closed on
+   * it (the criterion stays in scope — umbrella label + non-closing ref
+   * alone is never ownership evidence). */
+  childRefs?: string[];
 }
 
 /** The typed canonical requirement-ledger entry (#675). Internal fields are
@@ -73,6 +116,20 @@ export interface RequirementLedger {
     omittedRequirements: number;
     omittedSources: number;
   };
+  /** #1749 follow-up (review round): disclosure of linked documents excluded
+   * as `context reference` sources — `count` is the honest total excluded,
+   * `refs` lists their refs exactly as the intake heading rendered them (raw
+   * spellings like `#42` or `Owner/Repo#42`, never casefolded — the ledger does
+   * not know the document's repository and must not invent a canonical form;
+   * bounded, deduplicated, document
+   * order; fewer than `count` once {@link MAX_CONTEXT_EXCLUDED_REFS} is
+   * reached). Present ONLY when at least one document was excluded; absent
+   * (not empty) otherwise, so a no-context artifact keeps its exact legacy
+   * byte shape. Informational disclosure only: it never enters `requirements`
+   * or provenance, never feeds the sha, is never reported as truncation, and
+   * enforcement must not consume it. It exists so the exclusion is visible in
+   * `requirement-ledger.json` and the rendered ledger instead of silent. */
+  contextExcluded?: { count: number; refs: string[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +149,10 @@ export function entryToArtifact(entry: RequirementLedgerEntry): Record<string, u
 }
 
 /** Serialize the internal ledger to the persisted v2-identical snake_case
- * artifact (`requirement-ledger.json`): same keys, same values, same sha. */
+ * artifact (`requirement-ledger.json`): same keys, same values, same sha.
+ * #1749 follow-up (review round): the optional context-exclusion disclosure
+ * rides as `context_excluded` and is emitted ONLY when non-empty — an
+ * artifact with no context exclusions is byte-identical to the legacy shape. */
 export function ledgerToArtifact(ledger: RequirementLedger): Record<string, unknown> {
   return {
     version: ledger.version,
@@ -103,6 +163,9 @@ export function ledgerToArtifact(ledger: RequirementLedger): Record<string, unkn
       omitted_requirements: ledger.truncation.omittedRequirements,
       omitted_sources: ledger.truncation.omittedSources,
     },
+    ...(ledger.contextExcluded !== undefined && ledger.contextExcluded.refs !== undefined
+      ? { context_excluded: { count: ledger.contextExcluded.count, refs: [...ledger.contextExcluded.refs] } }
+      : {}),
   };
 }
 
@@ -223,7 +286,7 @@ export function pySplitLines(text: string): string[] {
 
 /** Content-derived entry id (first 12 hex of sha256 of casefolded text). */
 function requirementId(text: string): string {
-  return "req-" + createHash("sha256").update(Buffer.from(text.toLowerCase(), "utf8")).digest("hex").slice(0, 12);
+  return requirementIdOfText(text);
 }
 
 /** First 16 hex of sha256 over the canonical JSON of the entries array.
@@ -245,14 +308,12 @@ export function emptyLedger(): RequirementLedger {
 }
 
 /** Normalize one line; `null` when it is empty after normalization. The id is
- * derived from this (post-truncation) text. */
+ * derived from this (post-truncation) text. The squeeze+truncate step is the
+ * shared {@link normalizeRequirementText} — intake applies it to
+ * decomposition task-item content to derive the ids it renders (#1750), so
+ * both sides of that seam normalize identically by construction. */
 function normalizeLine(raw: string): { text: string; truncated: boolean } | null {
-  const text = raw.replace(MARKER_STRIP_RE, "").replace(WS_RE, " ").trim();
-  if (!text) return null;
-  if (text.length > MAX_REQUIREMENT_CHARS) {
-    return { text: text.slice(0, MAX_REQUIREMENT_CHARS - 1) + TRUNCATION_MARKER, truncated: true };
-  }
-  return { text, truncated: false };
+  return normalizeRequirementText(raw.replace(MARKER_STRIP_RE, ""));
 }
 
 interface ScannedLine {
@@ -314,14 +375,96 @@ function scanDocument(text: string): ScannedLine[] {
   return found;
 }
 
+/** #1749: bound one linked issue's forge-label list for provenance — trim,
+ * drop empties, deduplicate, cap count and per-label length (codepoint-safe,
+ * so a long label never splits a surrogate pair). `undefined` when nothing
+ * usable survives, so the provenance field stays absent rather than empty. */
+function boundedLinkedIssueLabels(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (names.length >= MAX_LINKED_ISSUE_LABELS) break;
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(Array.from(name).slice(0, MAX_LINKED_ISSUE_LABEL_CHARS).join(""));
+  }
+  return names.length > 0 ? names : undefined;
+}
+
+/** #1749 follow-up (review round): bound the disclosed context-exclusion refs of
+ * context-excluded documents — trim, drop empties, deduplicate (first
+ * occurrence keeps position, document order), cap count and per-ref length
+ * (codepoint-safe, so a forged long heading never splits a surrogate pair).
+ * Shared by extraction and the tolerant reload so both serialization
+ * boundaries re-bounded identically. */
+function boundedContextRefs(values: readonly unknown[]): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const item of values) {
+    if (refs.length >= MAX_CONTEXT_EXCLUDED_REFS) break;
+    if (typeof item !== "string") continue;
+    const ref = item.trim();
+    if (!ref || seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push(Array.from(ref).slice(0, MAX_CONTEXT_EXCLUDED_REF_CHARS).join(""));
+  }
+  return refs;
+}
+
+/** #1749 follow-up (review round): re-read the persisted `context_excluded`
+ * disclosure tolerantly — a malformed disclosure is ignored (undefined),
+ * never a failure, and a legacy artifact simply has none. A positive
+ * integer `count` with a garbage `refs` list keeps the count disclosure with
+ * an empty ref list; disclosure shape is informational only. */
+function tolerantContextExcluded(value: unknown): { count: number; refs: string[] } | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  const rawCount = rec.count;
+  if (typeof rawCount !== "number" || !Number.isInteger(rawCount) || rawCount <= 0) return undefined;
+  return { count: rawCount, refs: boundedContextRefs(Array.isArray(rec.refs) ? rec.refs : []) };
+}
+
 /** Parse rendered `linked-issues.md` into (ref, body) documents. Each
  * `## <repo>#<number>` heading (or any heading, as a fallback ref) owns the
  * fenced JSON blocks that follow it; a block decodes to a dict with a string
  * `body` to contribute that body for scanning. Malformed blocks are skipped
- * fail-soft. */
-function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string }[] {
-  const documents: { ref: string; body: string }[] = [];
+ * fail-soft.
+ *
+ * #1749: the relationship metadata the intake renders between the heading
+ * and the fence is parsed too — an exact-match `(linked as: …)` line records
+ * the reference shape the PR itself used, and the embedded projection's
+ * `labels` array (the linked issue's forge labels) is carried bounded. Both
+ * fields are OPTIONAL provenance: a document without them keeps the exact
+ * legacy `{ref, body}` shape, and the scope predicate fails closed on the
+ * unknown relationship.
+ *
+ * #1749 follow-up: a `(linked as: context reference)` line marks a document
+ * the PR linked ONLY by a plain `Refs`/`Ref` reference. The document is
+ * returned with `contextOnly: true` and its body is never scanned for
+ * requirements — a valid context link stays valid PR syntax (the issue is
+ * still fetched, fenced into `linked-issues.md`, and hashed into the
+ * selection signature upstream), but the referenced issue's acceptance
+ * criteria are not this PR's merge contract. Absent metadata keeps the
+ * contract-carrying reading (fail closed — unknown is never context).
+ *
+ * #1750: the exact-structure `(decomposition: req-<id> -> <child refs>)`
+ * ownership lines are parsed into a per-document id→childRefs map. Strictly
+ * structural (a malformed line parses to nothing and contributes no
+ * association), bounded to at most {@link MAX_DECOMPOSITION_LINES_PER_ISSUE}
+ * accepted lines per document, and FIRST line per id wins — honest intake
+ * renders exactly one line per criterion, so repeats never merge or replace.
+ * The map keys are the ledger's own content ids, so the association can only
+ * ever attach to the entry the id names; issue content itself never leaves
+ * the fence. */
+function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[]; contextOnly?: boolean; decompositions?: ReadonlyMap<string, readonly string[]> }[] {
+  const documents: { ref: string; body: string; closing?: boolean; labels?: string[]; contextOnly?: boolean; decompositions?: ReadonlyMap<string, readonly string[]> }[] = [];
   let currentRef = "";
+  let currentClosing: boolean | undefined = undefined;
+  let currentContext = false;
+  let decompositions: Map<string, string[]> | null = null;
   let inFence = false;
   let fenceChar = "";
   let fenceLines: string[] = [];
@@ -337,9 +480,21 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
           obj = null;
         }
         if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
-          const body = (obj as Record<string, unknown>).body;
+          const record = obj as Record<string, unknown>;
+          const body = record.body;
           if (typeof body === "string" && body.trim()) {
-            documents.push({ ref: currentRef, body });
+            const labels = boundedLinkedIssueLabels(record.labels);
+            documents.push({
+              ref: currentRef,
+              body,
+              // The relationship line is intake-authored and exact-matched
+              // outside the fence; absent means unknown (fail closed
+              // downstream), never a guess.
+              ...(currentClosing !== undefined ? { closing: currentClosing } : {}),
+              ...(currentContext ? { contextOnly: true } : {}),
+              ...(labels !== undefined ? { labels } : {}),
+              ...(decompositions !== null && decompositions.size > 0 ? { decompositions } : {}),
+            });
           }
         }
       } else {
@@ -354,7 +509,39 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
       continue;
     }
     const heading = HEADING_RE.exec(raw);
-    if (heading !== null) currentRef = (heading[1] ?? "").trim();
+    if (heading !== null) {
+      currentRef = (heading[1] ?? "").trim();
+      currentClosing = undefined;
+      currentContext = false;
+      decompositions = null;
+      continue;
+    }
+    if (currentRef !== "") {
+      const line = raw.trim();
+      if (line === LINKED_AS_CLOSING_LINE) {
+        currentClosing = true;
+      } else if (line === LINKED_AS_NON_CLOSING_LINE) {
+        currentClosing = false;
+      } else if (line === LINKED_AS_CONTEXT_LINE) {
+        // #1749 follow-up: an explicit plain-reference relationship. The
+        // document stays parsed (callers must be able to see it exists) but
+        // its body never becomes requirement-ledger entries — see
+        // `extractRequirementLedger`.
+        currentContext = true;
+      } else {
+        // #1750: the ownership-evidence lines. Only well-formed lines count;
+        // the budget bounds ACCEPTED associations, and the first line for an
+        // id wins.
+        const decomposition = parseDecompositionLine(line);
+        if (decomposition !== null) {
+          if (decompositions === null) decompositions = new Map();
+          if (!decompositions.has(decomposition.requirementId)
+            && decompositions.size < MAX_DECOMPOSITION_LINES_PER_ISSUE) {
+            decompositions.set(decomposition.requirementId, decomposition.childRefs);
+          }
+        }
+      }
+    }
   }
   return documents;
 }
@@ -394,6 +581,36 @@ export interface LedgerInput {
   harnessObligations?: readonly import("./obligations.js").HarnessObligation[] | undefined;
 }
 
+/** One bounded input document to scan. #1749: linked-issue documents carry
+ * the optional relationship provenance parsed from `linked-issues.md`.
+ * #1750: plus the document's trusted criterion→child decomposition map (id →
+ * canonical child refs). */
+interface SourceDoc {
+  source: string;
+  ref: string;
+  text: string;
+  closing?: boolean;
+  labels?: string[];
+  decompositions?: ReadonlyMap<string, readonly string[]>;
+}
+
+/** #1749: build one provenance entry, carrying the linked-issue relationship
+ * provenance (`closing`/`labels`) only on `linked_issues` entries and only
+ * when known — every other source, and unknown state, keeps the exact
+ * legacy `{source, ref, line}` shape. #1750: the ownership evidence attaches
+ * to exactly the entry whose content id a decomposition line named — the id
+ * is computed from the same normalized text the entry was built from, so a
+ * metadata line can never associate another entry's criterion. */
+function provenanceFor(doc: SourceDoc, line: number, entryId?: string): LedgerProvenance {
+  const provenance: LedgerProvenance = { source: doc.source, ref: doc.ref, line };
+  if (doc.source !== "linked_issues") return provenance;
+  if (doc.closing !== undefined) provenance.closing = doc.closing;
+  if (doc.labels !== undefined) provenance.labels = doc.labels;
+  const childRefs = entryId !== undefined ? doc.decompositions?.get(entryId) : undefined;
+  if (childRefs !== undefined) provenance.childRefs = [...childRefs];
+  return provenance;
+}
+
 /** Build the version-1 requirement ledger from bounded review inputs. Never
  * throws on malformed input; ids are computed from post-truncation
  * normalized text; duplicate text (casefolded) merges into one entry whose
@@ -404,12 +621,43 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
   let resolvedRef = typeof standardsRef === "string" ? standardsRef : "";
   if (!resolvedRef.trim()) resolvedRef = "standards";
 
-  type SourceDoc = { source: string; ref: string; text: string };
   const documents: SourceDoc[] = [];
+  // #1749 follow-up (review round): every context-excluded document leaves a
+  // trace here — the honest total count plus its bounded canonical ref — so
+  // the exclusion is disclosed in the ledger artifact (`contextExcluded`,
+  // persisted as `context_excluded`) instead of silent. Informational only:
+  // never a requirement, never provenance, never truncation accounting.
+  let contextExcludedCount = 0;
+  const contextExcludedRefs: unknown[] = [];
   if (typeof standardsText === "string") documents.push({ source: "standards", ref: resolvedRef, text: standardsText });
   if (typeof linkedIssuesMarkdown === "string") {
     for (const doc of parseLinkedIssueDocuments(linkedIssuesMarkdown)) {
-      documents.push({ source: "linked_issues", ref: doc.ref, text: doc.body });
+      // #1749 follow-up: a plain `Refs`/`Ref` context link is valid PR
+      // syntax, and its issue stays fenced review context in
+      // `linked-issues.md` (the model still reads it) — but the relationship
+      // was recorded as context, so its body is not a requirement source:
+      // the referenced issue's acceptance criteria are not this PR's merge
+      // contract. This is a deliberate relationship exclusion, not capacity
+      // truncation: the document is dropped BEFORE source-capacity counting,
+      // never appears in `omittedSources`, and a criterion it shares with a
+      // closing/implementation document still enters through THAT source.
+      // Only the explicit context metadata line excludes; unknown state
+      // keeps the contract-carrying reading (fail closed). The exclusion is
+      // never silent: the document's ref is disclosed in `contextExcluded`
+      // (count always honest, refs bounded and deduplicated).
+      if (doc.contextOnly) {
+        contextExcludedCount += 1;
+        if (contextExcludedRefs.length < MAX_CONTEXT_EXCLUDED_REFS) contextExcludedRefs.push(doc.ref);
+        continue;
+      }
+      documents.push({
+        source: "linked_issues",
+        ref: doc.ref,
+        text: doc.body,
+        ...(doc.closing !== undefined ? { closing: doc.closing } : {}),
+        ...(doc.labels !== undefined ? { labels: doc.labels } : {}),
+        ...(doc.decompositions !== undefined ? { decompositions: doc.decompositions } : {}),
+      });
     }
   }
   const prText = prDocumentText(prJson);
@@ -446,18 +694,19 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
       const index = indexByKey.get(key);
       if (index === undefined) {
         indexByKey.set(key, entries.length);
+        const entryId = requirementId(found.normalized);
         entries.push({
-          id: requirementId(found.normalized),
+          id: entryId,
           text: found.normalized,
           kind: found.kind,
           verificationRequired: found.kind === "invariant",
           truncated: found.truncated,
-          provenance: [{ source: doc.source, ref: doc.ref, line: found.line }],
+          provenance: [provenanceFor(doc, found.line, entryId)],
         });
       } else {
         // Merged duplicate: the first occurrence owns the entry (position,
         // kind, flags); provenance is appended.
-        entries[index]?.provenance.push({ source: doc.source, ref: doc.ref, line: found.line });
+        entries[index]?.provenance.push(provenanceFor(doc, found.line, entries[index]?.id));
       }
     }
   }
@@ -493,6 +742,14 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
 
   const omitted = Math.max(0, entries.length - MAX_REQUIREMENTS) + omittedKeys.size;
   const kept = entries.length > MAX_REQUIREMENTS ? entries.slice(0, MAX_REQUIREMENTS) : entries;
+  // #1749 follow-up (review round): disclose the context-link exclusions here
+  // — the relationship exclusion never disappears silently. Absent (not
+  // empty) when nothing was excluded, so no-context artifacts keep the exact
+  // legacy byte shape; `count` is the honest total even past the ref cap;
+  // refs re-bounded through the same helper the tolerant reload applies.
+  // This is NOT truncation — the documents were never requirement-source
+  // candidates — so `truncation` stays exactly as before.
+  const contextExcluded = boundedContextRefs(contextExcludedRefs);
   return {
     version: ARTIFACT_VERSION,
     sha: computeSha(kept),
@@ -504,6 +761,9 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
       omittedRequirements: omitted,
       omittedSources,
     },
+    ...(contextExcludedCount > 0
+      ? { contextExcluded: { count: contextExcludedCount, refs: contextExcluded } }
+      : {}),
   };
 }
 
@@ -537,7 +797,23 @@ function tolerantEntry(item: unknown): RequirementLedgerEntry | null {
       const ref = typeof prec.ref === "string" ? prec.ref : "";
       const rawLine = prec.line;
       const line = typeof rawLine === "number" && Number.isInteger(rawLine) && rawLine >= 0 ? rawLine : 0;
-      provenance.push({ source, ref, line });
+      // #1749: the linked-issue relationship provenance survives the
+      // deserialization boundary under the same strict bounds the parse
+      // applies — present only when well-formed, never guessed.
+      // #1750: the ownership evidence re-bounds the same way; an over-count
+      // list drops WHOLLY ({@link boundedChildRefs}) because a truncated
+      // owner list could silently lose the very child the PR references.
+      const closing = typeof prec.closing === "boolean" ? prec.closing : undefined;
+      const labels = boundedLinkedIssueLabels(prec.labels);
+      const childRefs = boundedChildRefs(prec.childRefs);
+      provenance.push({
+        source,
+        ref,
+        line,
+        ...(closing !== undefined ? { closing } : {}),
+        ...(labels !== undefined ? { labels } : {}),
+        ...(childRefs !== undefined ? { childRefs } : {}),
+      });
     }
   }
   return {
@@ -578,11 +854,18 @@ export function loadLedgerFromValue(data: unknown): RequirementLedger {
       omittedSources = rawOmittedSources;
     }
   }
+  // #1749 follow-up (review round): the informational context-exclusion
+  // disclosure survives a well-formed round trip and is re-bounded here the
+  // same way extraction bounds it. Absence (every legacy artifact) is fine;
+  // a malformed disclosure is IGNORED, never an error, and it never touches
+  // `requirements` or provenance. Both serializations are accepted.
+  const contextExcluded = tolerantContextExcluded(rec.context_excluded ?? rec.contextExcluded);
   return {
     version: ARTIFACT_VERSION,
     sha: computeSha(requirements),
     requirements,
     truncation: { truncated, omittedRequirements: omitted, omittedSources },
+    ...(contextExcluded !== undefined ? { contextExcluded } : {}),
   };
 }
 
@@ -633,27 +916,43 @@ function fitToBytes(text: string, maxBytes: number): string {
  * ``- (id) `text` [kind] (via ref)`` list items. When maxBytes is given a
  * hard UTF-8 byte cap applies: trailing whole entries are dropped (never a
  * character mid-codepoint) until the budget holds, the omission is always
- * visible, and a single oversized entry is shrunk char-safely. */
+ * visible, and a single oversized entry is shrunk char-safely.
+ * #1749 follow-up (review round): when the ledger carries the context-
+ * exclusion disclosure it renders as one bounded meta line (same parenthetical
+ * shape as the length note), so the review corpus shows that linked documents
+ * were excluded as context instead of vanishing silently. Absent disclosure
+ * keeps the rendered view byte-identical to before. */
 export function renderRequirementLedgerMarkdown(
   ledger: unknown,
   maxBytes: number | null = MAX_LEDGER_MARKDOWN_BYTES,
 ): string {
   const entries: RequirementLedgerEntry[] = [];
-  const raw =
+  const record =
     ledger !== null && typeof ledger === "object" && !Array.isArray(ledger)
-      ? (ledger as Record<string, unknown>).requirements
+      ? (ledger as Record<string, unknown>)
       : null;
+  const raw = record === null ? null : record.requirements;
   if (Array.isArray(raw)) {
     for (const item of raw) {
       const entry = tolerantEntry(item);
       if (entry !== null) entries.push(entry);
     }
   }
+  // Both serializations tolerated; a malformed disclosure renders nothing
+  // (informational only — it can never break or reshape the ledger view).
+  const contextExcluded =
+    record === null ? undefined : tolerantContextExcluded(record.context_excluded ?? record.contextExcluded);
 
   const build = (kept: RequirementLedgerEntry[], omitted: number): string => {
     const lines: string[] = [LEDGER_HEADER, ""];
     for (const entry of kept) lines.push(requirementLine(entry));
     if (omitted > 0) lines.push(`(+${omitted} requirements omitted for length)`);
+    if (contextExcluded !== undefined) {
+      const listed = contextExcluded.refs.map((ref) => codeSpan(escapeControlChars(ref))).join(", ");
+      const more = contextExcluded.count - contextExcluded.refs.length;
+      const tail = listed === "" ? "" : `: ${listed}${more > 0 ? ` (+${more} more)` : ""}`;
+      lines.push(`(+${contextExcluded.count} linked documents excluded as context references${tail})`);
+    }
     return `${lines.join("\n")}\n`;
   };
 

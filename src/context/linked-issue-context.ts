@@ -24,21 +24,50 @@
  * - a failed fetch renders a notice and records the ref; Linear lookups that
  *   fail per identifier, or an adapter that cannot run at all, are
  *   uncertainty, while the fork gate is known-disabled state.
- * - (#872) a non-closing ref (title `(#N)` convention, or a body
- *   `Implements`/`Part of`/`Refs` reference) whose fetched object is a pull
+ * - (#872) a non-closing or context-only ref (title `(#N)` convention, a
+ *   body `Implements`/`Part of`/`Addresses` reference, or a plain
+ *   `Refs`/`Ref` link) whose fetched object is a pull
  *   request is rejected before projection: it renders a skip notice instead
  *   of the issue's content, is recorded in `linked-metadata-status.json` as
  *   a skip (not a failure — it never marks linked-metadata uncertain), and
  *   never reaches the requirement ledger. Closing-keyword refs (`Closes`/
  *   `Fixes`/`Resolves`) are unaffected — parity with the pre-#872 fetch
- *   behavior is preserved for them. */
+ *   behavior is preserved for them.
+ * - (#1749) every ACCEPTED issue renders one exact-match relationship line
+ *   under its heading (`(linked as: closing|non-closing|context reference)`),
+ *   so the reference shape the PR itself used survives into
+ *   `linked-issues.md` — the requirement ledger's only channel — instead of
+ *   being dropped with the processed-ref representation. The third state
+ *   (#1749 follow-up) marks a link the PR used ONLY as a plain `Refs`/`Ref`
+ *   reference: still fetched and fenced as review context, but its
+ *   acceptance criteria never enter the requirement ledger.
+ * - (#1750) an ACCEPTED issue whose own body carries a task-list
+ *   decomposition associating criteria with child issues renders one
+ *   exact-structure `(decomposition: req-<content id> -> <child refs>)`
+ *   line per associated criterion — trusted forge metadata for the
+ *   umbrella-parent scope boundary, parsed conservatively (task-list items
+ *   only, bounded, fail-closed) and keyed by the ledger's own content id so
+ *   issue content never appears outside the fence.
+ * - (#1750 round 3/4) the organic umbrella shape — acceptance criteria with
+ *   no child refs plus a flat decomposition list — attests ownership through
+ *   the DECOMPOSED CHILD ISSUES themselves: for a non-closing umbrella-class
+ *   linked issue, intake fetches the decomposition's children (bounded) and
+ *   renders the same `(decomposition: …)` line when the child's own body
+ *   names the parent AND carries a criterion sharing the parent criterion's
+ *   requirement identity. Round 4 (operator follow-up 7025382962): several
+ *   children independently passing every gate for one criterion is JOINT
+ *   OWNERSHIP — the line carries the full bounded owner set. Cross-matched,
+ *   one-sided, or unreadable shapes render nothing (fail closed); the
+ *   ledger and scope predicate seams are unchanged. */
 
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqError } from "../platform/jq.js";
 import { pyOr, pyStr, pyStrip } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, type LinkedIssueRef } from "../precheck/linked-issues.js";
+import { acceptedLinkedIssues, canonicalChildRef, childRefsInText, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, LINKED_AS_CLOSING_LINE, LINKED_AS_CONTEXT_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_ATTESTATION_CRITERIA_PER_BODY, MAX_ATTESTED_CHILD_BODY_BYTES, MAX_DECOMPOSITION_CHILDREN_PER_ISSUE, MAX_DECOMPOSITION_LINES_PER_ISSUE, MAX_DECOMPOSITION_REFS_PER_CRITERION, parseDecompositionLine, renderDecompositionLine, requirementIdentityAttests, type LinkedIssueFetchResult, type LinkedIssueRef } from "../precheck/linked-issues.js";
+import { pySplitLines } from "../requirements/ledger.js";
+import { normalizeRequirementText, requirementIdOfText } from "../requirements/requirement-id.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 import { redactPrTextLines } from "./redact.js";
 
@@ -91,6 +120,522 @@ export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
     if (error instanceof JqError) throw new LinkedIssueProjectionError(`jq: projection failed: ${error.message}`);
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// #1750: trusted criterion→child ownership evidence from the linked issue's
+// own decomposition structure
+//
+// The umbrella-parent scope narrowing may treat an acceptance criterion as
+// not-this-increment's merge contract ONLY when trusted deterministic
+// evidence shows the SPECIFIC criterion is owned by separately decomposed
+// child work — never on the umbrella label + non-closing ref alone, and
+// never from model prose or PR text. The trusted channel is the linked
+// issue's OWN body: its task-list decomposition, where a task-list item
+// (the criterion) references child issues inline, or is followed by list
+// items nested under it that carry child refs. This is forge metadata
+// fetched at intake with the deployment's own read credential — the same
+// trust class as the body text the requirement ledger already scans — and
+// it is parsed conservatively: only task-list items are criteria, only
+// issue-reference tokens are children, and every bound (below) drops an
+// association it cannot carry whole.
+//
+// Each association renders as ONE exact-structure metadata line between the
+// `(linked as: …)` line and the JSON fence:
+//
+//     (decomposition: req-<content id> -> o/r#101, o/r#102)
+//
+// The content id is the requirement ledger's own id recipe
+// ({@link requirementIdOfText}, applied over the SAME normalization the
+// ledger scanner uses — {@link normalizeRequirementText}) — so issue content
+// never appears outside the fence (the exact-match trust model for metadata
+// lines holds) and the ledger can attach the association to exactly the
+// entry the id names. Normalization/id drift between intake and the ledger
+// silently detaches associations, which fails CLOSED downstream (the
+// criterion stays in scope), never unsafe. The body parsed here is the
+// projected (credential-redacted) body — the exact bytes that land inside
+// the fence — so both sides of the seam hash the same text.
+// ---------------------------------------------------------------------------
+
+interface BodyListItem {
+  indent: number;
+  content: string;
+  task: boolean;
+}
+
+const INTAKE_TASK_ITEM_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+\[[xX ]\][ \t]*(.*)$/;
+const INTAKE_LIST_ITEM_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+(.*)$/;
+
+function indentWidth(spaces: string): number {
+  let width = 0;
+  for (const ch of spaces) width += ch === "\t" ? 4 : 1;
+  return width;
+}
+
+/** Parse a linked issue's body into its trusted decomposition associations
+ * and render them as metadata lines, in body order. Only task-list items
+ * carry criteria; the child refs of a criterion are the issue references in
+ * its own text plus those on the list items nested under it (its subtree,
+ * until the first item at equal or shallower indent). A task item with no
+ * child refs renders nothing; an item naming more children than the bound
+ * renders nothing (an association that cannot be carried whole is never
+ * approximated — truncation could silently drop the very child the PR
+ * references, which is the unsafe direction). At most
+ * {@link MAX_DECOMPOSITION_LINES_PER_ISSUE} lines per issue.
+ *
+ * List and task-list items inside backtick or tilde code fences are inert —
+ * a quoted example of a criterion with child refs cannot attest ownership —
+ * matching the fence handling of the other attestation parsers. */
+function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
+  const items: BodyListItem[] = [];
+  let fence: IntakeFence | null = null;
+  for (const raw of body.split(/\r\n|\r|\n/)) {
+    if (fence !== null) {
+      if (intakeFenceCloses(raw, fence)) fence = null;
+      continue;
+    }
+    const opener = intakeFenceRun(raw);
+    if (opener !== null) {
+      fence = opener;
+      continue;
+    }
+    const task = INTAKE_TASK_ITEM_RE.exec(raw);
+    if (task !== null) {
+      items.push({ indent: indentWidth(task[1] ?? ""), content: task[2] ?? "", task: true });
+      continue;
+    }
+    const plain = INTAKE_LIST_ITEM_RE.exec(raw);
+    if (plain !== null) items.push({ indent: indentWidth(plain[1] ?? ""), content: plain[2] ?? "", task: false });
+  }
+  const lines: string[] = [];
+  for (let index = 0; index < items.length && lines.length < MAX_DECOMPOSITION_LINES_PER_ISSUE; index += 1) {
+    const item = items[index]!;
+    if (!item.task) continue;
+    const refs = childRefsInText(item.content, ownerRepo);
+    let next = index + 1;
+    while (next < items.length && items[next]!.indent > item.indent) {
+      if (refs.length <= MAX_DECOMPOSITION_REFS_PER_CRITERION) {
+        for (const ref of childRefsInText(items[next]!.content, ownerRepo)) {
+          if (!refs.includes(ref)) refs.push(ref);
+        }
+      }
+      next += 1;
+    }
+    if (refs.length === 0 || refs.length > MAX_DECOMPOSITION_REFS_PER_CRITERION) continue;
+    const normalized = normalizeRequirementText(item.content);
+    if (normalized === null) continue;
+    lines.push(renderDecompositionLine(requirementIdOfText(normalized.text), refs));
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// #1750 round 3: the child-attestation ownership channel. cbdb6287's
+// {@link bodyDecompositionLines} associates a criterion with child work only
+// when the criterion's OWN task-list item carries child refs — the organic
+// Dispatch umbrella shape (real #740: acceptance criteria with no refs plus
+// a flat, separate decomposition list) yields no evidence and the parent
+// criterion stays material. The next trustworthy seam is the DECOMPOSED
+// CHILD ISSUES THEMSELVES, fetched at intake with the deployment's own read
+// credential — the same trust class as the linked-issue bodies. An
+// association fires only when ALL of:
+//
+//   (a) the umbrella's own body lists the child in a decomposition section
+//       (the groomer `dispatch-groomer:decomposition` marker region, or a
+//       bare `## Decomposition` heading section);
+//   (b) the fetched child's own body names that parent — a `Parent:` line
+//       resolving to exactly the umbrella's canonical `repo#N` identity
+//       (bare `#N`, `owner/repo#N`, or an issues/pull URL, as the real
+//       #1677 body carries);
+//   (c) the child's own acceptance criterion carries the parent criterion's
+//       requirement identity — a shared contiguous run of ≥ 3 substantial
+//       tokens (`requirementIdentityAttests`, calibrated on the real
+//       #740/#1677 texts, whose criterion wording differs but shares the
+//       requirement-bearing phrase `same scheduler engine`).
+//
+// A criterion with at least one attesting child renders ONE
+// `(decomposition: req-<content id> -> <canonical children>)` line — the
+// seam cbdb6287 built — so the ledger provenance parse and the scope
+// predicate consume it unchanged. Round 4 (operator follow-up 7025382962):
+// MULTIPLE children independently passing every gate for the same parent
+// criterion is JOINT OWNERSHIP, not ambiguity — the line carries the FULL
+// bounded owner set (at most MAX_DECOMPOSITION_REFS_PER_CRITERION refs, the
+// existing childRefs contract the consumer already unions; the criterion
+// stays mandatory when the PR references ANY owning child). A child
+// criterion matching several parent criteria is a cross-matched identity
+// that cannot be disambiguated and attests nothing, and an owner set over
+// the per-line bound drops the association whole. Any UNREADABLE child —
+// fetch failure, pull-request payload, over-size body, or a child (or the
+// umbrella itself) outside the reviewed repository (refused on EVERY PR,
+// fork or not) — voids this umbrella's attestation WHOLE: a partial child
+// set could hide a second attesting child and make a jointly-owned
+// criterion look like a smaller owner set (the unsafe direction). A fetched
+// child that simply does not attest (wrong or missing parentage, no
+// matching criterion) is positive non-attestation evidence and only removes
+// itself. No model prose and no PR prose participates: every input here is
+// forge-fetched issue content, every output is a content id plus canonical
+// refs. The intake pre-gate (fetch children only for a NON-CLOSING linked
+// issue carrying an umbrella-class forge label) mirrors the consumer's
+// per-ref gate, so the bounded fetches happen only where the evidence could
+// be consumed; drift in either direction degrades to fewer or inert
+// fetches, never to unsafe ownership.
+// ---------------------------------------------------------------------------
+
+/** The umbrella-label vocabulary of the consumer's per-ref gate
+ * (`UMBRELLA_ISSUE_LABELS` in src/enforcement/requirement-trace.ts). The
+ * pre-gate below only saves bounded fetches on issues the consumer could
+ * never consume evidence for; a drift here degrades to inert work or to a
+ * criterion staying in scope (fail closed), never to unsafe ownership. */
+const INTAKE_UMBRELLA_LABELS: ReadonlySet<string> = new Set(["umbrella", "epic"]);
+
+/** Whether the projected label list carries an umbrella-class forge label
+ * (the consumer scans the first 8 bounded labels; this pre-gate scans all of
+ * them — a wider pre-gate only ever fetches for evidence the consumer would
+ * ignore, never the reverse). */
+function hasUmbrellaLabel(labels: unknown): boolean {
+  if (!Array.isArray(labels)) return false;
+  for (const label of labels) {
+    if (typeof label !== "string") continue;
+    if (INTAKE_UMBRELLA_LABELS.has(label.slice(0, 256).trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** Acceptance-heading vocabulary the requirement ledger extracts criteria
+ * under (ACCEPTANCE_HEADINGS parity — the same set, by exact normalized
+ * heading). Criteria the ledger demotes (advisory sections, uppercase-MUST
+ * normative lines elsewhere) either detach their rendered id or never
+ * extract — both directions fail closed downstream. */
+const INTAKE_ACCEPTANCE_HEADINGS: ReadonlySet<string> = new Set([
+  "acceptance criteria",
+  "requirements",
+  "invariants",
+  "success criteria",
+  "required checks",
+]);
+
+// The ledger scanner's line shapes, mirrored so intake derives criterion ids
+// from exactly the lines the ledger will extract from the same embedded body.
+const INTAKE_LEDGER_LIST_ITEM_RE = /^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/;
+const INTAKE_LEDGER_MARKER_STRIP_RE = /^\s*(?:[-*+]\s+\[[ xX]\]\s*|[-*+]\s+|\d+[.)]\s+)/;
+const INTAKE_HEADING_RE = /^\s{0,3}#{1,6}\s+(.*)$/;
+/** A Markdown code fence: at most 3 leading SPACES (CommonMark — a run
+ * indented 4+ spaces, or by a tab, is indented code, not a fence), the
+ * backtick/tilde run, then whatever follows. */
+const INTAKE_FENCE_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+interface IntakeFence {
+  char: string;
+  length: number;
+}
+
+/** Parse a RAW line as a Markdown fence run, or null when it is not a fence.
+ * Leading indentation is significant and must not be trimmed: only 0–3
+ * spaces are allowed before the run. Trailing text is an info string on an
+ * opener; a closer must have none (see {@link intakeFenceCloses}). */
+function intakeFenceRun(line: string): IntakeFence | null {
+  const match = INTAKE_FENCE_RE.exec(line);
+  if (match === null) return null;
+  const run = match[2] ?? "";
+  return { char: run.charAt(0), length: run.length };
+}
+
+/** True when the RAW line closes the open fence (CommonMark): at most 3
+ * leading spaces, the same fence character, a run at least as long as the
+ * OPENER's run, and nothing but trailing whitespace after it. A shorter run,
+ * an info string (`` ```not-a-close ``), or a 4-space-indented run is body
+ * text, not a closer, so the quoted content after it stays inert. */
+function intakeFenceCloses(line: string, fence: IntakeFence): boolean {
+  const match = INTAKE_FENCE_RE.exec(line);
+  if (match === null) return false;
+  const run = match[2] ?? "";
+  return run.charAt(0) === fence.char && run.length >= fence.length && (match[3] ?? "").trim() === "";
+}
+
+const DECOMPOSITION_START_MARKER = "dispatch-groomer:decomposition:start";
+const DECOMPOSITION_END_MARKER = "dispatch-groomer:decomposition:end";
+
+const CHILD_PARENT_LINE_RE = /^Parent:[ \t]*(.*)$/;
+/** `https://host/owner/repo/issues/N` (or `/pull/N`) — the parentage form the
+ * real decomposed children carry (`Parent: https://…/issues/740`). */
+const PARENT_URL_REF_RE = /^https?:\/\/[^\s/]+\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+)\/?(?:[?#].*)?$/;
+
+/** The acceptance-criterion texts one forge body yields under the ledger's
+ * acceptance headings — the same lines the requirement ledger extracts from
+ * this body when embedded (`scanDocument` parity: fences skipped, heading
+ * tracked, list items only, marker-stripped, squeezed+truncated via the
+ * shared {@link normalizeRequirementText}). Overflow is reported because a
+ * body with more criteria than {@link MAX_ATTESTATION_CRITERIA_PER_BODY}
+ * cannot be mapped whole. */
+function acceptanceCriteriaTexts(body: string): { texts: string[]; overflow: boolean } {
+  const texts: string[] = [];
+  let fence: IntakeFence | null = null;
+  let heading = "";
+  for (const raw of pySplitLines(body)) {
+    if (fence !== null) {
+      if (intakeFenceCloses(raw, fence)) fence = null;
+      continue;
+    }
+    const opener = intakeFenceRun(raw);
+    if (opener !== null) {
+      fence = opener;
+      continue;
+    }
+    const headingMatch = INTAKE_HEADING_RE.exec(raw);
+    if (headingMatch !== null) {
+      heading = (headingMatch[1] ?? "").trim().toLowerCase();
+      continue;
+    }
+    if (!INTAKE_ACCEPTANCE_HEADINGS.has(heading)) continue;
+    if (!INTAKE_LEDGER_LIST_ITEM_RE.test(raw)) continue;
+    const normalized = normalizeRequirementText(raw.replace(INTAKE_LEDGER_MARKER_STRIP_RE, ""));
+    if (normalized === null) continue;
+    if (texts.length >= MAX_ATTESTATION_CRITERIA_PER_BODY) return { texts, overflow: true };
+    texts.push(normalized.text);
+  }
+  return { texts, overflow: false };
+}
+
+/** The child refs one body's DECOMPOSITION sections list — attestation gate
+ * (a). The groomer marker regions (`dispatch-groomer:decomposition:start` /
+ * `:end`, as the real #740 body carries) are preferred; with no marker
+ * region, a bare `## Decomposition` heading section (until the next heading)
+ * is trusted. Markers and child refs inside code fences are inert (quoted
+ * examples cannot attest). Refs dedupe canonically in order of appearance;
+ * an over-count section reports overflow so the caller drops the
+ * association whole instead of sampling a prefix. */
+function decompositionSectionChildRefs(body: string, ownerRepo: string): { refs: string[]; overflow: boolean } {
+  const markerRefs: string[] = [];
+  const headingRefs: string[] = [];
+  const collect = (line: string, into: string[]): void => {
+    for (const ref of childRefsInText(line, ownerRepo)) {
+      if (!into.includes(ref)) into.push(ref);
+    }
+  };
+  const overflows = (refs: string[]): boolean => refs.length > MAX_DECOMPOSITION_CHILDREN_PER_ISSUE;
+  let fence: IntakeFence | null = null;
+  let inMarkerRegion = false;
+  let inHeadingSection = false;
+  for (const raw of pySplitLines(body)) {
+    if (fence !== null) {
+      if (intakeFenceCloses(raw, fence)) fence = null;
+      continue;
+    }
+    const opener = intakeFenceRun(raw);
+    if (opener !== null) {
+      fence = opener;
+      continue;
+    }
+    if (raw.includes(DECOMPOSITION_START_MARKER)) {
+      inMarkerRegion = true;
+      continue;
+    }
+    if (inMarkerRegion) {
+      if (raw.includes(DECOMPOSITION_END_MARKER)) {
+        inMarkerRegion = false;
+        continue;
+      }
+      collect(raw, markerRefs);
+      continue;
+    }
+    const headingMatch = INTAKE_HEADING_RE.exec(raw);
+    if (headingMatch !== null) {
+      inHeadingSection = (headingMatch[1] ?? "").trim().toLowerCase() === "decomposition";
+      continue;
+    }
+    if (inHeadingSection) collect(raw, headingRefs);
+  }
+  const refs = markerRefs.length > 0 ? markerRefs : headingRefs;
+  return { refs, overflow: overflows(refs) };
+}
+
+/** The distinct parents one fetched child body names in its own `Parent:`
+ * lines — attestation gate (b). Only exact `Parent:`-prefixed lines outside
+ * code fences count (the operator's quoted shape); each value may be a bare
+ * `#N` or `owner/repo#N` (resolved against the child's own repository) or an
+ * issues/pull URL (the real #1677 form). More than one distinct parent means
+ * ambiguous parentage: the caller treats the child as non-attesting. */
+function childParentRefs(childBody: string, childRepo: string): string[] {
+  const refs: string[] = [];
+  let fence: IntakeFence | null = null;
+  for (const raw of pySplitLines(childBody)) {
+    if (fence !== null) {
+      if (intakeFenceCloses(raw, fence)) fence = null;
+      continue;
+    }
+    const opener = intakeFenceRun(raw);
+    if (opener !== null) {
+      fence = opener;
+      continue;
+    }
+    const match = CHILD_PARENT_LINE_RE.exec(raw.trim());
+    if (match === null) continue;
+    const value = (match[1] ?? "").trim();
+    const lineRefs = childRefsInText(value, childRepo);
+    if (lineRefs.length > 0) {
+      for (const ref of lineRefs) {
+        if (!refs.includes(ref)) refs.push(ref);
+      }
+      continue;
+    }
+    const url = PARENT_URL_REF_RE.exec(value);
+    if (url !== null) {
+      const canonical = canonicalChildRef(`${url[1]}/${url[2]}`, Number.parseInt(url[3] ?? "", 10));
+      if (!refs.includes(canonical)) refs.push(canonical);
+    }
+  }
+  return refs;
+}
+
+/** One trusted criterion→child association derived from bidirectional
+ * attestation. */
+interface ChildAttestation {
+  requirementId: string;
+  /** The full bounded owner set (joint ownership, round 4) — canonical
+   * `repo#N` identities in decomposition order, at most
+   * MAX_DECOMPOSITION_REFS_PER_CRITERION entries. */
+  childRefs: string[];
+}
+
+interface CanonicalChild {
+  canonical: string;
+  repo: string;
+  number: number;
+}
+
+/** Derive the umbrella's attested criterion→child associations (the
+ * orchestrator for gates (a)+(b)+(c)). Returns associations in parent
+ * criterion body order; an empty return is the fail-closed reading (no
+ * evidence — the criteria stay in scope). */
+async function attestedDecompositionAssociations(
+  umbrellaBody: string,
+  umbrellaRepo: string,
+  umbrellaNumber: number,
+  fetchIssue: (repo: string, number: string) => Promise<LinkedIssueFetchResult>,
+  isForkPr: boolean,
+  defaultRepo: string,
+): Promise<ChildAttestation[]> {
+  // Gate (a): the umbrella's own decomposition section lists the children.
+  const section = decompositionSectionChildRefs(umbrellaBody, umbrellaRepo);
+  if (section.overflow) return [];
+  const children: CanonicalChild[] = [];
+  // The umbrella's own canonical identity — what a child's `Parent:` line
+  // must resolve to for the attestation to be BIDIRECTIONAL (gate (b)).
+  const umbrellaCanonical = canonicalChildRef(umbrellaRepo, umbrellaNumber);
+  for (const ref of section.refs) {
+    const hash = ref.indexOf("#");
+    const repo = ref.slice(0, hash);
+    const number = Number.parseInt(ref.slice(hash + 1), 10);
+    if (!repo || !Number.isInteger(number)) continue;
+    children.push({ canonical: canonicalChildRef(repo, number), repo, number });
+  }
+  if (children.length === 0) return [];
+  // Child-read repository scope: the decomposition section AND the umbrella
+  // linkage itself are untrusted PR/issue content. On a FORK the #1617 gate
+  // already refuses every cross-repo child; on a NON-fork it is permissive,
+  // so this channel's own bound applies and is deliberately NARROWER: the
+  // umbrella itself must live in the REVIEWED repository (a non-fork PR may
+  // legitimately link a foreign umbrella for context, but that foreign body
+  // must never steer privileged child reads), and every listed child must
+  // live in that SAME reviewed repository. Any foreign umbrella or any
+  // out-of-scope child is an UNREADABLE child that voids the attestation
+  // WHOLE, BEFORE any fetch is attempted (a partial child set is the unsafe
+  // direction, same as a fetch failure).
+  if (umbrellaRepo.toLowerCase() !== defaultRepo.toLowerCase()) return [];
+  for (const child of children) {
+    const childRepo = child.repo.toLowerCase();
+    if (childRepo !== defaultRepo.toLowerCase() || childRepo !== umbrellaRepo.toLowerCase()) return [];
+    const ref: LinkedIssueRef = { ref: child.canonical, repo: child.repo, number: child.number, closing: false };
+    if (!linkedIssueFetchAllowed(ref, defaultRepo, isForkPr)) return [];
+  }
+  // The parent criteria the association keys are the ledger's own entries —
+  // the same normalized texts (and ids) the ledger will extract from this
+  // umbrella's embedded body. An over-count body cannot be mapped whole.
+  const parents = acceptanceCriteriaTexts(umbrellaBody);
+  if (parents.overflow) return [];
+  if (parents.texts.length === 0) return [];
+  // Fetch every listed child (bounded); ANY unreadable child voids the
+  // umbrella's attestation whole. A readable child that does not attest
+  // (missing/wrong parentage, no criteria, no matching criterion) removes
+  // only itself.
+  interface AttestingChild {
+    ref: string;
+    criteria: string[];
+  }
+  const attesting: AttestingChild[] = [];
+  for (const child of children) {
+    const fetched = await fetchIssue(child.repo, String(child.number));
+    if (!fetched.ok) return [];
+    if (isPullRequestPayload(fetched.data)) return [];
+    let childBody = "";
+    try {
+      const projected = projectLinkedIssue(fetched.data);
+      childBody = typeof projected.body === "string" ? projected.body : "";
+    } catch (error) {
+      if (error instanceof LinkedIssueProjectionError) return [];
+      throw error;
+    }
+    if (Buffer.byteLength(childBody, "utf8") > MAX_ATTESTED_CHILD_BODY_BYTES) return [];
+    const parentRefs = childParentRefs(childBody, child.repo);
+    if (parentRefs.length !== 1 || parentRefs[0] !== umbrellaCanonical) continue;
+    const childCriteria = acceptanceCriteriaTexts(childBody);
+    if (childCriteria.overflow) return [];
+    if (childCriteria.texts.length === 0) continue;
+    attesting.push({ ref: child.canonical, criteria: childCriteria.texts });
+  }
+  // Gate (c): the identity edges. Both sides are bounded criterion texts, so
+  // the pairwise matcher surface is bounded.
+  interface IdentityEdge {
+    parent: number;
+    child: number;
+    criterion: number;
+  }
+  const edges: IdentityEdge[] = [];
+  for (const [parentIndex, parentText] of parents.texts.entries()) {
+    for (const [childIndex, child] of attesting.entries()) {
+      for (const [criterionIndex, criterionText] of child.criteria.entries()) {
+        if (requirementIdentityAttests(parentText, criterionText)) {
+          edges.push({ parent: parentIndex, child: childIndex, criterion: criterionIndex });
+        }
+      }
+    }
+  }
+  if (edges.length === 0) return [];
+  // Round 4 (operator follow-up 7025382962): a child criterion that matches
+  // SEVERAL parent criteria is a cross-matched identity that cannot be
+  // disambiguated deterministically — it attests nothing for either (the
+  // fail-closed genuinely-ambiguous shape).
+  const parentsPerChildCriterion = new Map<string, Set<number>>();
+  for (const edge of edges) {
+    const key = `${edge.child}:${edge.criterion}`;
+    const seen = parentsPerChildCriterion.get(key);
+    if (seen === undefined) parentsPerChildCriterion.set(key, new Set([edge.parent]));
+    else seen.add(edge.parent);
+  }
+  // A parent criterion attested by MULTIPLE children that each independently
+  // pass every gate is JOINT OWNERSHIP, not ambiguity: the association
+  // carries the full owner set (decomposition order), within the existing
+  // 4-ref childRefs contract the consumer already unions. An owner set over
+  // the bound drops the association WHOLE — never truncated (a truncated
+  // owner list could silently lose the very child the PR references, the
+  // unsafe direction).
+  const ownersByParent = new Map<number, string[]>();
+  for (const edge of edges) {
+    if ((parentsPerChildCriterion.get(`${edge.child}:${edge.criterion}`)?.size ?? 0) !== 1) continue;
+    const childRef = attesting[edge.child]?.ref ?? "";
+    if (childRef === "") continue;
+    const owners = ownersByParent.get(edge.parent);
+    if (owners === undefined) ownersByParent.set(edge.parent, [childRef]);
+    else if (!owners.includes(childRef)) owners.push(childRef);
+  }
+  const associations: ChildAttestation[] = [];
+  for (const [parentIndex, owners] of [...ownersByParent.entries()].sort((a, b) => a[0] - b[0])) {
+    if (owners.length === 0 || owners.length > MAX_DECOMPOSITION_REFS_PER_CRITERION) continue;
+    const parentText = parents.texts[parentIndex];
+    if (parentText === undefined) continue;
+    associations.push({ requirementId: requirementIdOfText(parentText), childRefs: [...owners] });
+  }
+  return associations.filter((association) => association.childRefs.length > 0);
 }
 
 /** Decimal value of a Unicode `Nd` digit: Nd characters come in contiguous
@@ -255,6 +800,60 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
       const filtered = projectLinkedIssue(outcome.data);
       labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
       anyLabels = true;
+      // #1749: the reference shape the PR itself used — the one relationship
+      // signal the requirement ledger can trust — rendered as an exact-match
+      // line between the heading and the embedded issue JSON. The issue's
+      // own content stays fenced below it; this line is intake-authored.
+      // #1749 follow-up: a ref the PR used ONLY as a plain `Refs`/`Ref`
+      // link renders the context state instead of the generic non-closing
+      // one, so the ledger keeps the issue as fenced review background while
+      // excluding its acceptance criteria from the merge contract.
+      md.push(enc(`${item.closing ? LINKED_AS_CLOSING_LINE : item.contextOnly ? LINKED_AS_CONTEXT_LINE : LINKED_AS_NON_CLOSING_LINE}\n`));
+      // #1750: the linked issue's own task-list decomposition, rendered as
+      // exact-structure ownership lines (see bodyDecompositionLines). The
+      // body parsed here is the projected (redacted) body — the exact bytes
+      // that land inside the fence below — so the content ids the ledger
+      // matches against are derived from the same text the scanner reads.
+      // #1750 round 3: plus the child-attestation channel for the organic
+      // umbrella shape (flat decomposition list + a parent-naming child) —
+      // see attestedDecompositionAssociations. The inline channel renders
+      // first: a criterion both channels associate keeps the DIRECT
+      // parent-body evidence (the ledger keeps the first line per id). The
+      // combined output never exceeds the ledger's per-document line budget,
+      // so nothing rendered goes unparsed.
+      const decompositionLines: string[] = [];
+      const seenDecompositionIds = new Set<string>();
+      const addDecompositionLine = (line: string): void => {
+        const parsed = parseDecompositionLine(line);
+        if (parsed === null || seenDecompositionIds.has(parsed.requirementId)) return;
+        if (decompositionLines.length >= MAX_DECOMPOSITION_LINES_PER_ISSUE) return;
+        seenDecompositionIds.add(parsed.requirementId);
+        decompositionLines.push(line);
+      };
+      for (const line of bodyDecompositionLines(typeof filtered.body === "string" ? filtered.body : "", item.repo)) {
+        addDecompositionLine(line);
+      }
+      // #1749 follow-up: the attestation fetch is additionally skipped for a
+      // context-only link — the ledger excludes that document's criteria from
+      // the merge contract entirely, so no ownership evidence for it could
+      // ever be consumed; the bounded child fetches would only be spent for
+      // nothing.
+      if (!item.closing && !item.contextOnly && hasUmbrellaLabel(filtered.labels)) {
+        const attested = await attestedDecompositionAssociations(
+          typeof filtered.body === "string" ? filtered.body : "",
+          item.repo,
+          item.number,
+          (repo, number) => input.adapter.getIssue(repo, String(number)),
+          isForkPr,
+          input.repo,
+        );
+        for (const association of attested) {
+          addDecompositionLine(renderDecompositionLine(association.requirementId, association.childRefs));
+        }
+      }
+      for (const line of decompositionLines) {
+        md.push(enc(`${line}\n`));
+      }
       md.push(enc("```json\n"), enc(`${jqPretty(filtered)}\n`).subarray(0, LINKED_ISSUE_EMBED_BYTES), enc("\n```\n"));
     } else {
       md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));
