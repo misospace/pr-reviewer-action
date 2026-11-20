@@ -10,6 +10,7 @@ import {
   pySplitLines,
   renderRequirementLedgerMarkdown,
 } from "../src/requirements/index.js";
+import { MAX_CONTEXT_EXCLUDED_REF_CHARS, MAX_CONTEXT_EXCLUDED_REFS } from "../src/requirements/ledger.js";
 
 const ACCEPTANCE_DOC = "## Acceptance criteria\n- first item ships tests\n- second item MUST validate input\n";
 const PR_JSON = JSON.stringify({ title: "Add exporter", body: "The exporter MUST NOT crash.\n- flush before close\n" });
@@ -394,6 +395,125 @@ test("#1749 follow-up: a criterion shared with a context document survives only 
   assert.equal(ledger.requirements.length, 1);
   assert.deepEqual(ledger.requirements[0]?.provenance, [{ source: "pr_body", ref: "pr", line: 3 }],
     "the context document contributes no provenance of its own");
+});
+
+// ── #1749 follow-up (review round): the exclusion is disclosed, silent ────
+// A context-excluded document contributes no requirements — but it must not
+// vanish WITHOUT A TRACE: the ledger artifact carries a bounded, deterministic
+// `context_excluded` disclosure ({count, refs}) so the review corpus and
+// humans can see the exclusion happened. Informational only: it never enters
+// requirements, provenance or sha, is never reported as truncation, and a
+// ledger with zero context documents keeps the EXACT legacy byte shape
+// (field absent, not empty). Legacy artifacts and malformed disclosures load
+// unchanged — the tolerant loader ignores a bad disclosure, never fails.
+function contextMd(ref: string, body: string): string {
+  return ["## " + ref, "(linked as: context reference)", "```json", JSON.stringify({ body }), "```", ""].join("\n") + "\n";
+}
+
+test("#1749 follow-up: an excluded context document is disclosed in the ledger", () => {
+  const ledger = extractRequirementLedger({
+    prJson: JSON.stringify({ title: "t", body: "## Acceptance criteria\n- planner and scheduler engine MUST share one feed.\n" }),
+    linkedIssuesMarkdown: linkedMd({ number: 42, labels: [], body: UMBRELLA_MD_BODY }, "(linked as: context reference)"),
+  });
+  assert.equal(ledger.requirements.length, 1, "the context issue's criteria still contribute no entries");
+  assert.deepEqual(ledger.requirements[0]?.provenance, [{ source: "pr_body", ref: "pr", line: 3 }],
+    "the disclosure never enters requirements or provenance");
+  assert.deepEqual(ledger.contextExcluded, { count: 1, refs: ["o/r#42"] }, "the excluded document is disclosed by canonical ref");
+  assert.equal(ledger.truncation.truncated, false, "the relationship exclusion is disclosed, never reported as truncation");
+  const artifact = ledgerToArtifact(ledger);
+  assert.deepEqual(artifact.context_excluded, { count: 1, refs: ["o/r#42"] }, "the persisted artifact carries the disclosure");
+});
+
+test("#1749 follow-up: no-context ledgers keep the exact legacy artifact bytes (no disclosure key)", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, title: "Umbrella", state: "open", html_url: "u", labels: ["umbrella"], body: UMBRELLA_MD_BODY }, "(linked as: non-closing reference)"),
+  });
+  assert.equal(ledger.contextExcluded, undefined, "absent when nothing was excluded, never an empty object");
+  const artifact = ledgerToArtifact(ledger);
+  assert.equal("context_excluded" in artifact, false, "no disclosure key without context documents");
+  assert.deepEqual(Object.keys(artifact), ["version", "sha", "requirements", "truncation"], "key set and order unchanged");
+  assert.deepEqual(artifact, {
+    version: 1,
+    sha: ledger.sha,
+    requirements: [{
+      id: reqIdOf("The planner and the scheduler engine MUST share one feed."),
+      text: "The planner and the scheduler engine MUST share one feed.",
+      kind: "acceptance",
+      verification_required: false,
+      truncated: false,
+      provenance: [{ source: "linked_issues", ref: "o/r#42", line: 2, closing: false, labels: ["umbrella"] }],
+    }],
+    truncation: { truncated: false, omitted_requirements: 0, omitted_sources: 0 },
+  });
+});
+
+test("#1749 follow-up: the disclosure is bounded — honest count past the cap, refs capped, deduplicated, length-limited", () => {
+  const longRef = "o/r#" + "x".repeat(300);
+  let md = "";
+  for (let i = 1; i <= MAX_CONTEXT_EXCLUDED_REFS + 4; i += 1) md += contextMd(`o/r#${100 + i}`, "MUST disclose me\n");
+  md += contextMd("o/r#101", "MUST disclose me again\n"); // duplicate ref is a separate excluded document
+  md += contextMd(longRef, "MUST disclose me\n");
+  const ledger = extractRequirementLedger({ linkedIssuesMarkdown: md });
+  assert.deepEqual(ledger.requirements, [], "none of the context documents enters the ledger");
+  assert.equal(ledger.contextExcluded?.count, MAX_CONTEXT_EXCLUDED_REFS + 6, "the count stays honest past the ref cap");
+  assert.deepEqual(ledger.contextExcluded?.refs,
+    Array.from({ length: MAX_CONTEXT_EXCLUDED_REFS }, (_, i) => `o/r#${101 + i}`),
+    "only the leading refs are listed, in document order");
+  const dup = extractRequirementLedger({
+    linkedIssuesMarkdown: contextMd("o/r#7", "MUST a\n") + contextMd("o/r#7", "MUST b\n") + contextMd(longRef, "MUST c\n"),
+  });
+  assert.deepEqual(dup.contextExcluded, {
+    count: 3,
+    refs: ["o/r#7", Array.from(longRef).slice(0, MAX_CONTEXT_EXCLUDED_REF_CHARS).join("")],
+  }, "duplicate refs disclose once; an over-long forged heading is cut codepoint-safely");
+});
+
+test("#1749 follow-up: the tolerant loader round-trips a well-formed disclosure", () => {
+  const ledger = extractRequirementLedger({
+    linkedIssuesMarkdown: linkedMd({ number: 42, labels: [], body: UMBRELLA_MD_BODY }, "(linked as: context reference)"),
+  });
+  const artifact = ledgerToArtifact(ledger);
+  const loaded = loadLedgerFromValue(JSON.parse(JSON.stringify(artifact)));
+  assert.deepEqual(loaded.contextExcluded, { count: 1, refs: ["o/r#42"] }, "the disclosure survives the persisted round trip");
+  assert.deepEqual(loaded.requirements, [], "and still contributes no requirements");
+  assert.equal(JSON.stringify(ledgerToArtifact(loaded)), JSON.stringify(artifact), "re-serialization is byte-identical");
+});
+
+test("#1749 follow-up: legacy absence and malformed disclosures load without failing", () => {
+  const base = { version: 1, sha: "0".repeat(16), requirements: [], truncation: { truncated: false, omitted_requirements: 0, omitted_sources: 0 } };
+  const legacy = loadLedgerFromValue(base);
+  assert.equal(legacy.contextExcluded, undefined, "a legacy artifact without the disclosure keeps loading");
+  assert.equal(legacy.sha, loadLedgerFromValue({ ...base }).sha);
+  // Malformed disclosures are IGNORED (undefined) — never an error, never a
+  // requirement, never provenance.
+  for (const junk of ["context", 42, true, [], {}, { count: 0, refs: ["o/r#42"] }, { count: -3 }, { count: "2" }, { count: 1.5 }]) {
+    const loaded = loadLedgerFromValue({ ...base, context_excluded: junk });
+    assert.equal(loaded.contextExcluded, undefined, `malformed disclosure ${JSON.stringify(junk)} is dropped, not failed on`);
+    assert.deepEqual(loaded.requirements, legacy.requirements);
+    assert.equal(loaded.sha, legacy.sha);
+  }
+  // A good count with a garbage refs list keeps the count disclosure with an
+  // empty list; junk ref entries drop individually.
+  const partial = loadLedgerFromValue({ ...base, context_excluded: { count: 5, refs: [42, "", "  ", "o/r#9", "o/r#9", {}, "z".repeat(200)] } });
+  assert.deepEqual(partial.contextExcluded, { count: 5, refs: ["o/r#9", "z".repeat(128)] });
+});
+
+test("#1749 follow-up: the rendered ledger shows the exclusion and stays byte-identical without one", () => {
+  const noContext = ledgerToArtifact(extractRequirementLedger({ standardsText: "## Acceptance criteria\n- MUST ship tests\n" }));
+  const baseMd = renderRequirementLedgerMarkdown(noContext);
+  assert.ok(!baseMd.includes("excluded as context"), "no disclosure line without context documents");
+  const withContext = ledgerToArtifact(extractRequirementLedger({
+    standardsText: "## Acceptance criteria\n- MUST ship tests\n",
+    linkedIssuesMarkdown: linkedMd({ number: 42, labels: [], body: UMBRELLA_MD_BODY }, "(linked as: context reference)"),
+  }));
+  const md = renderRequirementLedgerMarkdown(withContext);
+  assert.equal(md, `${baseMd}(+1 linked documents excluded as context references: \`o/r#42\`)\n`,
+    "the note is one deterministic meta line appended after unchanged entry bytes");
+  // The count-past-the-cap case and malformed disclosures render safely:
+  assert.ok(renderRequirementLedgerMarkdown({ requirements: [], context_excluded: { count: 3, refs: ["o/r#1"] } })
+    .includes("(+3 linked documents excluded as context references: `o/r#1` (+2 more))"));
+  assert.equal(renderRequirementLedgerMarkdown({ ...noContext, context_excluded: "junk" }), baseMd,
+    "a malformed disclosure reshapes nothing");
 });
 
 // ── #1749 follow-up (#252: feed the boundary token itself): a hostile

@@ -30,6 +30,8 @@ import {
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { buildLinkedIssueContext } from "../src/context/index.js";
 import { extractRequirementLedger } from "../src/requirements/index.js";
+import { prIssueReferenceIdentities } from "../src/precheck/linked-issues.js";
+import { tracePrIssueRefs } from "../src/engine/review.js";
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), "trace-narrow-"));
@@ -875,6 +877,39 @@ test("#1750 r4 boundary: a PR referencing EITHER jointly-owning child keeps the 
   }
 });
 
+test("#1750 r5: a bare #child mention or issue URL in the PR text keeps the umbrella criterion mandatory (reference union → scope)", () => {
+  // The fail-open the operator CR named: the veto contract voids ownership
+  // evidence when the PR references ANY owning child IN ANY FORM, but the
+  // engine derived `prLinkedRefs` from keyword/title grammar alone — a bare
+  // `#1677` prose mention or a full issue URL naming the owning child stayed
+  // invisible and the parent criterion silently scoped itself out. Now the
+  // widened union surfaces both forms and the criterion stays mandatory.
+  const umbrella = {
+    id: "req-umb",
+    text: "The planner and scheduler engine MUST share one feed.",
+    kind: "acceptance",
+    provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#1677"] }],
+  };
+  const ledger = ledgerWith([umbrella]);
+  const title = "feat: add GitLab webhook adapter";
+  const body = "Part of #42 (tracked separately).\n"
+    + "We deferred the child follow-up: #1677 will land the half documented at https://github.com/o/r/issues/1677.";
+  const prRefs = prIssueReferenceIdentities(title, body, "o/r");
+  assert.ok(prRefs.includes("o/r#1677"), "bare mention and issue URL surface the owning-child identity");
+  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: prRefs });
+  assert.equal(scope.inScope.length, 1, "referencing the owning child in any form voids the ownership evidence");
+  assert.equal(scope.inScope[0]!.id, "req-umb");
+  assert.deepEqual(scope.outOfScope, [], "no umbrella narrowing, no out-of-scope reason");
+  // Control: the PR references ONLY the umbrella (keyword form) — trusted
+  // decomposition stands and the criterion scopes out exactly as before.
+  const cleanRefs = prIssueReferenceIdentities(title, "Part of #42 (tracked separately).", "o/r");
+  assert.ok(!cleanRefs.includes("o/r#1677"));
+  const cleanScope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: cleanRefs });
+  assert.deepEqual(cleanScope.inScope, []);
+  assert.equal(cleanScope.outOfScope.length, 1);
+  assert.match(cleanScope.outOfScope[0]!.reason, /o\/r#1677/);
+});
+
 // ---------------------------------------------------------------------------
 // #1749 follow-up: a plain `Refs` link is context, not a merge contract.
 //
@@ -964,4 +999,40 @@ test("#1749 follow-up control: the identical issue linked by Implements stays co
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test("#1750 review round: padded PR body cannot hide an owning-child mention at the scope level", () => {
+  // Probed fail-open: with the old FIXED 256-entry reference cap, a body
+  // padded with 300 `#N` mentions evicted the tail `#1677` from the union,
+  // the trusted decomposition evidence stood, and the umbrella scope-out
+  // fired (`out-of-scope-umbrella-parent`) on a PR that in fact references
+  // its owning child. The bound is now derived from the text length, so the
+  // eviction is impossible and the criterion stays mandatory.
+  const umbrella = {
+    id: "req-umb",
+    text: "The planner and scheduler engine MUST share one feed.",
+    kind: "acceptance",
+    provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#1677"] }],
+  };
+  const ledger = ledgerWith([umbrella]);
+  const padding = Array.from({ length: 300 }, (_, index) => `mention #${index + 1}`).join("; ");
+  const prRefs = prIssueReferenceIdentities("feat: add GitLab webhook adapter", `${padding}; child #1677 lands the URL half`, "o/r");
+  assert.ok(prRefs.includes("o/r#1677"), "the owning-child identity survives the padding");
+  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: prRefs });
+  assert.equal(scope.inScope.length, 1, "a padded body keeps the criterion mandatory");
+  assert.equal(scope.inScope[0]!.id, "req-umb");
+  assert.deepEqual(scope.outOfScope, [], "zero out-of-scope umbrella-parent reasons");
+});
+
+test("#1750 coverage: engine-side derivation (tracePrIssueRefs) keeps bare mentions and issue URLs", () => {
+  // Pins the ENGINE wiring, not just the pure leaf: reverting the call site
+  // to keyword-only `extractLinkedIssueRefs` extraction keeps the rest of the
+  // suite green, but drops exactly these two reference forms here.
+  const refs = tracePrIssueRefs(
+    "feat: add GitLab webhook adapter",
+    "Part of #42 (tracked separately).\nsee #1677 and https://github.com/o/r/issues/1677",
+    "o/r",
+  );
+  assert.ok(refs.includes("o/r#42"), "keyword link survives engine-side derivation");
+  assert.ok(refs.includes("o/r#1677"), "bare mention and forge issue URL survive engine-side derivation");
 });

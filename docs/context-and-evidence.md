@@ -74,6 +74,12 @@ development-link meaning. Such an issue is still fetched, fenced into
 intake renders `(linked as: context reference)` under its heading — but the
 requirement ledger never treats its body as a requirement source, so the
 referenced issue's acceptance criteria are not this PR's merge contract.
+That exclusion is never silent: when documents are excluded this way the
+ledger artifact discloses them in a bounded `context_excluded` field (honest
+count plus the excluded documents' refs as the intake heading rendered
+them (raw reference spellings, deduplicated and bounded); absent when nothing was excluded,
+informational only — never a requirement, provenance entry, or truncation),
+and the rendered ledger carries the same note as one meta line.
 Any stronger relationship for the same identity (`Closes`/`Fixes`/`Resolves`,
 `Implements`/`Part of`/`Addresses`, or the title `(#N)` convention) wins in
 the dedupe merge, and a criterion shared with a genuine source still enters

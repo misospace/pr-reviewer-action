@@ -27,7 +27,7 @@ import {
 } from "../src/precheck/fingerprint.js";
 import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../src/confidence/result.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
-import { extractLinkedIssueRefs, labelsOf } from "../src/precheck/linked-issues.js";
+import { extractLinkedIssueRefs, issueUrlRefsInText, labelsOf, MAX_TRACE_PR_ISSUE_REFS, prIssueReferenceIdentities } from "../src/precheck/linked-issues.js";
 import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.js";
 import { buildSelectionSignature } from "../src/precheck/selection.js";
 import {
@@ -721,6 +721,68 @@ test("linked issue refs: Addresses is non-closing; past-tense closing keywords o
   assert.equal(extractLinkedIssueRefs("This PR fixes #42", "o/r")[0]!.closing, true);
   assert.equal(extractLinkedIssueRefs("this resolves #42", "o/r")[0]!.closing, true);
   assert.equal(extractLinkedIssueRefs("Closes #1", "o/r")[0]!.closing, true);
+});
+
+test("#1750 r5: prIssueReferenceIdentities widens beyond keyword forms to bare mentions and issue URLs", () => {
+  // The fail-open class the operator CR named: owning-child references with
+  // no closing/implementation keyword and no title `(#N)` — invisible to
+  // `extractLinkedIssueRefs` alone, visible to the veto union.
+  const title = "feat: add GitLab webhook adapter";
+  const body = "Part of #42 (tracked separately).\n"
+    + "We deferred the child follow-up: #1677 will land the URL half; "
+    + "see https://github.com/o/r/issues/1677 and https://gitlab.com/group/sub/proj/-/issues/5.";
+  assert.deepEqual(
+    prIssueReferenceIdentities(title, body, "o/r"),
+    ["o/r#42", "o/r#1677", "sub/proj#5"],
+    "keyword link, bare prose mention, GitHub issue URL, and GitLab nested-group URL all surface as canonical identities",
+  );
+
+  // Dedupe merges every spelling of one identity and casefolds the repo;
+  // the first-seen order is kept.
+  assert.deepEqual(
+    prIssueReferenceIdentities("chore: bump (#42)", "Closes #42; also #42 and https://github.com/O/R/issues/42", "O/R"),
+    ["o/r#42"],
+    "title convention, closing keyword, bare mention, and mixed-case URL are ONE identity",
+  );
+
+  // Pull URLs name a different object than the child issue — not matched;
+  // a URL with no two-segment repo path names no repository.
+  assert.deepEqual(prIssueReferenceIdentities("", "Supersedes https://github.com/o/r/pull/1677.", "o/r"), [], "pull URLs are not issue references");
+  assert.deepEqual(prIssueReferenceIdentities("", "doc at https://example.com/issues/12", "o/r"), [], "no repo path, no identity");
+
+  // Schemeless forge issue-URL mentions resolve too — over-matching is the safe
+  // side of this grammar (every extra identity only keeps a criterion mandatory).
+  assert.deepEqual(
+    prIssueReferenceIdentities("", "see github.com/o/r/issues/1677 for context", "o/r"),
+    ["o/r#1677"],
+    "a schemeless GitHub-style issue URL names the same canonical identity",
+  );
+  assert.deepEqual(
+    issueUrlRefsInText("milestone at forge.example/o/r/-/issues/9 and host/o/r/issues/3"),
+    ["o/r#9", "o/r#3"],
+    "schemeless GitLab-style and bare-host issue URLs both resolve",
+  );
+
+  // Query and fragment tails on issue URLs still resolve.
+  assert.deepEqual(
+    issueUrlRefsInText("https://gitlab.com/o/r/-/issues/5?fix_me=1#note-2 and https://github.com/o/r/issues/1677#issuecomment-9"),
+    ["o/r#5", "o/r#1677"],
+  );
+
+  // Explicit cross-repo mentions keep their repo (casefolded).
+  assert.deepEqual(prIssueReferenceIdentities("", "mirrors other/Repo#7 exactly", "o/r"), ["other/repo#7"]);
+
+  // Regression (#1750 review round): the fixed cap truncated in the UNSAFE
+  // direction — a body padded with 300 bare `#N` mentions evicted the TAIL
+  // owning-child mention and re-opened the umbrella scope-out fail-open. The
+  // bound is now length-derived and provably non-binding: every accepted
+  // identity consumes at least ~3 characters of distinct text, so no padded
+  // body can drop a real mention. All 301 identities survive, tail included.
+  const huge = Array.from({ length: 300 }, (_, index) => `mention #${index + 1}`).join("; ");
+  const padded = prIssueReferenceIdentities("", `${huge}; owning child #1677`, "o/r");
+  assert.ok(padded.includes("o/r#1677"), "tail owning-child mention survives 300-mention padding");
+  assert.ok(padded.includes("o/r#1") && padded.includes("o/r#300"), "the padding itself is never truncated");
+  assert.ok(padded.length > MAX_TRACE_PR_ISSUE_REFS, "the length-derived bound exceeds the fixed floor on long inputs");
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {

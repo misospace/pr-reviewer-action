@@ -415,6 +415,101 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
   return items;
 }
 
+// ---------------------------------------------------------------------------
+// #1750 round 5 (operator CR): reference-form-agnostic PR issue-reference
+// union for the umbrella-parent owning-child veto (pure leaves — no imports)
+//
+// The veto in `requirementTraceScope` is only as wide as the PR-reference
+// set the engine hands it. Derived from `extractLinkedIssueRefs` alone,
+// bare `#1677` prose mentions and full issue URLs naming an owning child
+// stayed invisible — the contract says the ownership evidence is void when
+// the PR references ANY owning child IN ANY FORM, so keyword-only grammar
+// was fail-open. The union below closes that: keyword/implementation/title
+// forms (the SAME intake grammar, so the two stages cannot disagree),
+// PLUS every `#N` mention in title+body (`childRefsInText` — bare refs
+// resolved against the REVIEWED repo), PLUS forge issue URLs — GitHub/
+// Forgejo style `https://host/o/r/issues/N` and GitLab style
+// `https://host/o/r/-/issues/N` (nested groups reduce to their last two
+// path segments, the `owner/repo` identity child refs use). Pull URLs are
+// deliberately NOT matched: they name a different object than the child
+// issue. Canonical casefolded `repo#N`, deduped in order of first
+// appearance — matching MORE owning children is the safe direction (each
+// match keeps a criterion mandatory), so the grammar errs inclusive.
+// ---------------------------------------------------------------------------
+
+/** Issue URLs across the GitHub/GitLab wire families: the `http(s)://` scheme
+ * is OPTIONAL, so a schemeless prose mention like `github.com/o/r/issues/N`
+ * resolves too — over-matching is the safe direction here (every extra
+ * identity only keeps a criterion mandatory), while a path with fewer than
+ * two segments still names no repository and contributes nothing. Inside a
+ * URL: optional `-/` separator (GitLab), terminal `/issues/N` segment,
+ * optional query or fragment after the number; the captured path prefix
+ * supplies the repo identity via its last two segments. Pull URLs stay
+ * deliberately unmatched: they name a different object than a child issue.
+ * `(?!-\/)` guard keeps the greedy prefix from swallowing GitLab's bare
+ * `-/` separator segment, which would otherwise corrupt the repo
+ * identity. */
+const ISSUE_URL_REF_RE = /(?:https?:\/\/)?[^\s/?#]+((?:\/(?!-\/)[^\s/?#]+)*)\/(?:-\/)?issues\/(\d+)(?![\w-])/gi;
+
+/** Forge issue URLs inside one text, canonical casefolded `repo#N`
+ * identities. Deduplicated in order of first appearance. */
+export function issueUrlRefsInText(text: string): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const match of (text ?? "").matchAll(ISSUE_URL_REF_RE)) {
+    const segments = (match[1] ?? "").split("/").filter((segment) => segment !== "");
+    const number = Number.parseInt(match[2] ?? "", 10);
+    if (segments.length < 2 || !Number.isFinite(number) || number <= 0) continue;
+    const repo = `${segments[segments.length - 2]}/${segments[segments.length - 1]}`;
+    const canonical = canonicalChildRef(repo, number);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    refs.push(canonical);
+  }
+  return refs;
+}
+
+/** Allocation backstop for the PR-reference union — never a semantic cap.
+ * Truncation drops TAIL entries, the unsafe direction here: a dropped
+ * mention could hide an owning-child reference, exactly the fail-open the
+ * widened union closes. So the effective bound in `prIssueReferenceIdentities`
+ * is derived from the input text length instead: every accepted identity
+ * consumes at least ~3 characters of distinct text (the minimum accepted
+ * mention form is a bare `#N `; keyword, title, `repo#N` and URL forms all
+ * consume more), so `floor(text.length / 3)` can never evict a real mention
+ * from the deduplicated union. This constant is only the FLOOR of that
+ * formula (8x the intake candidate cap `MAX_LINKED_ISSUE_CANDIDATES`,
+ * itself already 4x the accepted-issue cap), keeping tiny or malformed
+ * inputs under a fixed ceiling — a runaway-allocation guard, not a limit
+ * on what a PR actually references. */
+export const MAX_TRACE_PR_ISSUE_REFS = MAX_LINKED_ISSUE_CANDIDATES * 8;
+
+/** Every issue the PR's OWN title+body references — keyword links,
+ * implementation links, the title `(#N)` convention, bare `#N` prose
+ * mentions, explicit `repo#N` mentions, and forge issue URLs — as
+ * canonical casefolded `repo#N` identities, deduped in order of first
+ * appearance, bounded only by the length-derived allocation backstop
+ * documented on {@link MAX_TRACE_PR_ISSUE_REFS}. Consumed by the
+ * #1750 umbrella-parent veto in `requirementTraceScope` (`prLinkedRefs`). */
+export function prIssueReferenceIdentities(title: string, body: string, repo: string): string[] {
+  const text = `${title ?? ""}\n${body ?? ""}`;
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  const push = (canonical: string): void => {
+    if (seen.has(canonical)) return;
+    seen.add(canonical);
+    refs.push(canonical);
+  };
+  for (const ref of extractLinkedIssueRefs(body ?? "", repo, title ?? "")) push(canonicalChildRef(ref.repo, ref.number));
+  for (const ref of childRefsInText(text, repo)) push(ref);
+  for (const ref of issueUrlRefsInText(text)) push(ref);
+  // Length-derived so it can never drop a real mention (see
+  // {@link MAX_TRACE_PR_ISSUE_REFS}): a runaway-allocation backstop, not a
+  // semantic cap — tail entries stay visible no matter how padded the body.
+  const cap = Math.max(MAX_TRACE_PR_ISSUE_REFS, Math.floor(text.length / 3));
+  return refs.slice(0, cap);
+}
+
 /** #1617: the fork trust boundary for linked-issue FETCHES, applied BEFORE
  * any privileged fetch. On a fork PR the body and title are fully
  * attacker-authored, while the fetch runs with the operator's forge
