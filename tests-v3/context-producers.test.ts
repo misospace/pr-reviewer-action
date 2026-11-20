@@ -671,6 +671,49 @@ test("#1750: intake renders decomposition lines for task-list criteria that refe
   assert.ok(!rendered.some((line) => line.includes(reqIdOf("Criterion gamma MUST hold."))), "a criterion with no child work renders no ownership evidence");
 });
 
+test("#1750: task-list items inside code fences render no decomposition ownership evidence", async () => {
+  // A quoted copy of a real criterion plus a nested child ref must stay inert:
+  // otherwise the fence would mint ownership evidence for the LIVE criterion
+  // (same content id) and scope a real umbrella criterion out.
+  const criterion = "GitLab and Gitea feed the same scheduler/engine.";
+  const body = [
+    "## Acceptance criteria",
+    `- [ ] ${criterion}`,
+    "- [ ] Capability differences remain adapter-local.",
+    "  - #102",
+    "",
+    "```markdown",
+    `- [ ] ${criterion}`,
+    "  - #1677",
+    "```",
+    "",
+    "~~~",
+    `- [ ] ${criterion}`,
+    "  - #1678",
+    "~~~",
+    "",
+  ].join("\n");
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment (#42)", body: "Part of the umbrella." }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const rendered = text(result.artifacts.get("linked-issues.md"))
+    .split("\n")
+    .filter((line) => line.startsWith("(decomposition: "));
+  assert.deepEqual(
+    rendered,
+    [`(decomposition: ${reqIdOf("Capability differences remain adapter-local.")} -> o/r#102)`],
+    "the unfenced criterion still renders; both fenced copies (backtick and tilde) are inert",
+  );
+  assert.ok(
+    !rendered.some((line) => line.includes(reqIdOf(criterion))),
+    "the quoted real criterion gains no ownership evidence",
+  );
+});
+
 test("#1750: a body without task-list decomposition renders no ownership evidence (organic shape)", async () => {
   // The organic umbrella shape: task-list criteria WITHOUT child refs, plus a
   // flat decomposition list of child issues. Neither associates a specific

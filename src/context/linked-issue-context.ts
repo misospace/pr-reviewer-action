@@ -181,10 +181,26 @@ function indentWidth(spaces: string): number {
  * renders nothing (an association that cannot be carried whole is never
  * approximated — truncation could silently drop the very child the PR
  * references, which is the unsafe direction). At most
- * {@link MAX_DECOMPOSITION_LINES_PER_ISSUE} lines per issue. */
+ * {@link MAX_DECOMPOSITION_LINES_PER_ISSUE} lines per issue.
+ *
+ * List and task-list items inside backtick or tilde code fences are inert —
+ * a quoted example of a criterion with child refs cannot attest ownership —
+ * matching the fence handling of the other attestation parsers. */
 function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
   const items: BodyListItem[] = [];
+  let inFence = false;
+  let fenceChar = "";
   for (const raw of body.split(/\r\n|\r|\n/)) {
+    const fence = INTAKE_FENCE_RE.exec(raw.trim());
+    if (inFence) {
+      if (fence !== null && (fence[1] ?? "").charAt(0) === fenceChar) inFence = false;
+      continue;
+    }
+    if (fence !== null) {
+      inFence = true;
+      fenceChar = (fence[1] ?? "").charAt(0);
+      continue;
+    }
     const task = INTAKE_TASK_ITEM_RE.exec(raw);
     if (task !== null) {
       items.push({ indent: indentWidth(task[1] ?? ""), content: task[2] ?? "", task: true });
