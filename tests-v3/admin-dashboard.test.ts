@@ -1,27 +1,25 @@
-/** Operations dashboard shell tests (#742): optional mount, fail-closed
- * default, security headers, inert shell, intact auth boundary, the
- * structural XSS fence on the embedded script, and an EXECUTION fence test
- * (#252 pattern): the script is evaluated against a stubbed DOM fed the
- * hostile inputs themselves, so the boundary is proven on real renders, not
- * just by grepping the source. */
+/**
+ * Pins route/auth/CSP integrity, escaping/XSS fences, exact admin-API
+ * compatibility, hostile EXECUTION boundaries, and operator UI states.
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import vm from "node:vm";
 import { createAdminHost } from "../src/admin/server.js";
+import { ADMIN_ROUTE_TABLE } from "../src/admin/routes.js";
 import { DASHBOARD_HTML, DASHBOARD_JS, serveDashboard } from "../src/admin/dashboard.js";
 import type { ControllerAdminDeps } from "../src/admin/types.js";
 
-/** The pinned dashboard CSP (#1641). The `style-src` source is the SHA-256
- * hash of the shell's own style block, computed from the same constant the
- * shell serves. Pinning the whole header here means any change to the
- * style block, or any regression back to `'unsafe-inline'`, fails this
- * suite. */
-const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-rONVvIFCCcUKe79zLNUofwEI2VTQb/s419LLyrxm4tQ='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-const deps: ControllerAdminDeps = {
+/**
+ * Pins route/auth/CSP integrity, escaping/XSS fences, exact admin-API
+ * compatibility, hostile EXECUTION boundaries, and operator UI states.
+ */
+const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-2UPZoIdLr/DB0rB7iH8yqCXgjRaaF654c+JAFCZDcgM='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const deps = {
   readiness: async () => ({ components: [{ name: "store", ok: true }] }),
   listRuns: async () => ({ runs: [] }),
   getRun: async () => null,
@@ -29,27 +27,25 @@ const deps: ControllerAdminDeps = {
   queueStatus: async () => ({ depthByState: { queued: 0, starting: 0, running: 0, publishing: 0, completed: 0, failed: 0, cancelled: 0, superseded: 0 }, oldestAgeMs: 0, activeWorkersByExecutor: {} }),
   diagnostics: async () => ({ ready: true }),
   forceRereview: async () => ({ jobId: "job-1" }),
-  cancelRun: async () => ({ cancelled: true }),
-  audit: () => undefined,
+  cancelRun: async () => ({ cancelled: true as const }),
+  audit: () => void 0
 };
 async function listening(dashboard: boolean, token?: string, overrides?: Partial<ControllerAdminDeps>) {
-  const host = createAdminHost({ deps: { ...deps, ...overrides }, ...(token === undefined ? {} : { token }), ...(dashboard ? { dashboard: {} } : {}) });
+  const host = createAdminHost({ deps: { ...deps, ...overrides }, ...token === void 0 ? {} : { token }, ...dashboard ? { dashboard: {} } : {} });
   const server = createHttpServer(host.handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return { server, base: `http://127.0.0.1:${address.port}` };
 }
-
 test("dashboard is optional and off by default", async (t) => {
-  const fixture = await listening(false);
-  t.after(() => fixture.server.close());
+  const f = await listening(false);
+  t.after(() => f.server.close());
   for (const path of ["/dashboard", "/dashboard/app.js"]) {
-    const response = await fetch(fixture.base + path);
-    assert.equal(response.status, 404, path);
-    assert.match(await response.text(), /not found/);
+    const r = await fetch(f.base + path);
+    assert.equal(r.status, 404, path);
+    assert.match(await r.text(), /not found/);
   }
 });
-
 test("service without the dashboard keeps every route unchanged", async (t) => {
   const off = await listening(false);
   t.after(() => off.server.close());
@@ -61,338 +57,379 @@ test("service without the dashboard keeps every route unchanged", async (t) => {
   t.after(() => onAuth.server.close());
   assert.equal((await fetch(off.base + "/healthz")).status, 200);
   assert.equal((await fetch(on.base + "/healthz")).status, 200);
-  // Unconfigured admin auth fails closed identically with and without the
-  // dashboard mounted: the shell adds no route and relaxes nothing.
   assert.equal((await fetch(off.base + "/admin/status")).status, 503);
   assert.equal((await fetch(on.base + "/admin/status")).status, 503);
   assert.equal((await fetch(offAuth.base + "/admin/status")).status, 401);
   assert.equal((await fetch(onAuth.base + "/admin/status")).status, 401);
   assert.equal((await fetch(onAuth.base + "/admin/status", { headers: { authorization: "Bearer admin-secret" } })).status, 200);
 });
-
-test("enabled dashboard serves the shell and script with fixed security headers", async (t) => {
-  const fixture = await listening(true);
-  t.after(() => fixture.server.close());
-  for (const [path, contentType, body] of [
-    ["/dashboard", "text/html; charset=utf-8", DASHBOARD_HTML],
-    ["/dashboard/app.js", "text/javascript; charset=utf-8", DASHBOARD_JS],
-  ] as const) {
-    const response = await fetch(fixture.base + path);
-    assert.equal(response.status, 200, path);
-    assert.equal(response.headers.get("content-type"), contentType, path);
-    assert.equal(response.headers.get("content-security-policy"), CSP, path);
-    assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/, path);
-    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/, path);
-    assert.equal(response.headers.get("x-content-type-options"), "nosniff", path);
-    assert.equal(response.headers.get("x-frame-options"), "DENY", path);
-    assert.equal(response.headers.get("referrer-policy"), "no-referrer", path);
-    assert.equal(response.headers.get("cache-control"), "no-store", path);
-    assert.equal(await response.text(), body, path);
+test("enabled dashboard serves shell and script with fixed security headers", async (t) => {
+  const f = await listening(true);
+  t.after(() => f.server.close());
+  for (const [path, type, body] of [["/dashboard", "text/html; charset=utf-8", DASHBOARD_HTML], ["/dashboard/app.js", "text/javascript; charset=utf-8", DASHBOARD_JS]]) {
+    const r = await fetch(f.base + path);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("content-type"), type);
+    assert.equal(r.headers.get("content-security-policy"), CSP);
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(r.headers.get("x-frame-options"), "DENY");
+    assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(r.headers.get("cache-control"), "no-store");
+    assert.equal(await r.text(), body);
   }
 });
-
-// ── the CSP style fence (#1641) ──────────────────────────────────────────
-
-/** The exact bytes a browser hashes for an inline `<style>` element: the
- * text content between the tags, leading and trailing newline included. */
-function servedStyleBlock(): string {
-  const open = DASHBOARD_HTML.indexOf("<style>");
-  assert.notEqual(open, -1, "the shell must ship a style block");
-  const from = open + "<style>".length;
+function servedStyleBlock() {
+  const from = DASHBOARD_HTML.indexOf("<style>") + 7;
+  assert.ok(from > 6);
   const close = DASHBOARD_HTML.indexOf("</style>", from);
-  assert.notEqual(close, -1, "the style block must be closed");
+  assert.ok(close > from);
   return DASHBOARD_HTML.slice(from, close);
 }
-
-test("style-src pins the hash of the served style block and allows no other inline style", () => {
+test("style-src pins exact served CSS and denies every other inline style", () => {
   const digest = createHash("sha256").update(servedStyleBlock(), "utf8").digest("base64");
-  // The pinned header is the header built from the served bytes: the hash
-  // covers exactly the style block the shell ships.
   assert.equal(CSP, `default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-${digest}'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
   assert.doesNotMatch(CSP, /unsafe-inline/);
   assert.equal(CSP.match(/style-src/g)?.length, 1);
   assert.match(CSP, /style-src 'sha256-[A-Za-z0-9+/=]+'; frame-ancestors 'none'/);
-  // Both served routes carry exactly the pinned header.
-  assert.equal(serveDashboard("/dashboard")?.headers["Content-Security-Policy"], CSP);
-  assert.equal(serveDashboard("/dashboard/app.js")?.headers["Content-Security-Policy"], CSP);
-  // The authorised set is read back from the SERVED header: exactly one
-  // hash source, and it is the hash of the style block the shell ships.
-  const authorised = [...CSP.matchAll(/'sha256-([^']+)'/g)].map((match) => match[1]!);
+  const authorised = [...CSP.matchAll(/'sha256-([^']+)'/g)].map((m) => m[1]);
   assert.deepEqual(authorised, [digest]);
-  // Adversarial (#252): the boundary token itself. A hostile injected style
-  // block is not the served block, so the served header must not authorise it.
-  const hostile = "body { display: none; }";
-  const hostileDigest = createHash("sha256").update(hostile, "utf8").digest("base64");
-  assert.notEqual(hostileDigest, digest);
-  assert.ok(!authorised.includes(hostileDigest), "the served header must not authorise a style block the shell does not serve");
-  // The shell carries one style element, no inline style attribute, and no
-  // external stylesheet: with 'unsafe-inline' gone, any of those would be
-  // blocked by the browser with no test failure otherwise.
+  const hostileStyle = "body { display: none; }";
+  const hostileDigest = createHash("sha256").update(hostileStyle, "utf8").digest("base64");
+  assert.ok(!authorised.includes(hostileDigest), "served CSP must not authorize a hostile style block");
   assert.equal(DASHBOARD_HTML.match(/<style\b/gi)?.length, 1);
   assert.doesNotMatch(DASHBOARD_HTML, /\sstyle\s*=/i);
   assert.doesNotMatch(DASHBOARD_HTML, /<link\b/i);
   assert.doesNotMatch(DASHBOARD_JS, /\.style\b/);
+  assert.equal(serveDashboard("/dashboard")?.headers["Content-Security-Policy"], CSP);
+  assert.equal(serveDashboard("/dashboard/app.js")?.headers["Content-Security-Policy"], CSP);
 });
-
-test("the dashboard doc shows the served CSP header, not a stale one", () => {
+test("dashboard doc pins the served CSP", () => {
   const doc = readFileSync("docs/architecture/operations-dashboard.md", "utf8");
-  const line = doc.split("\n").find((candidate) => candidate.startsWith("Content-Security-Policy:"));
-  assert.ok(line !== undefined, "the doc must show the CSP header");
+  const line = doc.split("\n").find((x) => x.startsWith("Content-Security-Policy:"));
+  assert.ok(line);
   assert.equal(line.slice("Content-Security-Policy:".length).trim(), CSP);
 });
-
-test("method and path discipline: only the two GET routes exist", async (t) => {
-  const fixture = await listening(true);
-  t.after(() => fixture.server.close());
-  assert.equal((await fetch(fixture.base + "/dashboard", { method: "POST" })).status, 404);
-  const extra = await fetch(fixture.base + "/dashboard/extra");
+test("method and path discipline: only two GET routes", async (t) => {
+  const f = await listening(true);
+  t.after(() => f.server.close());
+  assert.equal((await fetch(f.base + "/dashboard", { method: "POST" })).status, 404);
+  const extra = await fetch(f.base + "/dashboard/extra");
   assert.equal(extra.status, 404);
   assert.doesNotMatch(await extra.text(), /<!doctype html|app\.js/i);
 });
-
-// `fetch` normalizes `..` client-side, so a fetch-based traversal probe never
-// reaches the handler with the hostile path intact. The REAL boundary test
-// sends the literal bytes over a raw `node:http` request: the request path is
-// delivered verbatim, no client normalization.
-function rawGet(base: string, path: string): Promise<{ readonly status: number; readonly body: string }> {
+function rawGet(base: string, path: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const url = new URL(base);
-    const request = httpRequest({ host: url.hostname, port: url.port, path, method: "GET" }, (response) => {
+    const u = new URL(base);
+    const req = httpRequest({ host: u.hostname, port: Number(u.port), path, method: "GET" }, (res) => {
       let body = "";
-      response.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
-      response.on("end", () => resolve({ status: response.statusCode ?? 0, body }));
+      res.on("data", (chunk) => body += chunk.toString("utf8"));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
     });
-    request.on("error", reject);
-    request.end();
+    req.on("error", reject);
+    req.end();
   });
 }
-
-test("traversal paths are sent verbatim and never serve shell content", async (t) => {
-  const fixture = await listening(true);
-  t.after(() => fixture.server.close());
+test("traversal paths are delivered verbatim and never serve shell content", async (t) => {
+  const f = await listening(true);
+  t.after(() => f.server.close());
   for (const path of ["/dashboard/../admin/status", "/dashboard%2f..%2fadmin/status"]) {
-    const response = await rawGet(fixture.base, path);
-    // Either the fixed 404 or the admin dispatch outcome (bearer-gated 503
-    // unconfigured) — NEVER the shell, in any framing.
-    assert.notEqual(response.status, 200, path);
-    assert.ok([401, 403, 404, 503].includes(response.status), `${path} -> ${response.status}`);
-    assert.doesNotMatch(response.body, /<!doctype html|app\.js/i, path);
+    const r = await rawGet(f.base, path);
+    assert.notEqual(r.status, 200);
+    assert.ok([401, 403, 404, 503].includes(r.status));
+    assert.doesNotMatch(r.body, /<!doctype html|app\.js/i);
   }
 });
-
-test("the shell is inert and static: identical bytes, no echo, no secrets", async (t) => {
-  const fixture = await listening(true, "admin-secret-token-value");
-  t.after(() => fixture.server.close());
-  const first = await fetch(fixture.base + "/dashboard", { headers: { host: "first.example.com" } });
-  const second = await fetch(fixture.base + "/dashboard", { headers: { host: "second.example.org:9999", authorization: "Bearer admin-secret-token-value" } });
-  assert.equal(await first.text(), await second.text());
+test("shell is inert, byte-identical, and carries no host or token", async (t) => {
+  const f = await listening(true, "admin-secret-token-value");
+  t.after(() => f.server.close());
+  const a = await fetch(f.base + "/dashboard", { headers: { host: "first.example.com" } });
+  const b = await fetch(f.base + "/dashboard", { headers: { host: "second.example.org:9999", authorization: "Bearer admin-secret-token-value" } });
+  assert.equal(await a.text(), await b.text());
   for (const secret of ["admin-secret-token-value", "first.example.com", "second.example.org", "owner/repo"]) {
-    assert.ok(!DASHBOARD_HTML.includes(secret), `shell must not carry ${secret}`);
-    assert.ok(!DASHBOARD_JS.includes(secret), `script must not carry ${secret}`);
+    assert.ok(!DASHBOARD_HTML.includes(secret));
+    assert.ok(!DASHBOARD_JS.includes(secret));
   }
 });
-
-test("auth boundary intact: dashboard on does not open any data route", async (t) => {
-  const fixture = await listening(true, "admin-secret");
-  t.after(() => fixture.server.close());
-  for (const path of ["/admin/status", "/admin/runs", "/admin/runs/x", "/admin/runs/x/cancel", "/admin/rereview", "/admin/diagnostics"]) {
-    const response = await fetch(fixture.base + path);
-    assert.equal(response.status, 401, path);
-  }
-  assert.equal((await fetch(fixture.base + "/admin/status", { headers: { authorization: "Bearer wrong" } })).status, 401);
+test("auth boundary intact: dashboard does not open admin data routes", async (t) => {
+  const f = await listening(true, "admin-secret");
+  t.after(() => f.server.close());
+  for (const path of ["/admin/status", "/admin/runs", "/admin/runs/x", "/admin/runs/x/cancel", "/admin/rereview", "/admin/diagnostics"]) assert.equal((await fetch(f.base + path)).status, 401, path);
+  assert.equal((await fetch(f.base + "/admin/status", { headers: { authorization: "Bearer wrong" } })).status, 401);
 });
-
-test("no direct db/cluster/forge access from the dashboard surface", async (t) => {
-  // Structural fence #1: the CSP pins connect-src to 'self' and forbids
-  // framing/base/form targets, so the UI can only reach the controller API
-  // on the same origin — never a database, the Kubernetes API, or a forge
-  // API directly, and never a framed hostile host.
+test("no direct db, cluster, or forge access from dashboard", () => {
   assert.equal(serveDashboard("/dashboard")?.headers["Content-Security-Policy"], CSP);
   assert.match(CSP, /connect-src 'self'/);
   assert.match(CSP, /frame-ancestors 'none'/);
-  // Structural fence #2: the script has exactly one fetch site (the api()
-  // wrapper), and every quoted path fragment in it is same-origin relative:
-  // no protocol-relative or absolute-URL literal exists anywhere (the
-  // banned-scheme list below covers the absolute forms). Quote-style
-  // agnostic on purpose: ', ", and ` all count.
   assert.equal([...DASHBOARD_JS.matchAll(/fetch\(/g)].length, 1);
-  for (const match of DASHBOARD_JS.matchAll(/['"`](\/[^'"`]*)['"`]/g)) {
-    const literal = match[1]!;
-    assert.ok(!literal.startsWith("//"), `path literal must not be protocol-relative: ${literal}`);
-    assert.ok(!literal.includes("://"), `path literal must not be absolute: ${literal}`);
+  for (const m of DASHBOARD_JS.matchAll(/[\"'](\/[^\"']*)[\"']/g)) {
+    assert.ok(!m[1]!.startsWith("//"));
+    assert.ok(!m[1]!.includes("://"));
   }
-  // Structural fence #3: no markup-injection, storage, dynamic-evaluation,
-  // framing, or attribute-injection surface exists in the source, in any
-  // quote style.
-  for (const banned of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "innerText", "new Function", "setAttribute", "srcdoc", "localStorage", "sessionStorage", "document.cookie", "javascript:", "https://", "http://", "ws://", "wss://", "EventSource", "WebSocket"]) {
-    assert.ok(!DASHBOARD_JS.includes(banned), `script must not contain ${banned}`);
-    assert.ok(!DASHBOARD_HTML.includes(banned), `shell must not contain ${banned}`);
+  for (const banned of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "innerText", "new Function", "setAttribute", "srcdoc", "localStorage", "sessionStorage", "document.cookie", "javascript:", "https://", "http://", "ws://", "wss://", "EventSource", "WebSocket", "sk-", "unredact", "decrypt", "atob(", "eval(", "owner/repo"]) {
+    assert.ok(!DASHBOARD_JS.includes(banned), banned);
+    assert.ok(!DASHBOARD_HTML.includes(banned), banned);
+  }
+  assert.match(DASHBOARD_JS, /^"use strict";/);
+  // These constants are embedded in TypeScript template literals.
+  assert.doesNotMatch(DASHBOARD_JS, /`|\$\{/);
+});
+test("admin-API-compatibility pin", () => {
+  const entries = ADMIN_ROUTE_TABLE.filter((entry) => entry.includes("/admin/")).map((entry) => entry.split(" ")[1]!);
+  const fixedPaths = new Set(["/admin/status", "/admin/runs", "/admin/rereview", "/admin/diagnostics"]);
+  const referenced = new Set<string>();
+  if (/"\/admin\/runs\/"\s*\+\s*encodeURIComponent\([^)]*\)\s*\+\s*"\/cancel"/.test(DASHBOARD_JS)) {
+    referenced.add("/admin/runs/{runId}/cancel");
+  }
+  for (const match of DASHBOARD_JS.matchAll(/[\"'](\/admin[^\"']*)[\"']/g)) {
+    const literal = match[1]!;
+    const path = literal.split("?", 1)[0]!;
+    if (literal === path && fixedPaths.has(path)) {
+      referenced.add(path);
+      continue;
+    }
+    if (/^\/admin\/runs\/[^/]+\/cancel$/.test(path)) {
+      referenced.add("/admin/runs/{runId}/cancel");
+      continue;
+    }
+    if (literal.startsWith("/admin/runs?")) {
+      referenced.add("/admin/runs");
+      continue;
+    }
+    assert.equal(literal, "/admin/runs/", `unsupported admin API literal: ${literal}`);
+    referenced.add("/admin/runs/{runId}");
+  }
+  for (const entry of entries) {
+    assert.ok(referenced.has(entry), `dashboard must exercise ${entry}`);
   }
 });
-
-// ── the EXECUTION fence (#252): feed the hostile payloads themselves ──────
-
-/** Hostile API-derived payloads, ONE UNIQUE MARKER PER RENDER PATH so a
- * deleted render path fails its own assertion: markup-injection, fence-escape,
- * attribute breakout, control/format characters, a credential-shaped string,
- * and a hostile mutation error body. */
-const MARKERS = ["<img src=x onerror=alert(1)>", "</script><script>", '"onmouseover="', "\u0000\u001f\u202e", "Bearer sk-fake-token-123456", "<svg onload=alert(1)>"] as const;
-
-test("execution fence: hostile API data is inserted verbatim as text and only via text nodes", async () => {
+const MARKERS = [
+  "<img src=x onerror=alert(1)>",
+  "</script><readiness-marker>",
+  '"executor-onmouseover"',
+  "not-a-number-created-marker",
+  "publication-marker",
+  "<svg onload=alert(1)>",
+  "Bearer sk-fake-token-123456",
+  "<rereview-refusal-marker>",
+  "hostile-run-state",
+  "hostile-detail-state",
+  "\u0000\u001f\u202e",
+  "<failure-reason-marker>"
+] as const;
+interface HarnessOptions {
+  payloads?: Record<string, unknown>;
+  responses?: Record<string, { status: number; body: string }>;
+  reject?: string;
+  confirm?: () => boolean;
+}
+function harness(options: HarnessOptions = {}) {
   const textData: string[] = [];
-  const attributeCalls: { readonly element: string; readonly name: string; readonly value: unknown }[] = [];
-  const propertyWrites: { readonly element: string; readonly prop: string; readonly value: unknown }[] = [];
-  const listeners: Record<string, Array<() => unknown>> = {};
-  const fetchedPaths: string[] = [];
-  /** A stub element that records every write channel the script could use.
-   * Only createTextNode data and textContent assignments are legitimate
-   * text-insertion paths; anything else (property writes carrying API data,
-   * attribute sets) is a fence breach. */
-  function makeElement(name: string): { readonly proxy: Record<string, unknown>; readonly raw: Record<string, unknown> } {
-    const raw: Record<string, unknown> = {
-      children: [] as unknown[],
-      addEventListener: (type: string, fn: () => unknown) => {
-        (listeners[`${name}:${type}`] ??= []).push(fn);
-      },
-      appendChild: (child: unknown) => {
-        (raw.children as unknown[]).push(child);
-        return child;
-      },
-      replaceChildren: (...kids: unknown[]) => {
-        raw.children = kids;
-      },
-      setAttribute: (attr: string, value: unknown) => {
-        attributeCalls.push({ element: name, name: attr, value });
-      },
-    };
-    const proxy = new Proxy(raw, {
-      set(target, prop, value) {
-        propertyWrites.push({ element: name, prop: String(prop), value });
-        (target as Record<string | symbol, unknown>)[prop] = value;
-        return true;
-      },
-    });
+  const attributeCalls: Array<{ element: string; name: string; value: unknown }> = [];
+  const propertyWrites: Array<{ prop: string; value: unknown }> = [];
+  const listeners: Record<string, Array<(event?: any) => unknown>> = {};
+  const paths: string[] = [];
+  const elements = new Map<string, { proxy: any; raw: any }>();
+  function make(name: string) {
+    const raw: any = { children: [] as unknown[], dataset: {}, addEventListener(type: string, fn: (event?: any) => unknown) {
+      (listeners[name + ":" + type] ??= []).push(fn);
+    }, appendChild(child: unknown) {
+      raw.children.push(child);
+      return child;
+    }, replaceChildren(...kids: unknown[]) {
+      raw.children = kids;
+    }, setAttribute: (name: string, value: unknown) => {
+      attributeCalls.push({ element: name, name, value });
+    }, className: "", disabled: false };
+    const proxy = new Proxy(raw, { set(target: any, prop: string | symbol, value: unknown) {
+      propertyWrites.push({ prop: String(prop), value });
+      target[prop] = value;
+      return true;
+    } });
     return { proxy, raw };
   }
-  const elements = new Map<string, ReturnType<typeof makeElement>>();
-  const document = {
-    createElement: (tag: string) => makeElement(tag).proxy,
-    createTextNode: (data: unknown) => {
-      const text = String(data);
-      textData.push(text);
-      return { data: text };
-    },
-    getElementById: (id: string) => {
-      if (!elements.has(id)) elements.set(id, makeElement(`#${id}`));
-      return elements.get(id)!.proxy;
-    },
-  };
-  // One render path per marker: status (adoption + readiness detail), the
-  // runs table, run detail, diagnostics, and the rereview ERROR body —
-  // deleting any one render path fails that path's own marker assertion.
-  const payloads: Record<string, unknown> = {
-    "/admin/status": {
-      queue: { depthByState: { running: 1 }, oldestAgeMs: 5, activeWorkersByExecutor: {} },
-      adoption: { repositories: [{ platform: "github", repository: MARKERS[0], enabled: true }] },
-      readiness: { components: [{ name: "probe", ok: true, degraded: false, detail: MARKERS[1] }] },
-    },
-    "/admin/runs?limit=50": {
-      runs: [{ runId: MARKERS[2], jobId: MARKERS[2], kind: "review", state: "running", executorIdentity: MARKERS[2], attempt: 1, headSha: MARKERS[2], failureReason: MARKERS[2], supersededByJobId: "", createdAtMs: "not-a-number", updatedAtMs: 1700000000000 }],
-    },
-    [`/admin/runs/${encodeURIComponent(MARKERS[2])}`]: {
-      runId: MARKERS[2], state: "running",
-      publication: { jobId: MARKERS[3], state: "pending", attempt: 1, lastOutcome: MARKERS[3] },
-      usage: [{ role: MARKERS[3], requestCount: 1, tokens: 2, costMicros: 3, costProvenance: MARKERS[3] }],
-    },
-    "/admin/diagnostics": { model_key: "sk-abcdefghijklmnop", leak: MARKERS[4] },
-  };
-  // The rereview path answers with a REFUSED mutation carrying a hostile
-  // error body, so the failure-rendering path is driven too.
-  const responses: Record<string, { readonly ok: boolean; readonly status: number; readonly body: string }> = {
-    "/admin/rereview": { ok: false, status: 409, body: JSON.stringify({ error: MARKERS[5] }) },
-  };
-  /** Deterministic settle: the sandboxed chains are pure microtasks (the
-   * fetch stub resolves without I/O and the script schedules no timers), so
-   * setImmediate turns advance them without fixed wall-clock timeouts. */
+  const document: any = { documentElement: { dataset: {} }, createElement: (tag: string) => make(tag).proxy, createTextNode: (v: unknown) => {
+    const s = String(v);
+    textData.push(s);
+    return { data: s };
+  }, getElementById: (id: string) => {
+    if (!elements.has(id)) elements.set(id, make("#" + id));
+    return elements.get(id)!.proxy;
+  } };
   async function untilSettled(pred: () => boolean, what: string): Promise<void> {
-    for (let turns = 0; !pred(); turns++) {
-      assert.ok(turns < 1000, `promise chains never settled: ${what}`);
+    for (let i = 0; !pred(); i++) {
+      assert.ok(i < 1e3, "never settled: " + what);
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
+  const responseMap = options.responses ?? {};
   const sandbox = vm.createContext({
     document,
-    confirm: () => true,
+    confirm: options.confirm ?? (() => true),
+    Date,
     fetch: async (path: string) => {
-      fetchedPaths.push(String(path));
-      const forced = responses[String(path)];
-      if (forced !== undefined) return { ok: forced.ok, status: forced.status, text: async () => forced.body };
-      return { ok: true, status: 200, text: async () => JSON.stringify(payloads[String(path)] ?? {}) };
+    paths.push(String(path));
+    if (options.reject === path) throw new Error("offline");
+    const forced = responseMap[path];
+    const body = forced?.body ?? JSON.stringify(options.payloads?.[path] ?? {});
+    const status = forced?.status ?? 200;
+    return { ok: status >= 200 && status < 300, status, text: async () => body };
+  } });
+  vm.runInContext(DASHBOARD_JS, sandbox);
+  elements.get("token")!.raw.value = "token-user-input";
+  function containerText(id: string): string {
+    let out = "";
+    const walk = (node: any) => {
+      if (!node) return;
+      if (typeof node.data === "string") out += node.data;
+      for (const child of node.children ?? []) walk(child);
+    };
+    walk(elements.get(id)?.raw);
+    return out;
+  }
+  return { textData, attributeCalls, propertyWrites, listeners, paths, elements, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled };
+}
+test("execution fence: hostile API values appear verbatim in text nodes only", async () => {
+  const h = harness({
+    payloads: {
+      "/admin/status": {
+        queue: { depthByState: { running: 1 }, oldestAgeMs: 5, activeWorkersByExecutor: { [MARKERS[10]]: 1 } },
+        adoption: { repositories: [{ platform: "github", repository: MARKERS[0], enabled: true }] },
+        readiness: { components: [{ name: "probe", ok: true, detail: MARKERS[1] }] },
+      },
+      "/admin/runs?limit=50": {
+        runs: [
+          { runId: MARKERS[2], jobId: MARKERS[2], kind: "review", state: MARKERS[8], executorIdentity: MARKERS[2], attempt: 1, headSha: MARKERS[2], failureReason: MARKERS[2], createdAtMs: MARKERS[3], updatedAtMs: 1700000000000 },
+          { runId: "failed-run", jobId: "failed-job", state: "failed", failureReason: MARKERS[11] },
+          null
+        ],
+      },
+      [`/admin/runs/${encodeURIComponent(MARKERS[2])}`]: {
+        runId: MARKERS[2],
+        state: "hostile-detail-state",
+        publication: { state: "pending", attempt: 1, lastOutcome: MARKERS[4] },
+        usage: [{ role: MARKERS[5], requestCount: 1, tokens: 2, costMicros: 3, costProvenance: MARKERS[5] }],
+      },
+      "/admin/diagnostics": { region: MARKERS[6] },
+      "/admin/runs/undefined/cancel": { cancelled: true },
+    },
+    responses: { "/admin/rereview": { status: 409, body: JSON.stringify({ error: MARKERS[7] }) } },
+  });
+  vm.runInContext("loadAll(); undefined", h.sandbox);
+  vm.runInContext(`loadRunDetail(${JSON.stringify(MARKERS[2])}); undefined`, h.sandbox);
+  vm.runInContext("loadDiagnostics(); undefined", h.sandbox);
+  assert.equal(h.listeners["#rereview:click"]?.length, 1);
+  await h.listeners["#rereview:click"]![0]!();
+  await h.untilSettled(() => MARKERS.every((x) => h.textData.some((t) => t.includes(x))), "marker renders");
+  const detailHandlers = h.listeners["button:click"] ?? [];
+  for (const handler of detailHandlers) await handler();
+  await h.untilSettled(() => h.paths.some((path) => path.endsWith("/cancel")), "hostile detail cancel request");
+  for (const marker of MARKERS) assert.ok(h.textData.some((x) => x.includes(marker)), marker);
+  for (const write of h.propertyWrites) {
+    for (const marker of MARKERS) assert.ok(!String(write.value).includes(marker));
+  }
+  assert.ok(h.textData.includes("hostile-run-state"));
+  assert.ok(h.textData.includes("hostile-detail-state"));
+  assert.ok(h.containerText("overview-failures").includes(MARKERS[11]), "actionable-failures list must render the failure marker");
+  assert.ok(h.containerText("runs").includes(MARKERS[11]), "runs-row failure column must render the failure marker");
+  assert.ok(h.paths.some((path) => path.endsWith("/cancel")), "cancel button must call the cancel API");
+  assert.ok(h.propertyWrites.some((write) => write.prop === "className" && write.value === "chip"));
+  assert.ok(!h.propertyWrites.some((write) => String(write.value).includes("hostile-run-state")), "API run state must never enter a property write");
+  assert.ok(!h.propertyWrites.some((write) => String(write.value).includes("hostile-detail-state")), "API detail state must never enter a property write");
+  assert.deepEqual(h.attributeCalls, []);
+});
+test("ui states: empty, auth, offline, pagination, and mutation feedback", async () => {
+  const h = harness({
+    payloads: {
+      "/admin/status": { readiness: { components: [] }, queue: { depthByState: {}, activeWorkersByExecutor: {} }, adoption: { repositories: [] } },
+      "/admin/runs?limit=50": { runs: [], nextCursor: "c2" },
+      "/admin/runs?limit=50&cursor=c2": { runs: [] },
+      "/admin/runs/active": { runId: "active", state: "running", usage: [], publication: { state: "none" } },
+    },
+    responses: {
+      "/admin/rereview": { status: 202, body: '{"jobId":"accepted-rereview-sentinel"}' },
+      "/admin/runs/active/cancel": { status: 202, body: '{"cancelled":true}' },
     },
   });
-  vm.runInContext(DASHBOARD_JS, sandbox, { filename: "dashboard-app.js" });
-  // The token input's value is the operator's OWN input (pre-set on the raw
-  // target, outside the recording proxy), read only by `loadAll`.
-  elements.get("token")!.raw.value = MARKERS[4];
-  // Top-level function declarations attach to the context global; hostile
-  // values are embedded as JSON string literals (safe JS source).
-  vm.runInContext("loadAll(); undefined", sandbox);
-  vm.runInContext(`loadRunDetail(${JSON.stringify(MARKERS[2])}); undefined`, sandbox);
-  vm.runInContext("loadDiagnostics(); undefined", sandbox);
-  // The rereview handler must EXIST (registered at the top level), then be
-  // invoked (confirm stubbed true) so the mutation error path is driven.
-  assert.equal(listeners["#rereview:click"]?.length, 1, "the rereview click handler must be registered");
-  await listeners["#rereview:click"]![0]!();
-  // The cancel handler is registered by the non-terminal run-detail render
-  // (after loadRuns' detail buttons); invoke every handler that appeared
-  // during loadRunDetail and require one of them to fetch the cancel path.
-  const buttonsBeforeDetail = (listeners["button:click"] ?? []).length;
-  vm.runInContext(`loadRunDetail(${JSON.stringify(MARKERS[2])}); undefined`, sandbox);
-  await untilSettled(() => (listeners["button:click"] ?? []).length > buttonsBeforeDetail, "run-detail cancel button registration");
-  const detailButtons = (listeners["button:click"] ?? []).slice(buttonsBeforeDetail);
-  assert.ok(detailButtons.length >= 1, "the non-terminal run detail must register its cancel button");
-  for (const handler of detailButtons) await handler();
-  // Let the kicked-off promise chains settle: every marker render path and
-  // the cancel call must have landed.
-  await untilSettled(
-    () => fetchedPaths.some((path) => path.endsWith("/cancel")) && MARKERS.every((marker) => textData.some((text) => text.includes(marker))),
-    "cancel call and every marker render",
-  );
-  assert.ok(fetchedPaths.some((path) => path.endsWith("/cancel")), "the cancel button must call the cancel API");
-  // Fence assertion 1: every hostile string reached the DOM VERBATIM as text
-  // data through createTextNode — escaped-out (rendered), not interpreted.
-  // Each marker pins its OWN render path (see MARKERS above).
-  for (const marker of MARKERS) {
-    assert.ok(textData.some((text) => text.includes(marker)), `hostile payload must be rendered as text: ${JSON.stringify(marker)}`);
-  }
-  // Fence assertion 2: no OTHER insertion channel ever received API-derived
-  // data — no property write or attribute set carries a hostile payload.
-  for (const write of propertyWrites) {
-    for (const marker of MARKERS) {
-      assert.ok(!String(write.value).includes(marker), `property write ${write.element}.${write.prop} carried hostile data`);
-    }
-  }
-  assert.deepEqual(attributeCalls, [], "the script must never set attributes");
+  vm.runInContext("loadAll(); undefined", h.sandbox);
+  await h.untilSettled(() => h.textData.includes("No runs yet."), "empty runs");
+  assert.ok(h.textData.includes("No runs yet."));
+  await h.listeners["#runs-next:click"]![0]!();
+  await h.untilSettled(() => h.paths.includes("/admin/runs?limit=50&cursor=c2"), "next page");
+  await h.listeners["#runs-prev:click"]![0]!();
+  await h.untilSettled(() => h.paths.filter((x) => x === "/admin/runs?limit=50").length > 1, "previous page");
+  assert.ok(h.paths.includes("/admin/runs?limit=50"));
+  const unauthorized = harness({ responses: { "/admin/status": { status: 401, body: '{"error":"no"}' }, "/admin/runs?limit=50": { status: 401, body: '{"error":"no"}' }, "/admin/diagnostics": { status: 401, body: '{"error":"no"}' } } });
+  vm.runInContext("loadAll(); undefined", unauthorized.sandbox);
+  await unauthorized.untilSettled(() => unauthorized.textData.includes("Authorization required"), "unauthorized");
+  assert.ok(unauthorized.textData.includes("unauthorized"));
+  assert.ok(!unauthorized.textData.includes("ready"));
+  const offline = harness({ reject: "/admin/status" });
+  vm.runInContext("loadAll(); undefined", offline.sandbox);
+  await offline.untilSettled(() => offline.textData.includes("Can't reach the controller"), "offline");
+  assert.ok(offline.textData.includes("Can't reach the controller"));
+  vm.runInContext("loadRunDetail('active'); undefined", h.sandbox);
+  await h.untilSettled(() => Boolean(h.listeners["button:click"]?.length), "cancel registration");
+  const cancelHandlers = h.listeners["button:click"]!;
+  await cancelHandlers[cancelHandlers.length - 1]!();
+  await h.untilSettled(() => h.textData.includes("Cancellation accepted."), "cancel success");
+  assert.ok(h.textData.includes("Cancellation accepted."));
+  const rereview = h.listeners["#rereview:click"]![0]!;
+  await rereview();
+  await h.untilSettled(() => h.textData.includes("Rereview accepted."), "rereview accepted");
+  assert.ok(h.textData.includes("Rereview accepted."));
+  const refused = harness({ responses: { "/admin/rereview": { status: 409, body: '{"error":"refused-rereview-sentinel"}' } } });
+  vm.runInContext("document.getElementById('token').value='token'; undefined", refused.sandbox);
+  await refused.listeners["#rereview:click"]![0]!();
+  await refused.untilSettled(() => refused.textData.includes("Rereview was not accepted."), "rereview refusal");
+  assert.ok(refused.paths.includes("/admin/rereview"));
+  assert.ok(refused.textData.some((x) => x.includes("HTTP 409")));
+  const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
+  vm.runInContext("loadRunDetail('refused'); undefined", cancelRefused.sandbox);
+  await cancelRefused.untilSettled(() => Boolean(cancelRefused.listeners["button:click"]?.length), "cancel refusal button");
+  const refusalButton = cancelRefused.listeners["button:click"]!;
+  await refusalButton[refusalButton.length - 1]!();
+  await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(cancelRefused.textData.some((x) => x.includes("HTTP 409")));
+  assert.ok(!cancelRefused.propertyWrites.some((write) => String(write.value).includes("cancel-refusal-sentinel")));
+  assert.ok(cancelRefused.textData.includes("Cancellation was not accepted."));
+  const theme = h.listeners["#theme:click"]![0]!;
+  await theme({ currentTarget: h.elements.get("theme")!.proxy });
+  assert.equal(h.documentElement?.dataset.theme, "dark");
+  const back = h.listeners["button:click"]!;
+  await back[back.length - 2]!();
+  assert.equal(h.elements.get("view-runs")!.raw.className, "view view-active", "back must re-activate the runs view");
+  assert.equal(h.elements.get("view-run")!.raw.className, "view", "back must deactivate the run view");
+  const beforeRefresh = h.paths.filter((path) => path === "/admin/runs?limit=50").length;
+  await h.listeners["#runs-refresh:click"]![0]!();
+  await h.untilSettled(() => h.paths.filter((path) => path === "/admin/runs?limit=50").length > beforeRefresh, "refresh runs");
+  const denied = harness({ confirm: () => false, payloads: { "/admin/runs/active": { runId: "active", state: "running", usage: [], publication: {} } } });
+  vm.runInContext("loadRunDetail('active'); undefined", denied.sandbox);
+  await denied.untilSettled(() => Boolean(denied.listeners["button:click"]?.length), "confirm-refused cancel button");
+  await denied.listeners["button:click"]![denied.listeners["button:click"]!.length - 1]!();
+  await denied.listeners["#rereview:click"]![0]!();
+  assert.ok(!denied.paths.some((path) => path.endsWith("/cancel") || path === "/admin/rereview"));
+  assert.ok(!denied.textData.some((text) => ["Cancellation accepted.", "Rereview accepted.", "was not accepted"].some((value) => text.includes(value))));
 });
-
+test("state chip whitelist covers every lifecycle state", () => {
+  const actual = vm.runInContext("({ queued: stateChipClass('queued'), starting: stateChipClass('starting'), running: stateChipClass('running'), publishing: stateChipClass('publishing'), completed: stateChipClass('completed'), failed: stateChipClass('failed'), cancelled: stateChipClass('cancelled'), superseded: stateChipClass('superseded'), unknown: stateChipClass('unrecognized') })", harness().sandbox);
+  for (const state of ["queued", "starting", "running", "publishing", "completed", "failed", "cancelled", "superseded"]) {
+    assert.ok(actual[state].includes("chip") && actual[state].includes(state), state);
+  }
+  assert.equal(actual.unknown, "chip");
+});
 test("auth and redaction are covered", async (t) => {
-  // The diagnostics route redacts server side; the shell renders exactly
-  // what the API returns and carries no redaction vocabulary of its own
-  // (no un-redaction mechanism exists in the UI).
-  const fixture = await listening(true, "admin-secret", {
-    diagnostics: async () => ({ model_key: "sk-abcdefghijklmnop", region: "eu-central" }),
-  });
-  t.after(() => fixture.server.close());
-  const response = await fetch(fixture.base + "/admin/diagnostics", { headers: { authorization: "Bearer admin-secret" } });
-  assert.equal(response.status, 200);
-  const body = await response.text();
+  const f = await listening(true, "admin-secret", { diagnostics: async () => ({ model_key: "sk-abcdefghijklmnop", region: "eu-central" }) });
+  t.after(() => f.server.close());
+  const r = await fetch(f.base + "/admin/diagnostics", { headers: { authorization: "Bearer admin-secret" } });
+  assert.equal(r.status, 200);
+  const body = await r.text();
   assert.doesNotMatch(body, /sk-abcdefghijklmnop/);
   assert.match(body, /REDACTED/);
   for (const banned of ["sk-", "unredact", "decrypt", "atob(", "eval("]) {
-    assert.ok(!DASHBOARD_HTML.includes(banned), `shell must not contain ${banned}`);
-    assert.ok(!DASHBOARD_JS.includes(banned), `script must not contain ${banned}`);
+    assert.ok(!DASHBOARD_HTML.includes(banned));
+    assert.ok(!DASHBOARD_JS.includes(banned));
   }
-  // The data routes stay token-gated while the shell is served unauthenticated.
-  assert.equal((await fetch(fixture.base + "/admin/diagnostics")).status, 401);
-  assert.equal((await fetch(fixture.base + "/dashboard")).status, 200);
+  assert.equal((await fetch(f.base + "/admin/diagnostics")).status, 401);
+  assert.equal((await fetch(f.base + "/dashboard")).status, 200);
 });
