@@ -134,7 +134,7 @@ import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, SATISFIED_NO_ENFORCEMENT_CITATION_NOTE, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { prContractIssueRefIdentities } from "../precheck/linked-issues.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -3045,6 +3045,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // independently prevent APPROVE.
     traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
     traceUnmetClaimed: traceUnmetClaimed,
+    // #1753: a satisfied ordinary-runtime row that emitted no
+    // enforcement-location citation while disclosing its evidence is the
+    // ADVISORY proof-shape omission class — surfaced on the disposition as
+    // the reserved `proof_shape_mismatch` diagnostic, never a material
+    // unknown. The note is the trusted provenance: only the fold's own
+    // validator sets it, and only on rows its ladder already made advisory.
+    traceProofShapeOmission: requirementTraceResult !== null && requirementTraceResult.applied
+      && requirementTraceResult.trace.rows.some((row) => row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE)),
     // #1678 hardening: an authoritative closing verdict whose
     // requirement_coverage is not EXACTLY the run's in-scope requirement set
     // (after that lane's single bounded correction, if one ran) is an invalid

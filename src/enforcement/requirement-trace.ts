@@ -2706,6 +2706,50 @@ function coverageClaimEvidence(claim: RawClaim): CoverageClaimEvidence {
   return { enforcement, test, details };
 }
 
+/**
+ * #1753: the satisfied row's evidence-list classification, for the
+ * enforcement-citation omission split. Two independent, deterministic
+ * questions over the wire `evidence[]` entries:
+ *
+ * - `disclosesEvidence` — at least one entry carries a non-empty `kind`,
+ *   `ref` or `detail`: an acquisition receipt (`kind: tool`/`ci` — the #1657
+ *   disclosure kinds), a detail, or any ref. The reviewer disclosed its
+ *   evidence; only the citation SHAPE is missing.
+ * - `malformedLocationAttempt` — at least one LOCATION-kind entry
+ *   (`file`/`test`/`diff` — the kinds the wire contract declares as
+ *   citations) carries a non-empty ref that the ONE canonical citation
+ *   grammar refuses (prose, URL, traversal, absolute, control bytes,
+ *   reversed ranges). The reviewer attempted a citation and produced a shape
+ *   the grammar rejects: that is invalid provenance, never a polite omission
+ *   — the parse-door fabrication guards keep their material path (#252),
+ *   and one malformed attempt is enough to fail the whole row closed.
+ *
+ * A ref that PARSES but does not resolve at head never reaches here as an
+ * omission question — it is already a validated-and-refuted citation
+ * (`downgraded-no-valid-enforcement-location`, material). The additive
+ * `reason` is prose, not evidence, and never satisfies either check: model
+ * prose alone can never certify an approval.
+ */
+function satisfiedEvidenceClassification(claim: RawClaim): { disclosesEvidence: boolean; malformedLocationAttempt: boolean } {
+  let disclosesEvidence = false;
+  let malformedLocationAttempt = false;
+  if (Array.isArray(claim.evidence)) {
+    for (const item of claim.evidence) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const entry = item as { kind?: unknown; ref?: unknown; detail?: unknown };
+      const kind = typeof entry.kind === "string" ? entry.kind.trim().toLowerCase() : "";
+      const ref = typeof entry.ref === "string" ? entry.ref : "";
+      const detail = typeof entry.detail === "string" ? entry.detail.trim() : "";
+      if (kind !== "" || ref.trim() !== "" || detail !== "") disclosesEvidence = true;
+      if ((kind === "file" || kind === "test" || kind === "diff") && ref.trim() !== ""
+        && coverageRefLocation(ref) === null) {
+        malformedLocationAttempt = true;
+      }
+    }
+  }
+  return { disclosesEvidence, malformedLocationAttempt };
+}
+
 /** Records an artifact-level parser/validation diagnostic. The final slot of
  * `errors` is reserved for the truncation note, so the array is bounded at
  * MAX_ARTIFACT_ERRORS even when a hostile payload is entirely malformed;
@@ -2763,6 +2807,11 @@ function missingReasonFloor(
   const topologyOverflow = notes.includes("distributed-topology-overflow");
   const seamUncovered = notes.some((note) => note.startsWith("distributed-enforcement-group-uncovered:"));
   const enforcementGap = notes.includes("downgraded-no-valid-enforcement-location");
+  // #1753: the serialization-omission gap — no citation was EMITTED at all,
+  // so the wording must not claim the reviewer "cited" something unusable.
+  // It composes with the test gap exactly like the emitted-but-unresolvable
+  // enforcement gap (#1724's additive-gap rule).
+  const omissionGap = notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE);
   const testGap = notes.includes("downgraded-no-valid-test-location");
   const deterministicFailure = structuralFailed || structuralRange || topologyOverflow || seamUncovered;
   if (structuralFailed) {
@@ -2777,11 +2826,19 @@ function missingReasonFloor(
     parts.push("reviewer reported unknown without naming what was not verified");
   } else if (notes.includes("disposition-invalid")) {
     parts.push("reviewer decision row carried no usable status or explanation");
-  } else if (enforcementGap || testGap) {
-    const gaps: string[] = [];
-    if (enforcementGap) gaps.push("no resolvable enforcement location");
-    if (testGap) gaps.push("no resolvable regression-test location");
-    parts.push(`reviewer reported satisfied but cited ${gaps.join(" and ")}`);
+  } else if (enforcementGap || omissionGap || testGap) {
+    // #1724's composition, #1753's second verb class: the citation-refusal
+    // gaps keep their legacy "cited …" phrasing byte-for-byte, and the
+    // serialization omission says "emitted" — nothing was ever cited.
+    const cited: string[] = [];
+    if (enforcementGap) cited.push("no resolvable enforcement location");
+    if (testGap) cited.push("no resolvable regression-test location");
+    const emitted: string[] = [];
+    if (omissionGap) emitted.push("no enforcement-location citation");
+    const segments: string[] = [];
+    if (cited.length > 0) segments.push(`cited ${cited.join(" and ")}`);
+    if (emitted.length > 0) segments.push(`emitted ${emitted.join(" and ")}`);
+    parts.push(`reviewer reported satisfied but ${segments.join(" and ")}`);
   } else {
     parts.push("reviewer decision carried no explanation");
   }
@@ -3081,10 +3138,41 @@ export function validateRequirementTrace(
             // fabricated false incompletes (#1643). A test citation is
             // demanded only when the requirement's own text explicitly
             // demands one (`test_required`).
+            //
+            // #1753: WHY the satisfied row lacks a valid enforcement
+            // citation decides the materiality — never the bare fact. A
+            // citation that WAS emitted but does not resolve at reviewed
+            // head (fabricated, stale, out of range) is an objective
+            // provenance failure the satisfied claim cannot ride: material,
+            // unchanged — and so is a LOCATION-kind evidence ref the one
+            // citation grammar refuses at the parse door (the #252
+            // fabrication guards). A row that emitted NO citation-shaped
+            // evidence at all while still disclosing its evidence (an
+            // acquisition receipt — `kind: tool`/`ci` — or a detail) is a
+            // proof-shape SERIALIZATION omission: the reviewer owns the
+            // semantic conclusion, there is no objective provenance left to
+            // validate or refute, and a missing validator-shaped field must
+            // never prove the requirement materially unresolved by itself
+            // (the machinery-created INCOMPLETE #1747 reproduced) — advisory
+            // bookkeeping via `satisfied-no-enforcement-citation`. A bare
+            // `satisfied` with NO evidence disclosure keeps the material
+            // path: an assertion with nothing to read is as unusable as no
+            // trace at all (#1724), and model prose alone can never certify
+            // an approval.
             if (!anyLocationValid(enforcement, cache)) {
               disposition = "unverifiable";
-              notes.push("downgraded-no-valid-enforcement-location");
+              const evidenceShape = satisfiedEvidenceClassification(claim);
+              if (enforcement.length > 0 || !evidenceShape.disclosesEvidence || evidenceShape.malformedLocationAttempt) {
+                notes.push("downgraded-no-valid-enforcement-location");
+              } else {
+                notes.push(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE);
+              }
             }
+            // The explicit test demand is the requirement's OWN text, not
+            // validator choreography — the #1753 omission split does not
+            // weaken it: a demanded test citation that does not resolve or
+            // was never emitted stays a material unknown (any material
+            // cause on the row outranks the advisory enforcement omission).
             if (requiresTest && !anyTestLocationValid(test, cache)) {
               disposition = "unverifiable";
               notes.push("downgraded-no-valid-test-location");
@@ -3152,6 +3240,22 @@ export function validateRequirementTrace(
       resolution = "unresolved";
       materiality = "material";
       unresolvedMaterialIds.push(entry.id);
+    } else if (notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE)
+      && !notes.includes("downgraded-no-valid-enforcement-location")
+      && !notes.includes("downgraded-no-valid-test-location")) {
+      // #1753: a satisfied ordinary runtime row that emitted no
+      // enforcement-location citation but disclosed its evidence — the
+      // proof-shape serialization omission is advisory bookkeeping
+      // (#1656's reserved non-material class), never a material unknown by
+      // itself. The row stays exposed: `unverifiable`, rendered in the
+      // trace, named in the handoff's unresolved ids, and surfaced to the
+      // disposition as the reserved ADVISORY `proof_shape_mismatch`
+      // diagnostic — observable, never vetoing. The guards keep ANY
+      // material cause (an emitted-but-unresolvable citation, an unresolved
+      // explicitly-demanded test citation) on the material ladder below.
+      resolution = "unresolved";
+      materiality = "advisory";
+      unresolvedAdvisoryIds.push(entry.id);
     } else if (proof === "runtime_behavior" || proof === "test_required") {
       // #1658 review: invalid OBJECTIVE provenance on an in-scope mandatory
       // ordinary row is a material unknown, not advisory bookkeeping. Every
@@ -3288,7 +3392,12 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
       ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\``
       : row.notes.includes("not-traced-by-reviewer")
         ? "the reviewer reported no trace for this requirement"
-        : "no valid enforcement location";
+        : row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE)
+          ? // #1753: nothing was emitted — say so, rather than the "no valid
+            // enforcement location" wording that belongs to a citation that
+            // failed validation (#959's distinct-failures rule).
+            "the reviewer emitted no enforcement-location citation"
+          : "no valid enforcement location";
     const details: string[] = [];
     if (row.notes.includes("distributed-topology-overflow")) {
       details.push(`distributed topology exceeds the ${MAX_GROUPS_PER_RULE} representable seams`);
@@ -3521,6 +3630,25 @@ export function confirmedUnmetRows(trace: RequirementTraceArtifact): Requirement
  * applicability scope (#1600) already settled, so it must never gate
  * certification the way an in-scope claim does. */
 export const OUT_OF_SCOPE_UNMET_NOTE = "out-of-scope-reported-unmet";
+
+/**
+ * #1753: the proof-shape serialization-omission note. A satisfied ordinary
+ * runtime row whose claim emitted NO enforcement-location citation at all
+ * (no parseable `enforcement` field and no location-shaped wire evidence
+ * ref) while the claim still DISCLOSED its evidence — any `evidence[]` entry
+ * with a non-empty `kind`/`ref`/`detail`: an acquisition receipt, an
+ * unparsable ref, a detail — degrades to `unverifiable` under this note with
+ * ADVISORY materiality. The reviewer owns the semantic conclusion
+ * (#1656/#1658); with no citation emitted there is no objective provenance
+ * left to validate or refute, so the missing validator-shaped field is
+ * bookkeeping and must never prove the requirement materially unresolved by
+ * itself (the machinery-created INCOMPLETE the PR #1747 organic run
+ * reproduced). A bare `satisfied` claim with NO evidence disclosure keeps
+ * the `downgraded-no-valid-enforcement-location` material path, and the
+ * disposition seam surfaces this note as the reserved ADVISORY
+ * `proof_shape_mismatch` diagnostic.
+ */
+export const SATISFIED_NO_ENFORCEMENT_CITATION_NOTE = "satisfied-no-enforcement-citation";
 
 /** #1658 review: the in-scope `unmet_claimed` rows — the reviewer's own
  * well-formed gap claims (#1095) on requirements the applicability scope
