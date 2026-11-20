@@ -137,9 +137,14 @@ The chart defaults to polling **trusted, explicitly listed** repositories every
 `controller.reconcile.repos: [owner/repo]` to activate it. With no targets,
 the chart starts no poll and does not scan the App's other repositories.
 For GitHub, also set `controller.reconcile.githubInstallationId` to the
-installation authorized to read those repositories. Forgejo/Gitea reuse their
-configured forge credential. A nonempty repo list without the required GitHub
-installation ID refuses to render, rather than silently skipping reviews.
+installation authorized to read those repositories. It is also the identity
+the GitHub webhook intake falls back to when a delivery omits
+`installation.id` (#1723), so it is emitted whenever configured — even with
+the sweep disabled — and a delivery the intake cannot assign to any
+installation is refused rather than minting a job that cannot authenticate.
+Forgejo/Gitea reuse their configured forge credential. A nonempty repo list
+without the required GitHub installation ID refuses to render, rather than
+silently skipping reviews.
 
 Webhooks (`controller.webhook.enabled`) are **optional** for low-latency
 delivery; the scheduled sweep discovers missed/new PR heads independently.

@@ -96,6 +96,32 @@ the bound forge-integration identity, the per-repository config fingerprint
 and the adoption epoch — so the poll mints the same generation the webhook
 delivery mints.
 
+### Installation identity (#1723)
+
+A REAL GitHub App delivery carries `installation: { id }` at the top level,
+and `normalizeGitHubEvent` projects it to the canonical `installationId` —
+the identity the minted job hashes and the worker credential broker mints
+against. GitHub repository webhooks (and forwarding proxies that drop
+unknown envelope fields) do not carry it, so a delivery can reach the intake
+with no resolvable installation. Minting a job with `installationId: ""`
+guarantees a worker-auth failure after the queue's retries, so the intake
+never does:
+
+- **Repair.** When the operator configured an App installation
+  (`PR_REVIEWER_GITHUB_APP_INSTALLATION_ID`), a delivery with no resolvable
+  `installation.id` is repaired to that identity — the SAME value the
+  reconciliation poll mints with (#1624), so webhook and poll converge on
+  one job identity instead of splitting a head into two generations.
+- **Refuse.** With no configured installation, a delivery that would mint a
+  job (`pr_*`/`check_update`, or `follow_up`) is answered
+  `200 {"status":"ignored"}` and never reaches adoption, dispatch or the
+  queue. Non-job deliveries (`pr_closed`, `pr_merged`, …) are unaffected.
+- **Observe.** Both outcomes are counted per daemon and exposed as
+  `intakeInstallationRepairs` / `intakeInstallationRefusals` on
+  `/admin/diagnostics`, which the operations dashboard renders — a
+  misconfigured webhook is visible at intake time, not after three failed
+  dispatches.
+
 ## Credential lifecycle
 
 Two distinct credentials, never conflated:

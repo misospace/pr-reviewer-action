@@ -286,9 +286,12 @@ export const INSTALLATION_ID_PATTERN = /^[1-9]\d{0,31}$/;
  * not actually carry (mirrors the `asId` convention). No leading zero:
  * "007" and 7 are the SAME installation and must never split into two
  * canonical values, and "0" is not an installation id at all. The
- * boundary never trusts its caller — webhook `installation.id` and poll
- * `options.installationId` are both funneled through this. */
-function normalizeInstallationId(value: unknown): string {
+ * boundary never trusts its caller — webhook `installation.id`, poll
+ * `options.installationId`, and the operator intake's configured fallback
+ * are all funneled through this. Exported so the GitHub intake seam can
+ * validate the operator's fallback with the SAME rule (#1723) instead of
+ * re-deriving it. */
+export function normalizeInstallationId(value: unknown): string {
   if (typeof value === "number" && !Number.isSafeInteger(value)) return "";
   if (typeof value !== "number" && typeof value !== "string") return "";
   const normalized = String(value).trim();

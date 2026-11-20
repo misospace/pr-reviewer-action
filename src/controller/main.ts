@@ -308,7 +308,7 @@ interface StartupConfig {
   readonly reconcile: { readonly intervalMs: number; readonly repos: readonly string[] } | null;
   readonly githubAppId: string;
   readonly githubAppPrivateKeyPem: string;
-  readonly githubPollInstallationId: string;
+  readonly githubInstallationId: string;
   readonly forgejoToken: string;
   readonly followUpModel: string;
   readonly followUpMentions: readonly string[];
@@ -409,7 +409,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   // ── forge material (platform-specific, fail closed).
   let githubAppId = "";
   let githubAppPrivateKeyPem = "";
-  let githubPollInstallationId = "";
+  let githubInstallationId = "";
   let forgejoToken = "";
   if (platform === "github") {
     githubAppId = env.PR_REVIEWER_GITHUB_APP_ID ?? "";
@@ -429,6 +429,18 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     if (!githubAppPrivateKeyPem.includes("-----BEGIN ") || !githubAppPrivateKeyPem.includes("PRIVATE KEY-----")) {
       throw new StartupRefusal(
         "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY must contain a PEM private key",
+        2,
+      );
+    }
+    // #1723: the App installation identity the instance serves. The SAME
+    // value seeds the reconciliation poll's minted identity (#1624) and
+    // repairs a webhook delivery whose signed payload omitted
+    // `installation.id`. Optional for the App intake alone (a real App
+    // delivery carries it); REQUIRED for the poll (enforced below).
+    githubInstallationId = env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID ?? "";
+    if (githubInstallationId !== "" && !/^[1-9][0-9]{0,18}$/.test(githubInstallationId)) {
+      throw new StartupRefusal(
+        "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID must be the installation id the instance serves (a positive decimal id) when the instance serves github",
         2,
       );
     }
@@ -540,14 +552,11 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
         2,
       );
     }
-    if (platform === "github") {
-      githubPollInstallationId = env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID ?? "";
-      if (!/^[1-9][0-9]{0,18}$/.test(githubPollInstallationId)) {
-        throw new StartupRefusal(
-          "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID must be the installation id the reconciliation poll authenticates as when the instance serves github",
-          2,
-        );
-      }
+    if (platform === "github" && githubInstallationId === "") {
+      throw new StartupRefusal(
+        "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID must be the installation id the reconciliation poll authenticates as when the instance serves github",
+        2,
+      );
     }
     reconcile = { intervalMs, repos };
   }
@@ -612,7 +621,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     reconcile,
     githubAppId,
     githubAppPrivateKeyPem,
-    githubPollInstallationId,
+    githubInstallationId,
     forgejoToken,
     followUpModel: env.PR_REVIEWER_FOLLOWUP_MODEL ?? "",
     followUpMentions: (env.PR_REVIEWER_FOLLOWUP_MENTIONS ?? "")
@@ -760,12 +769,18 @@ function createAdminDeps(deps: {
       };
     },
     async diagnostics(): Promise<Record<string, string | number | boolean>> {
+      const intakeInstallation = deps.daemon.intakeInstallationDiagnostics();
       return {
         platform: deps.platform,
         executorProfiles: deps.instance.executorProfiles.length,
         modelProfiles: deps.instance.modelProfiles.length,
         queuePersistenceError: deps.daemon.queuePersistenceError() === "" ? "ok" : "latched",
         intakeStopped: deps.daemon.stopped,
+        // #1723: a webhook delivery that omitted its installation identity
+        // is visible AT INTAKE: `repairs` used the configured App
+        // installation; `refusals` never minted a job (fail closed).
+        intakeInstallationRepairs: intakeInstallation.repairs,
+        intakeInstallationRefusals: intakeInstallation.refusals,
       };
     },
     async forceRereview() {
@@ -1288,8 +1303,8 @@ export async function controllerMain(
           ? {
               githubAppId: startup.githubAppId,
               githubAppPrivateKeyPem: startup.githubAppPrivateKeyPem,
-              ...(startup.githubPollInstallationId !== ""
-                ? { githubPollInstallationId: startup.githubPollInstallationId }
+              ...(startup.githubInstallationId !== ""
+                ? { githubPollInstallationId: startup.githubInstallationId }
                 : {}),
             }
           : { forgejoToken: startup.forgejoToken }),
@@ -1494,8 +1509,8 @@ export async function controllerMain(
           // A poll event minted without it carries `installationId: ""`,
           // and the minting broker refuses the whole worker credential
           // set — the exact GitHub self-hosted path this wiring unlocks.
-          ...(startup.githubPollInstallationId !== ""
-            ? { installationId: startup.githubPollInstallationId }
+          ...(startup.githubInstallationId !== ""
+            ? { installationId: startup.githubInstallationId }
             : {}),
           listOpenPullRequests: (repo) =>
             composedForge === null
@@ -1532,6 +1547,11 @@ export async function controllerMain(
       credentialRefs: credentialBinding.credentialRefs,
       executors,
       ...(deps.createWorkspace !== undefined ? { createWorkspace: deps.createWorkspace } : {}),
+      // #1723: the App installation identity repairs a webhook delivery that
+      // omitted `installation.id` — the same identity the poll mints with.
+      ...(startup.githubInstallationId !== ""
+        ? { githubInstallationId: startup.githubInstallationId }
+        : {}),
       ...(webhook !== undefined ? { webhook } : {}),
       ...(reconcile !== undefined ? { reconcile } : {}),
       now,

@@ -1077,6 +1077,10 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
   const env = baseEnv(configPath);
   env.PR_REVIEWER_GITHUB_APP_ID = "12345";
   env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  // #1723: the App installation identity is read for the webhook intake
+  // too (it is the fallback for a delivery that omitted `installation.id`),
+  // not only for the reconciliation poll.
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "4242";
   const port = await freePort();
   env.PR_REVIEWER_WEBHOOK_PORT = String(port);
   env.PR_REVIEWER_WEBHOOK_SECRET = WEBHOOK_SECRET;
@@ -1140,6 +1144,8 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
       base: { sha: BASE, repo: { full_name: "owner/repo" } },
     },
     repository: { full_name: "owner/repo" },
+    // A REAL App delivery carries the delivering installation (#1723).
+    installation: { id: 4242 },
     sender: { login: "contributor" },
   });
   const response = await fetch(`http://127.0.0.1:${port}/`, {
@@ -1156,6 +1162,11 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
   assert.equal(fake.started.length, 1, "the intake scheduled exactly one generation");
   await waitFor(() => publishes.length > 0);
   assert.equal(publishes.length, 1, "the review published exactly once");
+  assert.equal(
+    (publishes[0]!.job as { readonly installationId?: string }).installationId,
+    "4242",
+    "the minted job carries the delivery's installation identity (#1723)",
+  );
 
   // The graceful stop drains and closes the intake.
   const code = await started.stop();

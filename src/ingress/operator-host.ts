@@ -83,6 +83,7 @@ import {
   DurableRateLimitStore,
 } from "../followup/durable-rate-limit.js";
 import type { FollowUpRateLimits } from "../followup/plan.js";
+import type { ForgeEventKind } from "../events/types.js";
 import type { FollowUpConsumerOptions } from "./followup-host.js";
 import {
   createOperatorEventRouter,
@@ -223,6 +224,18 @@ export interface OperatorHostOptions {
   /** The re-review trigger label; the normalizer's default applies when
    * omitted. */
   readonly rereviewLabel?: string | undefined;
+  /** The operator's configured GitHub App installation identity (#1723).
+   * Only the GitHub intake consumes it: a delivery that carries no
+   * resolvable `installation.id` is repaired to this identity (the SAME one
+   * the reconciliation poll mints with, #1624); with none configured the
+   * App intake refuses a delivery that would mint an unauthenticatable job.
+   * Ignored on every other platform. */
+  readonly installationId?: string | undefined;
+  /** Intake identity observability (#1723), forwarded to the GitHub intake:
+   * a delivery was repaired from `installationId`, resp. refused because it
+   * carried no resolvable installation identity. */
+  readonly onInstallationRepair?: ((kind: ForgeEventKind) => void) | undefined;
+  readonly onMissingInstallation?: ((kind: ForgeEventKind) => void) | undefined;
   /** The operator's DURABLE STATE LOCATION: the directory the operator keeps
    * its durable state in (the daemon's queue snapshot lives there too). The
    * host constructs the Q&A budget's durable ledger INSIDE it and injects
@@ -340,7 +353,23 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
     router,
     handler:
       platform === "github"
-        ? createGitHubWebhookHandler(handlerOptions)
+        ? createGitHubWebhookHandler({
+            ...handlerOptions,
+            // #1723: the GitHub App intake always requires a resolvable
+            // installation identity for a job-minting delivery; the
+            // operator's configured installation repairs one that the
+            // signed payload omitted.
+            requireInstallationId: true,
+            ...(options.installationId !== undefined
+              ? { installationIdFallback: options.installationId }
+              : {}),
+            ...(options.onInstallationRepair !== undefined
+              ? { onInstallationRepair: options.onInstallationRepair }
+              : {}),
+            ...(options.onMissingInstallation !== undefined
+              ? { onMissingInstallation: options.onMissingInstallation }
+              : {}),
+          })
         : platform === "gitea"
           ? createGiteaWebhookHandler(handlerOptions)
           : platform === "gitlab"

@@ -72,7 +72,10 @@ controller:
   # faster hints; both paths deduplicate to the same review generation.
   # No repos configured => no sweep is started. Never discover repos beyond
   # this trusted list; disabling explicitly also turns off the sweep.
-  # GitHub polls additionally require the App installation identity.
+  # On GitHub, `githubInstallationId` is the App installation the instance
+  # serves: it is REQUIRED for the poll and is also the webhook intake's
+  # repair for a delivery that omitted `installation.id` (#1723), so it is
+  # emitted whenever set even with the sweep disabled.
   reconcile:
     enabled: true
     intervalMs: 900000

@@ -156,6 +156,30 @@ jobs:
             --set controller.webhook.enabled=false > /var/tmp/render-github-poll.yaml
           grep -A1 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-github-poll.yaml | grep -q 'value: "900000"'
           grep -A1 'name: PR_REVIEWER_GITHUB_APP_INSTALLATION_ID' /var/tmp/render-github-poll.yaml | grep -q 'value: "4242"'
+          # #1723: the App installation identity is ALSO the webhook
+          # intake's fallback for a delivery that omitted `installation.id`,
+          # so a configured id is emitted with polling explicitly disabled.
+          # The poll env must stay absent in that render.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+            --set controller.reconcile.enabled=false \
+            --set-string controller.reconcile.githubInstallationId=4242 \
+            > /var/tmp/render-github-no-poll.yaml
+          if grep -q 'name: PR_REVIEWER_RECONCILE_INTERVAL_MS' /var/tmp/render-github-no-poll.yaml; then
+            echo "reconcile interval rendered with polling disabled" >&2
+            exit 1
+          fi
+          if grep -q 'name: PR_REVIEWER_RECONCILE_REPOS' /var/tmp/render-github-no-poll.yaml; then
+            echo "reconcile repos rendered with polling disabled" >&2
+            exit 1
+          fi
+          # Direct file read (no producer|grep -q pipeline under pipefail).
+          awk '
+            /- name: PR_REVIEWER_GITHUB_APP_INSTALLATION_ID/ {
+              getline
+              if ($0 ~ /value: "4242"/) found = 1
+            }
+            END { exit found ? 0 : 1 }
+          ' /var/tmp/render-github-no-poll.yaml
 
       - name: Render (kubernetes-executor example)
         run: |

@@ -642,8 +642,19 @@ function makeGitHubSyncPayload(): Record<string, unknown> {
       base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
     },
     repository: { full_name: "org/repo" },
+    // A REAL GitHub App delivery carries the delivering installation
+    // (#1723): without it the minted job cannot authenticate.
+    installation: { id: 136450513 },
     sender: { login: "octo" },
   };
+}
+
+/** The SAME delivery shape with the `installation` envelope absent — the
+ *  shape a repository webhook (or a stripping proxy) produces (#1723). */
+function makeGitHubSyncPayloadWithoutInstallation(): Record<string, unknown> {
+  const payload = makeGitHubSyncPayload();
+  delete payload["installation"];
+  return payload;
 }
 
 test("the platform-aware host binds the GITHUB intake: it requires X-Hub-Signature-256 and refuses a Forgejo delivery", async (t) => {
@@ -710,6 +721,82 @@ test("the platform-aware host binds the GITHUB intake: it requires X-Hub-Signatu
   assert.equal(dispatched[0]!.kind, "synchronize");
   assert.equal(dispatched[0]!.repoFullName, "org/repo");
   assert.equal(dispatched[0]!.prNumber, 7);
+  assert.equal(
+    dispatched[0]!.installationId,
+    "136450513",
+    "a real App delivery's installation identity reaches the dispatch seam (#1723)",
+  );
+});
+
+// ── #1723: the GitHub App intake never mints an unauthenticatable job ──
+
+test("the GitHub intake repairs a delivery that omitted installation.id from the configured installation", async (t) => {
+  const { adapter } = makeAdapter(QUESTION);
+  const dispatched: CanonicalForgeEvent[] = [];
+  let repairs = 0;
+  const host = createOperatorHost({
+    platform: "github",
+    secret: SECRET,
+    durableStateDir: makeDurableStateDir(t),
+    followUp: makeFollowUpOptions(adapter),
+    installationId: "4242",
+    onInstallationRepair: () => {
+      repairs += 1;
+    },
+    dispatch: (event) => {
+      dispatched.push(event);
+    },
+  });
+  const h = await startTestHandler(host.handler);
+  t.after(() => h.close());
+
+  const body = JSON.stringify(makeGitHubSyncPayloadWithoutInstallation());
+  const res = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]!.installationId, "4242");
+  assert.equal(repairs, 1, "the repair is observable");
+});
+
+test("the GitHub intake REFUSES a job-minting delivery with no resolvable installation id", async (t) => {
+  const { adapter } = makeAdapter(QUESTION);
+  const dispatched: CanonicalForgeEvent[] = [];
+  let refusals = 0;
+  const host = createOperatorHost({
+    platform: "github",
+    secret: SECRET,
+    durableStateDir: makeDurableStateDir(t),
+    followUp: makeFollowUpOptions(adapter),
+    onMissingInstallation: () => {
+      refusals += 1;
+    },
+    dispatch: (event) => {
+      dispatched.push(event);
+    },
+  });
+  const h = await startTestHandler(host.handler);
+  t.after(() => h.close());
+
+  const body = JSON.stringify(makeGitHubSyncPayloadWithoutInstallation());
+  const res = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "ignored" });
+  assert.equal(dispatched.length, 0, "no guaranteed-to-fail job is minted");
+  assert.equal(refusals, 1, "the refusal is observable");
 });
 
 // ── #740: the GitLab intake is what the `gitlab` platform binds ──

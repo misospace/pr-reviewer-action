@@ -43,8 +43,9 @@
 // its own, never rewrites the signed `action`, and never mutates its input
 // (it always returns a copy).
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { normalizeGitHubEvent } from "../events/normalize.js";
-import type { CanonicalForgeEvent } from "../events/types.js";
+import { normalizeGitHubEvent, normalizeInstallationId } from "../events/normalize.js";
+import type { CanonicalForgeEvent, ForgeEventKind } from "../events/types.js";
+import { shouldSchedule } from "../jobs/schedule.js";
 import { verifyGitHubWebhookSignature } from "./github-app-signature.js";
 import type { OperatorEventRouter } from "./operator-router.js";
 import { DEFAULT_MAX_WEBHOOK_BODY_BYTES } from "./webhook-handler.js";
@@ -87,11 +88,50 @@ export interface GitHubWebhookHandlerOptions {
   /** The re-review trigger label; the normalizer's default applies when
    * omitted. */
   readonly rereviewLabel?: string | undefined;
+  /** The operator's configured GitHub App installation identity (#1723).
+   * A real App delivery carries top-level `installation.id`; when one does
+   * NOT (a repository webhook, or a forwarding proxy that stripped the
+   * field) the minted job would carry `installationId: ""` and every worker
+   * credential mint would refuse it. When this is a canonical id, the
+   * intake REPAIRS such an event to it — the same installation the
+   * reconciliation poll mints with (#1624), so the two paths converge.
+   * Validated through the canonical guard; anything else is ignored. */
+  readonly installationIdFallback?: string | undefined;
+  /** Refuse a delivery that would mint a job but has NO resolvable
+   * installation identity (and no `installationIdFallback`). Set by the
+   * GitHub App intake: a job that cannot authenticate must never be minted
+   * and retried to failure (#1723). Absent → legacy permissive behavior for
+   * direct/test construction. */
+  readonly requireInstallationId?: boolean | undefined;
+  /** Intake identity observability (#1723): a delivery was repaired from
+   * `installationIdFallback`, resp. refused because it carried no
+   * resolvable installation identity. A throwing callback is swallowed —
+   * observability must never break intake. */
+  readonly onInstallationRepair?: ((kind: ForgeEventKind) => void) | undefined;
+  readonly onMissingInstallation?: ((kind: ForgeEventKind) => void) | undefined;
   readonly onEvent: (event: CanonicalForgeEvent) => void | Promise<void>;
   /** The operator-mode event router. When present, a canonical `follow_up`
    * delivery is handed to it (and never to `onEvent`); everything else is
    * unchanged. Absent → the handler behaves exactly as it did before. */
   readonly router?: OperatorEventRouter | undefined;
+}
+
+/** Kinds that mint a `ReviewJob` and therefore require an installation
+ * identity a worker can authenticate with. Mirrors `shouldSchedule` plus
+ * the `follow_up` job kind (a follow-up is not a review generation but is
+ * still a job). */
+function mintsJob(event: CanonicalForgeEvent): boolean {
+  return event.prNumber > 0 && (shouldSchedule(event) || event.kind === "follow_up");
+}
+
+/** Run an observability callback without letting it break intake. */
+function notify(callback: ((kind: ForgeEventKind) => void) | undefined, kind: ForgeEventKind): void {
+  if (callback === undefined) return;
+  try {
+    callback(kind);
+  } catch {
+    // A broken observer must never change the response contract.
+  }
 }
 
 function send(res: ServerResponse, status: number, body: string): void {
@@ -258,12 +298,31 @@ export function createGitHubWebhookHandler(
         eventHeader,
         parsed as Record<string, unknown>,
       );
-      const event = normalizeGitHubEvent(payload, "webhook", normalizeOptions);
+      let event = normalizeGitHubEvent(payload, "webhook", normalizeOptions);
       if (event === null) {
         // Ack so the forge stops redelivering a permanently unroutable
         // delivery.
         settle(200, '{"status":"ignored"}');
         return;
+      }
+      // #1723: installation identity. A REAL GitHub App delivery carries
+      // top-level `installation.id`; one that does not (a repository
+      // webhook, or a proxy that stripped the field) would mint a job with
+      // `installationId: ""`, which the worker credential broker refuses —
+      // three retries and a settled failure instead of a review. Repair it
+      // from the operator's configured App installation (the SAME identity
+      // the poll mints with) when one is bound; otherwise the App intake
+      // REFUSES the delivery before any job exists.
+      if (event.installationId === "") {
+        const fallback = normalizeInstallationId(options.installationIdFallback);
+        if (fallback !== "") {
+          event = Object.freeze({ ...event, installationId: fallback });
+          notify(options.onInstallationRepair, event.kind);
+        } else if (options.requireInstallationId === true && mintsJob(event)) {
+          notify(options.onMissingInstallation, event.kind);
+          settle(200, '{"status":"ignored"}');
+          return;
+        }
       }
 
       try {

@@ -1907,6 +1907,8 @@ test("the daemon serves the platform's intake: a signed GitHub delivery reaches 
       base: { sha: BASE, repo: { full_name: "owner/repo" } },
     },
     repository: { full_name: "owner/repo" },
+    // A REAL App delivery carries the delivering installation (#1723).
+    installation: { id: 136450513 },
     sender: { login: "contributor" },
   });
   const res = await fetch(`http://127.0.0.1:${port}/`, {
@@ -1927,6 +1929,108 @@ test("the daemon serves the platform's intake: a signed GitHub delivery reaches 
   assert.equal(h.fake.started[0]!.headSha, HEAD);
   await waitFor(() => h.forgePublishes.length > 0);
   assert.equal(h.forgePublishes.length, 1, "the scheduled review published exactly once");
+  assert.equal(
+    h.forgePublishes[0]!.job.installationId,
+    "136450513",
+    "the minted job carries the delivering installation, not the empty sentinel (#1723)",
+  );
+});
+
+test("the daemon repairs an installation-less App delivery from its configured installation (#1723)", async (t) => {
+  const port = await freePort();
+  const h = await start({
+    options: {
+      githubInstallationId: "4242",
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      webhook: {
+        platform: "github",
+        port,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: { adapter: followUpAdapter(), botLogin: async () => "reviewer-bot", clock: () => 1_000_000, rereviewCommand: "/ai-review", mentionHandles: ["reviewer-bot"], answer: async () => "an answer", enqueueRereviewJob: async () => true },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  // The SAME real delivery shape, minus the `installation` envelope — the
+  // shape that used to mint a job no worker could authenticate.
+  const body = JSON.stringify({
+    action: "synchronize",
+    number: 7,
+    pull_request: {
+      number: 7,
+      id: 4242,
+      head: { sha: HEAD, repo: { full_name: "owner/repo" } },
+      base: { sha: BASE, repo: { full_name: "owner/repo" } },
+    },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "contributor" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(GITHUB_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202, "the delivery is repaired, not refused, when an installation is configured");
+
+  await waitFor(() => h.forgePublishes.length > 0);
+  assert.equal(
+    h.forgePublishes[0]!.job.installationId,
+    "4242",
+    "the repaired job carries the operator's configured installation (the poll's identity)",
+  );
+  assert.deepEqual(h.daemon.intakeInstallationDiagnostics(), { repairs: 1, refusals: 0 });
+});
+
+test("the daemon refuses an installation-less App delivery when no installation is configured (#1723)", async (t) => {
+  const port = await freePort();
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      webhook: {
+        platform: "github",
+        port,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: { adapter: followUpAdapter(), botLogin: async () => "reviewer-bot", clock: () => 1_000_000, rereviewCommand: "/ai-review", mentionHandles: ["reviewer-bot"], answer: async () => "an answer", enqueueRereviewJob: async () => true },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  const body = JSON.stringify({
+    action: "opened",
+    number: 7,
+    pull_request: {
+      number: 7,
+      id: 4242,
+      head: { sha: HEAD, repo: { full_name: "owner/repo" } },
+      base: { sha: BASE, repo: { full_name: "owner/repo" } },
+    },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "contributor" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(GITHUB_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "ignored" });
+  await settleFor(150);
+  assert.equal(h.fake.started.length, 0, "no guaranteed-to-fail job is minted");
+  assert.deepEqual(h.daemon.intakeInstallationDiagnostics(), { repairs: 0, refusals: 1 });
 });
 
 // ── the fixes the review round demanded ───────────────────────────────────
