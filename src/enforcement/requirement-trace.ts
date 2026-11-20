@@ -2708,53 +2708,86 @@ function coverageClaimEvidence(claim: RawClaim): CoverageClaimEvidence {
 }
 
 /**
- * #1753: the satisfied row's evidence-list classification, for the
- * enforcement-citation omission split. Two independent, deterministic
- * questions over the wire `evidence[]` entries:
+ * #1753 (review): does the receipt-kind ref name something the run's own
+ * record vouches for — an acquired receipt id exactly (`call-<n>`,
+ * `ci:<check>`, `corpus-diff:<path>`), or an acquired head-bound subject
+ * path with an optional `:line`/`-range` suffix (citation-suffix noise; the
+ * path prefix is what the record vouches for)? Matching is exact against
+ * the bounded token set; nothing is inferred.
+ */
+function receiptTokenMatch(ref: string, tokens: ReadonlySet<string>): boolean {
+  const trimmed = ref.trim();
+  if (tokens.has(trimmed)) return true;
+  const suffix = trimmed.lastIndexOf(":");
+  if (suffix <= 0 || suffix === trimmed.length - 1) return false;
+  if (!/^\d+(-\d+)?$/.test(trimmed.slice(suffix + 1))) return false;
+  return tokens.has(trimmed.slice(0, suffix));
+}
+
+/**
+ * #1753 (review round 2): the satisfied row's evidence-list classification,
+ * for the enforcement-citation omission split. Deterministic questions over
+ * the wire `evidence[]` entries, all gated on the CANONICAL concrete-evidence
+ * boundary (`isConcreteCoverageEvidence` — the exact predicate
+ * `normalizeEvidence` applies when it credits evidence and flags a row
+ * `downgraded-no-concrete-evidence`): a recognized evidence kind
+ * (`file`/`test`/`tool`/`ci`/`diff`) AND a concrete `ref` or `detail`.
  *
- * - `disclosesEvidence` — at least one entry is CONCRETE EVIDENCE under the
- *   canonical boundary (`isConcreteCoverageEvidence`, the exact predicate
- *   `normalizeEvidence` applies when it credits evidence and flags a row
- *   `downgraded-no-concrete-evidence`): a recognized evidence kind
- *   (`file`/`test`/`tool`/`ci`/`diff`) AND a concrete `ref` or `detail` —
- *   e.g. an acquisition receipt (`kind: "tool"`, ref `"call-12"`) or a
- *   detail-only `ci` entry. A kind-only shell (`{kind:"tool"}` with ref and
- *   detail both empty) is NOT evidence, and an unrecognized kind carrying
- *   arbitrary text is NOT evidence — the normalizer drops it, and a
- *   prompt-only provider must not self-authorize the advisory omission
- *   path through an invented kind.
+ * - `disclosesEvidence` — at least one RECEIPT-kind entry (`tool`/`ci`, the
+ *   #1657 disclosure kinds) whose concrete ref the run's OWN receipt
+ *   vocabulary vouches for: an acquired receipt id, or an acquired
+ *   head-bound subject path (with an optional `:line`/range suffix). The
+ *   reviewer disclosed evidence the run's record proves it actually
+ *   acquired; only the citation SHAPE is missing.
+ * - `unbackedReceiptEvidence` — receipt-kind concrete evidence whose ref
+ *   names NOTHING in the run's acquisition record (a fabricated
+ *   `call-<n>`, an unacquired receipt), or a detail-only prose claim with
+ *   nothing to cross-check, or any receipt-kind claim when the record
+ *   refuses or never existed. Material — a satisfied conclusion can never
+ *   ride self-declared acquisition.
  * - `malformedLocationAttempt` — at least one LOCATION-kind entry
  *   (`file`/`test`/`diff` — the kinds the wire contract declares as
- *   citations) carries a concrete non-empty ref that the ONE canonical
- *   citation grammar refuses (prose, URL, traversal, absolute, control
- *   bytes, reversed ranges). The reviewer attempted a citation and produced
- *   a shape the grammar rejects: that is invalid provenance, never a polite
- *   omission — the parse-door fabrication guards keep their material path
- *   (#252), and one malformed attempt is enough to fail the whole row
- *   closed.
+ *   citations) carries a concrete ref the ONE citation grammar refuses
+ *   (prose, URL, traversal, absolute, control bytes, reversed ranges). At
+ *   the omission question every location-kind ref is necessarily
+ *   grammar-refused (a parsed one would already be in `enforcement`). That
+ *   is invalid provenance, never a polite omission — the parse-door
+ *   fabrication guards keep their material path (#252), and one malformed
+ *   attempt is enough to fail the whole row closed.
  *
  * A ref that PARSES but does not resolve at head never reaches here as an
  * omission question — it is already a validated-and-refuted citation
  * (`downgraded-no-valid-enforcement-location`, material). The additive
- * `reason` is prose, not evidence, and never satisfies either check: model
+ * `reason` is prose, not evidence, and never satisfies any check: model
  * prose alone can never certify an approval.
  */
-function satisfiedEvidenceClassification(claim: RawClaim): { disclosesEvidence: boolean; malformedLocationAttempt: boolean } {
+function satisfiedEvidenceClassification(
+  claim: RawClaim,
+  receiptTokens: ReadonlySet<string>,
+): { disclosesEvidence: boolean; malformedLocationAttempt: boolean; unbackedReceiptEvidence: boolean } {
   let disclosesEvidence = false;
   let malformedLocationAttempt = false;
+  let unbackedReceiptEvidence = false;
   if (Array.isArray(claim.evidence)) {
     for (const item of claim.evidence) {
-      if (isConcreteCoverageEvidence(item)) disclosesEvidence = true;
-      const entry = item as { kind?: unknown; ref?: unknown } | null;
+      if (!isConcreteCoverageEvidence(item)) continue;
+      const entry = item as { kind?: unknown; ref?: unknown };
       const kind = entry && typeof entry.kind === "string" ? entry.kind.toLowerCase() : "";
       const ref = entry && typeof entry.ref === "string" ? entry.ref : "";
-      if ((kind === "file" || kind === "test" || kind === "diff") && ref.trim() !== ""
-        && coverageRefLocation(ref) === null) {
+      if (kind === "tool" || kind === "ci") {
+        // #1753 (review): receipt-kind evidence is credited ONLY against the
+        // run's own acquisition record — never on the model's declaration.
+        if (ref.trim() !== "" && receiptTokenMatch(ref, receiptTokens)) {
+          disclosesEvidence = true;
+        } else {
+          unbackedReceiptEvidence = true;
+        }
+      } else if (ref.trim() !== "" && coverageRefLocation(ref) === null) {
         malformedLocationAttempt = true;
       }
     }
   }
-  return { disclosesEvidence, malformedLocationAttempt };
+  return { disclosesEvidence, malformedLocationAttempt, unbackedReceiptEvidence };
 }
 
 /** Records an artifact-level parser/validation diagnostic. The final slot of
@@ -2819,6 +2852,11 @@ function missingReasonFloor(
   // It composes with the test gap exactly like the emitted-but-unresolvable
   // enforcement gap (#1724's additive-gap rule).
   const omissionGap = notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE);
+  // #1753 (review): the receipt-unbacked cause — the reviewer's receipt
+  // evidence names nothing in the run's own acquisition record. Its own
+  // primary wording; when it co-occurs with a demanded test gap, the test
+  // gap composes additively after it.
+  const unbackedReceipt = notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE);
   const testGap = notes.includes("downgraded-no-valid-test-location");
   const deterministicFailure = structuralFailed || structuralRange || topologyOverflow || seamUncovered;
   if (structuralFailed) {
@@ -2833,6 +2871,8 @@ function missingReasonFloor(
     parts.push("reviewer reported unknown without naming what was not verified");
   } else if (notes.includes("disposition-invalid")) {
     parts.push("reviewer decision row carried no usable status or explanation");
+  } else if (unbackedReceipt) {
+    parts.push("reviewer reported satisfied but its receipt evidence does not resolve to the run's own acquisition record");
   } else if (enforcementGap || omissionGap || testGap) {
     // #1724's composition, #1753's second verb class: the citation-refusal
     // gaps keep their legacy "cited …" phrasing byte-for-byte, and the
@@ -2857,11 +2897,16 @@ function missingReasonFloor(
   // test evidence in the same fold. Any citation-gap note that still applies
   // is surfaced additively after the primary diagnosis (r2 review: the floor
   // must be additive across deterministic diagnoses and orthogonal proof
-  // gaps, never choose only one).
-  if (deterministicFailure && (enforcementGap || testGap)) {
+  // gaps, never choose only one). #1753 (review): the receipt-unbacked
+  // primary composes the same way.
+  if ((deterministicFailure || unbackedReceipt) && (enforcementGap || omissionGap || testGap)) {
+    // Legacy noun-phrase template (the #1724 r2 pin): "additionally, no
+    // resolvable regression-test location" — no verb, the primary diagnosis
+    // already carries it.
     const gaps: string[] = [];
     if (enforcementGap) gaps.push("no resolvable enforcement location");
     if (testGap) gaps.push("no resolvable regression-test location");
+    if (omissionGap) gaps.push("no emitted enforcement-location citation");
     parts.push(`additionally, ${gaps.join(" and ")}`);
   }
   // Part 2 — what evidence the row carries or demands. The deterministic and
@@ -2925,6 +2970,17 @@ export function validateRequirementTrace(
      * unavailability) so the author sees what the review could and could not
      * observe; it never changes a disposition. */
     ciState?: string | null | undefined;
+    /** #1753 (review): the run's own #1657 receipt vocabulary, prepared by
+     * `receiptVocabularyForTrace` from the evidence-receipt ledger — the
+     * acquired receipt ids plus head-bound acquired subject paths, with the
+     * ledger state. The satisfied-omission disclosure check credits
+     * receipt-kind evidence (`kind: tool`/`ci`) ONLY against this set:
+     * `valid` credits exactly the tokens, `refused` and `unavailable` credit
+     * nothing (fail closed — a receipt claim on a lane with no acquisition
+     * record names an acquisition that never happened). ALWAYS supplied by
+     * the engine; absent (direct/unit callers) reads as `unavailable` —
+     * default-deny, per the module's fail-closed doctrine. */
+    evidenceReceipts?: { state: "unavailable" | "refused" | "valid"; tokens: readonly string[] } | undefined;
   } = {},
 ): RequirementTraceArtifact {
   const { inScope, outOfScope } = requirementTraceScope(ledger, changed, context);
@@ -2937,6 +2993,17 @@ export function validateRequirementTrace(
       errors: [],
     };
   }
+
+  // #1753 (review): the receipt-backed token set the omission disclosure
+  // check may credit. Absent context (direct/unit callers) reads as
+  // `unavailable` — nothing is receipt-backed: default-deny, per the
+  // module's fail-closed doctrine. Only a `valid` ledger credits its
+  // bounded token set; `refused` and `unavailable` credit nothing.
+  const receiptTokens: ReadonlySet<string> = new Set(
+    context.evidenceReceipts && context.evidenceReceipts.state === "valid"
+      ? context.evidenceReceipts.tokens.filter((token) => typeof token === "string" && token !== "")
+      : [],
+  );
 
   // #1062 review follow-up: provenance lookup so a pending advisory can state
   // WHERE its requirement came from (linked issues / PR body / standards / …).
@@ -3170,11 +3237,21 @@ export function validateRequirementTrace(
             // can never certify an approval.
             if (!anyLocationValid(enforcement, cache)) {
               disposition = "unverifiable";
-              const evidenceShape = satisfiedEvidenceClassification(claim);
-              if (enforcement.length > 0 || !evidenceShape.disclosesEvidence || evidenceShape.malformedLocationAttempt) {
+              const evidenceShape = satisfiedEvidenceClassification(claim, receiptTokens);
+              if (enforcement.length > 0 || evidenceShape.malformedLocationAttempt) {
                 notes.push("downgraded-no-valid-enforcement-location");
-              } else {
+              } else if (evidenceShape.disclosesEvidence) {
                 notes.push(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE);
+              } else if (evidenceShape.unbackedReceiptEvidence) {
+                // #1753 (review): the receipt evidence names nothing in the
+                // run's own acquisition record — a fabricated call id, an
+                // unacquired receipt, a detail-only prose claim, or any
+                // receipt-kind claim on a lane whose record refused or never
+                // existed. Material: a satisfied conclusion can never ride
+                // self-declared acquisition.
+                notes.push(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE);
+              } else {
+                notes.push("downgraded-no-valid-enforcement-location");
               }
             }
             // The explicit test demand is the requirement's OWN text, not
@@ -3251,7 +3328,8 @@ export function validateRequirementTrace(
       unresolvedMaterialIds.push(entry.id);
     } else if (notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE)
       && !notes.includes("downgraded-no-valid-enforcement-location")
-      && !notes.includes("downgraded-no-valid-test-location")) {
+      && !notes.includes("downgraded-no-valid-test-location")
+      && !notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE)) {
       // #1753: a satisfied ordinary runtime row that emitted no
       // enforcement-location citation but disclosed its evidence — the
       // proof-shape serialization omission is advisory bookkeeping
@@ -3406,7 +3484,12 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
             // enforcement location" wording that belongs to a citation that
             // failed validation (#959's distinct-failures rule).
             "the reviewer emitted no enforcement-location citation"
-          : "no valid enforcement location";
+          : row.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE)
+            ? // #1753 (review): the receipt evidence names nothing in the
+              // run's own acquisition record — distinct from a citation
+              // that failed validation and from an omission (#959).
+              "the receipt evidence is not backed by the run's acquisition record"
+            : "no valid enforcement location";
     const details: string[] = [];
     if (row.notes.includes("distributed-topology-overflow")) {
       details.push(`distributed topology exceeds the ${MAX_GROUPS_PER_RULE} representable seams`);
@@ -3554,6 +3637,11 @@ export function applyRequirementTraceEnforcement(
     /** #1062 review follow-up: the CI gate's exact-head conclusion, if this run
      * observed one — diagnostic-only text surfaced in the non-code advisory. */
     ciState?: string | null | undefined;
+    /** #1753 (review): the run's own #1657 receipt vocabulary
+     * (`receiptVocabularyForTrace` over the evidence-receipt ledger) — the
+     * satisfied-omission disclosure check credits receipt-kind evidence ONLY
+     * against it. Absent reads as `unavailable` (default-deny). */
+    evidenceReceipts?: { state: "unavailable" | "refused" | "valid"; tokens: readonly string[] } | undefined;
   },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
@@ -3575,6 +3663,7 @@ export function applyRequirementTraceEnforcement(
     prLinkedRefs: options.prLinkedRefs,
     prBody: options.prBody,
     ciState: options.ciState,
+    evidenceReceipts: options.evidenceReceipts,
   });
   if (trace.rows.length === 0) {
     return { applied: false, trace };
@@ -3661,6 +3750,21 @@ export const OUT_OF_SCOPE_UNMET_NOTE = "out-of-scope-reported-unmet";
  * ADVISORY `proof_shape_mismatch` diagnostic.
  */
 export const SATISFIED_NO_ENFORCEMENT_CITATION_NOTE = "satisfied-no-enforcement-citation";
+
+/**
+ * #1753 (review): the receipt-unbacked note — a satisfied ordinary runtime
+ * row whose receipt-kind evidence (`kind: tool`/`ci`) names NOTHING in the
+ * run's own #1657 acquisition record: a fabricated `call-<n>`, a recorded-
+ * but-unacquired receipt, a detail-only prose claim with nothing to
+ * cross-check, or any receipt-kind claim on a lane whose record refused or
+ * never existed (there is no acquisition to cite). This is the fail-closed
+ * MATERIAL path — a satisfied conclusion can never ride self-declared
+ * acquisition — distinct from the advisory `satisfied-no-enforcement-
+ * citation` class, which requires a receipt the record actually vouches
+ * for. The row keeps `downgraded-no-valid-*`'s material ladder rung via
+ * this note's absence from the advisory guards.
+ */
+export const SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE = "satisfied-unbacked-receipt-evidence";
 
 /** #1658 review: the in-scope `unmet_claimed` rows — the reviewer's own
  * well-formed gap claims (#1095) on requirements the applicability scope
