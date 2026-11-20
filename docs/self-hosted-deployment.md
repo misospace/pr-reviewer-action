@@ -413,6 +413,14 @@ poll runs; there is no implicit App-wide repository discovery. An explicit
 accepts `PR_REVIEWER_RECONCILE_REPOS` with an omitted
 `PR_REVIEWER_RECONCILE_INTERVAL_MS` and uses the same 15-minute default.
 
+The sweep runs through the daemon's own reconciliation composition, so a
+polled pull request gets the same review-job identity a webhook would
+give it. Each pass writes to the controller log when it has something to
+say: one summary line when it scheduled work, found open pull requests it
+had already scheduled, hit a failed repository, or had a job refused, plus
+one line per refused job with the reason the daemon gave. A pass that
+listed its repositories and found no open pull request at all stays quiet.
+
 Webhooks can stay **disabled** and review discovery still works; when
 enabled, they provide faster hints but converge with polling through the
 same generation ledger. The sweep fetches **all currently open PRs** per

@@ -44,11 +44,13 @@ import { validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
 import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
+import type { ReconcileReport } from "../src/ingress/reconcile.js";
 import {
   controllerMain,
   createGitHubPublishMintingBroker,
   createModelCredentialVault,
   createWorkerCredentialBinding,
+  reconcileReportDiagnostics,
   type ControllerMainHandle,
 } from "../src/controller/main.js";
 import { composeForgeCapability } from "../src/controller/forge-capability.js";
@@ -2318,4 +2320,306 @@ test("the reconcile composition mints the poll job with the App installation id 
   // the mint-backed broker is the composition's only forge credential source.
   assert.equal(env.PR_REVIEWER_CREDENTIAL_FORGE_CRED, undefined);
   assert.equal(env.PR_REVIEWER_CREDENTIAL_GITHUB, undefined);
+});
+
+// ── #1718: the reconcile schedule binds the canonical poll composition ────
+
+interface ReconcileSnapshotJob {
+  readonly platform?: string;
+  readonly repoFullName?: string;
+  readonly prNumber?: number;
+  readonly headSha?: string;
+  readonly adoptionEpoch?: string;
+}
+
+/** Read the durable queue snapshot the way a restart would and pick out the
+ * poll-minted job for `owner/name`. */
+function readReconciledJob(
+  durableStateDir: string,
+): ReconcileSnapshotJob | null {
+  try {
+    const snapshot = JSON.parse(
+      readFileSync(join(durableStateDir, "queue-snapshot.json"), "utf8"),
+    ) as { records?: ReadonlyArray<{ job?: ReconcileSnapshotJob }> };
+    return (
+      snapshot.records?.find(
+        (record) => record.job?.platform === "github" && record.job?.repoFullName === "owner/name",
+      )?.job ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+test("a poll-only intake mints the job with the intake's per-repository identity (#1718)", async (t) => {
+  // The bug: controllerMain bound the schedule through an operator `run`
+  // that called reconcileRepositories WITHOUT the daemon's per-event
+  // resolveBuildOptions, so buildReviewJob minted from `{}` — an EMPTY
+  // adoption identity, a DIFFERENT generation id than the daemon's own
+  // webhook intake mints for the same head, and a poll that scheduled
+  // nothing that ever converged. No webhook delivery runs in this boot: the
+  // poll alone must produce a queue record carrying the intake-resolved
+  // identity. `adoptionEpoch` is the field that proves it: the fixture's
+  // adoption policy (`all_allowed` / `discovered-default: adopt`) resolves a
+  // repository with no adoption record to the intake's FIRST_ADOPTION_EPOCH
+  // ("1") through createAdoptionIdentityResolver (src/controller/daemon.ts),
+  // while the old `{}` build options minted `adoptionEpoch: ""`.
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const dir = mkdtempSync(join(tmpdir(), "ctl-poll-identity-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = privateKeyPem;
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "4242";
+  env.PR_REVIEWER_RECONCILE_INTERVAL_MS = "100";
+  env.PR_REVIEWER_RECONCILE_REPOS = "owner/name";
+
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (/\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
+      return new Response(
+        JSON.stringify({
+          token: "ghs_poll_installation_token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+        { status: 201 },
+      );
+    }
+    if (url.pathname === "/repos/owner/name/pulls") {
+      return new Response(
+        JSON.stringify([
+          {
+            number: 7,
+            state: "open",
+            draft: false,
+            head: { sha: HEAD },
+            base: { sha: BASE, repo: { full_name: "owner/name" } },
+          },
+        ]),
+        { status: 200 },
+      );
+    }
+    return new Response("{}", { status: 404 });
+  };
+
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    fetchImpl,
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handleBox.handle !== null);
+
+  let pollJob: ReconcileSnapshotJob | null = null;
+  await waitFor(() => {
+    pollJob = readReconciledJob(env.PR_REVIEWER_DURABLE_STATE_DIR!);
+    return pollJob !== null;
+  });
+  // The intake's per-repository identity is IN the minted job: the poll-only
+  // intake now converges with what the webhook would have minted (#1718).
+  assert.equal(pollJob!.adoptionEpoch, "1");
+  assert.equal(pollJob!.prNumber, 7);
+  assert.equal(pollJob!.headSha, HEAD);
+});
+
+test("a failing reconcile pass surfaces on the controller stderr (#1718)", async (t) => {
+  // The report used to be discarded (`void run(...)`), so a lister failing
+  // every tick looked EXACTLY like a quiet forge. The composed poll's
+  // onReport must put the failing repository on the controller's diagnostics.
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const dir = mkdtempSync(join(tmpdir(), "ctl-poll-fail-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = privateKeyPem;
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "4242";
+  env.PR_REVIEWER_RECONCILE_INTERVAL_MS = "100";
+  env.PR_REVIEWER_RECONCILE_REPOS = "owner/name";
+
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (/\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
+      return new Response(
+        JSON.stringify({
+          token: "ghs_poll_installation_token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+        { status: 201 },
+      );
+    }
+    if (url.pathname === "/repos/owner/name/pulls") {
+      // The broken forge: the pass records the repository as failed.
+      return new Response("boom", { status: 500 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const stderr = captureStderr();
+  stderr.attach();
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    fetchImpl,
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  try {
+    t.after(async () => {
+      if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+      await running.catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+      cleanupDirs(env);
+    });
+    await waitFor(() => handleBox.handle !== null);
+
+    const passLines = () =>
+      stderr.lines().filter((line) => line.includes("reconcile pass:"));
+    await waitFor(() => passLines().length > 0);
+    const line = passLines()[0]!;
+    assert.ok(line.includes("owner/name"), line);
+    // ONE bounded line derived only from the report's counters.
+    assert.ok(line.includes("failed=owner/name"), line);
+    assert.ok(line.includes("scheduled=0"), line);
+    // One line only (the trailing newline the diagnostic helper appends is
+    // the sole line break).
+    assert.ok(!line.replace(/\n$/, "").includes("\n"), line);
+  } finally {
+    stderr.detach();
+  }
+});
+
+test("a quiet reconcile pass stays silent on the controller stderr (#1718)", async (t) => {
+  // The companion half of #1718's acceptance: surfacing the report must not
+  // turn a healthy, empty forge into log spam on a 15-minute timer. Two
+  // completed passes (the second list request proves the FIRST pass and its
+  // onReport fully settled) must still produce no `reconcile pass:` line.
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const dir = mkdtempSync(join(tmpdir(), "ctl-poll-quiet-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = privateKeyPem;
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "4242";
+  env.PR_REVIEWER_RECONCILE_INTERVAL_MS = "100";
+  env.PR_REVIEWER_RECONCILE_REPOS = "owner/name";
+
+  let listed = 0;
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (/\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
+      return new Response(
+        JSON.stringify({
+          token: "ghs_poll_installation_token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+        { status: 201 },
+      );
+    }
+    if (url.pathname === "/repos/owner/name/pulls") {
+      listed += 1;
+      // The quiet forge: every repository listed, nothing discovered.
+      return new Response("[]", { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const stderr = captureStderr();
+  stderr.attach();
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    fetchImpl,
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  try {
+    t.after(async () => {
+      if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+      await running.catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+      cleanupDirs(env);
+    });
+    await waitFor(() => handleBox.handle !== null);
+    await waitFor(() => listed >= 2);
+    assert.equal(
+      stderr.lines().filter((line) => line.includes("reconcile pass:")).length,
+      0,
+      stderr.lines().join(""),
+    );
+  } finally {
+    stderr.detach();
+  }
+});
+
+test("the reconciliation report renderer carries each refusal's reason (#1718)", () => {
+  // The boot-level tests prove the summary line reaches stderr; they cannot
+  // provoke a refusal on an UNBOUND daemon (the handoff's identity guard is
+  // inert without a bound integration), so the refusal lines the operator
+  // actually reads are pinned here, on the renderer the composed `onReport`
+  // uses. A dropped loop or a mangled reason is the difference between a
+  // refused head an operator can diagnose and one that is only counted.
+  const report = {
+    jobs: [],
+    discovered: 2,
+    skipped: 2,
+    failedRepositories: ["owner/broken"],
+    handoffRefusals: [
+      {
+        repo: "owner/name",
+        reason:
+          "job carries no forge integration identity but this daemon serves 'gh-primary'",
+      },
+    ],
+  } satisfies ReconcileReport;
+  const lines = reconcileReportDiagnostics(report);
+  assert.equal(lines.length, 2, "one summary line plus one line per refusal");
+  assert.match(lines[0]!, /^reconcile pass: scheduled=0 discovered=2 skipped=2 failed=owner\/broken$/);
+  assert.equal(
+    lines[1],
+    "reconcile handoff refused for owner/name: " +
+      "job carries no forge integration identity but this daemon serves 'gh-primary'",
+  );
+  // The quiet pass renders nothing at all (the silence rule lives here, so a
+  // regression that logs every 15-minute tick fails here rather than in prod).
+  assert.deepEqual(
+    reconcileReportDiagnostics({
+      jobs: [],
+      discovered: 0,
+      skipped: 0,
+      failedRepositories: [],
+      handoffRefusals: [],
+    } as unknown as ReconcileReport),
+    [],
+  );
+  // A pass that discovered heads and skipped them all (already scheduled) is
+  // NOT quiet: the heartbeat is the point.
+  assert.equal(
+    reconcileReportDiagnostics({
+      jobs: [],
+      discovered: 5,
+      skipped: 5,
+      failedRepositories: [],
+      handoffRefusals: [],
+    } as unknown as ReconcileReport).length,
+    1,
+  );
 });
