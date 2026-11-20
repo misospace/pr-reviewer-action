@@ -585,6 +585,50 @@ test("linked issue refs: non-closing body implementation references (#872)", () 
   }
 });
 
+// #1749 follow-up: a plain `Refs`/`Ref` link is valid PR syntax for RELATED
+// CONTEXT — GitHub itself gives it no development-link meaning — so it must
+// not import the referenced issue's acceptance criteria into the merge
+// contract. The relationship is classified deterministically at extraction;
+// `Implements`/`Part of`/`Addresses` and the title `(#N)` squash-merge
+// convention stay implementation links, and closing keywords are unchanged.
+test("linked issue refs: plain Refs/Ref links classify as context-only (#1749 follow-up)", () => {
+  for (const [body, spelling] of [["Refs #10", "#10"], ["Ref #10", "#10"], ["refs: #10", "#10"], ["REFS other/repo#10", "other/repo#10"]] as const) {
+    const refs = extractLinkedIssueRefs(body, "o/r");
+    assert.deepEqual(refs.map((ref) => ref.ref), [spelling], body);
+    assert.equal(refs[0]!.closing, false, body);
+    assert.equal(refs[0]!.contextOnly, true, `${body} is a plain reference`);
+  }
+  for (const body of ["Implements #10", "Part of #10", "Addresses #10"]) {
+    const refs = extractLinkedIssueRefs(body, "o/r");
+    assert.equal(refs.length, 1, body);
+    assert.equal(refs[0]!.contextOnly, undefined, `${body} stays an implementation link`);
+  }
+});
+
+test("linked issue refs: context-only is the STRONGEST relationship seen, never the first (#1749 follow-up)", () => {
+  // The title `(#N)` convention names the issue the PR implements — a later
+  // `Refs` spelling of the same identity never demotes it to context.
+  const titled = extractLinkedIssueRefs("Refs #10", "o/r", "feat: planner feed (#10)");
+  assert.equal(titled.length, 1);
+  assert.equal(titled[0]!.contextOnly, undefined, "title convention outranks a Refs mention");
+
+  // Refs first, stronger form second: the merged entry upgrades (and keeps
+  // the first-seen spelling/order).
+  const upgraded = extractLinkedIssueRefs("Refs #10\nImplements #10", "o/r");
+  assert.equal(upgraded.length, 1);
+  assert.equal(upgraded[0]!.ref, "#10");
+  assert.equal(upgraded[0]!.contextOnly, false, "Implements upgrades the Refs-only entry");
+
+  const closed = extractLinkedIssueRefs("Refs #10\nCloses #10", "o/r");
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0]!.closing, true);
+  assert.equal(closed[0]!.contextOnly, undefined, "a later Refs never marks a closing entry as context");
+
+  // The reverse order must never demote an already-stronger relationship.
+  const notDowngraded = extractLinkedIssueRefs("Implements #10\nRefs #10", "o/r");
+  assert.equal(notDowngraded[0]!.contextOnly, undefined, "a later Refs never demotes Implements");
+});
+
 test("linked issue refs: incidental mentions are never linked (#872)", () => {
   assert.deepEqual(extractLinkedIssueRefs("depends on #583", "o/r"), []);
   assert.deepEqual(extractLinkedIssueRefs("see #12 for background", "o/r"), []);

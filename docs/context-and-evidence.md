@@ -67,6 +67,35 @@ issue content, and it never reaches the requirement ledger. This only applies
 to non-closing refs; closing keywords (`Closes`/`Fixes`/`Resolves`) behave as
 before.
 
+A bare `Refs`/`Ref #N` link is the plain-reference relationship (#1749
+follow-up): valid PR syntax for related context, and GitHub gives it no
+development-link meaning. Such an issue is still fetched, fenced into
+`linked-issues.md` for the model, and hashed into the selection signature —
+intake renders `(linked as: context reference)` under its heading — but the
+requirement ledger never treats its body as a requirement source, so the
+referenced issue's acceptance criteria are not this PR's merge contract.
+Any stronger relationship for the same identity (`Closes`/`Fixes`/`Resolves`,
+`Implements`/`Part of`/`Addresses`, or the title `(#N)` convention) wins in
+the dedupe merge, and a criterion shared with a genuine source still enters
+the ledger through that source. A document with no relationship line keeps
+the contract-carrying reading — unknown state is never demoted to context.
+
+The authority for that exclusion is exactly one line: the exact-match
+relationship line intake renders **outside** the JSON fence. A hostile
+linked issue can quote `(linked as: context reference)` verbatim in its own
+body, repeat it, or wrap it in fence-shaped content — inside the fence it
+stays inert JSON string data, and a closing, non-closing, or unlabeled
+(unknown) link keeps its contract-carrying reading no matter what the
+referenced issue says about itself (adversarial coverage:
+`tests-v3/requirements.test.ts`). This is also a different mechanism from
+the umbrella-parent security veto (#1750,
+[Opt-in features](opt-in-features.md)): that veto is criterion-level and
+keeps security-vocabulary criteria **inside a contract-carrying document**
+in scope despite child-ownership narrowing, while context exclusion is
+document-level and records only the reference shape the PR itself used.
+Neither mechanism reads the linked issue's self-description, and neither
+can be steered by issue content.
+
 Labels on linked issues feed classification: a GitHub `security`, `audit`,
 `priority/p0`, or `priority/p1` label produces the matching `risk_flags`
 entry (`linked_security_issue`, `linked_audit_issue`,

@@ -874,3 +874,94 @@ test("#1750 r4 boundary: a PR referencing EITHER jointly-owning child keeps the 
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1749 follow-up: a plain `Refs` link is context, not a merge contract.
+//
+// `Refs owner/repo#N` is valid PR syntax for "related background" — GitHub
+// gives it no development-link meaning. Intake renders the context
+// relationship line, the ledger refuses the document as a requirement
+// source, and the trace has nothing to hold the increment to — even when the
+// referenced issue's criteria share the change's vocabulary, which is exactly
+// the shape that made closing/implementation links contract-bearing.
+// `Implements` (and the whole #1749/#1750 umbrella machinery) is unchanged:
+// the control below keeps the identical criterion contract-carrying.
+// ---------------------------------------------------------------------------
+
+const CONTEXT_ISSUE_BODY = [
+  "## Acceptance criteria",
+  "",
+  "- [ ] The planner and the scheduler engine MUST share one feed.",
+  "",
+  "Tracked separately; linked for background.",
+  "",
+].join("\n");
+
+async function refRelationshipLedger(reference: string): Promise<unknown> {
+  const intake = await buildLinkedIssueContext({
+    pr: { title: "feat: planner feed increment", body: `${reference} #7` },
+    repo: "o/r",
+    adapter: {
+      getIssue: async (repo: string, number: string) => number === "7"
+        ? { ok: true as const, data: { number: 7, title: "Planner notes", state: "open", html_url: "u", labels: [], body: CONTEXT_ISSUE_BODY } }
+        : { ok: false as const, error: `no ${repo}#${number}` },
+    },
+    isForkPr: "false",
+    linear: { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" },
+  });
+  return extractRequirementLedger({ linkedIssuesMarkdown: Buffer.from(intake.artifacts.get("linked-issues.md") ?? new Uint8Array()).toString("utf8") });
+}
+
+test("#1749 follow-up: a Refs-linked issue's criteria never scope the increment (intake→ledger→scope→disposition)", async () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    const ledger = await refRelationshipLedger("Refs");
+    assert.deepEqual((ledger as { requirements: unknown[] }).requirements, [],
+      "the context issue contributed no requirement entries at all");
+    const scope = requirementTraceScope(ledger, "+// planner feeds the scheduler engine", { prLinkedRefs: ["o/r#7"] });
+    assert.deepEqual(scope.inScope, [], "nothing rides a context link into the enforced scope");
+    assert.deepEqual(scope.outOfScope, []);
+    const trace = validateRequirementTrace([], ledger, workspace, "+// planner feeds the scheduler engine", { prLinkedRefs: ["o/r#7"] });
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence, [], "a clean increment referenced by `Refs` only holds no contract rows");
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "approve");
+    assert.equal(disposition.nativeEvent, "APPROVE");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1749 follow-up control: the identical issue linked by Implements stays contract-bearing", async () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/planner/feed.ts", ["export const feed = (x: number) => x;"]);
+    const ledger = await refRelationshipLedger("Implements");
+    const entry = (ledger as { requirements: Array<{ id: string; text: string; provenance: Array<Record<string, unknown>> }> }).requirements
+      .find((candidate) => candidate.text === "The planner and the scheduler engine MUST share one feed.");
+    assert.ok(entry, "the implementation-linked criterion reaches the ledger");
+    assert.equal(entry.provenance[0]?.closing, false);
+    assert.equal((entry.provenance[0] as { contextOnly?: unknown }).contextOnly, undefined,
+      "the persisted provenance shape is unchanged — context docs simply never enter it");
+    const scope = requirementTraceScope(ledger, "+// planner feeds the scheduler engine", { prLinkedRefs: ["o/r#7"] });
+    assert.equal(scope.inScope.length, 1, "the shared-vocabulary criterion scopes in for an implementation link");
+    const claims = [{
+      requirement_id: entry.id,
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the shared feed is not implemented",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, "+// planner feeds the scheduler engine", { prLinkedRefs: ["o/r#7"] });
+    const row = trace.rows.find((candidate) => candidate.requirement_id === entry.id);
+    assert.equal(row?.resolution, "unmet_claimed");
+    assert.equal(traceUnmetClaimedInScopeRows(trace).length, 1, "the claim stays material");
+    const build = dispositionFromTrace(trace);
+    assert.deepEqual(build.evidence.map((item) => item.subject), ["requirement-trace:unmet-claimed"]);
+    const disposition = computeFinalDisposition(dispositionInput(build.evidence) as never);
+    assert.equal(disposition.kind, "incomplete", "an implementation link holds its contract exactly as before");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

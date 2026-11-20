@@ -17,6 +17,19 @@ export interface LinkedIssueRef {
    * of/Refs/Addresses) — those still feed the requirement ledger as context,
    * but must never be treated as "this PR closes that issue". */
   closing: boolean;
+  /** #1749 follow-up: the plain-reference relationship. True ONLY when every
+   * form the PR used to name this issue was a bare `Refs`/`Ref` body link —
+   * valid PR syntax for "related context", and GitHub itself gives it no
+   * development-link meaning. Such an issue is still fetched and embedded as
+   * review context (and hashed into the selection signature), but its
+   * acceptance criteria are NOT this PR's merge contract, so the requirement
+   * ledger skips its body entirely. Any stronger form for the same canonical
+   * identity — a closing keyword, `Implements`/`Part of`/`Addresses`, or the
+   * title's `(#N)` convention — clears the flag in the dedupe merge (the
+   * relationship is the STRONGEST claim the PR made, never the first one);
+   * absent/false means an ordinary implementation link whose criteria stay
+   * contract candidates under the existing (#1749/#1750) umbrella rules. */
+  contextOnly?: boolean;
 }
 
 export const MAX_LINKED_ISSUES = 8;
@@ -36,6 +49,19 @@ export const MAX_LINKED_ISSUES = 8;
  * fence and nothing else. */
 export const LINKED_AS_CLOSING_LINE = "(linked as: closing reference)";
 export const LINKED_AS_NON_CLOSING_LINE = "(linked as: non-closing reference)";
+
+/** #1749 follow-up: the third relationship state — a link the PR used ONLY in
+ * the plain-reference form (`Refs`/`Ref #N`). It renders instead of
+ * {@link LINKED_AS_NON_CLOSING_LINE} so the ledger can tell an implementation
+ * link (`Implements`/`Part of`/`Addresses`, or the title `(#N)` — whose
+ * acceptance criteria are contract candidates) from a context reference whose
+ * referenced issue must stay pure background: fetched, fenced into
+ * `linked-issues.md`, hashed into the selection signature, but NEVER a source
+ * of requirement-ledger entries. The line is intake-authored and exact-matched
+ * outside the fence like the other two; a document without it keeps the
+ * legacy contract-carrying reading (fail closed — an unknown relationship is
+ * never silently demoted to context). */
+export const LINKED_AS_CONTEXT_LINE = "(linked as: context reference)";
 
 // ---------------------------------------------------------------------------
 // #1750: trusted criterion→child ownership evidence (the umbrella
@@ -308,8 +334,18 @@ const GITHUB_ISSUE_REF_PATTERN = /(?:\b(?:close|closes|fix|fixes|resolve|resolve
  * `Ref #N`/`Addresses #N`. Deliberately excludes incidental mentions
  * ("depends on #583", bare "#12" in prose) and "Related to #N" (ambiguous
  * between an implementation reference and an incidental mention; left
- * unlinked). */
-const IMPLEMENTATION_ISSUE_REF_PATTERN = /\b(?:implements|part of|refs?|addresses)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
+ * unlinked). The keyword itself is captured (group 1) so a bare `Refs`/`Ref`
+ * link can be classified as the plain-reference relationship
+ * ({@link CONTEXT_REF_KEYWORD_RE}) WITHOUT changing the single-pass match
+ * order the candidate list depends on. */
+const IMPLEMENTATION_ISSUE_REF_PATTERN = /\b(implements|part of|refs?|addresses)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
+
+/** The keyword vocabulary of the plain-reference relationship (#1749
+ * follow-up): `Refs #N`/`Ref #N` names related context, never an
+ * implementation claim — the referenced issue's acceptance criteria are not
+ * this PR's merge contract. `Implements`/`Part of`/`Addresses` remain
+ * implementation links. */
+const CONTEXT_REF_KEYWORD_RE = /^refs?$/i;
 
 /** A trailing `(#N)` / `(owner/repo#N)` at the very end of the PR title —
  * the conventional-commit / squash-merge title convention. Not anchored
@@ -328,13 +364,17 @@ const TITLE_TRAILING_ISSUE_REF_PATTERN = /\(((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+
  * a non-closing form and a later occurrence is a closing-keyword form, the
  * existing entry is upgraded to `closing: true` in place — the returned
  * list's order (position of first occurrence, in its first-seen spelling)
- * never changes, and an already-closing entry is never downgraded. */
+ * never changes, and an already-closing entry is never downgraded.
+ * #1749 follow-up: the same merge rule governs `contextOnly` — a `Refs`/
+ * `Ref`-only identity is context, but ANY stronger occurrence (closing
+ * keyword, `Implements`/`Part of`/`Addresses`, title `(#N)`) clears it, and
+ * a later `Refs` occurrence never demotes a stronger relationship. */
 export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title?: string): LinkedIssueRef[] {
   const repo = defaultRepo ?? "";
   const byKey = new Map<string, LinkedIssueRef>();
   const items: LinkedIssueRef[] = [];
 
-  const add = (ref: string, closing: boolean): void => {
+  const add = (ref: string, closing: boolean, contextOnly: boolean): void => {
     let repoName: string;
     let issueNumber: string;
     if (ref.includes("/")) {
@@ -351,24 +391,25 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
     const existing = byKey.get(canonicalKey);
     if (existing) {
       if (closing) existing.closing = true;
+      if (!contextOnly) existing.contextOnly = false;
       return;
     }
     if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) return;
-    const item: LinkedIssueRef = { ref, repo: repoName, number, closing };
+    const item: LinkedIssueRef = { ref, repo: repoName, number, closing, ...(contextOnly ? { contextOnly: true } : {}) };
     byKey.set(canonicalKey, item);
     items.push(item);
   };
 
   const titleMatch = TITLE_TRAILING_ISSUE_REF_PATTERN.exec((title ?? "").trim());
-  if (titleMatch) add(titleMatch[1] ?? "", false);
+  if (titleMatch) add(titleMatch[1] ?? "", false, false);
 
   for (const match of (body ?? "").matchAll(GITHUB_ISSUE_REF_PATTERN)) {
     if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
-    add(match[1] ?? "", true);
+    add(match[1] ?? "", true, false);
   }
   for (const match of (body ?? "").matchAll(IMPLEMENTATION_ISSUE_REF_PATTERN)) {
     if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
-    add(match[1] ?? "", false);
+    add(match[2] ?? "", false, CONTEXT_REF_KEYWORD_RE.test(match[1] ?? ""));
   }
 
   return items;

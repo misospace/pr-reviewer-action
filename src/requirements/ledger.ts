@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { escapeControlChars } from "../context/fence.js";
-import { boundedChildRefs, LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_DECOMPOSITION_LINES_PER_ISSUE, parseDecompositionLine } from "../precheck/linked-issues.js";
+import { boundedChildRefs, LINKED_AS_CLOSING_LINE, LINKED_AS_CONTEXT_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_DECOMPOSITION_LINES_PER_ISSUE, parseDecompositionLine } from "../precheck/linked-issues.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { HARNESS_SOURCE, obligationText } from "./obligations.js";
 import { MAX_REQUIREMENT_TEXT_CHARS, normalizeRequirementText, requirementIdOfText } from "./requirement-id.js";
@@ -378,6 +378,15 @@ function boundedLinkedIssueLabels(value: unknown): string[] | undefined {
  * legacy `{ref, body}` shape, and the scope predicate fails closed on the
  * unknown relationship.
  *
+ * #1749 follow-up: a `(linked as: context reference)` line marks a document
+ * the PR linked ONLY by a plain `Refs`/`Ref` reference. The document is
+ * returned with `contextOnly: true` and its body is never scanned for
+ * requirements — a valid context link stays valid PR syntax (the issue is
+ * still fetched, fenced into `linked-issues.md`, and hashed into the
+ * selection signature upstream), but the referenced issue's acceptance
+ * criteria are not this PR's merge contract. Absent metadata keeps the
+ * contract-carrying reading (fail closed — unknown is never context).
+ *
  * #1750: the exact-structure `(decomposition: req-<id> -> <child refs>)`
  * ownership lines are parsed into a per-document id→childRefs map. Strictly
  * structural (a malformed line parses to nothing and contributes no
@@ -387,10 +396,11 @@ function boundedLinkedIssueLabels(value: unknown): string[] | undefined {
  * The map keys are the ledger's own content ids, so the association can only
  * ever attach to the entry the id names; issue content itself never leaves
  * the fence. */
-function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[]; decompositions?: ReadonlyMap<string, readonly string[]> }[] {
-  const documents: { ref: string; body: string; closing?: boolean; labels?: string[]; decompositions?: ReadonlyMap<string, readonly string[]> }[] = [];
+function parseLinkedIssueDocuments(markdown: string): { ref: string; body: string; closing?: boolean; labels?: string[]; contextOnly?: boolean; decompositions?: ReadonlyMap<string, readonly string[]> }[] {
+  const documents: { ref: string; body: string; closing?: boolean; labels?: string[]; contextOnly?: boolean; decompositions?: ReadonlyMap<string, readonly string[]> }[] = [];
   let currentRef = "";
   let currentClosing: boolean | undefined = undefined;
+  let currentContext = false;
   let decompositions: Map<string, string[]> | null = null;
   let inFence = false;
   let fenceChar = "";
@@ -418,6 +428,7 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
               // outside the fence; absent means unknown (fail closed
               // downstream), never a guess.
               ...(currentClosing !== undefined ? { closing: currentClosing } : {}),
+              ...(currentContext ? { contextOnly: true } : {}),
               ...(labels !== undefined ? { labels } : {}),
               ...(decompositions !== null && decompositions.size > 0 ? { decompositions } : {}),
             });
@@ -438,6 +449,7 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
     if (heading !== null) {
       currentRef = (heading[1] ?? "").trim();
       currentClosing = undefined;
+      currentContext = false;
       decompositions = null;
       continue;
     }
@@ -447,6 +459,12 @@ function parseLinkedIssueDocuments(markdown: string): { ref: string; body: strin
         currentClosing = true;
       } else if (line === LINKED_AS_NON_CLOSING_LINE) {
         currentClosing = false;
+      } else if (line === LINKED_AS_CONTEXT_LINE) {
+        // #1749 follow-up: an explicit plain-reference relationship. The
+        // document stays parsed (callers must be able to see it exists) but
+        // its body never becomes requirement-ledger entries — see
+        // `extractRequirementLedger`.
+        currentContext = true;
       } else {
         // #1750: the ownership-evidence lines. Only well-formed lines count;
         // the budget bounds ACCEPTED associations, and the first line for an
@@ -544,6 +562,18 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
   if (typeof standardsText === "string") documents.push({ source: "standards", ref: resolvedRef, text: standardsText });
   if (typeof linkedIssuesMarkdown === "string") {
     for (const doc of parseLinkedIssueDocuments(linkedIssuesMarkdown)) {
+      // #1749 follow-up: a plain `Refs`/`Ref` context link is valid PR
+      // syntax, and its issue stays fenced review context in
+      // `linked-issues.md` (the model still reads it) — but the relationship
+      // was recorded as context, so its body is not a requirement source:
+      // the referenced issue's acceptance criteria are not this PR's merge
+      // contract. This is a deliberate relationship exclusion, not capacity
+      // truncation: the document is dropped BEFORE source-capacity counting,
+      // never appears in `omittedSources`, and a criterion it shares with a
+      // closing/implementation document still enters through THAT source.
+      // Only the explicit context metadata line excludes; unknown state
+      // keeps the contract-carrying reading (fail closed).
+      if (doc.contextOnly) continue;
       documents.push({
         source: "linked_issues",
         ref: doc.ref,

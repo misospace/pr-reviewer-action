@@ -33,10 +33,13 @@
  *   `Fixes`/`Resolves`) are unaffected — parity with the pre-#872 fetch
  *   behavior is preserved for them.
  * - (#1749) every ACCEPTED issue renders one exact-match relationship line
- *   under its heading (`(linked as: closing|non-closing reference)`), so the
- *   reference shape the PR itself used survives into `linked-issues.md` —
- *   the requirement ledger's only channel — instead of being dropped with
- *   the processed-ref representation.
+ *   under its heading (`(linked as: closing|non-closing|context reference)`),
+ *   so the reference shape the PR itself used survives into
+ *   `linked-issues.md` — the requirement ledger's only channel — instead of
+ *   being dropped with the processed-ref representation. The third state
+ *   (#1749 follow-up) marks a link the PR used ONLY as a plain `Refs`/`Ref`
+ *   reference: still fetched and fenced as review context, but its
+ *   acceptance criteria never enter the requirement ledger.
  * - (#1750) an ACCEPTED issue whose own body carries a task-list
  *   decomposition associating criteria with child issues renders one
  *   exact-structure `(decomposition: req-<content id> -> <child refs>)`
@@ -61,7 +64,7 @@ import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqEr
 import { pyOr, pyStr, pyStrip } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { acceptedLinkedIssues, canonicalChildRef, childRefsInText, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, LINKED_AS_CLOSING_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_ATTESTATION_CRITERIA_PER_BODY, MAX_ATTESTED_CHILD_BODY_BYTES, MAX_DECOMPOSITION_CHILDREN_PER_ISSUE, MAX_DECOMPOSITION_LINES_PER_ISSUE, MAX_DECOMPOSITION_REFS_PER_CRITERION, parseDecompositionLine, renderDecompositionLine, requirementIdentityAttests, type LinkedIssueFetchResult, type LinkedIssueRef } from "../precheck/linked-issues.js";
+import { acceptedLinkedIssues, canonicalChildRef, childRefsInText, extractLinkedIssueRefs, isPullRequestPayload, linkedIssueFetchAllowed, LINKED_AS_CLOSING_LINE, LINKED_AS_CONTEXT_LINE, LINKED_AS_NON_CLOSING_LINE, MAX_ATTESTATION_CRITERIA_PER_BODY, MAX_ATTESTED_CHILD_BODY_BYTES, MAX_DECOMPOSITION_CHILDREN_PER_ISSUE, MAX_DECOMPOSITION_LINES_PER_ISSUE, MAX_DECOMPOSITION_REFS_PER_CRITERION, parseDecompositionLine, renderDecompositionLine, requirementIdentityAttests, type LinkedIssueFetchResult, type LinkedIssueRef } from "../precheck/linked-issues.js";
 import { pySplitLines } from "../requirements/ledger.js";
 import { normalizeRequirementText, requirementIdOfText } from "../requirements/requirement-id.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
@@ -761,7 +764,11 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
       // signal the requirement ledger can trust — rendered as an exact-match
       // line between the heading and the embedded issue JSON. The issue's
       // own content stays fenced below it; this line is intake-authored.
-      md.push(enc(`${item.closing ? LINKED_AS_CLOSING_LINE : LINKED_AS_NON_CLOSING_LINE}\n`));
+      // #1749 follow-up: a ref the PR used ONLY as a plain `Refs`/`Ref`
+      // link renders the context state instead of the generic non-closing
+      // one, so the ledger keeps the issue as fenced review background while
+      // excluding its acceptance criteria from the merge contract.
+      md.push(enc(`${item.closing ? LINKED_AS_CLOSING_LINE : item.contextOnly ? LINKED_AS_CONTEXT_LINE : LINKED_AS_NON_CLOSING_LINE}\n`));
       // #1750: the linked issue's own task-list decomposition, rendered as
       // exact-structure ownership lines (see bodyDecompositionLines). The
       // body parsed here is the projected (redacted) body — the exact bytes
@@ -786,7 +793,12 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
       for (const line of bodyDecompositionLines(typeof filtered.body === "string" ? filtered.body : "", item.repo)) {
         addDecompositionLine(line);
       }
-      if (!item.closing && hasUmbrellaLabel(filtered.labels)) {
+      // #1749 follow-up: the attestation fetch is additionally skipped for a
+      // context-only link — the ledger excludes that document's criteria from
+      // the merge contract entirely, so no ownership evidence for it could
+      // ever be consumed; the bounded child fetches would only be spent for
+      // nothing.
+      if (!item.closing && !item.contextOnly && hasUmbrellaLabel(filtered.labels)) {
         const attested = await attestedDecompositionAssociations(
           typeof filtered.body === "string" ? filtered.body : "",
           item.repo,

@@ -515,6 +515,63 @@ test("#1749: accepted linked issues render their closing relationship into linke
   assert.match(implementsMd, /## #43\n\(linked as: non-closing reference\)\n/, "an implementation ref is non-closing");
 });
 
+// #1749 follow-up: a plain `Refs`/`Ref` link is a context reference — it
+// renders its own exact relationship line so the ledger can exclude the
+// referenced issue's criteria from the merge contract, while `Implements`
+// keeps the generic non-closing line (implementation link).
+test("#1749 follow-up: plain Refs links render the context relationship line; stronger forms keep theirs", async () => {
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: Number(number), title: `issue ${number}`, state: "open", html_url: "u", labels: [], body: "background" },
+  });
+  const refsOnly = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Refs #44" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const refsMd = text(refsOnly.artifacts.get("linked-issues.md"));
+  assert.match(refsMd, /## #44\n\(linked as: context reference\)\n/, "a Refs-only link names itself as context");
+  assert.match(refsMd, /"background"/, "the referenced issue stays fenced review context — a valid link is never dropped");
+  const mixed = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Refs #44\nImplements #45" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const mixedMd = text(mixed.artifacts.get("linked-issues.md"));
+  assert.match(mixedMd, /## #44\n\(linked as: context reference\)\n/, "the Refs link is context");
+  assert.match(mixedMd, /## #45\n\(linked as: non-closing reference\)\n/, "the Implements link keeps the implementation reading");
+});
+
+test("#1749 follow-up: a context-only umbrella link never triggers the bounded child-attestation fetches", async () => {
+  const fetched: string[] = [];
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+    fetched.push(`${repo}#${number}`);
+    if (number === "42") {
+      return {
+        ok: true,
+        data: {
+          number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }],
+          body: "## Acceptance criteria\n\n- [ ] The planner and the scheduler engine MUST share one feed.\n\n<!-- dispatch-groomer:decomposition:start -->\n- #1677: https://forge.example/o/r/issues/1677\n<!-- dispatch-groomer:decomposition:end -->\n",
+        },
+      };
+    }
+    return {
+      ok: true,
+      data: { number: Number(number), title: `Child ${number}`, state: "open", html_url: "u", labels: [], body: "Parent: https://github.com/o/r/issues/42\n\n## Acceptance criteria\n\n- [ ] The planner and the scheduler engine MUST share one feed.\n" },
+    };
+  };
+  const refsOnly = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Refs #42" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const refsMd = text(refsOnly.artifacts.get("linked-issues.md"));
+  assert.match(refsMd, /## #42\n\(linked as: context reference\)\n/, "the umbrella is linked as context");
+  assert.deepEqual(fetched, ["o/r#42"], "no attestation child fetches for a link whose contract weight is nil by relationship");
+  fetched.length = 0;
+  const partOf = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Part of #42" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const partOfMd = text(partOf.artifacts.get("linked-issues.md"));
+  assert.match(partOfMd, /## #42\n\(linked as: non-closing reference\)\n/, "the umbrella semantics are unchanged for an implementation link");
+  assert.ok(fetched.includes("o/r#1677"), "the existing attestation channel still runs for Part of");
+  assert.match(partOfMd, /\(decomposition: req-[0-9a-f]{12} -> o\/r#1677\)/, "and its ownership line still renders");
+});
+
 test("#1749: skip and failure notices render no relationship line", async () => {
   const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> =>
     number === "2"
