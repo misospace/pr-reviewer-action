@@ -221,6 +221,96 @@ test("#1753: an explicit test demand is the requirement's own text — no test c
   }
 });
 
+test("#1753 review: a kind-only evidence shell is NOT concrete evidence — the satisfied row stays material", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The canonical normalizer's concreteness rule: a recognized kind with
+    // NEITHER a non-empty ref NOR a non-empty detail is zero concrete
+    // evidence (`normalizeEvidence` would credit nothing and the row would
+    // read `downgraded-no-concrete-evidence`). The trace's disclosure check
+    // shares that exact boundary — a kind-only shell can never remove the
+    // material veto and open a native APPROVE.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-shell", "satisfied", [{ kind: "tool", ref: null, detail: null }])],
+      ledgerWith([{ id: "req-shell", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-shell"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: an unrecognized evidence kind with text cannot self-authorize the advisory omission (provider parity)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Prompt-only / structured-output-stripped providers are not guaranteed
+    // to enforce the schema enum: an invented kind with arbitrary ref/detail
+    // text is dropped by the canonical normalizer, so the trace's disclosure
+    // check must not credit it either — the row keeps the material path.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-invented", "satisfied", [{ kind: "receipt", ref: "call-12", detail: "live read confirmed the guard" }])],
+      ledgerWith([{ id: "req-invented", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-invented"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a concrete tool receipt keeps the advisory omission", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The intended #1758 behavior, now with explicit null detail: a
+    // recognized receipt kind plus a concrete ref IS concrete evidence.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-concrete-tool", "satisfied", [{ kind: "tool", ref: "call-12", detail: null }])],
+      ledgerWith([{ id: "req-concrete-tool", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(row.notes.includes("downgraded-no-valid-enforcement-location"), false);
+    assert.equal(row.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-concrete-tool"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a concrete ci detail disclosure keeps the advisory omission", () => {
+  const workspace = makeWorkspace();
+  try {
+    // A recognized disclosure kind with a concrete detail (null ref) — the
+    // canonical boundary is satisfied, so the advisory omission stands.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-concrete-ci", "satisfied", [{ kind: "ci", ref: null, detail: "live API read confirmed the guard" }])],
+      ledgerWith([{ id: "req-concrete-ci", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(row.notes.includes("downgraded-no-valid-enforcement-location"), false);
+    assert.equal(row.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-concrete-ci"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1753: any material cause outranks the advisory omission — omitted enforcement plus an unresolvable demanded test stays material", () => {
   const workspace = makeWorkspace();
   try {

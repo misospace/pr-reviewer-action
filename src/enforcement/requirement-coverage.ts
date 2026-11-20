@@ -25,7 +25,11 @@ export const MAX_EVIDENCE_CHARS = 500;
 export const TRUNCATION_MARKER = "…";
 
 const STATUS_VALUES: ReadonlySet<string> = new Set(["satisfied", "violated", "not_applicable", "unknown"]);
-const EVIDENCE_KINDS: ReadonlySet<string> = new Set(["file", "test", "tool", "ci", "diff"]);
+/** The canonical wire evidence kinds (#624): the ONLY kinds evidence entries
+ * may carry. An entry with any other kind is dropped by `normalizeEvidence`
+ * (prompt-only providers are not guaranteed to enforce the schema enum, so
+ * an invented kind can never smuggle evidence past this set). */
+export const EVIDENCE_KINDS: ReadonlySet<string> = new Set(["file", "test", "tool", "ci", "diff"]);
 const VERIFICATION_KINDS: ReadonlySet<string> = new Set(["test", "tool", "ci"]);
 
 export const DEFAULT_COVERAGE_KEY = "requirement_coverage";
@@ -67,6 +71,27 @@ function capText(value: unknown): string {
 
 function isConcreteField(value: unknown): boolean {
   return typeof value === "string" && value.trim() !== "";
+}
+
+/**
+ * The canonical per-entry CONCRETE-EVIDENCE predicate (#1753 review): the
+ * exact rule `normalizeEvidence` applies when it credits an evidence entry —
+ * a recognized (lowercased) evidence kind from {@link EVIDENCE_KINDS} AND a
+ * concrete (non-empty after trim) `ref` or `detail`. Shared with the
+ * requirement-trace fold so the satisfied-omission disclosure check and the
+ * coverage normalizer can never drift into two concreteness contracts: a
+ * kind-only shell (`{kind:"tool"}` with no ref and no detail) is NOT
+ * evidence, and an unrecognized kind carrying arbitrary text is NOT evidence
+ * (the normalizer drops the entry entirely — a prompt-only provider cannot
+ * self-authorize through an invented kind).
+ */
+export function isConcreteCoverageEvidence(item: unknown): boolean {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  const record = item as Record<string, unknown>;
+  const kind = record.kind;
+  const kindNorm = typeof kind === "string" ? kind.toLowerCase() : null;
+  if (kindNorm === null || !EVIDENCE_KINDS.has(kindNorm)) return false;
+  return isConcreteField(record.ref) || isConcreteField(record.detail);
 }
 
 function ledgerRequirements(ledger: unknown): LedgerEntryLike[] {

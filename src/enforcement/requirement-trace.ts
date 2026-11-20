@@ -147,6 +147,7 @@ import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import { boundedChildRefs } from "../precheck/linked-issues.js";
 import { parseCitationLocation } from "./citations.js";
+import { isConcreteCoverageEvidence } from "./requirement-coverage.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -2711,18 +2712,26 @@ function coverageClaimEvidence(claim: RawClaim): CoverageClaimEvidence {
  * enforcement-citation omission split. Two independent, deterministic
  * questions over the wire `evidence[]` entries:
  *
- * - `disclosesEvidence` — at least one entry carries a non-empty `kind`,
- *   `ref` or `detail`: an acquisition receipt (`kind: tool`/`ci` — the #1657
- *   disclosure kinds), a detail, or any ref. The reviewer disclosed its
- *   evidence; only the citation SHAPE is missing.
+ * - `disclosesEvidence` — at least one entry is CONCRETE EVIDENCE under the
+ *   canonical boundary (`isConcreteCoverageEvidence`, the exact predicate
+ *   `normalizeEvidence` applies when it credits evidence and flags a row
+ *   `downgraded-no-concrete-evidence`): a recognized evidence kind
+ *   (`file`/`test`/`tool`/`ci`/`diff`) AND a concrete `ref` or `detail` —
+ *   e.g. an acquisition receipt (`kind: "tool"`, ref `"call-12"`) or a
+ *   detail-only `ci` entry. A kind-only shell (`{kind:"tool"}` with ref and
+ *   detail both empty) is NOT evidence, and an unrecognized kind carrying
+ *   arbitrary text is NOT evidence — the normalizer drops it, and a
+ *   prompt-only provider must not self-authorize the advisory omission
+ *   path through an invented kind.
  * - `malformedLocationAttempt` — at least one LOCATION-kind entry
  *   (`file`/`test`/`diff` — the kinds the wire contract declares as
- *   citations) carries a non-empty ref that the ONE canonical citation
- *   grammar refuses (prose, URL, traversal, absolute, control bytes,
- *   reversed ranges). The reviewer attempted a citation and produced a shape
- *   the grammar rejects: that is invalid provenance, never a polite omission
- *   — the parse-door fabrication guards keep their material path (#252),
- *   and one malformed attempt is enough to fail the whole row closed.
+ *   citations) carries a concrete non-empty ref that the ONE canonical
+ *   citation grammar refuses (prose, URL, traversal, absolute, control
+ *   bytes, reversed ranges). The reviewer attempted a citation and produced
+ *   a shape the grammar rejects: that is invalid provenance, never a polite
+ *   omission — the parse-door fabrication guards keep their material path
+ *   (#252), and one malformed attempt is enough to fail the whole row
+ *   closed.
  *
  * A ref that PARSES but does not resolve at head never reaches here as an
  * omission question — it is already a validated-and-refuted citation
@@ -2735,12 +2744,10 @@ function satisfiedEvidenceClassification(claim: RawClaim): { disclosesEvidence: 
   let malformedLocationAttempt = false;
   if (Array.isArray(claim.evidence)) {
     for (const item of claim.evidence) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-      const entry = item as { kind?: unknown; ref?: unknown; detail?: unknown };
-      const kind = typeof entry.kind === "string" ? entry.kind.trim().toLowerCase() : "";
-      const ref = typeof entry.ref === "string" ? entry.ref : "";
-      const detail = typeof entry.detail === "string" ? entry.detail.trim() : "";
-      if (kind !== "" || ref.trim() !== "" || detail !== "") disclosesEvidence = true;
+      if (isConcreteCoverageEvidence(item)) disclosesEvidence = true;
+      const entry = item as { kind?: unknown; ref?: unknown } | null;
+      const kind = entry && typeof entry.kind === "string" ? entry.kind.toLowerCase() : "";
+      const ref = entry && typeof entry.ref === "string" ? entry.ref : "";
       if ((kind === "file" || kind === "test" || kind === "diff") && ref.trim() !== ""
         && coverageRefLocation(ref) === null) {
         malformedLocationAttempt = true;
@@ -3147,18 +3154,20 @@ export function validateRequirementTrace(
             // unchanged — and so is a LOCATION-kind evidence ref the one
             // citation grammar refuses at the parse door (the #252
             // fabrication guards). A row that emitted NO citation-shaped
-            // evidence at all while still disclosing its evidence (an
-            // acquisition receipt — `kind: tool`/`ci` — or a detail) is a
-            // proof-shape SERIALIZATION omission: the reviewer owns the
-            // semantic conclusion, there is no objective provenance left to
-            // validate or refute, and a missing validator-shaped field must
-            // never prove the requirement materially unresolved by itself
-            // (the machinery-created INCOMPLETE #1747 reproduced) — advisory
+            // evidence at all while still disclosing CONCRETE evidence
+            // under the canonical boundary (`isConcreteCoverageEvidence` —
+            // a recognized kind plus a non-empty ref or detail: an
+            // acquisition receipt, a detail-only entry) is a proof-shape
+            // SERIALIZATION omission: the reviewer owns the semantic
+            // conclusion, there is no objective provenance left to validate
+            // or refute, and a missing validator-shaped field must never
+            // prove the requirement materially unresolved by itself (the
+            // machinery-created INCOMPLETE #1747 reproduced) — advisory
             // bookkeeping via `satisfied-no-enforcement-citation`. A bare
-            // `satisfied` with NO evidence disclosure keeps the material
-            // path: an assertion with nothing to read is as unusable as no
-            // trace at all (#1724), and model prose alone can never certify
-            // an approval.
+            // `satisfied` with NO concrete evidence disclosure keeps the
+            // material path: an assertion with nothing to read is as
+            // unusable as no trace at all (#1724), and model prose alone
+            // can never certify an approval.
             if (!anyLocationValid(enforcement, cache)) {
               disposition = "unverifiable";
               const evidenceShape = satisfiedEvidenceClassification(claim);
@@ -3635,18 +3644,21 @@ export const OUT_OF_SCOPE_UNMET_NOTE = "out-of-scope-reported-unmet";
  * #1753: the proof-shape serialization-omission note. A satisfied ordinary
  * runtime row whose claim emitted NO enforcement-location citation at all
  * (no parseable `enforcement` field and no location-shaped wire evidence
- * ref) while the claim still DISCLOSED its evidence — any `evidence[]` entry
- * with a non-empty `kind`/`ref`/`detail`: an acquisition receipt, an
- * unparsable ref, a detail — degrades to `unverifiable` under this note with
- * ADVISORY materiality. The reviewer owns the semantic conclusion
- * (#1656/#1658); with no citation emitted there is no objective provenance
- * left to validate or refute, so the missing validator-shaped field is
- * bookkeeping and must never prove the requirement materially unresolved by
- * itself (the machinery-created INCOMPLETE the PR #1747 organic run
- * reproduced). A bare `satisfied` claim with NO evidence disclosure keeps
- * the `downgraded-no-valid-enforcement-location` material path, and the
- * disposition seam surfaces this note as the reserved ADVISORY
- * `proof_shape_mismatch` diagnostic.
+ * ref) while the claim still disclosed CONCRETE evidence under the
+ * canonical boundary (`isConcreteCoverageEvidence` from
+ * `requirement-coverage.ts`: a recognized evidence kind plus a non-empty
+ * `ref` or `detail` — an acquisition receipt, a detail-only entry) degrades
+ * to `unverifiable` under this note with ADVISORY materiality. The reviewer
+ * owns the semantic conclusion (#1656/#1658); with no citation emitted
+ * there is no objective provenance left to validate or refute, so the
+ * missing validator-shaped field is bookkeeping and must never prove the
+ * requirement materially unresolved by itself (the machinery-created
+ * INCOMPLETE the PR #1747 organic run reproduced). A kind-only evidence
+ * shell, an unrecognized evidence kind with arbitrary text, a bare
+ * `satisfied` claim with no concrete evidence, and any refused location
+ * attempt all keep the `downgraded-no-valid-enforcement-location` material
+ * path, and the disposition seam surfaces this note as the reserved
+ * ADVISORY `proof_shape_mismatch` diagnostic.
  */
 export const SATISFIED_NO_ENFORCEMENT_CITATION_NOTE = "satisfied-no-enforcement-citation";
 
