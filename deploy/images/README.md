@@ -82,10 +82,19 @@ listener binds loopback by default and the chart sets
   half-published controller/worker pair — it reuses a target whose tag is
   present (reporting its existing digest) and publishes only the missing
   target, so a run that failed after pushing one image can finish the pair
-  for that commit without cutting a new one. A reused target's moving refs
-  (`pr-<number>` and the release alias) are repointed at the preserved
-  digest by a separate step without a rebuild, so a rerun also recovers
-  aliases an earlier run failed to push. An uncertain registry answer
+  for that commit without cutting a new one. The build steps push nothing
+  but the immutable `sha-<commit>` ref: EVERY moving ref (`pr-<number>` and
+  the exact SemVer release alias, #1742: no floating alias of any shape),
+  for reused and freshly built targets alike, is written by a separate
+  guarded step that points it at the sha manifest without a rebuild — so a
+  rerun also recovers aliases an earlier run failed to push. Because the
+  build steps carry no supersession check, an ungated alias push there
+  could move a moving ref before any guard ran; the single writer prevents
+  that. The guarded step first confirms through the forge API that this
+  run's commit is still the live coordinate behind those refs (the PR head,
+  or the commit the release tag points at): a rerun of a superseded run
+  fails closed instead of dragging a moving ref back to an older commit. An
+  uncertain registry answer
   stops the run (fail closed). A rerun can never move a published tag — but
   a digest is still the exact bytes the controller will execute, so pin the
   digest at both consumption points.

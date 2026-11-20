@@ -49,7 +49,11 @@ name: Publish images
 # controller/worker pair (#1741): a present target is reused and its digest
 # reported, an absent one is built and pushed, and only an ambiguous registry
 # answer fails the run closed. The `pr-<number>` ref is the only intentionally
-# moving ref.
+# moving ref, and EVERY moving-ref write — freshly published or retagged —
+# comes only from the guarded republish step, never from a build step: the
+# run first confirms it is still the live coordinate behind that ref, so a
+# rerun of a superseded run fails closed instead of moving a moving ref
+# backward.
 #
 # Note on metadata-action: the Dispatch reference workflow tags the SHA ref
 # via docker/metadata-action's `type=sha`, which for pull_request events
@@ -211,22 +215,22 @@ jobs:
       # The immutable `sha-<SOURCE_SHA>` tag publishes whenever that target's
       # sha tag is absent; a target whose sha tag is already present is reused
       # untouched (#1741), so a rerun finishes a half-published pair without
-      # moving any existing ref. The `pr-<number>` ref publishes only for
-      # pull_request events, the exact SemVer release alias only for a
-      # validated `vX.Y.Z` tag push (#1742 removed the floating major.minor
-      # alias; each conditional line collapses to an empty entry that the
-      # build action drops). A target whose sha tag was reused publishes no
-      # tags from its build step; the moving refs are repointed at the
-      # preserved digest by the alias step below. The GHA cache is written
+      # moving any existing ref. The build step pushes ONLY the immutable sha
+      # ref: every moving ref (the `pr-<number>` alias and the exact SemVer
+      # release alias — #1742: no floating alias of any shape) is written by
+      # the guarded alias step below — for freshly built AND reused targets
+      # alike — because a build step has no supersession check, and an ungated
+      # alias push there could move a moving ref before the guard ever runs.
+      # The GHA cache is written
       # only for non-PR runs — PR builds read it but never export, so a PR
       # cannot rewrite the cache the `main` builds consume.
       - name: Build and push controller (linux/amd64)
         id: controller
         # #1741: push only when the controller's sha-<commit> tag is absent.
         # When it is already present the resolver reused it, and re-running
-        # must not rebuild and re-push that immutable ref; the target's moving
-        # refs are (re)pointed at the preserved digest by the alias step
-        # below, without a rebuild.
+        # must not rebuild and re-push that immutable ref. The push carries
+        # only the immutable sha ref; the target's moving refs are written by
+        # the guarded alias step below, for reused AND freshly built targets.
         if: steps.sha_state.outputs.controller_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -238,16 +242,15 @@ jobs:
           provenance: false
           tags: |
             ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ env.SOURCE_SHA }}
-            ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
-            ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-controller:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
       - name: Build and push worker (linux/amd64)
         id: worker
         # #1741: push only when the worker's sha-<commit> tag is absent; a
-        # present worker tag is reused so a rerun never moves it, and its
-        # moving refs are repointed by the alias step below.
+        # present worker tag is reused so a rerun never moves it. The push
+        # carries only the immutable sha ref; moving refs are written by the
+        # guarded alias step below, for reused AND freshly built targets.
         if: steps.sha_state.outputs.worker_state == 'absent'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -259,19 +262,31 @@ jobs:
           provenance: false
           tags: |
             ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ env.SOURCE_SHA }}
-            ${{ env.PR_REF != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.PR_REF) || '' }}
-            ${{ env.RELEASE_VERSION != '' && format('ghcr.io/{0}/pr-reviewer-worker:{1}', env.GHCR_OWNER, env.RELEASE_VERSION) || '' }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
-      - name: Republish moving refs of reused targets
+      - name: Publish moving refs behind the live-coordinate guard
         # #1741 review: gating the build-push steps on the target's sha-tag
-        # state also skipped that target's pr-<number>/SemVer alias pushes, so
-        # a run that died after the sha push but before the aliases could
-        # never republish them. Moving refs may legally be retagged, so the
-        # script below repoints them for every REUSED target at the exact
-        # manifest the immutable sha tag already holds — no rebuild, so a
-        # moving ref can never drift off the immutable digest.
+        # state also skipped that target's pr-<number>/exact SemVer alias
+        # pushes (#1742: no floating alias of any shape), so a run that died
+        # after the sha push but before the aliases could never republish
+        # them. Moving refs may legally be retagged, so the script below
+        # writes them for EVERY target (reused or freshly built) at the exact
+        # manifest the immutable sha tag holds — no rebuild, so a moving ref
+        # can never drift off the immutable digest. This step is the ONLY
+        # writer of moving refs: the build steps push nothing but the
+        # immutable sha ref, because they have no supersession check and an
+        # ungated alias push there could move a moving ref before any guard
+        # ran.
+        # But "legally retagged" is only true for the run that still OWNS the
+        # coordinate: a rerun of a SUPERSEDED workflow run must not repoint
+        # pr-<number> backward at the older commit (the pre-#1741 run simply
+        # refused there). The script therefore confirms through the forge API
+        # — the PR HEAD ref, or the tagged commit behind the release tag —
+        # that SOURCE_SHA is still the live coordinate before any moving-ref
+        # write, and fails the run closed (writing nothing) on a superseded or
+        # otherwise uncertain answer. The token travels header-only via a curl
+        # config on stdin; runs with no moving refs to write never use it.
         env:
           GHCR_OWNER: ${{ env.GHCR_OWNER }}
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
@@ -279,6 +294,8 @@ jobs:
           RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
           CONTROLLER_STATE: ${{ steps.sha_state.outputs.controller_state }}
           WORKER_STATE: ${{ steps.sha_state.outputs.worker_state }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash deploy/images/republish-moving-refs.sh
 
       - name: Record published digests
