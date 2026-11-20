@@ -190,12 +190,11 @@ function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
   const items: BodyListItem[] = [];
   let fence: IntakeFence | null = null;
   for (const raw of body.split(/\r\n|\r|\n/)) {
-    const line = raw.trim();
     if (fence !== null) {
-      if (intakeFenceCloses(line, fence)) fence = null;
+      if (intakeFenceCloses(raw, fence)) fence = null;
       continue;
     }
-    const opener = intakeFenceRun(line);
+    const opener = intakeFenceRun(raw);
     if (opener !== null) {
       fence = opener;
       continue;
@@ -320,34 +319,37 @@ const INTAKE_ACCEPTANCE_HEADINGS: ReadonlySet<string> = new Set([
 const INTAKE_LEDGER_LIST_ITEM_RE = /^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/;
 const INTAKE_LEDGER_MARKER_STRIP_RE = /^\s*(?:[-*+]\s+\[[ xX]\]\s*|[-*+]\s+|\d+[.)]\s+)/;
 const INTAKE_HEADING_RE = /^\s{0,3}#{1,6}\s+(.*)$/;
-const INTAKE_FENCE_RE = /^(`{3,}|~{3,})(.*)$/;
+/** A Markdown code fence: at most 3 leading SPACES (CommonMark — a run
+ * indented 4+ spaces, or by a tab, is indented code, not a fence), the
+ * backtick/tilde run, then whatever follows. */
+const INTAKE_FENCE_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 
 interface IntakeFence {
   char: string;
   length: number;
 }
 
-/** Parse a trimmed line as a Markdown fence run, or null when it does not
- * start with at least three backticks or tildes. Trailing text is an info
- * string on an opener; a closer must have none (see
- * {@link intakeFenceCloses}). */
+/** Parse a RAW line as a Markdown fence run, or null when it is not a fence.
+ * Leading indentation is significant and must not be trimmed: only 0–3
+ * spaces are allowed before the run. Trailing text is an info string on an
+ * opener; a closer must have none (see {@link intakeFenceCloses}). */
 function intakeFenceRun(line: string): IntakeFence | null {
   const match = INTAKE_FENCE_RE.exec(line);
   if (match === null) return null;
-  const run = match[1] ?? "";
+  const run = match[2] ?? "";
   return { char: run.charAt(0), length: run.length };
 }
 
-/** True when the line closes the open fence (CommonMark): the same fence
- * character, a run at least as long as the OPENER's run, and nothing but
- * trailing whitespace after it. A shorter run or an info string
- * (`` ```not-a-close ``) is body text, not a closer, so the quoted content
- * after it stays inert. */
+/** True when the RAW line closes the open fence (CommonMark): at most 3
+ * leading spaces, the same fence character, a run at least as long as the
+ * OPENER's run, and nothing but trailing whitespace after it. A shorter run,
+ * an info string (`` ```not-a-close ``), or a 4-space-indented run is body
+ * text, not a closer, so the quoted content after it stays inert. */
 function intakeFenceCloses(line: string, fence: IntakeFence): boolean {
   const match = INTAKE_FENCE_RE.exec(line);
   if (match === null) return false;
-  const run = match[1] ?? "";
-  return run.charAt(0) === fence.char && run.length >= fence.length && (match[2] ?? "").trim() === "";
+  const run = match[2] ?? "";
+  return run.charAt(0) === fence.char && run.length >= fence.length && (match[3] ?? "").trim() === "";
 }
 
 const DECOMPOSITION_START_MARKER = "dispatch-groomer:decomposition:start";
@@ -370,12 +372,11 @@ function acceptanceCriteriaTexts(body: string): { texts: string[]; overflow: boo
   let fence: IntakeFence | null = null;
   let heading = "";
   for (const raw of pySplitLines(body)) {
-    const line = raw.trim();
     if (fence !== null) {
-      if (intakeFenceCloses(line, fence)) fence = null;
+      if (intakeFenceCloses(raw, fence)) fence = null;
       continue;
     }
-    const opener = intakeFenceRun(line);
+    const opener = intakeFenceRun(raw);
     if (opener !== null) {
       fence = opener;
       continue;
@@ -416,12 +417,11 @@ function decompositionSectionChildRefs(body: string, ownerRepo: string): { refs:
   let inMarkerRegion = false;
   let inHeadingSection = false;
   for (const raw of pySplitLines(body)) {
-    const line = raw.trim();
     if (fence !== null) {
-      if (intakeFenceCloses(line, fence)) fence = null;
+      if (intakeFenceCloses(raw, fence)) fence = null;
       continue;
     }
-    const opener = intakeFenceRun(line);
+    const opener = intakeFenceRun(raw);
     if (opener !== null) {
       fence = opener;
       continue;
@@ -459,12 +459,11 @@ function childParentRefs(childBody: string, childRepo: string): string[] {
   const refs: string[] = [];
   let fence: IntakeFence | null = null;
   for (const raw of pySplitLines(childBody)) {
-    const line = raw.trim();
     if (fence !== null) {
-      if (intakeFenceCloses(line, fence)) fence = null;
+      if (intakeFenceCloses(raw, fence)) fence = null;
       continue;
     }
-    const opener = intakeFenceRun(line);
+    const opener = intakeFenceRun(raw);
     if (opener !== null) {
       fence = opener;
       continue;

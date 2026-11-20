@@ -714,13 +714,15 @@ test("#1750: task-list items inside code fences render no decomposition ownershi
   );
 });
 
-test("#1750: a shorter or decorated fence closer cannot expose quoted decomposition evidence", async () => {
+test("#1750: a short, decorated, or over-indented fence line cannot expose quoted decomposition evidence", async () => {
   // CommonMark: a closer must use the opener's character, be at least as long,
-  // and carry only trailing whitespace. Both shapes below used to close the
-  // fence early and parse `- [ ] still quoted (#123)` as trusted ownership.
+  // be indented at most 3 spaces, and carry only trailing whitespace. Each
+  // shape below used to close the fence early and parse
+  // `- [ ] still quoted (#123)` as trusted ownership.
   const shapes = [
     ["````markdown", "```", "````"],
     ["```markdown", "```not-a-close", "```"],
+    ["````markdown", "    ````", "````"],
   ];
   for (const [open, earlyClose, close] of shapes) {
     const body = [
@@ -743,14 +745,15 @@ test("#1750: a shorter or decorated fence closer cannot expose quoted decomposit
     const rendered = text(result.artifacts.get("linked-issues.md"))
       .split("\n")
       .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
-    assert.deepEqual(rendered, [], `${open}: the quoted task-list item produced no ownership evidence`);
+    assert.deepEqual(rendered, [], `${open} early-closed by ${JSON.stringify(earlyClose)}: the quoted task-list item produced no ownership evidence`);
   }
 });
 
-test("#1750: a shorter or decorated fence closer cannot expose quoted parentage", async () => {
+test("#1750: a short, decorated, or over-indented fence line cannot expose quoted parentage", async () => {
   const fencedParentage = [
     ["````markdown", "quoted task", "```", "Parent: https://github.com/o/r/issues/42", "````"],
     ["```markdown", "quoted task", "```not-a-close", "Parent: https://github.com/o/r/issues/42", "```"],
+    ["````markdown", "quoted task", "    ````", "Parent: https://github.com/o/r/issues/42", "````"],
   ];
   for (const fenced of fencedParentage) {
     // The acceptance criterion stays live so the only missing gate input is
@@ -774,14 +777,15 @@ test("#1750: a shorter or decorated fence closer cannot expose quoted parentage"
     const rendered = text(result.artifacts.get("linked-issues.md"))
       .split("\n")
       .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
-    assert.deepEqual(rendered, [], `${fenced[0]}: the quoted Parent line proved no parentage`);
+    assert.deepEqual(rendered, [], `${fenced[0]} early-closed by ${JSON.stringify(fenced[2])}: the quoted Parent line proved no parentage`);
   }
 });
 
-test("#1750: a shorter or decorated fence closer cannot expose quoted acceptance criteria", async () => {
+test("#1750: a short, decorated, or over-indented fence line cannot expose quoted acceptance criteria", async () => {
   const fencedCriteria = [
     ["````markdown", "quoted task", "```", `- [ ] ${ORGANIC_CHILD_CRITERIA[0]!}`, "````"],
     ["```markdown", "quoted task", "```not-a-close", `- [ ] ${ORGANIC_CHILD_CRITERIA[0]!}`, "```"],
+    ["````markdown", "quoted task", "    ````", `- [ ] ${ORGANIC_CHILD_CRITERIA[0]!}`, "````"],
   ];
   for (const fenced of fencedCriteria) {
     // The Parent line stays live; only the acceptance criterion is quoted.
@@ -803,7 +807,7 @@ test("#1750: a shorter or decorated fence closer cannot expose quoted acceptance
     const rendered = text(result.artifacts.get("linked-issues.md"))
       .split("\n")
       .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
-    assert.deepEqual(rendered, [], `${fenced[0]}: the quoted criterion supplied no requirement identity`);
+    assert.deepEqual(rendered, [], `${fenced[0]} early-closed by ${JSON.stringify(fenced[2])}: the quoted criterion supplied no requirement identity`);
   }
 });
 
