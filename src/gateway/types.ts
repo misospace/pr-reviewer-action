@@ -543,7 +543,7 @@ export interface GatewayCallInput {
    * `(runId, reservationId)` (#1361), so another run using the same id is
    * a distinct reservation, not a conflict. */
   readonly reservationId: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly repoFullName: string;
   /** The wire payload, verbatim from the engine — the gateway does not

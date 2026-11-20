@@ -1,8 +1,9 @@
 /** Provider-neutral forge event normalization (#728).
  *
- * `normalizeGitHubEvent` / `normalizeForgejoEvent` project a raw webhook (or
- * API) payload onto the canonical `CanonicalForgeEvent` contract so
- * downstream jobs can dedupe and route without forge-specific logic.
+ * `normalizeGitHubEvent` / `normalizeForgejoEvent` / `normalizeGitLabEvent`
+ * project a raw webhook (or API) payload onto the canonical
+ * `CanonicalForgeEvent` contract so downstream jobs can dedupe and route
+ * without forge-specific logic.
  *
  * Accepted payload shapes (both platforms — Forgejo PR payloads are
  * GitHub-compatible in shape, see `prToGithubShape` in
@@ -160,6 +161,27 @@ export function normalizeRepoFullName(fullName: string): string {
   return trimmed;
 }
 
+/** GitLab project identity is a NESTED namespace path (#740):
+ * `group/subgroup/project` — two or more non-empty segments, one or more
+ * slashes. Trim + lowercase, then every segment must be non-empty (a leading,
+ * trailing or doubled slash is rejected, not collapsed). Deliberately NOT the
+ * GitHub/Forgejo grammar: `normalizeRepoFullName` stays exactly one slash for
+ * those platforms, and this wider form is applied ONLY to events whose
+ * platform is `gitlab`, so a hostile GitHub/Forgejo-shaped payload can never
+ * smuggle a nested name past the boundary. */
+export function normalizeGitLabProjectPath(fullPath: string): string {
+  const trimmed = fullPath.trim().toLowerCase();
+  if (trimmed === "") return "";
+  const segments = trimmed.split("/");
+  if (segments.length < 2) return "";
+  return segments.every((segment) => segment !== "") ? trimmed : "";
+}
+
+/** The repository-identity grammar a platform's events use. */
+function repoNameNormalizer(platform: CanonicalPlatform): (value: string) => string {
+  return platform === "gitlab" ? normalizeGitLabProjectPath : normalizeRepoFullName;
+}
+
 type PrOrigin = "envelope" | "issue" | "check_list" | "bare";
 
 interface PrExtract {
@@ -313,13 +335,13 @@ function commentIdOf(raw: Record<string, unknown>): string {
 
 /** Repo-scoped fallback: the first well-formed entry of a `repositories`
  * array (e.g. `installation_repositories` events, which have no singular
- * `repository` and no PR). */
-function repoFromList(raw: Record<string, unknown>): string {
+ * `repository` and no PR). Validated with the platform's own name grammar. */
+function repoFromList(raw: Record<string, unknown>, normalizeName: (value: string) => string): string {
   const list = raw.repositories;
   if (!Array.isArray(list)) return "";
   for (const entry of list) {
     if (isPlainObject(entry)) {
-      const normalized = normalizeRepoFullName(asString(entry.full_name));
+      const normalized = normalizeName(asString(entry.full_name));
       if (normalized !== "") return normalized;
     }
   }
@@ -440,8 +462,12 @@ interface EventFields {
   eventReference: string;
 }
 
+/** The canonical platform vocabulary — the ONE spelling shared by the event
+ * contract, the normalizer core and the poll entry point. */
+type CanonicalPlatform = CanonicalForgeEvent["platform"];
+
 function buildEvent(
-  platform: "github" | "forgejo",
+  platform: CanonicalPlatform,
   source: ForgeEventSource,
   kind: ForgeEventKind,
   fields: EventFields,
@@ -449,10 +475,10 @@ function buildEvent(
   return Object.freeze({ platform, source, kind, ...fields });
 }
 
-/** Shared normalizer core; both platform entries and `normalizeForgeEvent`
- * funnel here so GitHub and Forgejo payloads can never drift. */
+/** Shared normalizer core; every platform entry and `normalizeForgeEvent`
+ * funnel here so GitHub, Forgejo and GitLab payloads can never drift. */
 function normalizeEvent(
-  platform: "github" | "forgejo",
+  platform: CanonicalPlatform,
   raw: unknown,
   source: ForgeEventSource,
   options: NormalizeEventOptions,
@@ -472,13 +498,14 @@ function normalizeEvent(
     // is only the `labelName` display field.
     const rawLabelName = labelNameOf(raw.label);
 
-    const envelopeRepo = normalizeRepoFullName(asString(asObject(raw.repository).full_name));
+    const normalizeName = repoNameNormalizer(platform);
+    const envelopeRepo = normalizeName(asString(asObject(raw.repository).full_name));
     const repoFullName =
       envelopeRepo !== ""
         ? envelopeRepo
         : pr !== null
-          ? normalizeRepoFullName(pr.baseRepoRaw)
-          : repoFromList(raw);
+          ? normalizeName(pr.baseRepoRaw)
+          : repoFromList(raw, normalizeName);
     if (repoFullName === "") return null;
 
     const kind = mapKind(name, action, pr, rawLabelName, rereviewLabel, raw);
@@ -544,9 +571,24 @@ export function normalizeForgejoEvent(
   return normalizeEvent("forgejo", raw, source, options);
 }
 
+/** Normalize a raw GitLab payload projected onto the GitHub-shaped envelope
+ * (#740, `src/ingress/gitlab-events.ts`) into the canonical event, or `null`
+ * when it cannot be resolved. The ONLY difference from the other platform
+ * entries is the repository-name grammar: GitLab project identity is the
+ * nested `group/subgroup/project` namespace path
+ * ({@link normalizeGitLabProjectPath}), validated here so no other consumer
+ * re-implements it. Never throws. */
+export function normalizeGitLabEvent(
+  raw: unknown,
+  source: ForgeEventSource = "webhook",
+  options: NormalizeEventOptions = {},
+): CanonicalForgeEvent | null {
+  return normalizeEvent("gitlab", raw, source, options);
+}
+
 /** Platform-dispatching entry point. */
 export function normalizeForgeEvent(
-  platform: "github" | "forgejo",
+  platform: CanonicalPlatform,
   raw: unknown,
   source: ForgeEventSource = "webhook",
   options: NormalizeEventOptions = {},
@@ -566,7 +608,7 @@ export function normalizeForgeEvent(
  * lets a poller converge with the webhook that carried `installation.id`.
  * Polls are never comment-shaped, so `eventReference` is always "". */
 export function reconciliationPollEvent(
-  platform: "github" | "forgejo",
+  platform: CanonicalPlatform,
   prPayloadRaw: unknown,
   options?: { installationId?: string },
 ): CanonicalForgeEvent | null {
@@ -574,8 +616,9 @@ export function reconciliationPollEvent(
     if (!isPlainObject(prPayloadRaw)) return null;
     const pr = resolvePr(prPayloadRaw);
     if (pr === null || pr.prNumber === 0) return null;
-    const envelopeRepo = normalizeRepoFullName(asString(asObject(prPayloadRaw.repository).full_name));
-    const repoFullName = envelopeRepo !== "" ? envelopeRepo : normalizeRepoFullName(pr.baseRepoRaw);
+    const normalizeName = repoNameNormalizer(platform);
+    const envelopeRepo = normalizeName(asString(asObject(prPayloadRaw.repository).full_name));
+    const repoFullName = envelopeRepo !== "" ? envelopeRepo : normalizeName(pr.baseRepoRaw);
     if (repoFullName === "") return null;
     // Sanitize each candidate in priority order (user → sender) and take
     // the first non-empty, so a hostile `user.login` falls through to

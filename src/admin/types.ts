@@ -44,7 +44,7 @@ export interface AdminRunDetail extends AdminRunSummary {
   readonly usage: readonly AdminUsageAggregate[];
 }
 export interface AdminAdoptionEntry {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly repository: string;
   /** The effective reviewer-config fingerprint the adoption last saw; "" when unknown. */
   readonly configFingerprint: string;

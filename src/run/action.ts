@@ -704,6 +704,11 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
   const label = stage.REREVIEW_LABEL ?? "";
   const pr = stage.PR_NUMBER ?? "";
   if (label === "" || !/^\d+$/.test(pr)) return;
+  // #740: the GitLab label API has no equivalent DELETE here, and the
+  // GitHub fallback below would target the WRONG forge with the wrong
+  // token. Ancillary GitLab writes are daemon-composition work (#1677);
+  // skip explicitly — silence here is chosen, never a misrouted GitHub call.
+  if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
     : (stage.GITHUB_API_URL || "https://api.github.com");
@@ -768,6 +773,9 @@ function isUsableCommentId(id: number | string | undefined): id is number | stri
 async function postCommentAckReaction(stage: Env, commentId: number | string): Promise<void> {
   const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
+  // #740: no GitLab award-emoji ancillary yet (#1677); skipping is chosen —
+  // the GitHub branch below must never run against a GitLab run.
+  if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
     : (stage.GITHUB_API_URL || "https://api.github.com");
@@ -803,6 +811,9 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
   requireImplementedBackend(platform);
   const pr = stage.PR_NUMBER ?? "";
   if (!/^\d+$/.test(pr)) return;
+  // #740: no GitLab note ancillary yet (#1677); skipping is chosen —
+  // the GitHub branch below must never run against a GitLab run.
+  if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
     : (stage.GITHUB_API_URL || "https://api.github.com");

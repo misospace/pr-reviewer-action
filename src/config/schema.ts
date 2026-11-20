@@ -110,7 +110,10 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   // fail-closed TANGLED_REPO_DID requirement.
   // #1678: 'gitea' is likewise resolvable — it selects the Forgejo/Gitea wire
   // family with the Gitea identity, which is what refuses 'authorized_integration'.
-  platform: ["auto", "forgejo", "gitea", "github", "tangled"],
+  // #740: 'gitlab' is resolvable too — its own wire family (explicit only;
+  // auto never selects it). The endpoint/credential requirement is the
+  // runtime's (GITLAB_API_URL / GITLAB_TOKEN), not this enum's.
+  platform: ["auto", "forgejo", "gitea", "gitlab", "github", "tangled"],
   "forgejo-auth-method": ["token", "authorized_integration"],
 });
 

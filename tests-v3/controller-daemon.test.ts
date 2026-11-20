@@ -2944,6 +2944,145 @@ test("the daemon-composed poll hands its report to the operator (#1446)", async 
   assert.equal(store.load().records[0]!.job.forgeIntegration, "fj-bound");
 });
 
+test("the operator run binding and the daemon poll binding mint byte-identical job identity (#1718)", async (t) => {
+  // The two reconcile bindings are two ways of writing ONE composition, so an
+  // operator who binds `run` exactly as `ControllerDaemonOptions.reconcile.run`
+  // documents it — `reconcileRepositories` bound with `context.ledger`,
+  // `context.resolveBuildOptions` and `context.enqueueJob` — must converge with
+  // the canonical `poll` on EVERY field the generation id hashes. The shipped
+  // composition broke this by minting from its own (absent → `{}`) build
+  // options, i.e. a second generation of the head its intake already claimed.
+  // The proof is NOT that the two jobs agree with each other — a
+  // self-consistent pair can both be wrong — it is that EACH daemon's own
+  // webhook intake of the same head is then a `duplicate` that adds no second
+  // queue record (#1443/#1446's invariant).
+  // The identity is made non-trivial on every mutable dimension (a config
+  // fingerprint, a non-first adoption epoch, a bound integration among two
+  // same-kind ones) so a dropped dimension surfaces as a divergent id instead
+  // of agreeing on "" by accident. Both daemons share the instance config, the
+  // bound integration, the identity resolver, and one fixed clock.
+  const forges: InstanceConfig["forges"] = [
+    { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+    { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+  ];
+  const identity = async () => ({ configFingerprint: "abcdef12", adoptionEpoch: "3" });
+  const clock = () => 1_700_000_000_000;
+
+  // A: the operator-composed pass, bound as the doc comment prescribes.
+  const storeA = new InMemoryQueueStore();
+  const runReports: ReconcileReport[] = [];
+  const hA = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: [...forges] } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: storeA,
+      resolveEventIdentity: identity,
+      now: clock,
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        run: async (ctx) => {
+          runReports.push(
+            await reconcileRepositories({
+              platform: "forgejo",
+              listOpenPullRequests: async () => ({ ok: true, data: [forgejoPrPayload()] }),
+              repos: ["owner/repo"],
+              ledger: ctx.ledger,
+              // The per-event identity the daemon's own intake mints with —
+              // never a private copy of the operator's options.
+              resolveBuildOptions: (discovered) => ctx.resolveBuildOptions(discovered),
+              installationId: "12345",
+              enqueueJob: (job) => ctx.enqueueJob(job),
+            }),
+          );
+        },
+      },
+    },
+  });
+
+  // B: the canonical daemon-composed poll over the same forge state.
+  const storeB = new InMemoryQueueStore();
+  const hB = await start({
+    options: {
+      instance: { ...instanceConfig(), forges: [...forges] } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: storeB,
+      resolveEventIdentity: identity,
+      now: clock,
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        poll: {
+          repos: ["owner/repo"],
+          installationId: "12345",
+          listOpenPullRequests: async () => ({ ok: true, data: [forgejoPrPayload()] }),
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await hA.daemon.stop().catch(() => undefined);
+    await hB.daemon.stop().catch(() => undefined);
+    cleanup(hA);
+    cleanup(hB);
+  });
+
+  await waitFor(() => runReports.length >= 1);
+  const runReport = runReports[0]!;
+  assert.equal(runReport.discovered, 1, "the run pass discovered the head");
+  assert.equal(runReport.jobs.length, 1, "the correctly-bound run pass minted the generation");
+  assert.deepEqual([...runReport.handoffRefusals], [], "the run pass was not refused");
+  await waitFor(() => storeA.load().records.length > 0 && storeB.load().records.length > 0);
+
+  const jobA = storeA.load().records[0]!.job;
+  const jobB = storeB.load().records[0]!.job;
+
+  // The thirteen fields `deriveGenerationId` hashes (`IDENTITY_FIELDS` in
+  // `src/jobs/generation.ts`): `trigger` and `reason` are excluded by contract,
+  // so parity here is exactly identity parity.
+  const identityFields = [
+    "platform",
+    "installationId",
+    "repoFullName",
+    "prNumber",
+    "prId",
+    "headSha",
+    "baseSha",
+    "configFingerprint",
+    "kind",
+    "nonce",
+    "adoptionEpoch",
+    "eventReference",
+    "forgeIntegration",
+  ] as const;
+  for (const field of identityFields) {
+    assert.equal(jobA[field], jobB[field], `the ${field} identity field agrees`);
+  }
+  assert.equal(jobA.jobId, jobB.jobId, "the two bindings mint the SAME generation id");
+  // The agreement is not the two paths agreeing on emptiness: every dimension
+  // that could have been dropped actually carried its value into both mints.
+  assert.equal(jobA.forgeIntegration, "fj-secondary", "the bound integration reached both mints");
+  assert.equal(jobA.adoptionEpoch, "3", "the resolved adoption epoch reached both mints");
+  assert.equal(jobA.configFingerprint, "abcdef12", "the config fingerprint reached both mints");
+
+  // And the real convergence: for EACH daemon, its own webhook intake of the
+  // same head is the generation the pass already scheduled — never a second
+  // review of one head.
+  assert.equal(
+    await hA.daemon.ingest(forgejoEvent()),
+    "duplicate",
+    "the run-bound daemon's intake sees its own pass's generation",
+  );
+  assert.equal(
+    await hB.daemon.ingest(forgejoEvent()),
+    "duplicate",
+    "the poll-bound daemon's intake sees its own pass's generation",
+  );
+  await settleFor(200);
+  assert.equal(storeA.load().records.length, 1, "the run-bound queue holds ONE generation");
+  assert.equal(storeB.load().records.length, 1, "the poll-bound queue holds ONE generation");
+});
+
 // ── Gitea-family instances: `kind: gitea` is a served identity (#1682) ──
 //
 // A `gitea` instance-config integration is the Gitea wire family under its

@@ -178,6 +178,34 @@ test("selection signature: an unresolvable PR identity fails closed as a fork (#
   assert.ok(signature);
 });
 
+test("non-fork: contract-bearing refs outrank context links identically in BOTH stages (#872 cross-stage)", async () => {
+  // 8 `Refs` context links + one `Implements` claim: the shared candidate
+  // ordering must give the contract issue the slot in the corpus stage and in
+  // the fingerprint stage alike, or a label change could perturb one signal
+  // without perturbing the other.
+  const body = `${Array.from({ length: 8 }, (_, index) => `Refs #${index + 1}`).join("\n")}\nImplements #1677`;
+  const prRecord = { title: "Operator contribution", body, head: { repo: { full_name: BASE_REPO } }, base: { repo: { full_name: BASE_REPO } } };
+
+  const contextCalls: string[] = [];
+  const contextResult = await buildLinkedIssueContext({
+    pr: { title: prRecord.title, body },
+    repo: BASE_REPO,
+    adapter: omnipotentAdapter(contextCalls),
+    isForkPr: "false",
+    linear: noLinear,
+  });
+  assert.equal(contextCalls[0], `${BASE_REPO}#1677`, "corpus stage: the contract issue is fetched first");
+
+  const selectionCalls: string[] = [];
+  const { error } = await buildSelectionSignature(BASE_REPO, "9", selectionAdapter(selectionCalls, prRecord, []));
+  assert.equal(error, "");
+  assert.equal(selectionCalls[0], `${BASE_REPO}#1677`, "fingerprint stage: the same contract-first allocation");
+  assert.deepEqual(selectionCalls, contextCalls, "both stages fetch the same ordered set — they cannot disagree");
+
+  const refs = (contextResult.linkedIssues as Array<{ ref: string }>).map((issue) => issue.ref);
+  assert.ok(refs.includes("#1677"), "the corpus keeps the contract issue");
+  assert.equal(refs.length, 8, "and the accepted cap still binds");
+});
 test("selection signature: outside forks the cross-repo ref stays in the fingerprint — positive control (#1617)", async () => {
   const first: string[] = [];
   const a = await buildSelectionSignature(BASE_REPO, "9", selectionAdapter(first, sameRepoPr, ["internal"]));

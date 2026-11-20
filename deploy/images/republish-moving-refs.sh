@@ -2,9 +2,9 @@
 # #1741 review: the image-publish workflow gates each target's build-push step
 # on that target's `sha-<commit>` tag being ABSENT, so a rerun never re-pushes
 # (never moves) an immutable ref. But that gate also skipped the target's
-# MOVING refs — `pr-<number>`, the SemVer release alias, and the major.minor
-# alias — so a run that died after the sha push but before the aliases could
-# never republish them on a rerun.
+# MOVING refs — `pr-<number>` and the exact SemVer release alias (#1742: no
+# floating alias of any shape) — so a run that died after the sha push but
+# before the aliases could never republish them on a rerun.
 #
 # This script is the ONLY writer of moving refs in the workflow (r3 review):
 # the build steps push nothing but the immutable sha ref, because they carry
@@ -21,22 +21,21 @@
 # backward is a regression the resume feature must not reintroduce. So before
 # ANY moving-ref write the script confirms through the forge API that this run's commit
 # is still the live coordinate behind the event's moving refs: the PR HEAD
-# commit for a pull_request run, the tagged commit for a release-tag run.
-# Git tags never move, but the shared `X.Y` alias tracks the NEWEST vX.Y.*
-# release, so a release-tag run is additionally required to be the newest
-# patch of its own X.Y.* bucket. A superseded run (or any uncertain forge
+# commit for a pull_request run, the tagged commit for a release-tag run (a
+# release tag that was re-pointed at a different commit supersedes the old
+# run). A superseded run (or any uncertain forge
 # answer, including a failed or unparseable API call) fails the run CLOSED
 # and writes nothing. Runs whose event defines no moving refs never contact
 # the forge API.
 #
 # Inputs (env): GHCR_OWNER, SOURCE_SHA, CONTROLLER_STATE, WORKER_STATE from
-# the sha-tag resolver, plus the event's moving-ref coordinates PR_REF,
-# RELEASE_VERSION, RELEASE_MAJOR_MINOR (each empty when the event defines
-# none). A target of an event with no moving refs is a no-op — imagetools
-# create is never run just to retag the sha ref onto itself. When moving
-# refs ARE due, the guard additionally requires GITHUB_TOKEN and
-# GITHUB_REPOSITORY (the runner provides both; GITHUB_API_URL defaults to
-# the runner's API base so a GitHub Enterprise host is addressed correctly).
+# the sha-tag resolver, plus the event's moving-ref coordinates PR_REF and
+# RELEASE_VERSION (each empty when the event defines none). A target of an
+# event with no moving refs is a no-op — imagetools create is never run just
+# to retag the sha ref onto itself. When moving refs ARE due, the guard
+# additionally requires GITHUB_TOKEN and GITHUB_REPOSITORY (the runner
+# provides both; GITHUB_API_URL defaults to the runner's API base so a
+# GitHub Enterprise host is addressed correctly).
 #
 # Like resolve-sha-tag-state.sh, the registry writes go through the
 # already-authenticated Docker CLI. The supersession read is a forge read:
@@ -74,65 +73,6 @@ parse_ref_object() {
   REF_TYPE="${BASH_REMATCH[2]}"
 }
 
-# The X.Y major.minor alias follows the NEWEST vX.Y.* tag, not this run's
-# tag alone: git tags never move, so a rerun of an OLD release's workflow
-# passes the tag-coordinate check and would still drag the shared X.Y alias
-# backward onto the older patch's manifest. So for release events the guard
-# also enumerates the repository tags and requires that no other tag inside
-# the same X.Y.* bucket is a newer patch. The enumeration must complete —
-# hitting the page bound, an undecidable comparison, a listing failure, or a
-# listing that omits this run's own tag is uncertain state and fails closed.
-assert_no_newer_patch_release() {
-  local page=1 total=0 seen_self=0 body compact name rest
-  local self_rest="${RELEASE_VERSION#"${RELEASE_MAJOR_MINOR}".}"
-  # Comparisons use bash integer arithmetic: a remainder that is not a plain
-  # number, or longer than int64 can hold, is undecidable, not comparable.
-  case "$self_rest" in
-    '' | *[!0-9]* | ???????????????????*)
-      die "this run's version ${RELEASE_VERSION} does not carry a comparable patch number under alias ${RELEASE_MAJOR_MINOR}; refusing to move release aliases over uncertain state."
-      ;;
-  esac
-  while :; do
-    if ! body=$(api_get "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/tags?per_page=100&page=${page}"); then
-      printf '%s\n' "$body" >&2
-      die "cannot list the repository tags to confirm no newer ${RELEASE_MAJOR_MINOR}.* release exists; refusing to move release aliases over uncertain state."
-    fi
-    compact=$(printf '%s' "$body" | tr -d '[:space:]')
-    local names=()
-    while IFS= read -r name; do
-      names+=( "$name" )
-    done < <(printf '%s' "$compact" | grep -oE '"name":"[^"]+"' | sed -e 's/^"name":"//' -e 's/"$//')
-    for name in ${names[@]+"${names[@]}"}; do
-      if [ "$name" = "v${RELEASE_VERSION}" ]; then
-        seen_self=1
-        continue
-      fi
-      case "$name" in
-        "v${RELEASE_MAJOR_MINOR}."*)
-          rest="${name#"v${RELEASE_MAJOR_MINOR}".}"
-          case "$rest" in
-            '' | *[!0-9]* | ???????????????????*)
-              die "release tag ${name} is not numerically comparable to ${RELEASE_VERSION}; refusing to move release aliases over uncertain state."
-              ;;
-          esac
-          if [ "$rest" -gt "$self_rest" ]; then
-            die "superseded run: ${name} is a newer ${RELEASE_MAJOR_MINOR}.* release than ${RELEASE_VERSION}; refusing to repoint ${RELEASE_MAJOR_MINOR} at this older patch."
-          fi
-          ;;
-      esac
-    done
-    total=$(( total + ${#names[@]} ))
-    if [ "${#names[@]}" -lt 100 ]; then
-      break
-    fi
-    if [ "$page" -ge 10 ]; then
-      die "the repository carries more tags than the enumeration bound (${total}); cannot confirm no newer ${RELEASE_MAJOR_MINOR}.* release exists; refusing to move release aliases over uncertain state."
-    fi
-    page=$(( page + 1 ))
-  done
-  [ "$seen_self" = 1 ] || die "tag v${RELEASE_VERSION} did not appear in the repository tag listing; uncertain release state, refusing to move release aliases."
-}
-
 # Confirm this run is the live run for the event's moving refs: resolve the
 # forge coordinate those refs follow and require it to equal SOURCE_SHA.
 assert_current_run_owns_moving_refs() {
@@ -145,6 +85,12 @@ assert_current_run_owns_moving_refs() {
     coordinate="the head of pull request ${number} (${PR_REF})"
     url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/pull/${number}/head"
   elif [ -n "$RELEASE_VERSION" ]; then
+    # #1744: the exact vX.Y.Z is the only release alias, so there is no
+    # shared floating X.Y ref whose newest patch could supersede this run.
+    # The tag-coordinate check is the whole release rule: once the tag still
+    # resolves to SOURCE_SHA, re-pointing X.Y.Z at this run's commit is
+    # correct, and no tag enumeration (an API read with no write reason) is
+    # warranted.
     coordinate="the release tag v${RELEASE_VERSION}"
     url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}"
   else
@@ -178,12 +124,6 @@ assert_current_run_owns_moving_refs() {
   if [ "$sha" != "$SOURCE_SHA" ]; then
     die "superseded run: ${coordinate} is at ${sha}, this run builds ${SOURCE_SHA}; refusing to repoint ${PR_REF:-$RELEASE_VERSION} backward at an older commit."
   fi
-  # The tag itself can never move, but the shared X.Y alias can: a rerun of
-  # an older patch's workflow must not repoint it backward (see
-  # assert_no_newer_patch_release).
-  if [ -n "$RELEASE_VERSION" ] && [ -n "$RELEASE_MAJOR_MINOR" ]; then
-    assert_no_newer_patch_release
-  fi
   echo "supersession check: ${coordinate} still resolves to ${SOURCE_SHA} - safe to republish moving refs"
 }
 
@@ -209,7 +149,8 @@ republish_target() {
   local args=()
   [ -n "$PR_REF" ] && args+=( -t "${repo}:${PR_REF}" )
   [ -n "$RELEASE_VERSION" ] && args+=( -t "${repo}:${RELEASE_VERSION}" )
-  [ -n "$RELEASE_MAJOR_MINOR" ] && args+=( -t "${repo}:${RELEASE_MAJOR_MINOR}" )
+  # #1742: the exact SemVer above is the only release alias — no floating
+  # major.minor (or major-only) ref is ever repointed.
   if [ "${#args[@]}" -eq 0 ]; then
     echo "${name}: no moving refs for this event - nothing to republish"
     return 0
@@ -224,7 +165,6 @@ republish_target() {
 : "${WORKER_STATE:?WORKER_STATE is required}"
 PR_REF="${PR_REF:-}"
 RELEASE_VERSION="${RELEASE_VERSION:-}"
-RELEASE_MAJOR_MINOR="${RELEASE_MAJOR_MINOR:-}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 
 validate_state controller "$CONTROLLER_STATE"
@@ -236,7 +176,7 @@ validate_state worker "$WORKER_STATE"
 # once, whenever the event defines moving refs — regardless of which targets
 # were reused or freshly built. Runs with no moving refs (a `main` push)
 # write nothing and never contact the forge API.
-if [ -n "${PR_REF}${RELEASE_VERSION}${RELEASE_MAJOR_MINOR}" ]; then
+if [ -n "${PR_REF}${RELEASE_VERSION}" ]; then
   : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to confirm the moving-ref coordinate}"
   : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required to confirm the moving-ref coordinate}"
   assert_current_run_owns_moving_refs

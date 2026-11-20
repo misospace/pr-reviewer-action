@@ -36,7 +36,9 @@ test("mirrorDirName: stable digest keyed by coordinates, repo text never in the 
   assert.notEqual(a, d);
   assert.match(a, /^[0-9a-f]{64}\.git$/);
   assert.throws(() => mirrorDirName("github", "../escape"));
-  assert.throws(() => mirrorDirName("gitlab", "org/repo"));
+  // #740: gitlab joined the declared vocabulary; an unknown label still fails.
+  assert.notEqual(mirrorDirName("gitlab", "org/repo"), mirrorDirName("github", "org/repo"));
+  assert.throws(() => mirrorDirName("bitbucket", "org/repo"));
 });
 
 // #1682: the acquisition seam accepts the DECLARED platform vocabulary, so
@@ -50,7 +52,7 @@ test("mirrorDirName: the declared Gitea identity is a first-class platform with 
   const forgejo = mirrorDirName("forgejo", "org/repo");
   assert.notEqual(gitea, forgejo, "a Gitea mirror is never the Forgejo family's mirror");
   assert.match(gitea, /^[0-9a-f]{64}\.git$/);
-  assert.throws(() => mirrorDirName("gitlab", "org/repo"), AcquisitionError);
+  assert.throws(() => mirrorDirName("bitbucket", "org/repo"), AcquisitionError);
 });
 
 test("a Gitea-declared mirror acquires the family's PR refs and records the family, not the product", async () => {

@@ -158,6 +158,15 @@ export function validateStageEnv(env: StageEnv): string | null {
   // gated on a credential it never uses. GitHub/Forgejo resolution is
   // unchanged (the guard was always satisfied by their token).
   const resolved = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  // #740: a resolved GitLab run is refused here, not token-gated. The
+  // GitLab credential family (`GITLAB_TOKEN`, header-injected) must never
+  // be satisfied by a GitHub token, and the durable lanes that would
+  // deliver GITLAB_API_URL/GITLAB_TOKEN to a stage are exactly the
+  // composition that #1677 still owes. The refusal names the missing piece
+  // instead of masking it behind a credential the run must never touch.
+  if (resolved === "gitlab") {
+    return "GitLab review runs are not composed on this host yet (#1677): the daemon startup guard refuses gitlab instances until controller composition lands";
+  }
   if (resolved !== "tangled" && !env.GH_TOKEN) return "Missing GitHub token in GH_TOKEN or GITHUB_TOKEN";
   if (env.REPOSITORY_SKILLS_PATHS !== undefined) {
     try {

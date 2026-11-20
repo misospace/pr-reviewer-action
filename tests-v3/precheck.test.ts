@@ -27,7 +27,7 @@ import {
 } from "../src/precheck/fingerprint.js";
 import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../src/confidence/result.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
-import { extractLinkedIssueRefs, labelsOf } from "../src/precheck/linked-issues.js";
+import { extractLinkedIssueRefs, labelsOf, MAX_LINKED_ISSUE_CANDIDATES, prContractIssueRefIdentities } from "../src/precheck/linked-issues.js";
 import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.js";
 import { buildSelectionSignature } from "../src/precheck/selection.js";
 import {
@@ -577,12 +577,56 @@ test("linked issue refs: title (#N) / (owner/repo#N) convention (#872)", () => {
   assert.deepEqual(extractLinkedIssueRefs("body text", "o/r", "feat: no ref here"), []);
 });
 
-test("linked issue refs: non-closing body implementation references (#872)", () => {
+test("linked issue refs: non-closing body references (#872)", () => {
   for (const body of ["Implements #10", "Part of #10", "Refs #10", "Ref #10"]) {
     const refs = extractLinkedIssueRefs(body, "o/r");
     assert.deepEqual(refs.map((ref) => ref.ref), ["#10"], body);
     assert.equal(refs[0]!.closing, false, body);
   }
+});
+
+// #1749 follow-up: a plain `Refs`/`Ref` link is valid PR syntax for RELATED
+// CONTEXT — GitHub itself gives it no development-link meaning — so it must
+// not import the referenced issue's acceptance criteria into the merge
+// contract. The relationship is classified deterministically at extraction;
+// `Implements`/`Part of`/`Addresses` and the title `(#N)` squash-merge
+// convention stay implementation links, and closing keywords are unchanged.
+test("linked issue refs: plain Refs/Ref links classify as context-only (#1749 follow-up)", () => {
+  for (const [body, spelling] of [["Refs #10", "#10"], ["Ref #10", "#10"], ["refs: #10", "#10"], ["REFS other/repo#10", "other/repo#10"]] as const) {
+    const refs = extractLinkedIssueRefs(body, "o/r");
+    assert.deepEqual(refs.map((ref) => ref.ref), [spelling], body);
+    assert.equal(refs[0]!.closing, false, body);
+    assert.equal(refs[0]!.contextOnly, true, `${body} is a plain reference`);
+  }
+  for (const body of ["Implements #10", "Part of #10", "Addresses #10"]) {
+    const refs = extractLinkedIssueRefs(body, "o/r");
+    assert.equal(refs.length, 1, body);
+    assert.equal(refs[0]!.contextOnly, undefined, `${body} stays an implementation link`);
+  }
+});
+
+test("linked issue refs: context-only is the STRONGEST relationship seen, never the first (#1749 follow-up)", () => {
+  // The title `(#N)` convention names the issue the PR implements — a later
+  // `Refs` spelling of the same identity never demotes it to context.
+  const titled = extractLinkedIssueRefs("Refs #10", "o/r", "feat: planner feed (#10)");
+  assert.equal(titled.length, 1);
+  assert.equal(titled[0]!.contextOnly, undefined, "title convention outranks a Refs mention");
+
+  // Refs first, stronger form second: the merged entry upgrades (and keeps
+  // the first-seen spelling/order).
+  const upgraded = extractLinkedIssueRefs("Refs #10\nImplements #10", "o/r");
+  assert.equal(upgraded.length, 1);
+  assert.equal(upgraded[0]!.ref, "#10");
+  assert.equal(upgraded[0]!.contextOnly, false, "Implements upgrades the Refs-only entry");
+
+  const closed = extractLinkedIssueRefs("Refs #10\nCloses #10", "o/r");
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0]!.closing, true);
+  assert.equal(closed[0]!.contextOnly, undefined, "a later Refs never marks a closing entry as context");
+
+  // The reverse order must never demote an already-stronger relationship.
+  const notDowngraded = extractLinkedIssueRefs("Implements #10\nRefs #10", "o/r");
+  assert.equal(notDowngraded[0]!.contextOnly, undefined, "a later Refs never demotes Implements");
 });
 
 test("linked issue refs: incidental mentions are never linked (#872)", () => {
@@ -677,6 +721,140 @@ test("linked issue refs: Addresses is non-closing; past-tense closing keywords o
   assert.equal(extractLinkedIssueRefs("This PR fixes #42", "o/r")[0]!.closing, true);
   assert.equal(extractLinkedIssueRefs("this resolves #42", "o/r")[0]!.closing, true);
   assert.equal(extractLinkedIssueRefs("Closes #1", "o/r")[0]!.closing, true);
+});
+
+test("#1750 (operator correction): prContractIssueRefIdentities counts recognized contract relationships only", () => {
+  // The umbrella-parent owning-child veto must fire only on REAL contract
+  // claims — the SAME grammar the linked-issue intake uses — and stay silent
+  // on incidental discussion: a plain `Refs` link, a bare `#N` prose mention,
+  // and forge issue URLs naming an owning child must not make that child's
+  // parent criterion mandatory again (the false-INCOMPLETE class the round-5
+  // reference-form-agnostic union created).
+  const title = "feat: add GitLab webhook adapter";
+  const body = "Part of #42 (tracked separately).\n"
+    + "We deferred the child follow-up: #1677 will land the URL half; "
+    + "see https://github.com/o/r/issues/1677 and https://gitlab.com/group/sub/proj/-/issues/5.";
+  assert.deepEqual(
+    prContractIssueRefIdentities(title, body, "o/r"),
+    ["o/r#42"],
+    "the keyword link counts; the bare prose mention and both issue URLs do not",
+  );
+
+  // Every recognized relationship form counts: closing keywords, the
+  // non-closing `Implements`/`Part of`/`Addresses` implementation links, and
+  // the title `(#N)` convention — canonical casefolded `repo#N`, in
+  // first-appearance order. `Refs`/`Ref` alone never counts.
+  assert.deepEqual(
+    prContractIssueRefIdentities("", "Closes #1; Part of #2; Addresses #3; Implements #4", "o/r"),
+    ["o/r#1", "o/r#2", "o/r#3", "o/r#4"],
+  );
+  assert.deepEqual(prContractIssueRefIdentities("feat: thing (#42)", "Background only.", "O/R"), ["o/r#42"], "title convention is a contract claim");
+  assert.deepEqual(prContractIssueRefIdentities("", "Refs #1677\nref: #1678\nREFS other/repo#1679", "o/r"), [], "plain references are context, never contract");
+
+  // Dedupe merges every spelling of one identity, and a STRONGER occurrence
+  // of the same identity overrides a plain `Refs` in either order — the
+  // merged entry keeps its contract status.
+  assert.deepEqual(
+    prContractIssueRefIdentities("chore: bump (#42)", "Refs #42; also Closes #42", "O/R"),
+    ["o/r#42"],
+    "title convention and closing keyword upgrade the Refs-only mention to ONE contract identity",
+  );
+  assert.deepEqual(prContractIssueRefIdentities("", "Refs #7\nImplements #7", "o/r"), ["o/r#7"]);
+  assert.deepEqual(prContractIssueRefIdentities("", "Implements #7\nRefs #7", "o/r"), ["o/r#7"]);
+
+  // Unkeyworded references are not contract claims: pull URLs, foreign URLs,
+  // and explicit `repo#N` mentions without a recognized keyword contribute
+  // nothing.
+  assert.deepEqual(prContractIssueRefIdentities("", "Supersedes https://github.com/o/r/pull/1677.", "o/r"), [], "pull URLs are not contract references");
+  assert.deepEqual(prContractIssueRefIdentities("", "doc at https://example.com/issues/12", "o/r"), [], "no relationship grammar, no identity");
+  assert.deepEqual(prContractIssueRefIdentities("", "mirrors other/Repo#7 exactly", "o/r"), [], "an unkeyworded repo#N mention is not a contract claim");
+
+  // A padded body of bare mentions contributes nothing and can never evict a
+  // recognized reference: the grammar simply never counted prose, so no
+  // allocation backstop is needed any more.
+  const huge = Array.from({ length: 300 }, (_, index) => `mention #${index + 1}`).join("; ");
+  assert.deepEqual(prContractIssueRefIdentities("", `${huge}; owning child #1677`, "o/r"), []);
+  assert.deepEqual(prContractIssueRefIdentities("", `${huge}\nPart of #42`, "o/r"), ["o/r#42"]);
+});
+
+test("#1750 review: the contract-reference scan never inherits intake's 32-candidate fetch cap", () => {
+  // MAX_LINKED_ISSUE_CANDIDATES bounds the issues intake may FETCH; the
+  // veto fetches nothing, so it must see the FULL recognized grammar of
+  // the platform-supplied title+body. A cap-inheriting implementation is
+  // fail-open in the exact shape below: `Refs` links are filtered out of
+  // the contract set anyway, yet filling the candidate list with them
+  // silently cut off every contract claim that followed.
+  const flood = Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n");
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nImplements #33`, "o/r"),
+    ["o/r#33"],
+    "the claim past the intake-cap boundary is a contract claim, not an eviction casualty",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nImplements Other/Repo#1679`, "o/r"),
+    ["other/repo#1679"],
+    "a cross-repo contract claim survives the Refs flood, casefolded",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("fix: half the feed (#42)", `${flood}\nAddresses #43`, "o/r"),
+    ["o/r#42", "o/r#43"],
+    "the title convention counts first and the buried contract link counts too",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("fix: half the feed (#42)", `${flood}\nCloses #7; Part of #42`, "o/r"),
+    ["o/r#42", "o/r#7"],
+    "the closing claim past the boundary fires; dedupe against the title identity stays one entry",
+  );
+
+  const deeper = Array.from({ length: 96 }, (_, index) => `Refs #${index + 1}`).join("\n");
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${deeper}\nImplements #97`, "o/r"),
+    ["o/r#97"],
+    "the scan is exhaustive over the input, not truncated at any candidate count",
+  );
+
+  // Exhaustive, not over-matching: the flood itself is recognized grammar
+  // but context-only, and prose or forge URLs naming a flooded identity
+  // contribute nothing either.
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nsee #33 and https://github.com/o/r/issues/33`, "o/r"),
+    [],
+    "a Refs flood plus prose/URL mentions of #33 is still not a contract claim",
+  );
+});
+
+test("#1750 review r6: intake allocates fetch capacity contract-first after an exhaustive merge", () => {
+  // 32 distinct `Refs` links are exactly the old `MAX_LINKED_ISSUE_CANDIDATES`
+  // boundary. A contract claim after them must still be a candidate, must
+  // stay contract-bearing, and must take a fetch slot ahead of context.
+  const flood32 = Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n");
+  const withClaim = extractLinkedIssueRefs(`${flood32}\nImplements #1677`, "o/r", "");
+  assert.equal(withClaim.length, MAX_LINKED_ISSUE_CANDIDATES, "the candidate list keeps its bound");
+  const claim = withClaim.find((ref) => ref.number === 1677);
+  assert.ok(claim, "the contract claim past the old cap is still a candidate");
+  assert.equal(claim.contextOnly, undefined, "and it is contract-bearing, not context");
+  assert.equal(withClaim[0]!.number, 1677, "contract-bearing refs take the fetch slots first");
+  assert.equal(
+    withClaim.filter((ref) => ref.contextOnly === true).length,
+    MAX_LINKED_ISSUE_CANDIDATES - 1,
+    "context links use only the leftover capacity",
+  );
+
+  // A later stronger occurrence upgrades the SAME identity no matter how many
+  // context links precede it: position never decides relationship strength.
+  const upgraded = extractLinkedIssueRefs(
+    `Refs #10\n${Array.from({ length: 31 }, (_, index) => `Refs #${100 + index}`).join("\n")}\nImplements #10`,
+    "o/r",
+    "",
+  );
+  const ten = upgraded.filter((ref) => ref.number === 10);
+  assert.equal(ten.length, 1, "one merged identity for #10");
+  assert.equal(ten[0]!.closing, false, "still a non-closing link");
+  assert.equal(ten[0]!.contextOnly !== true, true, "upgraded to contract-bearing by the later Implements");
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { validateContract } from "../src/config/contract.js";
 import {
+  forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   parseInstanceConfigText,
   validateInstanceConfig,
@@ -607,9 +608,19 @@ test("a gitea forge integration validates and carries its identity kind (#1682)"
   });
 });
 
+test("a gitlab forge integration validates and keeps its own family (#740)", () => {
+  const ok = validate({
+    ...baseInstance(),
+    forges: [{ name: "gl", kind: "gitlab", endpoint: "https://gitlab.internal", credential: "gitlab-ref" }],
+  });
+  assert.equal(ok.forges[0]!.kind, "gitlab");
+  // GitLab is its own wire family, never folded into the Forgejo one.
+  assert.equal(forgeFamily(ok.forges[0]!.kind), "gitlab");
+});
+
 test("an unknown forge kind is rejected with the closed-set message (#1682)", () => {
   expectError(
-    { ...baseInstance(), forges: [{ name: "lab", kind: "gitlab", endpoint: "https://gitlab.internal", credential: "ref" }] },
-    "must be 'github', 'forgejo', or 'gitea'",
+    { ...baseInstance(), forges: [{ name: "lab", kind: "stash", endpoint: "https://stash.internal", credential: "ref" }] },
+    "must be 'github', 'forgejo', 'gitea', or 'gitlab'",
   );
 });

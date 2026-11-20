@@ -43,7 +43,7 @@ export interface GhApiResult {
 }
 
 export interface PlatformAdapter {
-  readonly platform: "github" | "forgejo" | "tangled";
+  readonly platform: "github" | "forgejo" | "gitlab" | "tangled";
   /** Fail before review work when the selected platform auth needs an exchange. */
   preflightAuthentication?(): Promise<void>;
   /** PR object (GitHub REST shape) or null when the fetch fails. */

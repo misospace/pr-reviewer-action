@@ -19,6 +19,22 @@ export function resolveForgejoEndpoints(endpoint: string): ForgejoEndpoints {
   return { base, origin, apiBase: `${base}/api/v1`, webBase: base };
 }
 
+/** The GitLab REST surface resolved from a configured platform base URL
+ * (#740). Same validator (`parsePlatformBaseUrl`), same shape, one different
+ * API base: GitLab's stable REST lives at `/api/v4`, and the same code path
+ * serves gitlab.com and self-hosted instances. */
+export interface GitLabEndpoints {
+  readonly base: string;
+  readonly origin: string;
+  readonly apiBase: string;
+  readonly webBase: string;
+}
+
+export function resolveGitLabEndpoints(endpoint: string): GitLabEndpoints {
+  const { base, origin } = parsePlatformBaseUrl(endpoint);
+  return { base, origin, apiBase: `${base}/api/v4`, webBase: base };
+}
+
 export interface RepositoryEndpoints {
   readonly forgejo: ForgejoEndpoints;
   readonly repoRef: RepoRef;
@@ -54,6 +70,10 @@ export function resolveRepositoryEndpoints(endpoint: string, repo: string): Repo
  * place the route is named for both sides of the boundary. */
 export const FORGEJO_WEBHOOK_PATH = "/webhooks/forgejo";
 export const GITEA_WEBHOOK_PATH = "/webhooks/gitea";
+/** #740: the route the native GitLab intake is mounted on (and the route an
+ * operator points a GitLab merge-request webhook at — GitLab posts no path of
+ * its own either). */
+export const GITLAB_WEBHOOK_PATH = "/webhooks/gitlab";
 
 export interface IngressEndpoints {
   readonly forge: GiteaFamilyForge;
@@ -67,8 +87,10 @@ export interface IngressEndpoints {
  * endpoint to resolve — the controller daemon naming the route its intake
  * serves — asks this function instead of resolving an endpoint it does not
  * need. */
-export function ingressWebhookPath(forge: GiteaFamilyForge): string {
-  return forge === "gitea" ? GITEA_WEBHOOK_PATH : FORGEJO_WEBHOOK_PATH;
+export function ingressWebhookPath(forge: GiteaFamilyForge | "gitlab"): string {
+  if (forge === "gitea") return GITEA_WEBHOOK_PATH;
+  if (forge === "gitlab") return GITLAB_WEBHOOK_PATH;
+  return FORGEJO_WEBHOOK_PATH;
 }
 
 /** Resolve the ingress surface for one Gitea-family forge (#1678).

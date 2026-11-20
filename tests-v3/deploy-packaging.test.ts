@@ -686,8 +686,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     }>;
   };
 
-  // ── Triggers (#1704): same-repo PRs, pushes to protected main, `v*` tag
-  // pushes, and retained manual dispatch.
+  // ── Triggers (#1704): same-repo PRs, pushes to protected main, exact
+  // `vX.Y.Z` tag pushes, and retained manual dispatch. #1742: the filter
+  // itself excludes the floating git major tag (`v3`) and a floating
+  // `vX.Y`, because such a push could only produce a run the strict
+  // validation refuses: the spurious alarm #1742 removes.
   assert.ok(parsed.on, "triggers must parse");
   assert.deepEqual(
     Object.keys(parsed.on).sort(),
@@ -695,7 +698,44 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   );
   assert.deepEqual(parsed.on.pull_request?.branches, ["main"], "PR runs must target main");
   assert.deepEqual(parsed.on.push?.branches, ["main"], "every push to main must publish");
-  assert.deepEqual(parsed.on.push?.tags, ["v*"], "release tag pushes must publish");
+  // GitHub filter patterns are globs, not regex, but they support
+  // character classes with a following `+` quantifier (the documented
+  // `v[12].[0-9]+.[0-9]+` shape). This matcher covers exactly that
+  // subset: literals (dots included), `[...]` classes, and `+`.
+  const ghFilterToRegExp = (pattern: string): RegExp => {
+    let source = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i]!;
+      if (ch === "[") {
+        const end = pattern.indexOf("]", i);
+        assert.notEqual(end, -1, "unterminated character class in the tag filter");
+        source += pattern.slice(i, end + 1);
+        i = end;
+        if (pattern[i + 1] === "+") {
+          source += "+";
+          i++;
+        }
+      } else {
+        source += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+    }
+    return new RegExp(`^${source}$`);
+  };
+  assert.deepEqual(
+    parsed.on.push?.tags,
+    ["v[0-9]+.[0-9]+.[0-9]+"],
+    "only exact vX.Y.Z tag pushes may trigger the workflow",
+  );
+  const tagFilter = ghFilterToRegExp(parsed.on.push!.tags![0]!);
+  for (const exact of ["v1.0.0", "v3.9.1", "v10.20.30"]) {
+    assert.ok(tagFilter.test(exact), `the exact release tag ${exact} must trigger the workflow`);
+  }
+  for (const floating of ["v3", "v3.9", "v", "v3.", "v3.9.0-rc.1", "nightly"]) {
+    assert.ok(
+      !tagFilter.test(floating),
+      `the floating/non-release ref ${floating} must never start an image-publication run`,
+    );
+  }
   // A canceled run would silently skip publishing the sha refs of the
   // commit it raced, so runs serialize per ref and never cancel.
   assert.match(parsed.concurrency.group, /publish-images-\$\{\{ github\.ref \}\}/);
@@ -787,10 +827,11 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
 
   // ── Tag contract on the publish job's build steps (r3 review): the build
   // steps push ONLY the immutable sha-<commit> ref. No build step may name a
-  // moving ref (pr-<number> / SemVer / major.minor): the steps carry no
-  // supersession check, so an ungated alias push there could move a moving
-  // ref before the guarded republish step ever ran. Every moving-ref write
-  // lives behind that guard (asserted with the alias step below).
+  // moving ref (the pr-<number> ref or the exact SemVer release alias —
+  // #1742: no floating alias of any shape): the steps carry no supersession
+  // check, so an ungated alias push there could move a moving ref before the
+  // guarded republish step ever ran. Every moving-ref write lives behind that
+  // guard (asserted with the alias step below).
   const publishTagBlocks = publish.steps.flatMap(
     (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
   ).filter((block) =>
@@ -816,17 +857,21 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     assert.deepEqual(
       lines,
       [`ghcr.io/\${{ env.GHCR_OWNER }}/pr-reviewer-${target}:sha-\${{ env.SOURCE_SHA }}`],
-      `the ${target} build step must push ONLY the immutable sha ref: no pr/SemVer/major.minor alias, no latest, no floating branch tag`,
+      `the ${target} build step must push ONLY the immutable sha ref: no pr ref, no SemVer or floating alias, no latest, no floating branch tag`,
     );
     // Belt and braces on the moving-ref coordinates: the resolved aliases
     // must not appear anywhere in a build step, so no build step can ever
-    // become a second, unguarded moving-ref writer.
-    for (const coordinate of ["PR_REF", "RELEASE_VERSION", "RELEASE_MAJOR_MINOR"]) {
+    // become a second, unguarded moving-ref writer. #1742: the RELEASE_MAJOR
+    // prefix also catches a (now-impossible) floating alias variable.
+    for (const coordinate of ["PR_REF", "RELEASE_VERSION", "RELEASE_MAJOR"]) {
       assert.ok(!block.includes(coordinate), `the ${target} build tags must not reference ${coordinate}`);
     }
   }
   assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
   assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // #1742: the whole workflow derives no floating alias anywhere (the
+  // RELEASE_MAJOR prefix also catches a major-only alias variable).
+  assert.doesNotMatch(workflow, /RELEASE_MAJOR/, "no floating alias may be derived");
 
   // ── The source SHA: one resolution step, and PR events anchor the
   // immutable refs to the PR HEAD commit (github.sha is the merge commit
@@ -848,19 +893,26 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
   assert.match(coordsRun, /SOURCE_SHA="\$DEFAULT_SHA"/);
   // Moving PR ref is pr-<number>, derived only for pull_request events.
   assert.match(coordsRun, /PR_REF="pr-\$PR_NUMBER"/);
-  // Release aliases derive only from a strictly validated vX.Y.Z tag: the
-  // version is stripped of its v prefix, the major.minor alias is cut from
-  // the exact version, and a non-semver ref refuses the run instead of
-  // producing a wrong alias.
+  // The release alias derives only from a strictly validated vX.Y.Z tag:
+  // the version is stripped of its v prefix, and a non-semver ref refuses
+  // the run instead of producing a wrong alias. #1742: the exact version
+  // is the only alias cut from the tag.
   assert.match(coordsRun, /version="\$\{REF_NAME#v\}"/);
   assert.match(
     coordsRun,
     /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\(\[-\+\]\[0-9A-Za-z\.\-\]\+\)\?\$/,
     "release aliases require a strict X.Y.Z semver check",
   );
-  assert.match(coordsRun, /refusing to derive release aliases/);
-  assert.match(coordsRun, /RELEASE_MAJOR_MINOR="\$\{version%\.\*\}"/);
+  assert.match(coordsRun, /refusing to derive a release alias/);
   assert.match(coordsRun, /RELEASE_VERSION=""/, "non-tag events must derive no release alias");
+  // #1742: the exact version is the only release coordinate derived from
+  // a release tag — the resolution step computes no floating alias by
+  // any means (suffix-cut, cut, or a major/minor-shaped variable).
+  assert.doesNotMatch(
+    coordsRun,
+    /RELEASE_MAJOR|\$\{\s*version\s*%|\$\{\s*VERSION\s*%|\bcut\b/,
+    "the resolution step must derive no floating alias",
+  );
   // ── The resume resolver (#1741): GHCR has no registry-side tag
   // immutability, so the workflow must never re-push an existing
   // sha-<commit> tag — but it must also not refuse the whole run when only
@@ -898,13 +950,14 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     "the sha-tag resolver must run before any push step",
   );
   // ── The moving refs of EVERY target (reused or freshly built) converge in
-  // ONE dedicated step: it repoints pr-<number>/SemVer/major.minor at the
-  // manifest the immutable sha tag holds (no rebuild, so a moving ref can
-  // never drift off the immutable digest, and aliases lost when an earlier
-  // run died after the sha push are recovered on the rerun). Combined with
-  // the build-tag contract above this pins the ordering the r3 review
-  // demanded: the guarded script is the workflow's ONLY moving-ref writer,
-  // so no write can precede the supersession check inside it.
+  // ONE dedicated step: it repoints pr-<number>/exact SemVer (#1742: no
+  // floating alias of any shape) at the manifest the immutable sha tag holds
+  // (no rebuild, so a moving ref can never drift off the immutable digest,
+  // and aliases lost when an earlier run died after the sha push are
+  // recovered on the rerun). Combined with the build-tag contract above this
+  // pins the ordering the r3 review demanded: the guarded script is the
+  // workflow's ONLY moving-ref writer, so no write can precede the
+  // supersession check inside it.
   const aliasStep = publish.steps.find((step) =>
     (step.run ?? "").includes("deploy/images/republish-moving-refs.sh"),
   );
@@ -914,7 +967,6 @@ test("#1704 image-publishing workflow: PR/main/tag triggers, PR/SHA/SemVer refs,
     SOURCE_SHA: "${{ env.SOURCE_SHA }}",
     PR_REF: "${{ env.PR_REF }}",
     RELEASE_VERSION: "${{ env.RELEASE_VERSION }}",
-    RELEASE_MAJOR_MINOR: "${{ env.RELEASE_MAJOR_MINOR }}",
     CONTROLLER_STATE: "${{ steps.sha_state.outputs.controller_state }}",
     WORKER_STATE: "${{ steps.sha_state.outputs.worker_state }}",
     // The supersession guard reads the live coordinate through the forge
@@ -1215,12 +1267,6 @@ function writeCurlStub(dir: string): void {
       'ref_sha="$LIVE_SHA"',
       '[ "${TAG_REF_TYPE:-commit}" = tag ] && ref_sha="$TAG_OBJECT_SHA"',
       'case "$url" in',
-      '  */tags\\?*)',
-      '    out="["',
-      '    for n in ${TAG_LIST:-v1.2.3 v1.1.0}; do',
-      "      out=\"$out{\\\"name\\\":\\\"$n\\\",\\\"commit\\\":{\\\"sha\\\":\\\"ffffffffffffffffffffffffffffffffffffffff\\\",\\\"url\\\":\\\"u\\\"}},\"",
-      "    done",
-      '    printf \'%s]\' "${out%,}";;',
       '  */git/ref/tags/*)',
       '    printf \'{"ref":"refs/tags/v1.2.3","object":{"sha":"%s","type":"%s","url":"u"}}\\n\' "$ref_sha" "${TAG_REF_TYPE:-commit}";;',
       "  */git/tags/*)",
@@ -1239,7 +1285,6 @@ function runMovingRefs(env: {
   worker: string;
   prRef?: string;
   releaseVersion?: string;
-  releaseMajorMinor?: string;
   dockerFail?: boolean;
   // Forge-API emulation for the supersession guard: the sha the live
   // coordinate resolves to (default: this run's SOURCE_SHA, i.e. current),
@@ -1247,9 +1292,6 @@ function runMovingRefs(env: {
   live?: string;
   apiMode?: "ok" | "http-fail" | "garbage" | "pretty";
   tagRefType?: "commit" | "tag";
-  // Space-separated repository tag names the stubbed listing returns for the
-  // major.minor-alias check (default: this run's tag plus one older patch).
-  tagList?: string;
 }): { status: number | null; calls: string[]; apiCalls: string[]; stdout: string } {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "moving-refs-"));
   const callsFile = join(dir, "calls.txt");
@@ -1298,14 +1340,12 @@ function runMovingRefs(env: {
       WORKER_STATE: env.worker,
       PR_REF: env.prRef ?? "",
       RELEASE_VERSION: env.releaseVersion ?? "",
-      RELEASE_MAJOR_MINOR: env.releaseMajorMinor ?? "",
       GITHUB_REPOSITORY: "o/r",
       GITHUB_TOKEN: FAKE_TOKEN,
       CALLS_FILE: callsFile,
       CURL_CALLS_FILE: apiCallsFile,
       LIVE_SHA: live,
       TAG_OBJECT_SHA,
-      ...(env.tagList !== undefined ? { TAG_LIST: env.tagList } : {}),
       ...(env.tagRefType ? { TAG_REF_TYPE: env.tagRefType } : {}),
       ...(env.dockerFail ? { DOCKER_FAIL: "1" } : {}),
       ...(mode !== "ok" ? { API_MODE: mode } : {}),
@@ -1338,18 +1378,17 @@ test("#1741 moving refs of every target repoint at the sha manifest behind the g
     `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:pr-7 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
-  // Release-tag resume: every reused target gets BOTH SemVer aliases
-  // repointed, each at its own sha manifest.
+  // Release-tag resume: every reused target gets its exact SemVer alias
+  // repointed (#1742: the only release alias), each at its own sha manifest.
   const release = runMovingRefs({
     controller: "present",
     worker: "present",
     releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
   });
   assert.equal(release.status, 0);
   assert.deepEqual(release.calls, [
-    `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 -t ghcr.io/o/pr-reviewer-controller:1.2 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
-    `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 -t ghcr.io/o/pr-reviewer-worker:1.2 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-controller:1.2.3 ghcr.io/o/pr-reviewer-controller:sha-${MOVING_SOURCE_SHA}`,
+    `buildx imagetools create -t ghcr.io/o/pr-reviewer-worker:1.2.3 ghcr.io/o/pr-reviewer-worker:sha-${MOVING_SOURCE_SHA}`,
   ]);
 
   // First publish: the build steps pushed only the sha refs, so the script
@@ -1399,7 +1438,6 @@ test("#1741 r2: only the run that still owns the moving-ref coordinate may retag
     controller: "present",
     worker: "present",
     releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
     live: SUPERSEDED_SHA,
   });
   assert.notEqual(staleTag.status, 0, "a run whose release tag no longer resolves to SOURCE_SHA fails closed");
@@ -1411,7 +1449,6 @@ test("#1741 r2: only the run that still owns the moving-ref coordinate may retag
     controller: "present",
     worker: "present",
     releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
     tagRefType: "tag",
   });
   assert.equal(annotated.status, 0, "an annotated tag is dereferenced and, at SOURCE_SHA, still republishes");
@@ -1458,85 +1495,15 @@ test("#1741 r2: only the run that still owns the moving-ref coordinate may retag
   assert.deepEqual(freshNoAliases.apiCalls, [], "a fresh main push with no moving refs never calls the API");
 
   // The guard runs ONCE per run, not once per retag: one coordinate read
-  // and one (first-page) tag enumeration guard both targets.
+  // guards both targets. #1742: the exact SemVer tag is the only release
+  // alias, so there is no shared floating bucket to enumerate.
   const once = runMovingRefs({
     controller: "present",
     worker: "present",
     releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
   });
   assert.equal(once.apiCalls.filter((call) => call.includes("/git/ref/")).length, 1, "one coordinate check guards both targets");
-  assert.equal(once.apiCalls.filter((call) => call.includes("/tags?")).length, 1, "one page-bounded tag enumeration per run");
-
-  // The shared X.Y alias follows the NEWEST vX.Y.* release: a rerun of an
-  // older patch's workflow must not repoint it backward, even though the
-  // patch's own tag still resolves to this run's commit.
-  const newerPatch = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
-    tagList: "v1.2.3 v1.2.9 v1.1.0",
-  });
-  assert.notEqual(newerPatch.status, 0, "a newer same-bucket patch supersedes the rerun");
-  assert.match(newerPatch.stdout, /v1\.2\.9/);
-  assert.deepEqual(newerPatch.calls, [], "no registry write when a newer patch owns the alias");
-
-  // Newer tags OUTSIDE the bucket do not block it: 1.2 belongs to the newest
-  // 1.2.x, regardless of how far 1.3/2.x have moved ahead.
-  const otherBucket = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
-    tagList: "v2.0.0 v1.3.0 v1.2.3 v1.1.0",
-  });
-  assert.equal(otherBucket.status, 0, "newer releases in other buckets do not supersede this one");
-  assert.equal(otherBucket.calls.length, 2, "the confirmed run republishes both reused targets");
-
-  // Enumeration uncertainty fails closed: a same-bucket sibling that is not
-  // numerically comparable, and a listing that omits this run's own tag.
-  const oddSibling = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
-    tagList: "v1.2.3 v1.2.x",
-  });
-  assert.notEqual(oddSibling.status, 0, "an undecidable same-bucket tag fails closed");
-  assert.deepEqual(oddSibling.calls, [], "no registry write on undecidable enumeration");
-  const missingSelf = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
-    tagList: "v1.1.0 v1.0.0",
-  });
-  assert.notEqual(missingSelf.status, 0, "a listing that omits the run's own tag is uncertain and fails closed");
-  assert.deepEqual(missingSelf.calls, [], "no registry write on an uncertain listing");
-
-  // The numeric comparison is numeric: 10 > 9, not "10" < "9".
-  const patchTen = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.9",
-    releaseMajorMinor: "1.2",
-    tagList: "v1.2.10 v1.2.9",
-  });
-  assert.notEqual(patchTen.status, 0, "v1.2.10 supersedes a rerun of v1.2.9");
-  assert.match(patchTen.stdout, /v1\.2\.10 is a newer 1\.2\.\* release/);
-
-  // A remainder bash cannot hold as an integer is undecidable, not
-  // comparable: it must fail closed, not silently pass the -gt test.
-  const hugeSibling = runMovingRefs({
-    controller: "present",
-    worker: "present",
-    releaseVersion: "1.2.3",
-    releaseMajorMinor: "1.2",
-    tagList: "v1.2.3 v1.2.99999999999999999999999",
-  });
-  assert.notEqual(hugeSibling.status, 0, "an int64-overflowing same-bucket tag fails closed");
-  assert.deepEqual(hugeSibling.calls, [], "no registry write on an undecidable patch number");
+  assert.deepEqual(once.apiCalls.filter((call) => call.includes("/tags?")), [], "a release run enumerates no tags");
 
   // The PR flow needs no tag enumeration.
   const prGuard = runMovingRefs({ controller: "present", worker: "absent", prRef: "pr-7" });
@@ -1566,7 +1533,37 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(readme, /pr-<number>/, "the moving same-repo PR ref must be documented");
   assert.match(readme, /sha-<commit>/, "the immutable commit ref must be documented");
   assert.match(readme, /X\.Y\.Z/, "the exact SemVer release alias must be documented");
-  assert.match(readme, /X\.Y/, "the major.minor release alias must be documented");
+  // #1742: the exact version is the only release alias. The docs must not
+  // advertise a floating major.minor image reference, and (review
+  // follow-up) they must not imply the chart carries a floating OCI alias
+  // today: publish-chart.yaml publishes exact SemVer only, because Helm
+  // rejects non-SemVer OCI tags.
+  assert.doesNotMatch(
+    readme,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  const readmeProse = readme.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    readmeProse,
+    /intended destination for floating references/,
+    "the docs must not present the chart as a floating-alias destination today",
+  );
+  assert.match(
+    readmeProse,
+    /No floating alias exists on the chart surface today/,
+    "the docs must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    readmeProse,
+    /Helm rejects non-SemVer OCI tags/,
+    "the docs must give the reason the chart carries exact tags only",
+  );
+  assert.match(
+    readmeProse,
+    /never starts an image-publication run/,
+    "the docs must state the floating major tag never starts an image-publication run",
+  );
   // The fork trust boundary must be stated.
   assert.match(readme, /[Ff]ork[\s\S]{0,200}publish(?:es)? nothing/, "the fork-PR no-publish contract must be documented");
   // No `latest` policy statement survives either.
@@ -1579,6 +1576,29 @@ test("#1704 image coordinates are documented for PR, main, and release flows", (
   assert.match(deploymentDoc, /sha-<commit>/);
   assert.match(deploymentDoc, /X\.Y\.Z/);
   assert.match(deploymentDoc, /[Ff]ork/);
+  // #1742: same single-alias contract in the deployment runbook, with the
+  // same "no floating alias exists today" honesty about the chart surface.
+  assert.doesNotMatch(
+    deploymentDoc,
+    /:X\.Y(?!\.Z)|pr-reviewer-\w+:[0-9]+\.[0-9]+(?![.\d])|`X\.Y` (?:release )?alias/,
+    "no floating image alias may be documented",
+  );
+  const deploymentProse = deploymentDoc.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    deploymentProse,
+    /intended destination for floating references/,
+    "the deployment doc must not present the chart as a floating-alias destination today",
+  );
+  assert.match(
+    deploymentProse,
+    /No floating alias exists on the chart surface today/,
+    "the deployment doc must state that no floating reference exists on either surface today",
+  );
+  assert.match(
+    deploymentProse,
+    /never starts an image-publication run/,
+    "the deployment doc must state the floating major tag never starts an image-publication run",
+  );
 });
 
 test("#1708 chart OCI publishing workflow: release/dispatch publish, PR validate-only, coordinates fail closed", () => {

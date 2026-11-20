@@ -106,7 +106,6 @@ import {
 import { InClusterKubernetesApi } from "../executor/kubernetes-api.js";
 import { InClusterCredentialStore } from "../executor/kubernetes-credential-store.js";
 import { createFollowUpAnswerExecutor } from "../followup/executor.js";
-import { reconcileRepositories } from "../ingress/reconcile.js";
 import { createAdminHost, type AdminHost } from "../admin/server.js";
 import type {
   AdminAdoptionEntry,
@@ -117,6 +116,7 @@ import type {
   ReadinessComponent,
 } from "../admin/types.js";
 import type { FollowUpForgeAdapter } from "../ingress/followup-host.js";
+import type { ReconcileReport } from "../ingress/reconcile.js";
 import {
   startControllerDaemon,
   type ControllerDaemon,
@@ -132,6 +132,10 @@ import {
 /** The daemon's webhook option shape (re-exported locally for the
  * composition). */
 type DaemonWebhook = NonNullable<ControllerDaemonOptions["webhook"]>;
+
+/** The daemon's reconciliation option shape (re-exported locally for the
+ * composition). */
+type DaemonReconcile = NonNullable<ControllerDaemonOptions["reconcile"]>;
 
 /** The running controller handle: health introspection plus the graceful
  * stop the signal handlers (and tests) drive. */
@@ -186,6 +190,41 @@ function diagnostic(message: string): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The controller's rendering of one reconciliation pass (#1718).
+ *
+ * The report is the ONLY channel that distinguishes a poll that fails or is
+ * refused every tick from a forge with nothing to review, so a pass with
+ * anything to say gets one summary line plus one line per refused queue
+ * handoff carrying the daemon's reason. A pass that listed every repository
+ * and found nothing stays silent: a quiet forge must not generate log spam
+ * on a 15-minute timer. A repository whose open pull requests are all
+ * already scheduled DOES log (discovered > 0, skipped > 0) — that line is
+ * the only evidence the sweep still sees them and the ledger still
+ * suppresses them.
+ *
+ * Refusal reasons arrive single-line and secret-masked from the pass itself
+ * (`describeHandoffRefusal`): they are rendered verbatim, never re-derived,
+ * and no job id or credential ever joins the line. */
+export function reconcileReportDiagnostics(report: ReconcileReport): readonly string[] {
+  if (
+    report.discovered === 0 &&
+    report.failedRepositories.length === 0 &&
+    report.handoffRefusals.length === 0
+  ) {
+    return [];
+  }
+  const lines = [
+    `reconcile pass: scheduled=${String(report.jobs.length)}` +
+      ` discovered=${String(report.discovered)}` +
+      ` skipped=${String(report.skipped)}` +
+      ` failed=${report.failedRepositories.length === 0 ? "-" : report.failedRepositories.join(",")}`,
+  ];
+  for (const refusal of report.handoffRefusals) {
+    lines.push(`reconcile handoff refused for ${refusal.repo}: ${refusal.reason}`);
+  }
+  return lines;
 }
 
 /** The env var name that carries the material for one #735 credential
@@ -355,6 +394,17 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   }
   const platform = instance.forges[0]!.kind;
   const forgeEndpoint = instance.forges[0]!.endpoint;
+  if (platform === "gitlab") {
+    // #740: the GitLab adapter stack (ingress intake, read/publish
+    // adapters) exists at the platform seam, but the controller daemon's
+    // capability composition, credential wiring and reconciliation for
+    // GitLab are not landed yet. Refuse at startup — the daemon must
+    // never compose a GitLab instance on another family's adapters.
+    throw new StartupRefusal(
+      "the instance config declares a gitlab forge integration, but controller-daemon GitLab composition is not wired yet (#1677)",
+      2,
+    );
+  }
 
   // ── forge material (platform-specific, fail closed).
   let githubAppId = "";
@@ -761,7 +811,7 @@ const MAX_TRACKED_RUN_PLANS = 256;
 export interface CredentialPlanJob {
   readonly jobId: string;
   readonly repoFullName: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly fork: boolean;
   /** The serving forge integration's identity (#1440), when the job names
@@ -796,7 +846,7 @@ export interface WorkerCredentialBinding {
  * authentication, exactly the pre-existing posture. */
 function servingForgePublishCredentialRef(
   instance: InstanceConfig,
-  platform: "github" | "forgejo",
+  platform: "github" | "forgejo" | "gitlab",
   forgeIntegration: string,
 ): string {
   if (forgeIntegration !== "") {
@@ -959,7 +1009,7 @@ export function createWorkerCredentialBinding(deps: {
  * only bounds reuse within that process. */
 export function createModelCredentialVault(options: {
   readonly instance: InstanceConfig;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly modelCredentialMaterial: ReadonlyMap<string, string>;
 }): InMemorySecretVault {
   const profilesByReference = new Map<string, string[]>();
@@ -1368,7 +1418,6 @@ export async function controllerMain(
   // resolution can never describe two different runs.
 
   // ── the webhook intake and the reconciliation schedule.
-  const daemonRef: { value: ControllerDaemon | null } = { value: null };
   let webhook: DaemonWebhook | undefined;
   if (startup.webhook !== null) {
     // The follow-up lane's forge adapter: the composed platform adapter,
@@ -1420,44 +1469,50 @@ export async function controllerMain(
     };
   }
 
-  const reconcile = startup.reconcile === null
+  // The schedule binds the daemon's canonical `poll` composition (#1446),
+  // NEVER an operator `run` (#1718). The intake mints every job with a
+  // PER-EVENT identity (adoption epoch, config fingerprint, bound
+  // integration) resolved through `resolveIntakeBuildOptions`; no
+  // operator-side build options can mirror it, and a `run` passing its own
+  // (here: empty) options minted a SECOND generation of every head the
+  // webhook already claimed — the live #1718 failure where the poll
+  // scheduled nothing that converged. With `poll` the daemon drives
+  // `reconcileRepositories` against its OWN context, so there is no
+  // operator callback that can drop the identity.
+  const reconcile: DaemonReconcile | undefined = startup.reconcile === null
     ? undefined
     : {
         intervalMs: startup.reconcile.intervalMs,
+        // The daemon hashes the FAMILY identity itself (#1682): a Gitea
+        // instance's poll mints what its own intake mints for the same head.
         platform: startup.platform,
-        run: async (): Promise<void> => {
-          const daemon = daemonRef.value;
-          if (daemon === null || startup.reconcile === null) return;
-          await reconcileRepositories({
-            // The mint site hashes the FAMILY identity (#1682): a Gitea
-            // instance's poll mints what its own intake mints for the same
-            // head, so the two converge on one generation.
-            platform: forgeFamily(startup.platform),
-            // The poll's installation identity rides the canonical event into
-            // the minted job (#1624): the reconciler authenticates and
-            // list-opens AS the configured App installation, so the job's
-            // late forge-publish resolution must mint for THAT installation.
-            // A poll event minted without it carries `installationId: ""`,
-            // and the minting broker refuses the whole worker credential
-            // set — the exact GitHub self-hosted path this wiring unlocks.
-            ...(startup.githubPollInstallationId !== ""
-              ? { installationId: startup.githubPollInstallationId }
-              : {}),
-            listOpenPullRequests: (repo) =>
-              composedForge === null
-                ? Promise.resolve({ ok: false as const, error: "no reconcile lister is bound" })
-                : composedForge.listOpenPullRequests(repo),
-            repos: startup.reconcile.repos,
-            ledger: daemon.ledger,
-            enqueueJob: async (job) => {
-              try {
-                await daemon.enqueue(job);
-                return true;
-              } catch {
-                return false;
-              }
-            },
-          });
+        poll: {
+          // The poll's installation identity rides the canonical event into
+          // the minted job (#1624): the reconciler authenticates and
+          // list-opens AS the configured App installation, so the job's
+          // late forge-publish resolution must mint for THAT installation.
+          // A poll event minted without it carries `installationId: ""`,
+          // and the minting broker refuses the whole worker credential
+          // set — the exact GitHub self-hosted path this wiring unlocks.
+          ...(startup.githubPollInstallationId !== ""
+            ? { installationId: startup.githubPollInstallationId }
+            : {}),
+          listOpenPullRequests: (repo) =>
+            composedForge === null
+              ? Promise.resolve({ ok: false as const, error: "no reconcile lister is bound" })
+              : composedForge.listOpenPullRequests(repo),
+          repos: startup.reconcile.repos,
+          // #1718: the report is never discarded. See
+          // `reconcileReportDiagnostics` for the silence rule and what each
+          // line may carry.
+          onReport: (report) => {
+            try {
+              for (const line of reconcileReportDiagnostics(report)) diagnostic(line);
+            } catch {
+              // observability only: a broken diagnostic must never stop the
+              // reconciliation schedule.
+            }
+          },
         },
       };
 
@@ -1486,8 +1541,6 @@ export async function controllerMain(
     await closePool(pool);
     return 1;
   }
-  daemonRef.value = daemon;
-
   // ── the admin listener (#737): never unauthenticated, never shared with
   //    the webhook intake (the normative listener boundary).
   let adminServer: Server | null = null;

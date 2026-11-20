@@ -104,10 +104,16 @@ test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#58
   // A blank DID is no signal: auto falls through unchanged.
   assert.equal(resolvePlatform("auto", "", "", "   "), "github");
   assert.equal(resolvePlatform("auto", "https://git.example.com", "", "   "), "forgejo");
+  // GitLab (#740) is an explicit declaration, never an auto result: there
+  // is no signal here that could distinguish a self-hosted GitLab host.
+  assert.equal(resolvePlatform("gitlab", "", "", ""), "gitlab");
+  assert.equal(resolvePlatform(" GitLab ", "", "", ""), "gitlab");
+  assert.equal(resolvePlatform("auto", "", "", ""), "github");
+  assert.equal(resolvePlatform("auto", "https://gitlab.example.com", "", ""), "forgejo");
   // The unsupported-value diagnostic lists every resolvable platform.
   assert.throws(
-    () => resolvePlatform("gitlab", "", "", ""),
-    (e: unknown) => e instanceof Error       && e.message === "unsupported PLATFORM 'gitlab' (expected github|forgejo|gitea|tangled|auto)",
+    () => resolvePlatform("stash", "", "", ""),
+    (e: unknown) => e instanceof Error       && e.message === "unsupported PLATFORM 'stash' (expected github|forgejo|gitea|gitlab|tangled|auto)",
   );
 });
 

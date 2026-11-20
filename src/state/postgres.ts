@@ -807,7 +807,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
   }
 
   async getAdoptedRepository(
-    platform: "github" | "forgejo",
+    platform: "github" | "forgejo" | "gitlab",
     installationId: string,
     repoFullName: string,
   ): Promise<AdoptedRepositoryRecord | null> {

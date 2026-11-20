@@ -6,8 +6,11 @@
  * a forced push to the source branch cannot move an already-pinned review.
  *
  * GitHub and Forgejo/Gitea both expose `refs/pull/<n>/head`, so the ref form
- * is shared; the seam still exists so a platform that names its PR refs
- * differently can be added without touching the acquisition module.
+ * is shared; GitLab names the same forge-maintained coordinate
+ * `refs/merge-requests/<n>/head` (#740) — the branch is spelled the same way,
+ * only the ref namespace differs, so the trust argument is unchanged: the head
+ * commit is addressed by the MR number alone, never by the contributor's
+ * source branch.
  */
 
 import { forgeWireFamily, type ForgeId } from "./resolve.js";
@@ -31,6 +34,9 @@ function isGiteaFamily(platform: AcquisitionPlatform): boolean {
 export function pullRequestHeadRef(platform: AcquisitionPlatform, prNumber: number): string | null {
   if (typeof prNumber !== "number" || !Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
   if (!PR_NUMBER_RE.test(String(prNumber))) return null;
+  // #740: GitLab's forge-maintained MR head ref. The ref name is built from
+  // the validated MR number ONLY — no caller string is interpolated.
+  if (platform === "gitlab") return `refs/merge-requests/${prNumber}/head`;
   if (platform !== "github" && !isGiteaFamily(platform)) return null;
   return `refs/pull/${prNumber}/head`;
 }
@@ -40,6 +46,9 @@ export function pullRequestHeadRef(platform: AcquisitionPlatform, prNumber: numb
  * acquisition mirror composes its fetch refspecs from this seam — the
  * per-platform PR-ref naming lives here, nowhere else. */
 export function pullHeadRefspec(platform: AcquisitionPlatform): string | null {
+  // #740: forced update has the same rationale as below — a re-pushed MR head
+  // must overwrite the old one in the mirror.
+  if (platform === "gitlab") return "+refs/merge-requests/*:refs/merge-requests/*";
   if (platform !== "github" && !isGiteaFamily(platform)) return null;
   return "+refs/pull/*:refs/pull/*";
 }

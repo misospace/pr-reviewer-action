@@ -123,6 +123,20 @@ test("validateStageEnv fails closed with the v2 messages on missing bindings", (
   assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t", REPOSITORY_SKILLS_PATHS: "[]" } as never), null);
 });
 
+test("validateStageEnv refuses a resolved gitlab run with the #1677 composition message, never a token demand", () => {
+  const config = loadConfig(contract, { "github-token": "t", "ai-base-url": "u", "ai-model": "m" });
+  const empty = stageEnvFromConfig(config);
+  const base = { ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m" };
+  // A declared GitLab run must NOT be gated on a GitHub token it can never
+  // use; the refusal names the missing composition (#1677) in every token
+  // state, GH_TOKEN present or absent.
+  const refusal = validateStageEnv({ ...base, PLATFORM: "gitlab" } as never) ?? "";
+  assert.match(refusal, /gitlab/i);
+  assert.match(refusal, /#1677/);
+  assert.doesNotMatch(refusal, /GitHub token/);
+  assert.equal(validateStageEnv({ ...base, PLATFORM: "gitlab", GH_TOKEN: "t" } as never) ?? "", refusal);
+});
+
 test("eval fixture keys survive the stage-env projection and yield the offline adapter", async () => {
   // The real run path is buildStageEnv -> buildPlatformReadAdapter, so the
   // projection must carry the eval harness's SEMANTIC_FIXTURE_* keys —

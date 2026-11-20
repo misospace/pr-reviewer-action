@@ -30,7 +30,7 @@ export interface ReviewJob {
   /** The producing event's kind (the event kind that produced the job).
    * Not part of the generation identity. */
   readonly reason: string;
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly installationId: string;
   readonly repoFullName: string;
   readonly prNumber: number;

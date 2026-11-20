@@ -65,14 +65,26 @@ are published from the same source commit:
   may move as commits are pushed; each underlying commit stays addressable
   by its immutable `sha-<head-commit>` ref.
 - **Release tags.** A `vX.Y.Z` tag publishes the exact SemVer ref
-  (`X.Y.Z`) and a `X.Y` alias for both images from that exact tagged
-  commit. The immutable `sha-<commit>` ref and digest remain the
-  provenance anchor behind the aliases. No `latest` tag is published.
+  (`X.Y.Z`) only for both images from that exact tagged commit. Only
+  exact `vX.Y.Z` tag pushes trigger the workflow at all: the floating git
+  major tag (`v3`), which the release pipeline moves on every stable
+  release, matches no trigger filter and never starts an image-publication
+  run (#1742). No floating alias is published: a cluster pulls an image
+  tag directly, so every image tag must resolve to one immutable build.
+  The immutable `sha-<commit>` ref and digest remain the provenance anchor
+  behind the alias. No `latest` tag is published. No floating alias
+  exists on the chart surface today either: the chart publishes exact
+  SemVer OCI tags only, because Helm rejects non-SemVer OCI tags, so an
+  operator who tracks a release line consumes the exact chart version the
+  same release publishes
+  (`oci://ghcr.io/misospace/charts/pr-reviewer:X.Y.Z`), never a moving
+  image tag.
 
 How it runs:
 
 - **Triggers.** Pull requests targeting `main`, pushes to `main`, pushes of
-  `v*` release tags, and manual `workflow_dispatch` (recovery/testing,
+  exact `vX.Y.Z` release tags (the floating `vX` major tag never starts a
+  run, #1742), and manual `workflow_dispatch` (recovery/testing,
   from Actions → Publish images).
 - **Fork boundary.** A fork pull request builds and validates both targets
   locally but receives no GHCR credentials (`contents: read` only) and
@@ -86,13 +98,14 @@ How it runs:
   tag's state and never re-pushes one that already exists. A rerun RESUMES a
   half-published pair — it reuses a target whose tag is present (keeping its
   digest) and publishes only the missing target. The build steps push nothing
-  but the immutable sha ref; EVERY moving ref (`pr-<number>` and the release
-  aliases), for reused and freshly built targets alike, is written by one
-  guarded step that points it at the sha manifest without a rebuild — so a
-  rerun also recovers aliases an earlier run failed to push, and no write can
-  precede the guard. That step first confirms through the forge API that this
-  run is still the live coordinate behind the refs: a rerun of a superseded
-  run fails closed instead of moving a moving ref backward. If either registry
+  but the immutable sha ref; EVERY moving ref (`pr-<number>` and the exact
+  SemVer release alias, #1742: no floating alias of any shape), for reused
+  and freshly built targets alike, is written by one guarded step that
+  points it at the sha manifest without a rebuild — so a rerun also recovers
+  aliases an earlier run failed to push, and no write can precede the guard.
+  That step first confirms through the forge API that this run is still the
+  live coordinate behind the refs: a rerun of a superseded run fails closed
+  instead of moving a moving ref backward. If either registry
   answer is uncertain, the run stops instead of pushing (fail closed). A rerun
   can therefore never move a published tag. The `pr-<number>` ref is the only
   intentionally moving ref.
@@ -404,6 +417,14 @@ poll runs; there is no implicit App-wide repository discovery. An explicit
 `controller.reconcile.enabled: false` disables polling. The runtime also
 accepts `PR_REVIEWER_RECONCILE_REPOS` with an omitted
 `PR_REVIEWER_RECONCILE_INTERVAL_MS` and uses the same 15-minute default.
+
+The sweep runs through the daemon's own reconciliation composition, so a
+polled pull request gets the same review-job identity a webhook would
+give it. Each pass writes to the controller log when it has something to
+say: one summary line when it scheduled work, found open pull requests it
+had already scheduled, hit a failed repository, or had a job refused, plus
+one line per refused job with the reason the daemon gave. A pass that
+listed its repositories and found no open pull request at all stays quiet.
 
 Webhooks can stay **disabled** and review discovery still works; when
 enabled, they provide faster hints but converge with polling through the

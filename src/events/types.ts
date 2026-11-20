@@ -1,8 +1,8 @@
 /** Canonical forge event contract (#728).
  *
- * Provider-neutral event types shared by the GitHub and Forgejo payload
- * normalizers (`./normalize.js`) and the downstream review-job layer. No
- * runtime logic lives in this module.
+ * Provider-neutral event types shared by the GitHub, Forgejo and GitLab
+ * payload normalizers (`./normalize.js`) and the downstream review-job
+ * layer. No runtime logic lives in this module.
  */
 
 /** Where the event observation came from. */
@@ -31,7 +31,7 @@ export type ForgeEventKind =
  * explicit sentinel (""/0/false) instead of an optional, so downstream
  * consumers never branch on `undefined`. */
 export interface CanonicalForgeEvent {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "gitlab";
   readonly source: ForgeEventSource;
   readonly kind: ForgeEventKind;
   /** Stable forge installation/profile identity; "" when the payload has none. */
