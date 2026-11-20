@@ -184,13 +184,14 @@ export function boundedChildRefs(value: unknown): string[] | undefined {
   return refs;
 }
 
-/** Hard safety bound on raw extraction (#872 follow-up): the accepted-issue
- * cap (`MAX_LINKED_ISSUES`) is enforced downstream, over issues that
- * actually get fetched and accepted (see `buildLinkedIssueContext`), not
- * over raw refs — a title `(#N)` that turns out to name a pull request must
- * not evict a real 8th body issue. Extraction itself still needs *some*
- * bound so a pathological body cannot force unbounded fetches; this is
- * generous (4x the accepted cap) precisely because it is not the real cap. */
+/** Hard safety bound on the CANDIDATE LIST intake may fetch (#872
+ * follow-up): the accepted-issue cap (`MAX_LINKED_ISSUES`) is enforced
+ * downstream, over issues that actually get fetched and accepted (see
+ * `buildLinkedIssueContext`), not over raw refs — a title `(#N)` that turns
+ * out to name a pull request must not evict a real 8th body issue.
+ * `extractLinkedIssueRefs` merges the full title+body first and allocates
+ * this capacity contract-first (context-only `Refs` links only use what is
+ * left), so this bound can never starve or demote a contract-bearing ref. */
 export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
 
 // ---------------------------------------------------------------------------
@@ -362,13 +363,25 @@ const TITLE_TRAILING_ISSUE_REF_PATTERN = /\(((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+
  * case-insensitively) are the SAME identity, not two entries.
  * Dedupe is a merge, not a first-write-wins: if an identity first appears in
  * a non-closing form and a later occurrence is a closing-keyword form, the
- * existing entry is upgraded to `closing: true` in place — the returned
- * list's order (position of first occurrence, in its first-seen spelling)
- * never changes, and an already-closing entry is never downgraded.
+ * existing entry is upgraded to `closing: true` in place — an entry keeps the
+ * position and spelling of its first occurrence, and an already-closing entry
+ * is never downgraded.
  * #1749 follow-up: the same merge rule governs `contextOnly` — a `Refs`/
  * `Ref`-only identity is context, but ANY stronger occurrence (closing
  * keyword, `Implements`/`Part of`/`Addresses`, title `(#N)`) clears it, and
- * a later `Refs` occurrence never demotes a stronger relationship. */
+ * a later `Refs` occurrence never demotes a stronger relationship.
+ *
+ * The scan is EXHAUSTIVE over the platform-supplied title+body before any
+ * capacity decision: `MAX_LINKED_ISSUE_CANDIDATES` bounds the returned
+ * candidate list (fetch capacity), never the merge, so a stronger occurrence
+ * appearing after any number of `Refs` links still upgrades its identity
+ * (position must not decide relationship strength). The returned list then
+ * ALLOCATES that capacity contract-first: every contract-bearing ref keeps
+ * its first-occurrence slot before any context-only ref is admitted, so no
+ * volume of `Refs` context can starve a contract issue out of intake. Both
+ * consumers (`buildLinkedIssueContext` and `buildSelectionSignature`) read
+ * this one ordered list through the shared `acceptedLinkedIssues` generator,
+ * so the two stages cannot disagree about which issues were accepted. */
 export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title?: string): LinkedIssueRef[] {
   const repo = defaultRepo ?? "";
   const byKey = new Map<string, LinkedIssueRef>();
@@ -394,7 +407,6 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
       if (!contextOnly) existing.contextOnly = false;
       return;
     }
-    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) return;
     const item: LinkedIssueRef = { ref, repo: repoName, number, closing, ...(contextOnly ? { contextOnly: true } : {}) };
     byKey.set(canonicalKey, item);
     items.push(item);
@@ -404,15 +416,20 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
   if (titleMatch) add(titleMatch[1] ?? "", false, false);
 
   for (const match of (body ?? "").matchAll(GITHUB_ISSUE_REF_PATTERN)) {
-    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
     add(match[1] ?? "", true, false);
   }
   for (const match of (body ?? "").matchAll(IMPLEMENTATION_ISSUE_REF_PATTERN)) {
-    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
     add(match[2] ?? "", false, CONTEXT_REF_KEYWORD_RE.test(match[1] ?? ""));
   }
 
-  return items;
+  // Capacity allocation happens AFTER the full merge (see the doc comment):
+  // contract-bearing refs first in first-occurrence order, then context-only
+  // refs in first-occurrence order, bounded by the candidate cap. Only this
+  // slice is bounded; the scan above is not, so a late `Implements`/`Closes`
+  // occurrence always wins over earlier context links.
+  const contract = items.filter((item) => item.contextOnly !== true);
+  const context = items.filter((item) => item.contextOnly === true);
+  return [...contract, ...context].slice(0, MAX_LINKED_ISSUE_CANDIDATES);
 }
 
 // ---------------------------------------------------------------------------
@@ -565,11 +582,15 @@ export type LinkedIssueOutcome =
  * fingerprint), or vice versa, silently letting precheck skip a review that
  * should have re-run.
  *
- * Iterates `refItems` (the FULL uncapped candidate list from
- * `extractLinkedIssueRefs`, itself bounded by `MAX_LINKED_ISSUE_CANDIDATES`)
- * in order, calling `fetchIssue` for each until `cap` issues have been
- * ACCEPTED — successfully fetched and, for a non-closing ref, not a
- * pull-request payload. A pull-request payload on a non-closing ref is a
+ * Iterates `refItems` (the candidate list from `extractLinkedIssueRefs`,
+ * bounded by `MAX_LINKED_ISSUE_CANDIDATES`) in the ORDER extraction returned
+ * it — contract-bearing refs first, context-only refs after (see
+ * `extractLinkedIssueRefs`): the shared ordering is what keeps a `Refs`
+ * context link from consuming a slot a contract issue needs, and because
+ * both stages iterate the same list, they cannot disagree about which
+ * issues were accepted. `fetchIssue` is called for each ref until `cap`
+ * issues have been ACCEPTED — successfully fetched and, for a non-closing
+ * ref, not a pull-request payload. A pull-request payload on a non-closing ref is a
  * skip: it consumes a fetch (so its content is known), never a slot.
  * Closing-keyword refs are never rejected as pull requests (parity with
  * pre-#872 fetch behavior). This generator makes no fail-open/fail-closed

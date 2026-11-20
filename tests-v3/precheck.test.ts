@@ -27,7 +27,7 @@ import {
 } from "../src/precheck/fingerprint.js";
 import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../src/confidence/result.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
-import { extractLinkedIssueRefs, labelsOf, prContractIssueRefIdentities } from "../src/precheck/linked-issues.js";
+import { extractLinkedIssueRefs, labelsOf, MAX_LINKED_ISSUE_CANDIDATES, prContractIssueRefIdentities } from "../src/precheck/linked-issues.js";
 import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.js";
 import { buildSelectionSignature } from "../src/precheck/selection.js";
 import {
@@ -825,6 +825,36 @@ test("#1750 review: the contract-reference scan never inherits intake's 32-candi
     [],
     "a Refs flood plus prose/URL mentions of #33 is still not a contract claim",
   );
+});
+
+test("#1750 review r6: intake allocates fetch capacity contract-first after an exhaustive merge", () => {
+  // 32 distinct `Refs` links are exactly the old `MAX_LINKED_ISSUE_CANDIDATES`
+  // boundary. A contract claim after them must still be a candidate, must
+  // stay contract-bearing, and must take a fetch slot ahead of context.
+  const flood32 = Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n");
+  const withClaim = extractLinkedIssueRefs(`${flood32}\nImplements #1677`, "o/r", "");
+  assert.equal(withClaim.length, MAX_LINKED_ISSUE_CANDIDATES, "the candidate list keeps its bound");
+  const claim = withClaim.find((ref) => ref.number === 1677);
+  assert.ok(claim, "the contract claim past the old cap is still a candidate");
+  assert.equal(claim.contextOnly, undefined, "and it is contract-bearing, not context");
+  assert.equal(withClaim[0]!.number, 1677, "contract-bearing refs take the fetch slots first");
+  assert.equal(
+    withClaim.filter((ref) => ref.contextOnly === true).length,
+    MAX_LINKED_ISSUE_CANDIDATES - 1,
+    "context links use only the leftover capacity",
+  );
+
+  // A later stronger occurrence upgrades the SAME identity no matter how many
+  // context links precede it: position never decides relationship strength.
+  const upgraded = extractLinkedIssueRefs(
+    `Refs #10\n${Array.from({ length: 31 }, (_, index) => `Refs #${100 + index}`).join("\n")}\nImplements #10`,
+    "o/r",
+    "",
+  );
+  const ten = upgraded.filter((ref) => ref.number === 10);
+  assert.equal(ten.length, 1, "one merged identity for #10");
+  assert.equal(ten[0]!.closing, false, "still a non-closing link");
+  assert.equal(ten[0]!.contextOnly !== true, true, "upgraded to contract-bearing by the later Implements");
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {

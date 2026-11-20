@@ -572,6 +572,44 @@ test("#1749 follow-up: a context-only umbrella link never triggers the bounded c
   assert.match(partOfMd, /\(decomposition: req-[0-9a-f]{12} -> o\/r#1677\)/, "and its ownership line still renders");
 });
 
+test("#1750 review r6: a Refs flood never starves a later contract link at intake", async () => {
+  // 32 distinct `Refs` links are exactly the old candidate boundary; the
+  // `Implements` claim after them must still be a candidate, must stay
+  // contract-bearing, and must be fetched before any context link.
+  const body = `${Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n")}\nImplements #1677`;
+  const calls: string[] = [];
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+    calls.push(`${repo}#${number}`);
+    return { ok: true, data: { number: Number(number), title: `Issue ${number}`, state: "open", html_url: "u", labels: [], body: `Issue ${number} MUST hold` } };
+  };
+  const result = await buildLinkedIssueContext({
+    pr: { body }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  assert.equal(calls[0], "o/r#1677", "the contract claim takes the first fetch slot");
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.match(md, /## #1677\n\(linked as: non-closing reference\)\n/, "and renders as contract-bearing, never as context");
+  assert.ok(
+    (result.linkedIssues as Array<{ ref: string }>).some((issue) => issue.ref === "#1677"),
+    "it is in the accepted set the selection signature shares",
+  );
+});
+
+test("#1750 review r6: eight fetched context links cannot exclude a later contract link from MAX_LINKED_ISSUES", async () => {
+  const body = `${Array.from({ length: 8 }, (_, index) => `Refs #${index + 1}`).join("\n")}\nImplements #1677`;
+  const calls: string[] = [];
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+    calls.push(`${repo}#${number}`);
+    return { ok: true, data: { number: Number(number), title: `Issue ${number}`, state: "open", html_url: "u", labels: [], body: `Issue ${number} MUST hold` } };
+  };
+  const result = await buildLinkedIssueContext({
+    pr: { body }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  assert.equal(calls[0], "o/r#1677", "the contract issue is fetched before the context links");
+  const refs = (result.linkedIssues as Array<{ ref: string }>).map((issue) => issue.ref);
+  assert.ok(refs.includes("#1677"), "the contract issue holds an accepted slot despite eight context links");
+  assert.equal(refs.length, 8, "the accepted-issue cap still holds — one context link yields the slot");
+});
+
 test("#1749: skip and failure notices render no relationship line", async () => {
   const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> =>
     number === "2"
