@@ -3,8 +3,9 @@
  * also recognize the issue a PR implements when the closing-keyword
  * convention isn't used: a trailing `(#N)` / `(owner/repo#N)` on the PR
  * TITLE (the conventional-commit / squash-merge title convention), and
- * explicit non-closing implementation references in the body
- * (`Implements`/`Part of`/`Refs`/`Ref #N`/`Addresses #N`). */
+ * explicit non-closing body references — contract-bearing `Implements`/
+ * `Part of`/`Addresses #N`, plus the plain-reference `Refs`/`Ref #N` form,
+ * which is context-only (#1749 follow-up). */
 
 export interface LinkedIssueRef {
   ref: string;
@@ -13,9 +14,9 @@ export interface LinkedIssueRef {
   /** True for GitHub's own auto-close keyword forms: the present/imperative
    * `Closes`/`Fixes`/`Resolves` anywhere, and the past-participle
    * `Closed`/`Fixed`/`Resolved` at a line start (#953). False for the title's
-   * `(#N)` convention and for non-closing body references (Implements/Part
-   * of/Refs/Addresses) — those still feed the requirement ledger as context,
-   * but must never be treated as "this PR closes that issue". */
+   * `(#N)` convention and for non-closing body references
+   * (`Implements`/`Part of`/`Addresses`, and the context-only `Refs`/`Ref`
+   * form) — none of them may be treated as "this PR closes that issue". */
   closing: boolean;
   /** #1749 follow-up: the plain-reference relationship. True ONLY when every
    * form the PR used to name this issue was a bare `Refs`/`Ref` body link —
@@ -331,8 +332,9 @@ export function requirementIdentityAttests(parentText: string, childText: string
  * marker ("Fixed #42", "- Fixed #42", "* Resolved owner/repo#42"). #953. */
 const GITHUB_ISSUE_REF_PATTERN = /(?:\b(?:close|closes|fix|fixes|resolve|resolves)|(?:^|\n)[ \t]*(?:[-*+>]|\d+[.)])?[ \t]*(?:closed|fixed|resolved))\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
-/** Non-closing implementation references: `Implements`/`Part of`/`Refs`/
- * `Ref #N`/`Addresses #N`. Deliberately excludes incidental mentions
+/** Non-closing body references: the contract-bearing
+ * `Implements`/`Part of`/`Addresses #N` forms plus the plain-reference
+ * `Refs`/`Ref #N` form. Deliberately excludes incidental mentions
  * ("depends on #583", bare "#12" in prose) and "Related to #N" (ambiguous
  * between an implementation reference and an incidental mention; left
  * unlinked). The keyword itself is captured (group 1) so a bare `Refs`/`Ref`
@@ -357,8 +359,9 @@ const TITLE_TRAILING_ISSUE_REF_PATTERN = /\(((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+
  * by CANONICAL IDENTITY in order of appearance (hard bound
  * `MAX_LINKED_ISSUE_CANDIDATES`; see its docstring for why this isn't the
  * accepted-issue cap): first the title's trailing `(#N)` convention, then
- * closing-keyword body references, then non-closing implementation body
- * references. A bare `#N` resolves against the default repo, so a bare
+ * closing-keyword body references, then non-closing body references
+ * (contract-bearing `Implements`/`Part of`/`Addresses`, then context-only
+ * `Refs`/`Ref`). A bare `#N` resolves against the default repo, so a bare
  * `#584` and an explicit `owner/repo#584` naming the same repo (compared
  * case-insensitively) are the SAME identity, not two entries.
  * Dedupe is a merge, not a first-write-wins: if an identity first appears in

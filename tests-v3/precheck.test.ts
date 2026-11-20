@@ -577,7 +577,7 @@ test("linked issue refs: title (#N) / (owner/repo#N) convention (#872)", () => {
   assert.deepEqual(extractLinkedIssueRefs("body text", "o/r", "feat: no ref here"), []);
 });
 
-test("linked issue refs: non-closing body implementation references (#872)", () => {
+test("linked issue refs: non-closing body references (#872)", () => {
   for (const body of ["Implements #10", "Part of #10", "Refs #10", "Ref #10"]) {
     const refs = extractLinkedIssueRefs(body, "o/r");
     assert.deepEqual(refs.map((ref) => ref.ref), ["#10"], body);

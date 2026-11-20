@@ -72,8 +72,9 @@ export interface LedgerProvenance {
   line: number;
   /** #1749: linked-issue relationship provenance, present on `linked_issues`
    * entries ONLY when known. `closing` records the reference shape the PR
-   * itself used (a closing-keyword ref vs an `Implements`/`Refs`/title-
-   * `(#N)` link); `labels` carries the linked issue's bounded forge-label
+   * itself used (a closing-keyword ref vs an `Implements`/`Addresses`/title-
+   * `(#N)` contract link, or a plain `Refs`/`Ref` context link); `labels`
+   * carries the linked issue's bounded forge-label
    * list. The trace scope consumes both to tell an issue the PR claims to
    * close (whose acceptance criteria stay mandatory) from a non-closing
    * parent/umbrella/context link (whose acceptance set is not automatically

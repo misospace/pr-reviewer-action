@@ -59,13 +59,15 @@ ordinary prose ("covered by closed #479"), so they only count as closing when
 they start a line, after optional indentation and a markdown list/blockquote
 marker (`Fixed #42`, `- Fixed #42`).
 
-Non-closing references count too: a title using the `(#N)` convention, or a
-body reference like `Implements`/`Part of`/`Refs`/`Addresses`. If a
-title-linked or body-referenced number resolves to a pull request rather than
-an issue, it's rejected before use — a skip notice is recorded instead of
-issue content, and it never reaches the requirement ledger. This only applies
-to non-closing refs; closing keywords (`Closes`/`Fixes`/`Resolves`) behave as
-before.
+Non-closing references count too, but they split by relationship strength.
+Contract-bearing forms — a title using the `(#N)` convention, or a body
+reference like `Implements`/`Part of`/`Addresses` — keep the referenced
+issue's acceptance criteria in the requirement ledger. A plain `Refs`/`Ref`
+body link is contextual only (see below). If a linked number in any
+non-closing form resolves to a pull request rather than an issue, it's
+rejected before use — a skip notice is recorded instead of issue content,
+and it never reaches the requirement ledger. Closing keywords
+(`Closes`/`Fixes`/`Resolves`) behave as before.
 
 A bare `Refs`/`Ref #N` link is the plain-reference relationship (#1749
 follow-up): valid PR syntax for related context, and GitHub gives it no

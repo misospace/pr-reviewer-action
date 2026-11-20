@@ -24,8 +24,9 @@
  * - a failed fetch renders a notice and records the ref; Linear lookups that
  *   fail per identifier, or an adapter that cannot run at all, are
  *   uncertainty, while the fork gate is known-disabled state.
- * - (#872) a non-closing ref (title `(#N)` convention, or a body
- *   `Implements`/`Part of`/`Refs` reference) whose fetched object is a pull
+ * - (#872) a non-closing or context-only ref (title `(#N)` convention, a
+ *   body `Implements`/`Part of`/`Addresses` reference, or a plain
+ *   `Refs`/`Ref` link) whose fetched object is a pull
  *   request is rejected before projection: it renders a skip notice instead
  *   of the issue's content, is recorded in `linked-metadata-status.json` as
  *   a skip (not a failure — it never marks linked-metadata uncertain), and
