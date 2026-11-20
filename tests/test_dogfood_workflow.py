@@ -182,6 +182,7 @@ DOGFOOD_OVERRIDES = {
     "repository-skills",
     "review-verbosity",
     "ai-base-url",
+    "ai-extra-headers",
     "ai-api-format",
     "ai-model",
     "ai-api-key",
