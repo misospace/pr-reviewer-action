@@ -357,6 +357,14 @@ export interface ControllerDaemonOptions {
      * be mis-stated. */
     run?(context: ReconcileContext): Promise<void>;
   };
+  /** The operator's configured GitHub App installation identity (#1723).
+   * The reconciliation poll mints its events with it (#1624); the GitHub
+   * intake uses the SAME value to repair a delivery that omitted
+   * `installation.id`, so webhook and poll converge on one identity. When
+   * absent/empty the GitHub intake instead REFUSES a job-minting delivery
+   * with no installation identity (fail closed, visible in diagnostics).
+   * Ignored for non-GitHub platforms. */
+  readonly githubInstallationId?: string | undefined;
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
    * daemon serves exactly ONE forge platform per instance (its forge
    * capability is a single per-platform capability), and `platform` selects
@@ -420,6 +428,16 @@ export interface ControllerDaemon {
   /** "" while every persisted queue mutation is durable; otherwise the
    * latched persistence-failure message (the daemon's health signal). */
   queuePersistenceError(): string;
+  /** Intake installation-identity diagnostics (#1723): deliveries whose
+   * missing/invalid `installation.id` was REPAIRED from the configured App
+   * installation, and job-minting deliveries REFUSED because no identity
+   * was resolvable. Exposed through `/admin/diagnostics`, so a misrouted
+   * webhook is visible at intake time instead of after the worker's auth
+   * retries settle. */
+  intakeInstallationDiagnostics(): {
+    readonly repairs: number;
+    readonly refusals: number;
+  };
   /** True once `stop()` closed intake. */
   readonly stopped: boolean;
   /** Graceful stop: intake closed, bounded drain, cancel the remainder,
@@ -1779,6 +1797,9 @@ export async function startControllerDaemon(
   };
 
   let operatorHost: OperatorHost | undefined;
+  // #1723 intake identity observability: bounded counters, never content.
+  let intakeInstallationRepairs = 0;
+  let intakeMissingInstallationRefusals = 0;
   if (options.webhook !== undefined) {
     operatorHost = createOperatorHost({
       // The intake the platform selects: the GitHub App intake
@@ -1787,6 +1808,20 @@ export async function startControllerDaemon(
       platform: options.webhook.platform,
       secret: options.webhook.secret,
       durableStateDir,
+      // #1723: the GitHub App intake repairs a delivery that omitted its
+      // installation identity from the operator's configured App
+      // installation — the SAME identity the poll mints with (#1624) — and
+      // refuses one it cannot resolve rather than minting a job that
+      // cannot authenticate. Both outcomes are counted for diagnostics.
+      ...(options.githubInstallationId !== undefined
+        ? { installationId: options.githubInstallationId }
+        : {}),
+      onInstallationRepair: () => {
+        intakeInstallationRepairs += 1;
+      },
+      onMissingInstallation: () => {
+        intakeMissingInstallationRefusals += 1;
+      },
       ...(options.webhook.maxBodyBytes !== undefined
         ? { maxBodyBytes: options.webhook.maxBodyBytes }
         : {}),
@@ -1832,6 +1867,10 @@ export async function startControllerDaemon(
     // the ingress seam, reported in the controller's startup summary.
     intakeRoute: canonicalIntakeRoute(options),
     queuePersistenceError: () => (snapshotStore !== null ? snapshotStore.persistenceError() : ""),
+    intakeInstallationDiagnostics: () => ({
+      repairs: intakeInstallationRepairs,
+      refusals: intakeMissingInstallationRefusals,
+    }),
     get stopped(): boolean {
       return stopped;
     },

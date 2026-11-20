@@ -157,10 +157,14 @@ genuinely absent — an empty value is never emitted (unset is OFF) */}}
   value: {{ $v.reconcile.intervalMs | quote }}
 - name: PR_REVIEWER_RECONCILE_REPOS
   value: {{ join "," $v.reconcile.repos | quote }}
+{{- end }}
 {{- if and (eq $v.forgeAuth.platform "github") (not (empty $v.reconcile.githubInstallationId)) }}
+{{- /* #1723: the installation identity is BOTH the poll's minted identity
+and the webhook intake's repair for a delivery that omitted
+`installation.id`, so it is emitted whenever configured — not only when the
+poll is enabled. */}}
 - name: PR_REVIEWER_GITHUB_APP_INSTALLATION_ID
   value: {{ $v.reconcile.githubInstallationId | quote }}
-{{- end }}
 {{- end }}
 {{- if eq $v.forgeAuth.platform "github" }}
 - name: PR_REVIEWER_GITHUB_APP_ID

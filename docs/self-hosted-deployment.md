@@ -382,7 +382,14 @@ Gitea-header intake. The daemon refuses to start when its reconcile poll
 and intake disagree.
 
 - **GitHub App**: set `forgeAuth.platform: github` with the App ID and the
-  private key (mounted from a secret). The install token lifecycle, webhook
+  private key (mounted from a secret). Set
+  `controller.reconcile.githubInstallationId`
+  (`PR_REVIEWER_GITHUB_APP_INSTALLATION_ID`) to the installation the
+  instance serves: it is required for the poll and is the identity the
+  webhook intake repairs a delivery with when the signed payload omitted
+  `installation.id` (#1723). With none configured, a job-minting delivery
+  that carries no installation is refused at intake; either outcome is
+  counted in `/admin/diagnostics`. The install token lifecycle, webhook
   signature verification (`X-Hub-Signature-256`), and publication
   idempotency follow
   [`docs/architecture/self-hosted-github-app-ingress.md`](architecture/self-hosted-github-app-ingress.md).

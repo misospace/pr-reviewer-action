@@ -184,6 +184,72 @@ test("a valid signed pull_request/synchronize delivery → 202 with the canonica
   assert.equal(ev.actor, "octo");
 });
 
+// ── 1b. installation identity (#1723) ─────────────────────────────────────
+
+test("a REAL App pull_request delivery carries installation.id into the canonical event", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // The #725 pilot's delivering installation: a real GitHub App
+  // `pull_request` delivery always carries it at the TOP level.
+  const body = JSON.stringify({
+    ...makePrPayload("opened"),
+    installation: { id: 136450513 },
+  });
+  const res = await post(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.equal(h.events.length, 1);
+  assert.equal(
+    h.events[0]!.installationId,
+    "136450513",
+    "the delivering installation reaches the minted job's identity",
+  );
+});
+
+test("a delivery that omitted installation.id is repaired from the configured App installation", async (t) => {
+  let repairs = 0;
+  const h = await startTestHandler({
+    requireInstallationId: true,
+    installationIdFallback: "4242",
+    onInstallationRepair: () => {
+      repairs += 1;
+    },
+  });
+  t.after(() => h.close());
+  const body = JSON.stringify(makePrPayload("synchronize"));
+  const res = await post(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.installationId, "4242");
+  assert.equal(repairs, 1, "the repair is observable");
+});
+
+test("a job-minting delivery with no resolvable installation id is REFUSED, never minted", async (t) => {
+  let refusals = 0;
+  const h = await startTestHandler({
+    requireInstallationId: true,
+    onMissingInstallation: () => {
+      refusals += 1;
+    },
+  });
+  t.after(() => h.close());
+  const body = JSON.stringify(makePrPayload("opened"));
+  const res = await post(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.text), { status: "ignored" });
+  assert.equal(h.events.length, 0, "no guaranteed-to-fail job is minted");
+  assert.equal(refusals, 1, "the refusal is observable");
+});
+
+test("a NON-job delivery with no installation id is still accepted", async (t) => {
+  const h = await startTestHandler({ requireInstallationId: true });
+  t.after(() => h.close());
+  const body = JSON.stringify(makePrPayload("closed"));
+  const res = await post(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.kind, "pr_closed");
+});
+
 // ── 2. the raw body is signed: bytes changed after signing → 401 ───────────
 
 test("the raw body is signed: valid JSON whose bytes changed after signing → 401", async (t) => {
