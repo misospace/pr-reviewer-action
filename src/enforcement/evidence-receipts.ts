@@ -1194,13 +1194,20 @@ const MAX_TRACE_RECEIPT_TOKENS = 2048;
 
 /**
  * #1753 (review): the bounded receipt-backed VOCABULARY the requirement
- * trace's satisfied-omission disclosure check may credit — every ACQUIRED
- * receipt's id (`call-<n>` for trace receipts, `ci:<check>` for CI rows,
- * `corpus-diff:<path>` for corpus credit) plus the subject paths of ACQUIRED
- * HEAD-BOUND receipts. A recorded-but-unacquired receipt is provenance of
- * FAILURE, never credit (#1657: "a receipt proves what the loop fetched" —
- * a failed fetch fetched nothing), and a non-head-bound path proves nothing
- * about the reviewed head.
+ * trace's satisfied-omission disclosure check may credit — the ids of
+ * ACQUIRED HEAD-BOUND receipts (`call-<n>` for trace receipts, `ci:<check>`
+ * for CI rows, `corpus-diff:<path>` for corpus credit) plus their subject
+ * paths. Only HEAD-BOUND acquisitions prove anything about the reviewed
+ * head: a web fetch/search or any unbound acquisition, however successful,
+ * is not current-head evidence, so a satisfied row backed only by one keeps
+ * the material path (the AI review's freshness finding). A recorded-but-
+ * unacquired receipt is provenance of FAILURE, never credit (#1657: "a
+ * receipt proves what the loop fetched" — a failed fetch fetched nothing).
+ *
+ * Subject-to-requirement RELEVANCE stays deliberately unchecked — which
+ * acquisition supports which requirement is the reviewer's semantic
+ * judgment, the same line the citation path draws (#1658: the validator
+ * proves a citation resolves; it never judges what the cited code means).
  *
  * The state rides along so the trace's cross-check can never be looser than
  * the receipt gate's own semantics: `valid` credits exactly the token set;
@@ -1216,13 +1223,14 @@ export function receiptVocabularyForTrace(ledger: EvidenceLedger): { state: Evid
   const tokens = new Set<string>();
   for (const receipt of ledger.receipts) {
     if (!receipt.acquired) continue;
+    // Freshness gate: an unbound acquisition (web fetch/search, a CI row
+    // not bound to the reviewed head) is not current-head evidence.
+    if (receipt.freshness !== "head-bound") continue;
     tokens.add(receipt.id);
-    if (receipt.freshness === "head-bound") {
-      const path = receipt.subject.path;
-      if (typeof path === "string" && path !== "") tokens.add(path);
-      for (const subjectPath of receipt.subject.paths ?? []) {
-        if (typeof subjectPath === "string" && subjectPath !== "") tokens.add(subjectPath);
-      }
+    const path = receipt.subject.path;
+    if (typeof path === "string" && path !== "") tokens.add(path);
+    for (const subjectPath of receipt.subject.paths ?? []) {
+      if (typeof subjectPath === "string" && subjectPath !== "") tokens.add(subjectPath);
     }
     if (tokens.size >= MAX_TRACE_RECEIPT_TOKENS) break;
   }
