@@ -207,6 +207,8 @@ jobs:
           # the two fork models — a credential-level backstop so even a
           # routing mistake cannot reach another model.
           ai-base-url: ${{ vars.LITELLM_URL }}
+          ai-extra-headers: |
+            x-litellm-session-id: prreview-${{ github.run_id }}-${{ github.run_attempt }}
           ai-api-format: ${{ vars.FORK_PRIMARY_FORMAT }}
           ai-model: ${{ vars.FORK_PRIMARY_MODEL }}
           ai-api-key: ${{ secrets.FORK_LITELLM_API_KEY }}
