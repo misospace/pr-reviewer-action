@@ -161,58 +161,68 @@ and configured concurrency/model costs before first enabling the poll.
   claims is what lets the controller read the worker's result file and
   the worker read the controller's envelope across the uid boundary
   (#1631).
-- **Shared-claim volume-root contract (#1725): `2750`, owner uid 1000,
-  group 65532.** When `workerExecutor.mode: kubernetes` provisions shared
-  claims, kubelet applies `fsGroup` to each freshly provisioned root as
-  group-writable (`0775`, uid 0) — and the runtime's own acquisition
-  check refuses any cache root that is group/other-writable or not owned
-  by the controller uid (`assertTrustedDirChain` in
-  `src/acquisition/mirror.ts`), so every job would fail before dispatch.
-  The chart therefore ships a `fix-roots` init container (rendered only
-  in Kubernetes-executor mode): it runs as root with only `CHOWN`/`FOWNER`
+- **Claim volume-root contract (#1725/#1737): `fix-roots` repairs the
+  runs and workspace-cache claim roots in every executor mode — `2750
+  1000 65532` under `workerExecutor.mode: kubernetes`, `0750 1000 65532`
+  in controller-only mode.** Kubelet applies `fsGroup` to a freshly
+  provisioned root as group-writable (`0775`, uid 0), and a claim mounted
+  without `fsGroup` keeps uid 0 with mode `0755`; either way the runtime's
+  own acquisition check refuses the cache root — "writable by group or
+  other", or "not owned by the controller uid"
+  (`assertTrustedDirChain` in `src/acquisition/mirror.ts`) — so every job
+  would fail before dispatch. The chart therefore ships a `fix-roots` init
+  container in both modes: it runs as root with only `CHOWN`/`FOWNER`
   added, `chown`s the runs and workspace-cache claim roots to the
-  controller uid plus the shared group, and `chmod`s them to `2750`.
+  controller uid plus the pod's `fsGroup`, and `chmod`s them to the mode
+  that executor's write trace needs:
+  - Kubernetes executor: `2750`. The shared group keeps the read/execute
+    the #1631 exchange needs while stripping the group write the check
+    refuses, and the setgid bit keeps group inheritance below the claim
+    root: the runtime chmods the components below it but never chgroups
+    them, so without setgid each run directory would inherit the
+    controller's primary group (1000) instead of 65532 and the worker
+    would be refused traversal one level below the root.
+  - Controller-only: `0750`, no setgid. The local executor spawns the
+    worker as the controller's own uid and never changes group ownership
+    below these roots, so no cross-uid writer consumes group inheritance;
+    the owner bits are the entire write surface and group read/execute is
+    just the declared fsGroup posture.
   `fix-roots` is the only root container in the pod: it runs as uid 0
   with `runAsNonRoot: false`, so a namespace enforcing the Pod Security
-  `restricted` profile rejects the controller pod in
-  Kubernetes-executor mode. Use `baseline` for that namespace (every
-  other container in the pod already satisfies `restricted`), or keep
-  the Kubernetes executor off. The root shape stays minimal: all
-  capabilities dropped except `CHOWN`/`FOWNER`, no privilege
-  escalation, read-only root filesystem, `RuntimeDefault` seccomp.
-  `2750` keeps the shared group's read/execute (which the #1631 exchange
-  needs) while stripping the group write the check refuses, and keeps the
-  setgid bit that fsGroup provisioning itself carries: the runtime
-  chmods the components below the claim root but never chgroups them, so
-  without the setgid bit each run directory would inherit the
-  controller's primary group (1000) instead of 65532 and the worker
-  would be refused traversal one level below the root.
+  `restricted` profile rejects the controller pod in every mode. Use
+  `baseline` for that namespace (every other container in the pod already
+  satisfies `restricted`), or provide the root shape yourself outside the
+  chart. The root container stays minimal: all capabilities dropped except
+  `CHOWN`/`FOWNER`, no privilege escalation, read-only root filesystem,
+  `RuntimeDefault` seccomp.
   The fix is durable because **no other workload mounts these claims with
   `fsGroup`** — not because `OnRootMismatch` skips it (#1736): kubelet's
   `OnRootMismatch` skips only when the root GID matches AND the root mode
   is a superset of `0770` *with* setgid (`requiresPermissionChange`,
   Kubernetes `pkg/volume/volume_linux.go`), so a trusted non-group-writable
-  `2750` root always re-triggers a full recursive restyle (chgrp to that
-  pod's fsGroup plus group-writable bits) for any pod that mounts with
+  root always re-triggers a full recursive restyle (chgrp to that pod's
+  fsGroup plus group-writable bits) for any pod that mounts with
   `fsGroup`. The executor's worker Jobs therefore carry no `fsGroup`
   (#1736, rejected by the shipped worker admission policy); the only
   remaining fsGroup mount is the controller pod itself, whose kubelet
   processing runs at pod startup *before* `fix-roots` repairs the root
   again ahead of the controller process. Any other workload mounting these
-  claims must likewise carry no `fsGroup`. Operators
-  mounting pre-existing claims must ensure the same root shape — uid
-  1000, group 65532, mode `2750` (no group/other write, setgid set) — or
-  the controller refuses to start exactly as above. Verify a running
-  install from inside the controller pod with
+  claims must likewise carry no `fsGroup`. Operators mounting pre-existing
+  claims must ensure the matching root shape themselves — uid 1000, group
+  65532, mode `2750` (Kubernetes executor, setgid set) or `0750`
+  (controller-only), no group/other write in either — or the controller
+  refuses to start exactly as above. Verify a running install from inside
+  the controller pod with
   `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`,
-  expecting `2750 1000 65532` for each. `fix-roots` reaches the roots
-  through the `persistence` `globalMounts` (the common library renders
-  them for init containers as well), so relocating `controller.paths.*`
-  requires updating the matching `globalMounts` paths in sync. Custom
-  init containers added under `controller.controllers.main.initContainers`
-  must use the common-library map shape keyed by container name; in
-  Kubernetes-executor mode the chart's `fix-roots` merge preserves them
-  next to its own container and refuses a raw Kubernetes container list.
+  expecting `2750 1000 65532` or `0750 1000 65532` for each. `fix-roots`
+  reaches the roots through the `persistence` `globalMounts` (the common
+  library renders them for init containers as well), so relocating
+  `controller.paths.*` requires updating the matching `globalMounts` paths
+  in sync. Custom init containers added under
+  `controller.controllers.main.initContainers` must use the common-library
+  map shape keyed by container name; the chart's `fix-roots` merge
+  preserves them next to its own container and refuses a raw Kubernetes
+  container list.
 - The controller's service-account token is mounted ONLY when
   `workerExecutor.mode: kubernetes` (the executor talks to the cluster
   API); otherwise `automountServiceAccountToken: false`.

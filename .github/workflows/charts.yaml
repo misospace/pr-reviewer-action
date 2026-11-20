@@ -55,13 +55,25 @@ jobs:
             echo "controller Deployment must keep automountServiceAccountToken: false in controller-only mode" >&2
             exit 1
           fi
-          # #1725: the fix-roots claim-root init container is scoped to the
-          # shared-claim (Kubernetes-executor) posture; controller-only
-          # renders no root-fixing container at all.
-          if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then
-            echo "fix-roots init container must not render outside Kubernetes-executor mode" >&2
+          # #1737: controller-only installs hit the same fresh-claim refusal
+          # (fsGroup 0775 root, or uid 0 on a bare claim), so fix-roots must
+          # render here too — with the controller-only shape: mode 0750 (no
+          # setgid, since no second uid writes below these roots), owner uid
+          # 1000, group 65532.
+          awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml | grep -q "name: fix-roots"
+          awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml \
+            | tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 0750 '
+          if awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml \
+            | tr '\n' ' ' | tr -s ' ' | grep -Eq 'chmod 2750 '; then
+            echo "controller-only fix-roots must not carry the Kubernetes-mode setgid root shape" >&2
             exit 1
           fi
+          # The fix targets must be mounted on the init container through
+          # persistence globalMounts, exactly as in the Kubernetes mode.
+          awk '/initContainers:/,/containers:/' /var/tmp/render-controller-only.yaml \
+            > /var/tmp/render-controller-only-init-section.yaml
+          grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: runs'
+          grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: workspace-cache'
           # Policies are opt-in; verify default renders none, opt-in renders one.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
             echo "unexpected default NetworkPolicy in controller-only chart" >&2

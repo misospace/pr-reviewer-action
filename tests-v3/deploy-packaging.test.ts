@@ -199,14 +199,16 @@ test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key,
   );
 });
 
-test("#1725: kubernetes-executor mode injects the fix-roots claim-root init container, CI pins both renders", () => {
+test("#1725/#1737: every executor mode injects the fix-roots claim-root init container, CI pins each render's root shape", () => {
   const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
   // The kubelet applies fsGroup to freshly provisioned claim roots as
-  // group-WRITABLE (0775, uid 0), which the runtime's cache-root trust
-  // walk (assertTrustedDirChain in src/acquisition/mirror.ts) refuses —
-  // the chart must fix the roots to the documented shared-group shape
-  // (2750, owner = the pod's runAsUser, group = the shared fsGroup; the
-  // setgid bit keeps the #1631 group inheritance below the root).
+  // group-WRITABLE (0775, uid 0) — and a claim without fsGroup stays uid 0
+  // at 0755 — which the runtime's cache-root trust walk
+  // (assertTrustedDirChain in src/acquisition/mirror.ts) refuses. The chart
+  // must fix the roots in EVERY executor mode: owner = the pod's runAsUser,
+  // group = the shared fsGroup, mode selected by the write trace below the
+  // root (2750 setgid for the Kubernetes executor's #1631 exchange, 0750
+  // for controller-only where the local executor keeps the controller uid).
   assert.ok(
     helpers.includes('{{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}'),
     "the fix must chown to the pod's runAsUser (default 1000)",
@@ -220,7 +222,26 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
     /\(list \$v\.paths\.runsRoot \$v\.paths\.workspaceCacheRoot\)/,
     "the fix must target exactly the runs and workspace-cache roots",
   );
-  assert.match(helpers, /chown %d:%d %s && chmod 2750 %s/, "the fix command must be chown + chmod 2750 (setgid preserved for #1631 group inheritance)");
+  assert.match(
+    helpers,
+    /\(printf "chown %d:%d %s && chmod %s %s"/,
+    "the fix command must be chown + a template-selected chmod mode",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$claimRootMode := "0750" -\}\}/,
+    "controller-only roots default to 0750 (no setgid without a cross-uid writer below the root)",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if \$kubeExecutor -\}\}\n\{\{- \$claimRootMode = "2750" -\}\}\n\{\{- end -\}\}/,
+    "only the Kubernetes executor takes the setgid 2750 shape (#1631 group inheritance)",
+  );
+  assert.match(
+    helpers,
+    /controller-only: mode 0750, same owner\/group, NO setgid/,
+    "the helper must justify the controller-only mode from the write trace, not by analogy",
+  );
   assert.match(
     helpers,
     /\(mustMergeOverwrite \$operatorInitContainers \(dict "fix-roots"/,
@@ -234,22 +255,29 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
     /\{\{- if not \(kindIs "map" \$operatorInitContainers\) -\}\}\n\{\{- fail "controller\.controllers\.main\.initContainers must be a map keyed by container name/,
     "a list-shaped controllers.main.initContainers must fail closed with the map-shape guidance",
   );
-  // The injection is scoped to the executor branch: a root init container
-  // renders only when workerExecutor.mode is kubernetes.
-  const executorBranch = helpers.indexOf("{{- if $kubeExecutor -}}");
-  const fixRoots = helpers.indexOf('"fix-roots"');
-  assert.notEqual(executorBranch, -1, "the executor branch must exist");
-  assert.ok(fixRoots > executorBranch, "fix-roots must be injected inside the executor branch");
-  assert.equal(helpers.indexOf('"fix-roots"', fixRoots + 1), -1, "fix-roots must appear exactly once");
+  // The root fix must sit OUTSIDE the Kubernetes-executor-only branch: the
+  // service-account token injection closes (`end` for its inner `if`, then
+  // `end` for the executor branch) before the fix-roots comment starts.
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$sa "automountServiceAccountToken" true -\}\}\n\{\{- end -\}\}\n\{\{- end -\}\}\n\{\{- \/\* #1725\/#1737/,
+    "fix-roots must render in every executor mode, outside the Kubernetes-executor branch",
+  );
+  assert.equal(
+    helpers.split('"fix-roots"').length - 1,
+    1,
+    "fix-roots must appear exactly once (one container, both modes)",
+  );
   assert.match(
     helpers,
     /"capabilities" \(dict "drop" \(list "ALL"\) "add" \(list "CHOWN" "FOWNER"\)\)/,
     "the fix container must run with only CHOWN/FOWNER added",
   );
-  // CI pins the behavior on both renders: present in the
-  // Kubernetes-executor Deployment, absent from the controller-only one.
-  // Substring checks on the literal CI lines (the rendered fix command is
-  // one folded YAML scalar, hence the tr-joining pipeline).
+  // CI pins each render's behavior: both Deployments carry the init
+  // container, the Kubernetes-executor one keeps 2750 and the
+  // controller-only one renders 0750 (and never the setgid shape). The
+  // rendered fix command is one folded YAML scalar, hence the tr-joining
+  // pipeline.
   const workflow = read(".github/workflows/charts.yaml");
   assert.ok(
     workflow.includes(
@@ -261,11 +289,23 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
     workflow.includes(
       String.raw`| tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 2750 '`,
     ),
-    "charts.yaml must pin the exact chown/chmod fix command in the rendered Deployment",
+    "charts.yaml must pin the exact chown/chmod 2750 fix command in the Kubernetes-executor Deployment",
   );
   assert.ok(
-    workflow.includes(`if grep -q "fix-roots" /var/tmp/render-controller-only.yaml; then`),
-    "charts.yaml must pin the controller-only absence assertion",
+    workflow.includes(
+      `awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml | grep -q "name: fix-roots"`,
+    ),
+    "charts.yaml must pin the fix-roots render assertion for controller-only mode",
+  );
+  assert.ok(
+    workflow.includes(
+      String.raw`| tr '\n' ' ' | tr -s ' ' | grep -Eq 'chown 1000:65532 .* && chmod 0750 '`,
+    ),
+    "charts.yaml must pin the exact chown/chmod 0750 fix command in the controller-only Deployment",
+  );
+  assert.ok(
+    workflow.includes(`grep -Eq 'chmod 2750 '; then`),
+    "charts.yaml must pin the controller-only rejection of the Kubernetes-mode setgid shape",
   );
   // Review follow-ups (#1736): CI must pin that fix-roots actually receives
   // the claim-root mounts, that an operator-defined init container
@@ -279,6 +319,14 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
     "charts.yaml must pin the workspace-cache mount on fix-roots",
   );
   assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the controller-only runs mount on fix-roots",
+  );
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: workspace-cache'`),
+    "charts.yaml must pin the controller-only workspace-cache mount on fix-roots",
+  );
+  assert.ok(
     workflow.includes(`awk '/initContainers:/,/containers:/' /var/tmp/render-operator-init.yaml | grep -q 'name: operator-init'`),
     "charts.yaml must pin operator-defined init container preservation",
   );
@@ -286,10 +334,14 @@ test("#1725: kubernetes-executor mode injects the fix-roots claim-root init cont
     workflow.includes("a raw list under controller.controllers.main.initContainers must refuse the render"),
     "charts.yaml must pin the list-shaped initContainers refusal",
   );
-  // The operator-facing contract is documented (acceptance criterion 3).
+  // The operator-facing contract is documented (acceptance criterion 3):
+  // one container, two mode-specific shapes, and the matching live stat.
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");
-  assert.match(chartReadme, /`2750`, owner uid 1000,\s+group 65532/);
+  assert.match(chartReadme, /`2750\s+1000 65532` under `workerExecutor\.mode: kubernetes`, `0750 1000 65532`/);
   assert.match(chartReadme, /fix-roots/);
+  const deployment = read("docs/self-hosted-deployment.md");
+  assert.match(deployment, /Controller-only → `0750`, no setgid/, "deployment doc must document the controller-only root shape");
+  assert.match(deployment, /`0750 1000 65532` \(controller-only\)/, "deployment doc must state the controller-only stat contract");
 });
 
 test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
