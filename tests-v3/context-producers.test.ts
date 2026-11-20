@@ -1249,6 +1249,43 @@ test("#1750 r3: the requirement-identity matcher is calibrated on the real #740/
   assert.ok(!requirementIdentityAttests("", forkChild), "empty criteria never attest");
 });
 
+test("#1750: normative boilerplate (MUST/SHALL/MUST NOT) cannot attest ownership", () => {
+  // Two unrelated criteria that share a subject and a modal used to reach the
+  // 3-token bar through `review engine must` — the modal, not the
+  // requirement, supplied the identity. The boilerplate filter removes the
+  // modal tokens from BOTH sequences.
+  const parent = "The review engine MUST reject malformed payloads.";
+  const unrelated = "The review engine MUST publish status checks.";
+  assert.ok(!requirementIdentityAttests(parent, unrelated), "a shared subject + MUST is boilerplate, not identity");
+
+  assert.ok(
+    !requirementIdentityAttests("The review engine SHALL reject malformed payloads.", "The review engine SHALL publish status checks."),
+    "SHALL is equally boilerplate",
+  );
+  assert.ok(
+    !requirementIdentityAttests("The review engine MUST NOT accept malformed payloads.", "The review engine MUST NOT publish status checks."),
+    "MUST NOT contributes no identity tokens",
+  );
+
+  // The filter removes only the modal: genuine shared requirement content
+  // still attests, including the real #740/#1677 phrase.
+  assert.ok(
+    requirementIdentityAttests(
+      "GitLab and Gitea feed the same scheduler/engine.",
+      "GitLab merge_request webhook events produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo",
+    ),
+    "the real `same scheduler engine` run survives the filter",
+  );
+  assert.ok(
+    requirementIdentityAttests(parent, "The review engine MUST reject malformed payloads at every transport boundary."),
+    "a verbatim requirement still attests once its modal is dropped",
+  );
+  assert.ok(
+    requirementIdentityAttests(parent, "The review engine MUST now reject malformed payloads."),
+    "an intervening modal does not split the surrounding content run",
+  );
+});
+
 test("#1750 r3: quoted content cannot attest — fenced decomposition sections and fenced Parent lines are inert", async () => {
   // AGENTS #252: feed the boundary the hostile delimiter itself. The umbrella
   // quotes a decomposition section and the child quotes a Parent line inside

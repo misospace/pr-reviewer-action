@@ -280,11 +280,35 @@ export const MIN_REQUIREMENT_IDENTITY_RUN = 3;
  * this filter the same pair tops out at a 2-token run and stays unassociated. */
 export const MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS = 4;
 
+/** RFC-2119-style normative modals are boilerplate, never requirement
+ * identity: they appear in nearly every acceptance criterion, so two
+ * unrelated criteria that happen to start `The review engine MUST …` would
+ * otherwise share the run `review engine must` and falsely attest ownership
+ * (the subject phrase, not the modal, is the identity). Excluding the modals
+ * rather than the whole phrase keeps the surrounding content words eligible:
+ * the real #740/#1677 `same scheduler engine` run is untouched. `not` is
+ * already below the character bar, so `MUST NOT` contributes nothing once
+ * the modals are dropped. Substantive adjectives such as `required`
+ * (`required checks`) are deliberately NOT here. */
+const NORMATIVE_BOILERPLATE_TOKENS: ReadonlySet<string> = new Set([
+  "must",
+  "shall",
+  "should",
+  "may",
+  "might",
+  "will",
+  "would",
+  "can",
+  "could",
+  "cannot",
+]);
+
 /** Casefolded substantial tokens of one requirement text: alphanumeric runs
- * of at least {@link MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS} characters. */
+ * of at least {@link MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS} characters, minus
+ * the normative boilerplate in {@link NORMATIVE_BOILERPLATE_TOKENS}. */
 export function requirementIdentityTokens(text: string): string[] {
   return (text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-    .filter((token) => token.length >= MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS);
+    .filter((token) => token.length >= MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS && !NORMATIVE_BOILERPLATE_TOKENS.has(token));
 }
 
 /** The longest contiguous token run the two sequences share, by dynamic
@@ -311,7 +335,10 @@ export function requirementIdentityRun(parentTokens: readonly string[], childTok
 /** The deterministic requirement-identity test of attestation gate (c):
  * does the child criterion carry the parent criterion's requirement — a
  * shared contiguous run of ≥ {@link MIN_REQUIREMENT_IDENTITY_RUN}
- * substantial tokens? Verbatim-equal criteria (the ledger content-id recipe
+ * substantial tokens? Normative boilerplate (`MUST`/`SHALL`/`MUST NOT` and
+ * the rest of {@link NORMATIVE_BOILERPLATE_TOKENS}) never counts, so two
+ * unrelated criteria sharing a subject and a modal (`The review engine MUST
+ * …`) do not attest. Verbatim-equal criteria (the ledger content-id recipe
  * case) trivially fire; the real #1677/#740 texts differ and fire on the
  * `same scheduler engine` phrase; unrelated criteria sharing only scattered
  * domain vocabulary stay below the bar. */
