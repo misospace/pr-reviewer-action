@@ -272,8 +272,8 @@ export const MIN_REQUIREMENT_IDENTITY_RUN = 3;
 
 /** A token is substantial (identity-bearing) only at this many characters:
  * a crude closed-class filter that drops articles and short function words
- * (`the`, `and`, `in`, `no`) so generic stopword runs (`in the review
- * engine`) can never satisfy the identity bar. Calibrated: with stopword
+ * (`the`, `and`, `in`) so generic stopword runs (`in the review engine`)
+ * can never satisfy the identity bar. Calibrated: with stopword
  * runs allowed, the real #740 `Requirements` bullet "no forge-specific
  * behavior in the review engine" would ride the 4-token stopword phrase
  * `in the review engine` onto the children's boilerplate criterion; with
@@ -286,9 +286,10 @@ export const MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS = 4;
  * otherwise share the run `review engine must` and falsely attest ownership
  * (the subject phrase, not the modal, is the identity). Excluding the modals
  * rather than the whole phrase keeps the surrounding content words eligible:
- * the real #740/#1677 `same scheduler engine` run is untouched. `not` is
- * already below the character bar, so `MUST NOT` contributes nothing once
- * the modals are dropped. Substantive adjectives such as `required`
+ * the real #740/#1677 `same scheduler engine` run is untouched. Modals carry
+ * no polarity of their own — `MUST` and `MUST NOT` differ only by the
+ * negator, which {@link NEGATION_WORDS} handles — so dropping them cannot
+ * merge opposite requirements. Substantive adjectives such as `required`
  * (`required checks`) are deliberately NOT here. */
 const NORMATIVE_BOILERPLATE_TOKENS: ReadonlySet<string> = new Set([
   "must",
@@ -300,15 +301,56 @@ const NORMATIVE_BOILERPLATE_TOKENS: ReadonlySet<string> = new Set([
   "would",
   "can",
   "could",
+]);
+
+/** Negative-polarity operators. Polarity is part of a requirement's identity:
+ * `MUST publish status checks` and `MUST NOT publish status checks` are
+ * opposite obligations, not the same requirement. Tokenizing the negator as
+ * an ordinary word is not enough — the DP would still match the shared
+ * `publish status checks` run on either side of it — so every content token
+ * from a negator onward is prefixed with {@link NEGATION_PREFIX}. The
+ * negation is sticky to the end of the text (no clause parser): that is
+ * deliberately fail closed, since a stricter reading can only decline to
+ * narrow a criterion, never narrow the wrong one. `cannot` and `n't`
+ * contractions are normalized into the same channel. */
+const NEGATION_WORDS: ReadonlySet<string> = new Set([
+  "not",
+  "no",
+  "never",
+  "none",
+  "neither",
+  "nor",
+  "without",
   "cannot",
 ]);
 
+/** Polarity marker prefixed to content tokens under a negator. `!` cannot
+ * start a token produced by the alphanumeric tokenizer, so a marked token
+ * never collides with an unmarked one. */
+const NEGATION_PREFIX = "!";
+
 /** Casefolded substantial tokens of one requirement text: alphanumeric runs
  * of at least {@link MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS} characters, minus
- * the normative boilerplate in {@link NORMATIVE_BOILERPLATE_TOKENS}. */
+ * the normative boilerplate in {@link NORMATIVE_BOILERPLATE_TOKENS}, with
+ * every token after a {@link NEGATION_WORDS} negator carrying
+ * {@link NEGATION_PREFIX} so opposite polarity never compares equal. */
 export function requirementIdentityTokens(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-    .filter((token) => token.length >= MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS && !NORMATIVE_BOILERPLATE_TOKENS.has(token));
+  const words = text
+    .toLowerCase()
+    .replace(/n['\u2019]t\b/g, " not")
+    .match(/[a-z0-9]+/g) ?? [];
+  const tokens: string[] = [];
+  let negated = false;
+  for (const word of words) {
+    if (NEGATION_WORDS.has(word)) {
+      negated = true;
+      continue;
+    }
+    if (NORMATIVE_BOILERPLATE_TOKENS.has(word)) continue;
+    if (word.length < MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS) continue;
+    tokens.push(negated ? `${NEGATION_PREFIX}${word}` : word);
+  }
+  return tokens;
 }
 
 /** The longest contiguous token run the two sequences share, by dynamic
@@ -335,13 +377,15 @@ export function requirementIdentityRun(parentTokens: readonly string[], childTok
 /** The deterministic requirement-identity test of attestation gate (c):
  * does the child criterion carry the parent criterion's requirement — a
  * shared contiguous run of ≥ {@link MIN_REQUIREMENT_IDENTITY_RUN}
- * substantial tokens? Normative boilerplate (`MUST`/`SHALL`/`MUST NOT` and
- * the rest of {@link NORMATIVE_BOILERPLATE_TOKENS}) never counts, so two
- * unrelated criteria sharing a subject and a modal (`The review engine MUST
- * …`) do not attest. Verbatim-equal criteria (the ledger content-id recipe
- * case) trivially fire; the real #1677/#740 texts differ and fire on the
- * `same scheduler engine` phrase; unrelated criteria sharing only scattered
- * domain vocabulary stay below the bar. */
+ * substantial tokens? Normative boilerplate (`MUST`/`SHALL` and the rest of
+ * {@link NORMATIVE_BOILERPLATE_TOKENS}) never counts, so two unrelated
+ * criteria sharing a subject and a modal (`The review engine MUST …`) do not
+ * attest; and polarity is part of identity, so `MUST publish X` never
+ * attests `MUST NOT publish X` (see {@link NEGATION_WORDS}). Verbatim-equal
+ * criteria (the ledger content-id recipe case) trivially fire; the real
+ * #1677/#740 texts differ and fire on the `same scheduler engine` phrase;
+ * unrelated criteria sharing only scattered domain vocabulary stay below the
+ * bar. */
 export function requirementIdentityAttests(parentText: string, childText: string): boolean {
   const parentTokens = requirementIdentityTokens(parentText);
   if (parentTokens.length < MIN_REQUIREMENT_IDENTITY_RUN) return false;

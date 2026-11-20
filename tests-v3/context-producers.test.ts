@@ -1286,6 +1286,89 @@ test("#1750: normative boilerplate (MUST/SHALL/MUST NOT) cannot attest ownership
   );
 });
 
+test("#1750: negation polarity is part of requirement identity", () => {
+  // Dropping the modal must not merge opposite obligations: `MUST publish X`
+  // and `MUST NOT publish X` share every content word, so polarity has to be
+  // carried in the token sequence rather than discarded with the boilerplate.
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine MUST publish status checks.",
+      "The review engine MUST NOT publish status checks.",
+    ),
+    "MUST vs MUST NOT is opposite polarity",
+  );
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine MUST NOT publish status checks.",
+      "The review engine MUST publish status checks.",
+    ),
+    "the comparison is symmetric",
+  );
+
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine SHALL accept webhook payloads.",
+      "The review engine SHALL NOT accept webhook payloads.",
+    ),
+    "SHALL vs SHALL NOT is opposite polarity",
+  );
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine SHALL NOT accept webhook payloads.",
+      "The review engine SHALL accept webhook payloads.",
+    ),
+    "SHALL NOT vs SHALL is symmetric too",
+  );
+
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine can publish status checks.",
+      "The review engine cannot publish status checks.",
+    ),
+    "cannot is negative polarity, not a synonym for can",
+  );
+  assert.ok(
+    !requirementIdentityAttests(
+      "The review engine cannot publish status checks.",
+      "The review engine can publish status checks.",
+    ),
+    "positive vs cannot is symmetric",
+  );
+
+  // Same requirement and same polarity still attests — negated criteria are
+  // not categorically ineligible, they just must not cross polarity.
+  assert.ok(
+    requirementIdentityAttests(
+      "The review engine MUST NOT publish status checks.",
+      "The review engine MUST NOT publish status checks.",
+    ),
+    "identical negated criteria attest",
+  );
+  assert.ok(
+    requirementIdentityAttests(
+      "The review engine MUST NOT publish status checks.",
+      "The review engine MUST NOT publish status checks before required checks complete.",
+    ),
+    "a negated requirement still attests with extra context",
+  );
+
+  // Existing positive controls are untouched by the polarity channel.
+  assert.ok(
+    requirementIdentityAttests(
+      "GitLab and Gitea feed the same scheduler/engine.",
+      "GitLab merge_request webhook events produce ReviewJobs that enter the same scheduler/engine as GitHub/Forgejo",
+    ),
+    "the real #740/#1677 `same scheduler engine` run still attests",
+  );
+  assert.ok(
+    requirementIdentityAttests(
+      "The review engine MUST publish status checks.",
+      "The review engine MUST publish status checks at every transport boundary.",
+    ),
+    "the modal-boilerplate positive control still attests",
+  );
+});
+
 test("#1750 r3: quoted content cannot attest — fenced decomposition sections and fenced Parent lines are inert", async () => {
   // AGENTS #252: feed the boundary the hostile delimiter itself. The umbrella
   // quotes a decomposition section and the child quotes a Parent line inside
