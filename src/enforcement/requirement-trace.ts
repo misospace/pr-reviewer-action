@@ -2425,10 +2425,14 @@ const MAX_UMBRELLA_LABEL_MATCH_CHARS = 256;
  * canonical child identities — see `src/precheck/linked-issues.ts` and
  * `src/requirements/requirement-id.ts`). The criterion scopes out only when
  * a well-formed association names child work for it AND the current PR
- * (its `prLinkedRefs`, canonical identities from the same extraction
- * grammar intake used) references NONE of the owning children — in any
- * form, closing or non-closing, since a PR referencing the owning child may
- * be that child's implementer. Without the association the criterion stays
+ * (its `prLinkedRefs`, canonical identities from the recognized
+ * CONTRACT-relationship grammar intake used — closing keyword,
+ * `Implements`/`Part of`/`Addresses`, or the title `(#N)` convention)
+ * references NONE of the owning children — a plain `Refs`/`Ref` context
+ * link, a bare `#N` prose mention, or an issue URL naming the owning child
+ * is NOT an implementation claim, so it does not void the evidence; only a
+ * contract relationship does, since a PR contractually referencing the
+ * owning child may be that child's implementer. Without the association the criterion stays
  * in scope and NO out-of-scope reason is emitted at all; with it, the
  * reason cites the owning child. Umbrella label + non-closing ref alone is
  * NEVER ownership evidence, and neither is model prose or PR text.
@@ -2449,13 +2453,16 @@ export function requirementTraceScope(
      * `changed` text — so the lexical match keeps full weight (fail closed)
      * rather than dropping a requirement on unproven attribution. */
     fileLines?: readonly ChangedFileLines[] | undefined;
-    /** #1750: the current PR's own linked-issue references, as canonical
-     * casefolded `repo#N` identities (the engine derives them with the same
-     * pure extraction grammar intake used). Consumed ONLY by the
-     * umbrella-parent ownership boundary: a criterion whose trusted
-     * decomposition names an owning child the PR itself references — in any
-     * form, closing or non-closing — stays mandatory, because the PR may be
-     * that child's implementer. Non-canonical entries are dropped (never
+    /** #1750: the current PR's own CONTRACT issue references, as canonical
+     * casefolded `repo#N` identities (the engine derives them with the
+     * recognized-relationship grammar intake used: closing keywords,
+     * `Implements`/`Part of`/`Addresses`, and the title `(#N)` convention).
+     * Consumed ONLY by the umbrella-parent ownership boundary: a criterion
+     * whose trusted decomposition names an owning child the PR itself
+     * contractually references stays mandatory, because the PR may be
+     * that child's implementer. A plain `Refs`/`Ref` context link, a bare
+     * `#N` prose mention, or an issue URL is NOT a contract relationship
+     * and never voids the evidence. Non-canonical entries are dropped (never
      * matched), so an unparseable identity can never silently count as "not
      * referenced". */
     prLinkedRefs?: readonly string[] | undefined;
@@ -2553,9 +2560,12 @@ export function requirementTraceScope(
     // unsafe case (the PR is actually responsible for one of the parent's
     // criteria, the reviewer correctly reports it unmet, and the row was
     // scoped out anyway) cannot recur. The evidence is also void when the
-    // current PR references ANY owning child, in any form: a PR referencing
-    // the owning child may be that child's implementer, so the criterion
-    // stays mandatory. Model prose and PR text claiming "deferred"/"not my
+    // current PR CONTRACTUALLY references an owning child — a recognized
+    // relationship form (closing keyword, `Implements`/`Part of`/
+    // `Addresses`, or the title `(#N)` convention), because such a PR may be
+    // that child's implementer. A plain `Refs`/`Ref` context link, a bare
+    // `#N` prose mention, or an issue URL only DISCUSSES the child and keeps
+    // the narrowing intact. Model prose and PR text claiming "deferred"/"not my
     // scope" never reach this decision — only the deterministic channel does.
     const allLinked = sources !== null && sources.length > 0 && sources.every((source) => source === "linked_issues");
     const owningChildren = [...new Set(linkedRefs.flatMap((ref) => ref.childRefs))];

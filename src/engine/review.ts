@@ -135,7 +135,7 @@ import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArt
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
-import { prIssueReferenceIdentities } from "../precheck/linked-issues.js";
+import { prContractIssueRefIdentities } from "../precheck/linked-issues.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -2204,17 +2204,18 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // authoritative platform PR snapshot, never model output, and is never used to
   // confirm a code obligation — the validator's classifier gates that out.
   const tracePrBody = `${String(pr.title ?? "")}\n${String(pr.body ?? "")}`;
-  // #1750: the current PR's own issue references, as canonical casefolded
-  // `repo#N` identities — the reference-form-agnostic union from the SAME
-  // pure grammar the linked-issue intake uses, widened (#1750 operator CR)
-  // beyond keyword/title forms to bare `#N` prose mentions and forge issue
-  // URLs, because the veto contract voids ownership evidence when the PR
-  // references ANY owning child IN ANY FORM (so the engine and intake can
-  // never disagree about what the PR references). Consumed ONLY by the
-  // umbrella-parent ownership boundary in `requirementTraceScope`: a parent
-  // criterion whose trusted decomposition names an owning child this PR
-  // references — in any form — stays mandatory, because this PR may be that
-  // child's implementer.
+  // #1750: the current PR's own CONTRACT issue references, as canonical
+  // casefolded `repo#N` identities — the recognized-relationship grammar the
+  // linked-issue intake itself uses (`prContractIssueRefIdentities`):
+  // closing keywords, the `Implements`/`Part of`/`Addresses` implementation
+  // links, and the title `(#N)` convention; plain `Refs`/`Ref` context links
+  // do NOT (so the engine and intake can never disagree about what the PR
+  // contracted to). Consumed ONLY by the umbrella-parent ownership boundary
+  // in `requirementTraceScope`: a parent criterion whose trusted
+  // decomposition names an owning child this PR contractually references
+  // stays mandatory, because this PR may be that child's implementer —
+  // while merely mentioning a child in prose, a URL, or a `Refs` context
+  // link keeps the narrowing intact.
   const tracePrLinkedRefs = tracePrIssueRefs(String(pr.title ?? ""), String(pr.body ?? ""), repo);
   // #1062 review follow-up: when the CI gate finalized during this run, hand its
   // exact-head conclusion to the requirement-trace advisory diagnostics (an
@@ -5250,13 +5251,15 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
 
 // ---------------------------------------------------------------------------
 
-/** #1750 (review round): engine-side derivation of the PR's own issue
- * references consumed by the umbrella-parent scope-out veto. A thin
- * delegation keeping the call site honest about the reference-form-agnostic
- * union the veto contract requires (the SAME pure grammar linked-issue
- * intake uses, `prIssueReferenceIdentities`) — exported so the wiring is
- * pinned by tests: reverting the call site to keyword-only extraction
- * drops bare `#N` mentions and forge issue URLs and fails them. */
+/** #1750 (operator correction): engine-side derivation of the PR's own
+ * CONTRACT issue references consumed by the umbrella-parent scope-out veto.
+ * A thin delegation to the recognized-relationship grammar linked-issue
+ * intake itself uses (`prContractIssueRefIdentities`): closing keywords,
+ * `Implements`/`Part of`/`Addresses` and the title `(#N)` convention count;
+ * plain `Refs`/`Ref` context links, incidental bare `#N` prose mentions and
+ * forge issue URLs do NOT — discussing or merely referencing a child is not
+ * implementing it. Exported so the wiring is pinned by tests: reverting the
+ * call site to a different grammar fails them. */
 export function tracePrIssueRefs(title: string, body: string, repo: string): string[] {
-  return prIssueReferenceIdentities(title, body, repo);
+  return prContractIssueRefIdentities(title, body, repo);
 }

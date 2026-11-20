@@ -30,7 +30,7 @@ import {
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { buildLinkedIssueContext } from "../src/context/index.js";
 import { extractRequirementLedger } from "../src/requirements/index.js";
-import { prIssueReferenceIdentities } from "../src/precheck/linked-issues.js";
+import { prContractIssueRefIdentities } from "../src/precheck/linked-issues.js";
 import { tracePrIssueRefs } from "../src/engine/review.js";
 
 function makeWorkspace(): string {
@@ -877,13 +877,15 @@ test("#1750 r4 boundary: a PR referencing EITHER jointly-owning child keeps the 
   }
 });
 
-test("#1750 r5: a bare #child mention or issue URL in the PR text keeps the umbrella criterion mandatory (reference union → scope)", () => {
-  // The fail-open the operator CR named: the veto contract voids ownership
-  // evidence when the PR references ANY owning child IN ANY FORM, but the
-  // engine derived `prLinkedRefs` from keyword/title grammar alone — a bare
-  // `#1677` prose mention or a full issue URL naming the owning child stayed
-  // invisible and the parent criterion silently scoped itself out. Now the
-  // widened union surfaces both forms and the criterion stays mandatory.
+test("#1750 (operator correction): only recognized CONTRACT relationships to an owning child veto the umbrella narrowing (scope level)", () => {
+  // The veto fires when the PR may itself be the owning child's implementer
+  // — a claim only the recognized relationship grammar can make (the SAME
+  // one linked-issue intake uses, `prContractIssueRefIdentities`). Round-5's
+  // reference-form-agnostic union over-matched: merely DISCUSSING the child
+  // forced the parent criterion back into scope and produced false
+  // INCOMPLETEs. This is the scope-level regression for that correction:
+  // `Refs`/bare/URL do not veto; `Implements`/`Addresses`/title `(#N)`/
+  // closing do; the strongest relationship seen decides in both orders.
   const umbrella = {
     id: "req-umb",
     text: "The planner and scheduler engine MUST share one feed.",
@@ -891,23 +893,41 @@ test("#1750 r5: a bare #child mention or issue URL in the PR text keeps the umbr
     provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#1677"] }],
   };
   const ledger = ledgerWith([umbrella]);
-  const title = "feat: add GitLab webhook adapter";
-  const body = "Part of #42 (tracked separately).\n"
-    + "We deferred the child follow-up: #1677 will land the half documented at https://github.com/o/r/issues/1677.";
-  const prRefs = prIssueReferenceIdentities(title, body, "o/r");
-  assert.ok(prRefs.includes("o/r#1677"), "bare mention and issue URL surface the owning-child identity");
-  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: prRefs });
-  assert.equal(scope.inScope.length, 1, "referencing the owning child in any form voids the ownership evidence");
-  assert.equal(scope.inScope[0]!.id, "req-umb");
-  assert.deepEqual(scope.outOfScope, [], "no umbrella narrowing, no out-of-scope reason");
-  // Control: the PR references ONLY the umbrella (keyword form) — trusted
-  // decomposition stands and the criterion scopes out exactly as before.
-  const cleanRefs = prIssueReferenceIdentities(title, "Part of #42 (tracked separately).", "o/r");
-  assert.ok(!cleanRefs.includes("o/r#1677"));
-  const cleanScope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: cleanRefs });
-  assert.deepEqual(cleanScope.inScope, []);
-  assert.equal(cleanScope.outOfScope.length, 1);
-  assert.match(cleanScope.outOfScope[0]!.reason, /o\/r#1677/);
+  const scopeWith = (title: string, body: string) =>
+    requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: prContractIssueRefIdentities(title, body, "o/r") });
+
+  // NOT contract claims -> the umbrella narrowing stands unchanged.
+  for (const [label, body] of [
+    ["a plain Refs link", "Part of #42 (tracked separately).\nRefs #1677 for the deferred half."],
+    ["a bare #N prose mention", "Part of #42 (tracked separately).\nWe deferred the child follow-up: #1677 will land the URL half."],
+    ["a forge issue URL", "Part of #42 (tracked separately).\nDocumented at https://github.com/o/r/issues/1677."],
+  ] as const) {
+    const scope = scopeWith("feat: add GitLab webhook adapter", body);
+    assert.deepEqual(scope.inScope, [], `${label}: discussing the owning child is not implementing it`);
+    assert.equal(scope.outOfScope.length, 1, `${label}: the umbrella narrowing still fires`);
+    assert.equal(scope.outOfScope[0]!.note, "out-of-scope-umbrella-parent");
+    assert.match(scope.outOfScope[0]!.reason, /o\/r#1677/, `${label}: the reason still cites the owning child`);
+  }
+
+  // Contract claims -> the veto keeps the criterion mandatory.
+  for (const [label, title, body] of [
+    ["Implements", "feat: add GitLab webhook adapter", "Part of #42 (tracked separately).\nImplements #1677 as the URL half."],
+    ["Addresses", "feat: add GitLab webhook adapter", "Part of #42 (tracked separately).\nAddresses #1677 in this increment."],
+    ["a closing keyword", "feat: add GitLab webhook adapter", "Part of #42 (tracked separately).\nCloses #1677."],
+    ["the title (#N) convention", "feat: land the URL half (#1677)", "Part of #42 (tracked separately)."],
+  ] as const) {
+    const scope = scopeWith(title, body);
+    assert.deepEqual(scope.inScope.map((entry) => entry.id), ["req-umb"], `${label}: this PR may be the child's implementer`);
+    assert.deepEqual(scope.outOfScope, [], `${label}: no umbrella reason`);
+  }
+
+  // The STRONGEST relationship seen decides, in BOTH orders: `Refs` first
+  // with a contract form second still vetoes, and a contract form is never
+  // demoted by a later `Refs`.
+  for (const order of ["Refs #1677\nImplements #1677", "Implements #1677\nRefs #1677"]) {
+    const scope = scopeWith("feat: add GitLab webhook adapter", `Part of #42 (tracked separately).\n${order}`);
+    assert.deepEqual(scope.inScope.map((entry) => entry.id), ["req-umb"], "the strongest claim decides the veto, not the first spelling");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1001,13 +1021,12 @@ test("#1749 follow-up control: the identical issue linked by Implements stays co
   }
 });
 
-test("#1750 review round: padded PR body cannot hide an owning-child mention at the scope level", () => {
-  // Probed fail-open: with the old FIXED 256-entry reference cap, a body
-  // padded with 300 `#N` mentions evicted the tail `#1677` from the union,
-  // the trusted decomposition evidence stood, and the umbrella scope-out
-  // fired (`out-of-scope-umbrella-parent`) on a PR that in fact references
-  // its owning child. The bound is now derived from the text length, so the
-  // eviction is impossible and the criterion stays mandatory.
+test("#1750 (operator correction): prose padding cannot veto the narrowing, and a buried contract link still surfaces (scope level)", () => {
+  // The round-5 fixed-cap eviction fail-open existed only because the veto
+  // counted bare mentions. With the correction the grammar never counts
+  // prose at all: 300 padded `#N` mentions contribute nothing (no eviction
+  // class to guard), while a recognized contract link survives any padding —
+  // so there is nothing to truncate and no allocation backstop to get wrong.
   const umbrella = {
     id: "req-umb",
     text: "The planner and scheduler engine MUST share one feed.",
@@ -1016,23 +1035,61 @@ test("#1750 review round: padded PR body cannot hide an owning-child mention at 
   };
   const ledger = ledgerWith([umbrella]);
   const padding = Array.from({ length: 300 }, (_, index) => `mention #${index + 1}`).join("; ");
-  const prRefs = prIssueReferenceIdentities("feat: add GitLab webhook adapter", `${padding}; child #1677 lands the URL half`, "o/r");
-  assert.ok(prRefs.includes("o/r#1677"), "the owning-child identity survives the padding");
-  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: prRefs });
-  assert.equal(scope.inScope.length, 1, "a padded body keeps the criterion mandatory");
-  assert.equal(scope.inScope[0]!.id, "req-umb");
-  assert.deepEqual(scope.outOfScope, [], "zero out-of-scope umbrella-parent reasons");
+  const proseOnly = prContractIssueRefIdentities("feat: add GitLab webhook adapter", `${padding}; child #1677 lands the URL half`, "o/r");
+  assert.deepEqual(proseOnly, [], "bare mentions and an unkeyworded child sentence contribute nothing");
+  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: proseOnly });
+  assert.deepEqual(scope.inScope, [], "prose padding cannot force the parent criterion back into scope");
+  assert.equal(scope.outOfScope.length, 1, "the umbrella narrowing still fires");
+
+  const buried = prContractIssueRefIdentities("feat: add GitLab webhook adapter", `${padding}\nPart of #1677`, "o/r");
+  assert.deepEqual(buried, ["o/r#1677"], "a recognized contract link survives any padding");
+  const vetoed = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: buried });
+  assert.deepEqual(vetoed.inScope.map((entry) => entry.id), ["req-umb"], "the buried contract reference keeps the criterion mandatory");
 });
 
-test("#1750 coverage: engine-side derivation (tracePrIssueRefs) keeps bare mentions and issue URLs", () => {
-  // Pins the ENGINE wiring, not just the pure leaf: reverting the call site
-  // to keyword-only `extractLinkedIssueRefs` extraction keeps the rest of the
-  // suite green, but drops exactly these two reference forms here.
+test("#1750 review: 32 `Refs` context links cannot hide the owning-child veto (scope level)", () => {
+  // The scope half of the cap-inheritance regression: in the old shared
+  // implementation 32 distinct `Refs` links — filtered out of the contract
+  // set anyway — filled intake's candidate list and cut off the
+  // `Implements` claim before it reached the umbrella-parent veto,
+  // silently narrowing a contract-bearing criterion out of scope. The
+  // veto scans the full bounded-by-input grammar, so it must fire here,
+  // while the pure-`Refs` control stays narrowed.
+  const umbrella = {
+    id: "req-umb",
+    text: "The planner and scheduler engine MUST share one feed.",
+    kind: "acceptance",
+    provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#1677"] }],
+  };
+  const ledger = ledgerWith([umbrella]);
+  const flood = Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n");
+
+  const vetoed = prContractIssueRefIdentities("feat: add GitLab webhook adapter", `${flood}\nImplements #1677`, "o/r");
+  assert.deepEqual(vetoed, ["o/r#1677"], "the contract claim past the intake-cap boundary reaches the veto");
+  const scope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: vetoed });
+  assert.deepEqual(scope.inScope.map((entry) => entry.id), ["req-umb"], "the veto fires: this PR may be the owning child's implementer");
+
+  const explicit = prContractIssueRefIdentities("feat: add GitLab webhook adapter", `${flood}\nPart of o/r#1677`, "o/r");
+  assert.deepEqual(explicit, ["o/r#1677"], "the explicit-repo spelling normalizes to the same identity past the flood");
+  const explicitScope = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: explicit });
+  assert.deepEqual(explicitScope.inScope.map((entry) => entry.id), ["req-umb"], "an explicit-repo contract spelling vetoes too");
+
+  const contextOnly = prContractIssueRefIdentities("feat: add GitLab webhook adapter", `${flood}\nRefs #1677`, "o/r");
+  assert.deepEqual(contextOnly, [], "the same flood with only context links is not a contract");
+  const narrowed = requirementTraceScope(ledger, "+// planner feeds scheduler engine", { prLinkedRefs: contextOnly });
+  assert.deepEqual(narrowed.inScope, [], "a pure `Refs` flood never forces the parent criterion back into scope");
+  assert.equal(narrowed.outOfScope.length, 1, "the umbrella narrowing still fires");
+});
+
+test("#1750 coverage: engine-side derivation (tracePrIssueRefs) keeps contract forms and drops context/prose/URL", () => {
+  // Pins the ENGINE wiring, not just the pure leaf: the call site must hand
+  // the veto exactly the recognized contract identities. A regression back
+  // to the widened union (or to raw keyword extraction that keeps `Refs`)
+  // fails this.
   const refs = tracePrIssueRefs(
     "feat: add GitLab webhook adapter",
-    "Part of #42 (tracked separately).\nsee #1677 and https://github.com/o/r/issues/1677",
+    "Part of #42 (tracked separately).\nRefs #1678; see #1677 and https://github.com/o/r/issues/1677",
     "o/r",
   );
-  assert.ok(refs.includes("o/r#42"), "keyword link survives engine-side derivation");
-  assert.ok(refs.includes("o/r#1677"), "bare mention and forge issue URL survive engine-side derivation");
+  assert.deepEqual(refs, ["o/r#42"], "the keyword contract link survives; the Refs context link, the bare mention and the forge issue URL do not");
 });

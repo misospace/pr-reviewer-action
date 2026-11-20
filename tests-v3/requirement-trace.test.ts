@@ -5307,9 +5307,13 @@ test("#1749 scope: the umbrella shape is the bounded forge-label vocabulary, exa
 // The fix: the narrowing applies ONLY when the linked umbrella's own body
 // carries a trusted decomposition associating THIS criterion with child work
 // (task-list items referencing child issues, parsed conservatively at intake
-// and carried through the same seams), AND the current PR does not reference
-// the owning child in any form. Umbrella label + non-closing ref alone is
-// NEVER ownership evidence; model prose and PR text never are.
+// and carried through the same seams), AND the current PR does not
+// contractually reference the owning child — a recognized relationship form
+// (closing keyword, `Implements`/`Part of`/`Addresses`, or the title `(#N)`
+// convention); a plain `Refs`/`Ref` context link, a bare mention, or an
+// issue URL never enters the engine-derived reference set. Umbrella label +
+// non-closing ref alone is NEVER ownership evidence; model prose and PR
+// text never are.
 
 test("#1750 NEGATIVE: non-closing umbrella label without trusted child ownership keeps a touched criterion in scope", () => {
   // The exact unsafe case from the CR: umbrella parent, non-closing ref, the
@@ -5336,10 +5340,12 @@ test("#1750 BOUNDARY: trusted ownership evidence is void when the PR references 
       provenance: [{ source: "linked_issues", ref: "#42", line: 1, closing: false, labels: ["umbrella"], childRefs: ["o/r#101"] }],
     }],
   };
-  // A PR that references the owning child — in ANY form, closing or
-  // non-closing — may be that child's implementer: the criterion stays
-  // mandatory. (The engine passes canonical `repo#N` identities; the label /
-  // closing shape of the child reference is irrelevant.)
+  // A PR that CONTRACTUALLY references the owning child — a recognized
+  // relationship form — may be that child's implementer: the criterion stays
+  // mandatory. (The engine passes the canonical `repo#N` identities of its
+  // contract references only — `Refs` context links, bare mentions, and
+  // issue URLs never reach this set; the label / closing shape of the child
+  // reference itself is irrelevant.)
   const inScope = (prRefs: readonly string[]): string[] =>
     requirementTraceScope(ledger, UMBRELLA_CHANGED, { prLinkedRefs: prRefs }).inScope.map((e) => e.id);
   assert.deepEqual(inScope(["o/r#101"]), ["req-umb"], "a canonical reference to the owning child keeps it in scope");

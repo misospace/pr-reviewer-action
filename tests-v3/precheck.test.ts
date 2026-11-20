@@ -27,7 +27,7 @@ import {
 } from "../src/precheck/fingerprint.js";
 import { CONFIDENCE_RUBRIC_VERSION, CONFIDENCE_VERIFIER_REVISION } from "../src/confidence/result.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
-import { extractLinkedIssueRefs, issueUrlRefsInText, labelsOf, MAX_TRACE_PR_ISSUE_REFS, prIssueReferenceIdentities } from "../src/precheck/linked-issues.js";
+import { extractLinkedIssueRefs, labelsOf, prContractIssueRefIdentities } from "../src/precheck/linked-issues.js";
 import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.js";
 import { buildSelectionSignature } from "../src/precheck/selection.js";
 import {
@@ -723,66 +723,108 @@ test("linked issue refs: Addresses is non-closing; past-tense closing keywords o
   assert.equal(extractLinkedIssueRefs("Closes #1", "o/r")[0]!.closing, true);
 });
 
-test("#1750 r5: prIssueReferenceIdentities widens beyond keyword forms to bare mentions and issue URLs", () => {
-  // The fail-open class the operator CR named: owning-child references with
-  // no closing/implementation keyword and no title `(#N)` — invisible to
-  // `extractLinkedIssueRefs` alone, visible to the veto union.
+test("#1750 (operator correction): prContractIssueRefIdentities counts recognized contract relationships only", () => {
+  // The umbrella-parent owning-child veto must fire only on REAL contract
+  // claims — the SAME grammar the linked-issue intake uses — and stay silent
+  // on incidental discussion: a plain `Refs` link, a bare `#N` prose mention,
+  // and forge issue URLs naming an owning child must not make that child's
+  // parent criterion mandatory again (the false-INCOMPLETE class the round-5
+  // reference-form-agnostic union created).
   const title = "feat: add GitLab webhook adapter";
   const body = "Part of #42 (tracked separately).\n"
     + "We deferred the child follow-up: #1677 will land the URL half; "
     + "see https://github.com/o/r/issues/1677 and https://gitlab.com/group/sub/proj/-/issues/5.";
   assert.deepEqual(
-    prIssueReferenceIdentities(title, body, "o/r"),
-    ["o/r#42", "o/r#1677", "sub/proj#5"],
-    "keyword link, bare prose mention, GitHub issue URL, and GitLab nested-group URL all surface as canonical identities",
-  );
-
-  // Dedupe merges every spelling of one identity and casefolds the repo;
-  // the first-seen order is kept.
-  assert.deepEqual(
-    prIssueReferenceIdentities("chore: bump (#42)", "Closes #42; also #42 and https://github.com/O/R/issues/42", "O/R"),
+    prContractIssueRefIdentities(title, body, "o/r"),
     ["o/r#42"],
-    "title convention, closing keyword, bare mention, and mixed-case URL are ONE identity",
+    "the keyword link counts; the bare prose mention and both issue URLs do not",
   );
 
-  // Pull URLs name a different object than the child issue — not matched;
-  // a URL with no two-segment repo path names no repository.
-  assert.deepEqual(prIssueReferenceIdentities("", "Supersedes https://github.com/o/r/pull/1677.", "o/r"), [], "pull URLs are not issue references");
-  assert.deepEqual(prIssueReferenceIdentities("", "doc at https://example.com/issues/12", "o/r"), [], "no repo path, no identity");
-
-  // Schemeless forge issue-URL mentions resolve too — over-matching is the safe
-  // side of this grammar (every extra identity only keeps a criterion mandatory).
+  // Every recognized relationship form counts: closing keywords, the
+  // non-closing `Implements`/`Part of`/`Addresses` implementation links, and
+  // the title `(#N)` convention — canonical casefolded `repo#N`, in
+  // first-appearance order. `Refs`/`Ref` alone never counts.
   assert.deepEqual(
-    prIssueReferenceIdentities("", "see github.com/o/r/issues/1677 for context", "o/r"),
-    ["o/r#1677"],
-    "a schemeless GitHub-style issue URL names the same canonical identity",
+    prContractIssueRefIdentities("", "Closes #1; Part of #2; Addresses #3; Implements #4", "o/r"),
+    ["o/r#1", "o/r#2", "o/r#3", "o/r#4"],
   );
+  assert.deepEqual(prContractIssueRefIdentities("feat: thing (#42)", "Background only.", "O/R"), ["o/r#42"], "title convention is a contract claim");
+  assert.deepEqual(prContractIssueRefIdentities("", "Refs #1677\nref: #1678\nREFS other/repo#1679", "o/r"), [], "plain references are context, never contract");
+
+  // Dedupe merges every spelling of one identity, and a STRONGER occurrence
+  // of the same identity overrides a plain `Refs` in either order — the
+  // merged entry keeps its contract status.
   assert.deepEqual(
-    issueUrlRefsInText("milestone at forge.example/o/r/-/issues/9 and host/o/r/issues/3"),
-    ["o/r#9", "o/r#3"],
-    "schemeless GitLab-style and bare-host issue URLs both resolve",
+    prContractIssueRefIdentities("chore: bump (#42)", "Refs #42; also Closes #42", "O/R"),
+    ["o/r#42"],
+    "title convention and closing keyword upgrade the Refs-only mention to ONE contract identity",
   );
+  assert.deepEqual(prContractIssueRefIdentities("", "Refs #7\nImplements #7", "o/r"), ["o/r#7"]);
+  assert.deepEqual(prContractIssueRefIdentities("", "Implements #7\nRefs #7", "o/r"), ["o/r#7"]);
 
-  // Query and fragment tails on issue URLs still resolve.
-  assert.deepEqual(
-    issueUrlRefsInText("https://gitlab.com/o/r/-/issues/5?fix_me=1#note-2 and https://github.com/o/r/issues/1677#issuecomment-9"),
-    ["o/r#5", "o/r#1677"],
-  );
+  // Unkeyworded references are not contract claims: pull URLs, foreign URLs,
+  // and explicit `repo#N` mentions without a recognized keyword contribute
+  // nothing.
+  assert.deepEqual(prContractIssueRefIdentities("", "Supersedes https://github.com/o/r/pull/1677.", "o/r"), [], "pull URLs are not contract references");
+  assert.deepEqual(prContractIssueRefIdentities("", "doc at https://example.com/issues/12", "o/r"), [], "no relationship grammar, no identity");
+  assert.deepEqual(prContractIssueRefIdentities("", "mirrors other/Repo#7 exactly", "o/r"), [], "an unkeyworded repo#N mention is not a contract claim");
 
-  // Explicit cross-repo mentions keep their repo (casefolded).
-  assert.deepEqual(prIssueReferenceIdentities("", "mirrors other/Repo#7 exactly", "o/r"), ["other/repo#7"]);
-
-  // Regression (#1750 review round): the fixed cap truncated in the UNSAFE
-  // direction — a body padded with 300 bare `#N` mentions evicted the TAIL
-  // owning-child mention and re-opened the umbrella scope-out fail-open. The
-  // bound is now length-derived and provably non-binding: every accepted
-  // identity consumes at least ~3 characters of distinct text, so no padded
-  // body can drop a real mention. All 301 identities survive, tail included.
+  // A padded body of bare mentions contributes nothing and can never evict a
+  // recognized reference: the grammar simply never counted prose, so no
+  // allocation backstop is needed any more.
   const huge = Array.from({ length: 300 }, (_, index) => `mention #${index + 1}`).join("; ");
-  const padded = prIssueReferenceIdentities("", `${huge}; owning child #1677`, "o/r");
-  assert.ok(padded.includes("o/r#1677"), "tail owning-child mention survives 300-mention padding");
-  assert.ok(padded.includes("o/r#1") && padded.includes("o/r#300"), "the padding itself is never truncated");
-  assert.ok(padded.length > MAX_TRACE_PR_ISSUE_REFS, "the length-derived bound exceeds the fixed floor on long inputs");
+  assert.deepEqual(prContractIssueRefIdentities("", `${huge}; owning child #1677`, "o/r"), []);
+  assert.deepEqual(prContractIssueRefIdentities("", `${huge}\nPart of #42`, "o/r"), ["o/r#42"]);
+});
+
+test("#1750 review: the contract-reference scan never inherits intake's 32-candidate fetch cap", () => {
+  // MAX_LINKED_ISSUE_CANDIDATES bounds the issues intake may FETCH; the
+  // veto fetches nothing, so it must see the FULL recognized grammar of
+  // the platform-supplied title+body. A cap-inheriting implementation is
+  // fail-open in the exact shape below: `Refs` links are filtered out of
+  // the contract set anyway, yet filling the candidate list with them
+  // silently cut off every contract claim that followed.
+  const flood = Array.from({ length: 32 }, (_, index) => `Refs #${index + 1}`).join("\n");
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nImplements #33`, "o/r"),
+    ["o/r#33"],
+    "the claim past the intake-cap boundary is a contract claim, not an eviction casualty",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nImplements Other/Repo#1679`, "o/r"),
+    ["other/repo#1679"],
+    "a cross-repo contract claim survives the Refs flood, casefolded",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("fix: half the feed (#42)", `${flood}\nAddresses #43`, "o/r"),
+    ["o/r#42", "o/r#43"],
+    "the title convention counts first and the buried contract link counts too",
+  );
+
+  assert.deepEqual(
+    prContractIssueRefIdentities("fix: half the feed (#42)", `${flood}\nCloses #7; Part of #42`, "o/r"),
+    ["o/r#42", "o/r#7"],
+    "the closing claim past the boundary fires; dedupe against the title identity stays one entry",
+  );
+
+  const deeper = Array.from({ length: 96 }, (_, index) => `Refs #${index + 1}`).join("\n");
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${deeper}\nImplements #97`, "o/r"),
+    ["o/r#97"],
+    "the scan is exhaustive over the input, not truncated at any candidate count",
+  );
+
+  // Exhaustive, not over-matching: the flood itself is recognized grammar
+  // but context-only, and prose or forge URLs naming a flooded identity
+  // contribute nothing either.
+  assert.deepEqual(
+    prContractIssueRefIdentities("", `${flood}\nsee #33 and https://github.com/o/r/issues/33`, "o/r"),
+    [],
+    "a Refs flood plus prose/URL mentions of #33 is still not a contract claim",
+  );
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {
