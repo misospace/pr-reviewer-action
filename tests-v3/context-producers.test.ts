@@ -1025,6 +1025,88 @@ test("#1750 r3: cross-repository decomposition children are refused on fork PRs;
   );
 });
 
+test("#1750 security: cross-repository decomposition children are refused on NON-fork PRs too — zero foreign fetch, attestation voided whole", async () => {
+  // The decomposition section is untrusted issue content: even with the
+  // operator's non-fork credential (where #1617's fork gate is permissive),
+  // a hostile umbrella must not point privileged reads at arbitrary
+  // repositories. Children must live in the REVIEWED repository (the umbrella
+  // itself must share it — see the foreign-umbrella test below). The foreign
+  // child here WOULD pass every attestation gate if fetched — so a rendered
+  // line or a foreign call proves the leak; the correct behavior is no fetch
+  // and no evidence at all.
+  const childBody = organicChildBody("Parent: https://github.com/o/r/issues/42", ORGANIC_CHILD_CRITERIA.slice(0, 1));
+  const mixed = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- other/repo#5: https://forge.example/other/repo/issues/5", "- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([
+      // Keyed by number only (organicAdapter ignores repo): both listed
+      // children are perfectly attesting payloads IF read.
+      ["5", { ok: true, data: { number: 5, title: "Foreign child", state: "open", html_url: "u", labels: [], body: childBody } }],
+      ["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }],
+    ]),
+  });
+  const refused = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter: mixed.adapter, isForkPr: "false", linear: noLinear,
+  });
+  const refusedMd = text(refused.artifacts.get("linked-issues.md"));
+  assert.equal(refusedMd.split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length, 0, "one out-of-scope child voids the umbrella's attestation whole on a non-fork too");
+  assert.deepEqual(mixed.calls.filter((call) => !call.startsWith("o/r#")), [], "no fetch was attempted against a foreign repository");
+  assert.deepEqual(mixed.calls, ["o/r#42"], "the refusal happens BEFORE any child fetch, same-repo or not");
+  // Same-repo children on a non-fork keep working (the fix must not
+  // over-consume into disabling the channel entirely).
+  const sameRepo = organicAdapter({
+    umbrellaBody: organicUmbrellaBody(
+      [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+      ["- #1677: https://forge.example/o/r/issues/1677"],
+    ),
+    children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+  });
+  const allowed = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter: sameRepo.adapter, isForkPr: "false", linear: noLinear,
+  });
+  assert.deepEqual(
+    text(allowed.artifacts.get("linked-issues.md")).split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)),
+    [`(decomposition: ${reqIdOf(ORGANIC_PARENT_CRITERION)} -> o/r#1677)`],
+    "reviewed-repository children still attest on non-fork PRs",
+  );
+});
+
+test("#1750 security: a FOREIGN (cross-repository) linked umbrella on a non-fork voids child attestation — zero child fetch", async () => {
+  // The union with a foreign umbrella's repository is NOT safe: the PR body is
+  // untrusted and may reference any umbrella in any repository the credential
+  // can read. Child attestation therefore requires umbrella repo == reviewed
+  // repo == child repo; a foreign umbrella fails closed with no child fetch.
+  const umbrellaBody = organicUmbrellaBody(
+    [`- [ ] ${ORGANIC_PARENT_CRITERION}`],
+    ["- #1677: https://forge.example/other/repo/issues/1677"],
+  );
+  const childBody = organicChildBody("Parent: other/repo#42", ORGANIC_CHILD_CRITERIA.slice(0, 1));
+  const calls: string[] = [];
+  const adapter = {
+    getIssue: async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+      calls.push(`${repo}#${number}`);
+      if (repo === "other/repo" && number === "42") {
+        return { ok: true, data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body: umbrellaBody } };
+      }
+      if (number === "1677") {
+        return { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } };
+      }
+      return { ok: false, error: `no ${repo}#${number}` };
+    },
+  };
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: increment", body: "Part of other/repo#42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+  });
+  assert.equal(
+    text(result.artifacts.get("linked-issues.md")).split("\n").filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE)).length,
+    0,
+    "a foreign umbrella cannot attest ownership of reviewed-repo criteria",
+  );
+  assert.deepEqual(calls, ["other/repo#42"], "the umbrella linkage itself is refused before any child fetch — zero child fetches, foreign or same-number");
+});
+
 test("#1750 r3: a non-umbrella linked issue fetches no children", async () => {
   // The intake pre-gate mirrors the consumer's per-ref gate (non-closing +
   // umbrella label): without the label the child fetches never happen.

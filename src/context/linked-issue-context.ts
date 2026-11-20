@@ -247,8 +247,9 @@ function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
 // criterion matching several parent criteria is a cross-matched identity
 // that cannot be disambiguated and attests nothing, and an owner set over
 // the per-line bound drops the association whole. Any UNREADABLE child —
-// fetch failure, pull-request payload, over-size body, refused cross-repo
-// read on a fork — voids this umbrella's attestation WHOLE: a partial child
+// fetch failure, pull-request payload, over-size body, or a child (or the
+// umbrella itself) outside the reviewed repository (refused on EVERY PR,
+// fork or not) — voids this umbrella's attestation WHOLE: a partial child
 // set could hide a second attesting child and make a jointly-owned
 // criterion look like a smaller owner set (the unsafe direction). A fetched
 // child that simply does not attest (wrong or missing parentage, no
@@ -486,10 +487,21 @@ async function attestedDecompositionAssociations(
     children.push({ canonical: canonicalChildRef(repo, number), repo, number });
   }
   if (children.length === 0) return [];
-  // Fork trust boundary (#1617 parity): a refused cross-repo read is an
-  // UNREADABLE child — the attestation voids whole rather than proceeding on
-  // a partial child set.
+  // Child-read repository scope: the decomposition section AND the umbrella
+  // linkage itself are untrusted PR/issue content. On a FORK the #1617 gate
+  // already refuses every cross-repo child; on a NON-fork it is permissive,
+  // so this channel's own bound applies and is deliberately NARROWER: the
+  // umbrella itself must live in the REVIEWED repository (a non-fork PR may
+  // legitimately link a foreign umbrella for context, but that foreign body
+  // must never steer privileged child reads), and every listed child must
+  // live in that SAME reviewed repository. Any foreign umbrella or any
+  // out-of-scope child is an UNREADABLE child that voids the attestation
+  // WHOLE, BEFORE any fetch is attempted (a partial child set is the unsafe
+  // direction, same as a fetch failure).
+  if (umbrellaRepo.toLowerCase() !== defaultRepo.toLowerCase()) return [];
   for (const child of children) {
+    const childRepo = child.repo.toLowerCase();
+    if (childRepo !== defaultRepo.toLowerCase() || childRepo !== umbrellaRepo.toLowerCase()) return [];
     const ref: LinkedIssueRef = { ref: child.canonical, repo: child.repo, number: child.number, closing: false };
     if (!linkedIssueFetchAllowed(ref, defaultRepo, isForkPr)) return [];
   }
