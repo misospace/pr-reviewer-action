@@ -131,10 +131,10 @@ import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obl
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
-import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evidenceLedgerToArtifact, receiptVocabularyForTrace, type EvidenceLedger } from "../enforcement/evidence-receipts.js";
 import { finalSettlementsToArtifact, parseLoopSettlementsReport, reconcileSettlements, type LoopEvidenceSettlement } from "../enforcement/settlement.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, confirmedUnmetRows, createHeadLocationValidator, distributedRequirementHints, distributedRequirementWarnings, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, SATISFIED_NO_ENFORCEMENT_CITATION_NOTE, traceUnmetClaimedInScopeRows, unresolvedTraceRequirementIds, type ChangedFileLines } from "../enforcement/requirement-trace.js";
 import { prContractIssueRefIdentities } from "../precheck/linked-issues.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -2637,6 +2637,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // `unavailable` state (no native-loop surface) is explicit, never inferred
   // from a missing file.
   ws.write("evidence-receipts.json", `${pyJsonDumps(evidenceLedgerToArtifact(resolvedObligations.ledger))}\n`);
+  // #1753 (review): the requirement trace's satisfied-omission disclosure
+  // check credits receipt-kind evidence ONLY against the run's OWN #1657
+  // receipt vocabulary — the same ledger the completeness fold validates
+  // against, so the folds can never disagree on what the run acquired. A
+  // `valid` ledger credits acquired receipt ids and head-bound acquired
+  // subject paths; `refused`/`unavailable` credit nothing (fail closed: a
+  // receipt claim without an acquisition record names an acquisition that
+  // never happened, and a fabricated `call-<n>` can never remove the
+  // material veto).
+  const traceReceipts = receiptVocabularyForTrace(resolvedObligations.ledger);
   // #1449: the run's derived-obligation state — "" when the feature is off,
   // so a disabled run's coverage record and marker keep their pre-#1449
   // bytes exactly.
@@ -2675,7 +2685,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState, evidenceReceipts: traceReceipts });
     // #1658 removed the #1145 confirmed-unmet ESCALATION — the trace no
     // longer synthesizes findings or touches the verdict. The #1656
     // round-3 signal survives through the disposition instead: the
@@ -2755,7 +2765,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, fileLines: traceFileLines, prLinkedRefs: tracePrLinkedRefs, prBody: tracePrBody, ciState: traceCiState, evidenceReceipts: traceReceipts });
     // #1658 removed the #1145 escalation and its synthesized blocker (the
     // relaxers' `requirement_trace_incomplete` refusal still holds the
     // non-strict composition); the mechanical refutation COUNT feeds the
@@ -3045,6 +3055,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // independently prevent APPROVE.
     traceUnresolvedMaterial: requirementTraceSummary !== null && requirementTraceSummary.unresolved_material.length > 0,
     traceUnmetClaimed: traceUnmetClaimed,
+    // #1753: a satisfied ordinary-runtime row that emitted no
+    // enforcement-location citation while disclosing its evidence is the
+    // ADVISORY proof-shape omission class — surfaced on the disposition as
+    // the reserved `proof_shape_mismatch` diagnostic, never a material
+    // unknown. The note is the trusted provenance: only the fold's own
+    // validator sets it, and only on rows its ladder already made advisory.
+    traceProofShapeOmission: requirementTraceResult !== null && requirementTraceResult.applied
+      && requirementTraceResult.trace.rows.some((row) => row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE)),
     // #1678 hardening: an authoritative closing verdict whose
     // requirement_coverage is not EXACTLY the run's in-scope requirement set
     // (after that lane's single bounded correction, if one ran) is an invalid

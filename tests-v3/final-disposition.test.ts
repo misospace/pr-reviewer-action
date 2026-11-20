@@ -1093,6 +1093,39 @@ test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane
 });
 
 // ---------------------------------------------------------------------------
+// #1753: the satisfied-no-citation proof-shape omission feeds the reserved
+// ADVISORY `proof_shape_mismatch` vocabulary and never vetoes approval.
+// ---------------------------------------------------------------------------
+
+test("#1753: the satisfied-no-enforcement-citation omission is an ADVISORY diagnostic on the disposition — observable, never vetoing", () => {
+  const build = buildDispositionEvidence({ ...DISPOSITION_BASE, traceProofShapeOmission: true });
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.materiality]), [
+    ["proof_shape_mismatch", "advisory"],
+  ]);
+  assert.equal(build.provenUnmetRequirement, false);
+  // The #1747 shape end-to-end on the seam: a satisfied/approve review whose
+  // trace rows degraded as serialization omissions certifies APPROVE.
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "approve");
+  assert.equal(disposition.reason, "approval_certified");
+  assert.equal(disposition.nativeEvent, "APPROVE");
+  assert.deepEqual(disposition.materialUnknowns, []);
+  assert.deepEqual(disposition.advisoryDiagnostics.map((entry) => entry.code), ["proof_shape_mismatch"]);
+});
+
+test("#1753: a material trace class still withholds even when an advisory omission rides along", () => {
+  const build = buildDispositionEvidence({
+    ...DISPOSITION_BASE,
+    traceUnresolvedMaterial: true,
+    traceProofShapeOmission: true,
+  });
+  assert.ok(build.evidence.some((entry) => entry.code === "mandatory_requirement_unresolved" && entry.materiality === "material"));
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
+// ---------------------------------------------------------------------------
 // Audit round 3: hostile-boundary regression for `boundDispositionSubject`.
 // ---------------------------------------------------------------------------
 

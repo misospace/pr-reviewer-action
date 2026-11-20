@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import { validateRequirementTrace, SATISFIED_NO_ENFORCEMENT_CITATION_NOTE, SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE, renderRequirementTraceMarkdown } from "../src/enforcement/requirement-trace.js";
 import { USER_MESSAGE_BASE } from "../src/prompt/user-message.js";
 import { VERDICT_USER_INSTRUCTION } from "../src/model/conversation.js";
 
@@ -60,17 +60,413 @@ test("wire satisfied with a missing file ref downgrades to a material unresolved
   }
 });
 
-test("tool evidence is disclosure only and cannot satisfy an enforcement citation", () => {
+test("#1753: tool evidence is disclosure only — a satisfied row citing a receipt the run's record vouches for is ADVISORY proof-shape omission", () => {
   const workspace = makeWorkspace();
   try {
     const trace = validateRequirementTrace(
       [wireClaim("req-tool", "satisfied", [{ kind: "tool", ref: "call-7" }])],
       ledgerWith([{ id: "req-tool", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      // #1753 (review): the receipt cross-check — the run's own #1657
+      // vocabulary vouches for call-7, so the disclosure is genuine and the
+      // missing validator-shaped field is serialization bookkeeping.
+      { evidenceReceipts: { state: "valid", tokens: ["call-7", "call-8"] } },
     );
-    assert.deepEqual(trace.rows[0]?.enforcement, []);
-    assert.equal(trace.rows[0]?.disposition, "unverifiable");
-    assert.ok(trace.rows[0]?.notes.includes("downgraded-no-valid-enforcement-location"));
-    assert.deepEqual(trace.summary.unresolved_material, ["req-tool"]);
+    const row = trace.rows[0]!;
+    assert.deepEqual(row.enforcement, []);
+    // Still not mechanically discharged: no citation, no `met`.
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("coverage-status-mapped"));
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    // #1753: no citation was EMITTED, so no objective provenance failed —
+    // the reviewer's satisfied conclusion is the semantic answer and the
+    // missing validator-shaped field is serialization bookkeeping.
+    assert.equal(row.materiality, "advisory");
+    assert.equal(row.resolution, "unresolved");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-tool"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+// ── #1753: proof-shape serialization omissions vs invalid provenance ──────
+
+test("#1753 repro: the #1747 shape — satisfied runtime rows disclosing only tool receipts never become a machinery-created INCOMPLETE", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-8bf0d16f5427", text: "Release tags must fail closed when a moving ref is re-pointed.", kind: "acceptance" },
+      { id: "req-a5603fa91789", text: "Build steps must push only the exact-sha tag coordinates.", kind: "acceptance" },
+      { id: "req-207283cc8aed", text: "Stubbed regressions must cover the superseded-rerun refusal.", kind: "acceptance" },
+    ]);
+    const receipt = (id: string): unknown => ({
+      requirement_id: id,
+      status: "satisfied",
+      evidence: [{ kind: "tool", ref: "call-12" }],
+    });
+    const trace = validateRequirementTrace(
+      [receipt("req-8bf0d16f5427"), receipt("req-a5603fa91789"), receipt("req-207283cc8aed")],
+      ledger, workspace,
+      undefined,
+      // The organic run's own receipt record vouched for the calls its
+      // reviewer cited (30 successful tool calls) — the genuine #1747 shape.
+      { evidenceReceipts: { state: "valid", tokens: ["call-12", "call-13", "call-14", "call-15"] } },
+    );
+    assert.equal(trace.rows.length, 3);
+    for (const row of trace.rows) {
+      assert.equal(row.proof, "runtime_behavior");
+      assert.equal(row.disposition, "unverifiable");
+      assert.equal(row.materiality, "advisory");
+      assert.ok(row.notes.includes("coverage-status-mapped"));
+      assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    }
+    // Model conclusion satisfied/approve + disclosed acquired evidence +
+    // missing validator-shaped enforcement field: NOT a material unknown.
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-8bf0d16f5427", "req-a5603fa91789", "req-207283cc8aed"]);
+    // The deterministic missing-reason floor explains the omission without
+    // blaming the reviewer for a validator-produced shape.
+    assert.match(trace.rows[0]!.reason, /emitted no enforcement-location citation/);
+    // The published trace keeps the rows visible as ADVISORY bookkeeping.
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.match(rendered, /\[advisory\]/);
+    assert.match(rendered, /the reviewer emitted no enforcement-location citation/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 negative: a bare satisfied claim with no evidence disclosure cannot certify — it stays a material unknown", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Simply saying `satisfied` — no evidence entries, no reason — is as
+    // unusable as no trace at all (#1724's doctrine): the row keeps the
+    // material path and the approval stays withheld.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-bare", "satisfied")],
+      ledgerWith([{ id: "req-bare", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.equal(row.materiality, "material");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.deepEqual(trace.summary.unresolved_material, ["req-bare"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753: a location-kind ref the citation grammar refuses is a malformed citation attempt — material, never a polite omission", () => {
+  const workspace = makeWorkspace();
+  try {
+    // `kind: file` DECLARES a citation; a ref the one grammar refuses at the
+    // parse door (prose here; the traversal/absolute/control-byte classes
+    // keep their own #252 pins) is invalid provenance the satisfied claim
+    // cannot ride — it never degrades into the advisory omission class.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-mangled", "satisfied", [{ kind: "file", ref: "see the republish script near the guard" }])],
+      ledgerWith([{ id: "req-mangled", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.deepEqual(row.enforcement, []);
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-mangled"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753: a receipt ref the run's record vouches for is the advisory omission class; a detail-only prose claim is not", () => {
+  const workspace = makeWorkspace();
+  try {
+    // #1753 (review): disclosure must be receipt-BACKED, not self-declared.
+    // A `kind: tool` ref the run's #1657 vocabulary vouches for is genuine
+    // disclosure (advisory omission); a `kind: ci` entry with only a detail
+    // is prose with nothing to cross-check — it cannot remove the material
+    // veto, whatever its text claims.
+    const trace = validateRequirementTrace([
+      wireClaim("req-detail-only", "satisfied", [{ kind: "ci", detail: "live API read confirmed the guard" }]),
+      wireClaim("req-receipt-only", "satisfied", [{ kind: "tool", ref: "call-12" }]),
+    ], ledgerWith([
+      { id: "req-detail-only", text: "The renderer must display the result.", kind: "acceptance" },
+      { id: "req-receipt-only", text: "The service must expose the state.", kind: "acceptance" },
+    ]), workspace, undefined, { evidenceReceipts: { state: "valid", tokens: ["call-12"] } });
+    const detailRow = trace.rows[0]!;
+    const receiptRow = trace.rows[1]!;
+    // Detail-only prose: fail closed to the unbacked-receipt material path.
+    // The model's detail rides the row's reason (the floor only composes
+    // when the reason is empty); the unbacked note is the artifact marker.
+    assert.equal(detailRow.disposition, "unverifiable");
+    assert.ok(detailRow.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(detailRow.materiality, "material");
+    // Genuine receipt-backed disclosure: advisory serialization omission.
+    assert.equal(receiptRow.disposition, "unverifiable");
+    assert.ok(receiptRow.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(receiptRow.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-detail-only"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-receipt-only"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753: an explicit test demand is the requirement's own text — no test citation stays material even when the enforcement omission alone would be advisory", () => {
+  const workspace = makeWorkspace();
+  try {
+    const trace = validateRequirementTrace(
+      [wireClaim("req-tests", "satisfied", [{ kind: "tool", ref: "call-3" }])],
+      ledgerWith([{ id: "req-tests", text: "The renderer must display the result. It must be covered by regression tests.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["call-3"] } },
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.proof, "test_required");
+    assert.equal(row.disposition, "unverifiable");
+    // Both notes land, but the demanded-test gap is the material cause: any
+    // material cause on a row outranks the advisory enforcement omission.
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.ok(row.notes.includes("downgraded-no-valid-test-location"));
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-tests"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a kind-only evidence shell is NOT concrete evidence — the satisfied row stays material", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The canonical normalizer's concreteness rule: a recognized kind with
+    // NEITHER a non-empty ref NOR a non-empty detail is zero concrete
+    // evidence (`normalizeEvidence` would credit nothing and the row would
+    // read `downgraded-no-concrete-evidence`). The trace's disclosure check
+    // shares that exact boundary — a kind-only shell can never remove the
+    // material veto and open a native APPROVE.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-shell", "satisfied", [{ kind: "tool", ref: null, detail: null }])],
+      ledgerWith([{ id: "req-shell", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-shell"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: an unrecognized evidence kind with text cannot self-authorize the advisory omission (provider parity)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Prompt-only / structured-output-stripped providers are not guaranteed
+    // to enforce the schema enum: an invented kind with arbitrary ref/detail
+    // text is dropped by the canonical normalizer, so the trace's disclosure
+    // check must not credit it either — the row keeps the material path.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-invented", "satisfied", [{ kind: "receipt", ref: "call-12", detail: "live read confirmed the guard" }])],
+      ledgerWith([{ id: "req-invented", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-invented"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a concrete tool receipt keeps the advisory omission", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The intended #1758 behavior, now with explicit null detail: a
+    // recognized receipt kind plus a concrete ref the run's record vouches
+    // for IS receipt-backed concrete evidence.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-concrete-tool", "satisfied", [{ kind: "tool", ref: "call-12", detail: null }])],
+      ledgerWith([{ id: "req-concrete-tool", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["call-12"] } },
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(row.notes.includes("downgraded-no-valid-enforcement-location"), false);
+    assert.equal(row.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-concrete-tool"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a concrete ci receipt id keeps the advisory omission; a detail-only ci claim is unbacked prose", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The receipt id the run's record vouches for (`ci:<check>`): advisory.
+    const backed = validateRequirementTrace(
+      [wireClaim("req-concrete-ci", "satisfied", [{ kind: "ci", ref: "ci:build", detail: null }])],
+      ledgerWith([{ id: "req-concrete-ci", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["ci:build"] } },
+    );
+    const backedRow = backed.rows[0]!;
+    assert.equal(backedRow.disposition, "unverifiable");
+    assert.ok(backedRow.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(backedRow.materiality, "advisory");
+    // A null ref with only a detail is prose with nothing to cross-check —
+    // unbacked, material (supersedes the pre-review advisory expectation).
+    const prose = validateRequirementTrace(
+      [wireClaim("req-prose-ci", "satisfied", [{ kind: "ci", ref: null, detail: "live API read confirmed the guard" }])],
+      ledgerWith([{ id: "req-prose-ci", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["ci:build"] } },
+    );
+    const proseRow = prose.rows[0]!;
+    assert.equal(proseRow.disposition, "unverifiable");
+    assert.ok(proseRow.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(proseRow.materiality, "material");
+    assert.deepEqual(prose.summary.unresolved_material, ["req-prose-ci"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: a receipt ref naming nothing in the run's record stays material (fabricated call id)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The AI review's Major: `{kind:"tool", ref:"call-12"}` alone must not
+    // remove the material veto — call-999 was never executed, so the
+    // self-declared receipt is unbacked and the row keeps the material path.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-fabricated", "satisfied", [{ kind: "tool", ref: "call-999" }])],
+      ledgerWith([{ id: "req-fabricated", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["call-12", "call-13"] } },
+    );
+    const row = trace.rows[0]!;
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE), false);
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-fabricated"]);
+    assert.deepEqual(trace.summary.unresolved_advisory, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: an acquired head-bound receipt path vouches for a path-shaped receipt ref", () => {
+  const workspace = makeWorkspace();
+  try {
+    // A tool receipt citing the path the run actually read (the optional
+    // `:line` suffix is citation noise; the path prefix is what the record
+    // vouches for) — genuine disclosure, advisory omission.
+    const trace = validateRequirementTrace(
+      [wireClaim("req-path", "satisfied", [{ kind: "tool", ref: "src/read.ts:42" }])],
+      ledgerWith([{ id: "req-path", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["call-5", "src/read.ts"] } },
+    );
+    const row = trace.rows[0]!;
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(row.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_material, []);
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-path"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: refused and unavailable receipt records fail the omission closed — a receipt claim without a record never discloses", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-gate", text: "The renderer must display the result.", kind: "acceptance" }]);
+    const claim = [wireClaim("req-gate", "satisfied", [{ kind: "tool", ref: "call-12" }])];
+    // Refused ledger (a present-but-malformed trace): fail closed (#1634).
+    const refused = validateRequirementTrace(claim, ledger, workspace, undefined, {
+      evidenceReceipts: { state: "refused", tokens: ["call-12"] },
+    });
+    assert.ok(refused.rows[0]!.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(refused.rows[0]!.materiality, "material");
+    // Unavailable ledger (fresh standard-call/fork paths — no acquisition
+    // record exists): a receipt claim names an acquisition that never
+    // happened. Fail closed even though the tokens list is empty.
+    const unavailable = validateRequirementTrace(claim, ledger, workspace, undefined, {
+      evidenceReceipts: { state: "unavailable", tokens: [] },
+    });
+    assert.ok(unavailable.rows[0]!.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(unavailable.rows[0]!.materiality, "material");
+    // No context at all (direct/unit callers): default-deny — the same
+    // fail-closed reading, per the module's doctrine.
+    const absent = validateRequirementTrace(claim, ledger, workspace);
+    assert.ok(absent.rows[0]!.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE));
+    assert.equal(absent.rows[0]!.materiality, "material");
+    for (const trace of [refused, unavailable, absent]) {
+      assert.deepEqual(trace.summary.unresolved_material, ["req-gate"]);
+      assert.deepEqual(trace.summary.unresolved_advisory, []);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753 review: one genuine receipt carries the disclosure — an extra unbacked entry gains nothing", () => {
+  const workspace = makeWorkspace();
+  try {
+    const trace = validateRequirementTrace(
+      [wireClaim("req-mixed-receipts", "satisfied", [
+        { kind: "tool", ref: "call-12" },
+        { kind: "tool", ref: "call-999" },
+      ])],
+      ledgerWith([{ id: "req-mixed-receipts", text: "The renderer must display the result.", kind: "acceptance" }]), workspace,
+      undefined,
+      { evidenceReceipts: { state: "valid", tokens: ["call-12"] } },
+    );
+    const row = trace.rows[0]!;
+    // The backed entry establishes genuine disclosure; the fabricated extra
+    // gains nothing and poisons nothing — the advisory omission stands.
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.equal(row.notes.includes(SATISFIED_UNBACKED_RECEIPT_EVIDENCE_NOTE), false);
+    assert.equal(row.materiality, "advisory");
+    assert.deepEqual(trace.summary.unresolved_advisory, ["req-mixed-receipts"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1753: any material cause outranks the advisory omission — omitted enforcement plus an unresolvable demanded test stays material", () => {
+  const workspace = makeWorkspace();
+  try {
+    const trace = validateRequirementTrace([{
+      requirement_id: "req-mixed",
+      status: "satisfied",
+      evidence: [{ kind: "tool", ref: "call-3" }],
+      // The tolerated additive test field parses into a test citation that
+      // does not exist at head — a material cause the omission never hides.
+      test: [{ file: "tests/absent.test.ts", line: 1 }],
+    }], ledgerWith([{ id: "req-mixed", text: "The sync must be covered by regression tests.", kind: "acceptance" }]), workspace,
+    undefined,
+    { evidenceReceipts: { state: "valid", tokens: ["call-3"] } });
+    const row = trace.rows[0]!;
+    assert.equal(row.proof, "test_required");
+    assert.equal(row.disposition, "unverifiable");
+    assert.ok(row.notes.includes(SATISFIED_NO_ENFORCEMENT_CITATION_NOTE));
+    assert.ok(row.notes.includes("downgraded-no-valid-test-location"));
+    assert.equal(row.materiality, "material");
+    assert.deepEqual(trace.summary.unresolved_material, ["req-mixed"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

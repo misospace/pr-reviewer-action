@@ -6,6 +6,7 @@ import {
   evaluateRowEvidence,
   evidenceLedgerFromArtifact,
   evidenceLedgerToArtifact,
+  receiptVocabularyForTrace,
   executedCallId,
   MAX_EXECUTED_CALL_INDEX,
   rowEvidenceStateToArtifact,
@@ -925,4 +926,30 @@ test("#1657 (round 3): the strict tag parser takes the {slug, versions} entry sh
       JSON.stringify(bad),
     );
   }
+});
+
+// ── #1753 (review): the receipt vocabulary the requirement trace's
+// satisfied-omission disclosure check may credit ─────────────────────────────
+
+test("#1753 (review): the trace receipt vocabulary credits only ACQUIRED HEAD-BOUND receipts", () => {
+  const ledger: EvidenceLedger = {
+    state: "valid",
+    receipts: [
+      // A genuine current-head source read: id + subject path both credit.
+      { id: "call-1", kind: "source-read", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "workspace", subject: { path: "src/read.ts" } },
+      // A successful WEB acquisition: real, but not current-head evidence —
+      // excluded whatever its acquisition status (the AI review's freshness
+      // finding: a non-head-bound fetch must never back the advisory class).
+      { id: "call-2", kind: "web-fetch", capability: "acquisition", acquired: true, complete: true, freshness: "unbound", trust: "web", subject: { url: "https://example.invalid/x" } },
+      // A recorded-but-failed read: provenance of failure, never credit.
+      { id: "call-3", kind: "source-read", capability: "content", acquired: false, complete: false, freshness: "head-bound", trust: "workspace", subject: { path: "src/failed.ts" } },
+    ],
+  };
+  const vocabulary = receiptVocabularyForTrace(ledger);
+  assert.equal(vocabulary.state, "valid");
+  assert.deepEqual(vocabulary.tokens, ["call-1", "src/read.ts"]);
+  // A refused ledger (present-but-malformed trace) and an unavailable one
+  // (no acquisition record) credit nothing — fail closed.
+  assert.deepEqual(receiptVocabularyForTrace({ state: "refused", receipts: ledger.receipts }).tokens, []);
+  assert.deepEqual(receiptVocabularyForTrace({ state: "unavailable", receipts: [] }).tokens, []);
 });

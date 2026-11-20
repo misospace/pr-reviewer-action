@@ -81,6 +81,17 @@ export interface DispositionEvidenceParts {
    * `out-of-scope-reported-unmet` marker), so a scope-settled claim can
    * never independently prevent APPROVE. */
   traceUnmetClaimed: boolean;
+  /** #1753: true when the requirement trace degraded at least one satisfied
+   * ordinary-runtime row to ADVISORY proof-shape bookkeeping because the
+   * claim emitted NO enforcement-location citation while still disclosing
+   * its evidence (the `satisfied-no-enforcement-citation` note). Feeds the
+   * reserved ADVISORY `proof_shape_mismatch` code — the omission stays
+   * observable on the authoritative disposition, never vetoing: the
+   * reviewer's satisfied conclusion is the semantic answer and a missing
+   * validator-shaped field is serialization bookkeeping, not a demonstrated
+   * material gap. Optional so pre-#1753 callers compile; absent = no
+   * signal. */
+  traceProofShapeOmission?: boolean;
   /** #1678 hardening: the authoritative closing verdict's
    * `requirement_coverage` failed the exact-set requirement-decision contract
    * (rows missing, duplicated, unexpected, malformed, or absent while
@@ -310,6 +321,15 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   }
   if (parts.traceUnmetClaimed) {
     evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", "requirement-trace:unmet-claimed"));
+  }
+  // #1753: the satisfied-no-citation serialization omission is the one trace
+  // class the reserved ADVISORY `proof_shape_mismatch` vocabulary was pinned
+  // for — "a requirement-trace predicate/test-shape mismatch established by
+  // trusted provenance". Trusted provenance here is the trace row's own note
+  // (deterministic: no citation emitted, evidence disclosed); the disclosure
+  // rides `advisoryDiagnostics` and can never veto an approval.
+  if (parts.traceProofShapeOmission === true) {
+    evidence.push(dispositionEvidence("proof_shape_mismatch", "deterministic", "advisory", "requirement-trace:satisfied-no-enforcement-citation"));
   }
   // #1678 hardening: the exact-set verdict-contract failure is its OWN
   // material reason — the serialization broke, the semantics were never

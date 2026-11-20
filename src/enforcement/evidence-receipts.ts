@@ -1187,6 +1187,56 @@ export function evidenceLedgerToArtifact(ledger: EvidenceLedger): Record<string,
   };
 }
 
+/** Defensive cap on the receipt vocabulary the trace may consult — the
+ * ledger build already bounds every class far below this; the cap keeps a
+ * corrupted (hand-built) ledger from inflating the set without bound. */
+const MAX_TRACE_RECEIPT_TOKENS = 2048;
+
+/**
+ * #1753 (review): the bounded receipt-backed VOCABULARY the requirement
+ * trace's satisfied-omission disclosure check may credit — the ids of
+ * ACQUIRED HEAD-BOUND receipts (`call-<n>` for trace receipts, `ci:<check>`
+ * for CI rows, `corpus-diff:<path>` for corpus credit) plus their subject
+ * paths. Only HEAD-BOUND acquisitions prove anything about the reviewed
+ * head: a web fetch/search or any unbound acquisition, however successful,
+ * is not current-head evidence, so a satisfied row backed only by one keeps
+ * the material path (the AI review's freshness finding). A recorded-but-
+ * unacquired receipt is provenance of FAILURE, never credit (#1657: "a
+ * receipt proves what the loop fetched" — a failed fetch fetched nothing).
+ *
+ * Subject-to-requirement RELEVANCE stays deliberately unchecked — which
+ * acquisition supports which requirement is the reviewer's semantic
+ * judgment, the same line the citation path draws (#1658: the validator
+ * proves a citation resolves; it never judges what the cited code means).
+ *
+ * The state rides along so the trace's cross-check can never be looser than
+ * the receipt gate's own semantics: `valid` credits exactly the token set;
+ * `refused` (a present-but-malformed trace) credits nothing (#1634's
+ * fail-closed rule — no objective satisfaction can discharge behind a trace
+ * this runtime cannot verify); `unavailable` (fresh standard-call and fork
+ * paths) credits nothing either — there is no acquisition record, so a
+ * receipt-kind evidence claim names an acquisition this run provably never
+ * made and can never self-authorize the advisory omission path.
+ */
+export function receiptVocabularyForTrace(ledger: EvidenceLedger): { state: EvidenceLedgerState; tokens: readonly string[] } {
+  if (ledger.state !== "valid") return { state: ledger.state, tokens: [] };
+  const tokens = new Set<string>();
+  for (const receipt of ledger.receipts) {
+    if (!receipt.acquired) continue;
+    // Freshness gate: an unbound acquisition (web fetch/search, a CI row
+    // not bound to the reviewed head) is not current-head evidence.
+    if (receipt.freshness !== "head-bound") continue;
+    tokens.add(receipt.id);
+    const path = receipt.subject.path;
+    if (typeof path === "string" && path !== "") tokens.add(path);
+    for (const subjectPath of receipt.subject.paths ?? []) {
+      if (typeof subjectPath === "string" && subjectPath !== "") tokens.add(subjectPath);
+    }
+    if (tokens.size >= MAX_TRACE_RECEIPT_TOKENS) break;
+  }
+  return { state: ledger.state, tokens: [...tokens].slice(0, MAX_TRACE_RECEIPT_TOKENS) };
+}
+
 const LEDGER_STATES: ReadonlySet<string> = new Set(["unavailable", "refused", "valid"]);
 const RECEIPT_KINDS: ReadonlySet<string> = new Set([
   "source-read", "corpus-diff", "ci-check", "web-fetch", "web-search", "discovery", "command",
