@@ -188,17 +188,16 @@ function indentWidth(spaces: string): number {
  * matching the fence handling of the other attestation parsers. */
 function bodyDecompositionLines(body: string, ownerRepo: string): string[] {
   const items: BodyListItem[] = [];
-  let inFence = false;
-  let fenceChar = "";
+  let fence: IntakeFence | null = null;
   for (const raw of body.split(/\r\n|\r|\n/)) {
-    const fence = INTAKE_FENCE_RE.exec(raw.trim());
-    if (inFence) {
-      if (fence !== null && (fence[1] ?? "").charAt(0) === fenceChar) inFence = false;
+    const line = raw.trim();
+    if (fence !== null) {
+      if (intakeFenceCloses(line, fence)) fence = null;
       continue;
     }
-    if (fence !== null) {
-      inFence = true;
-      fenceChar = (fence[1] ?? "").charAt(0);
+    const opener = intakeFenceRun(line);
+    if (opener !== null) {
+      fence = opener;
       continue;
     }
     const task = INTAKE_TASK_ITEM_RE.exec(raw);
@@ -321,7 +320,35 @@ const INTAKE_ACCEPTANCE_HEADINGS: ReadonlySet<string> = new Set([
 const INTAKE_LEDGER_LIST_ITEM_RE = /^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/;
 const INTAKE_LEDGER_MARKER_STRIP_RE = /^\s*(?:[-*+]\s+\[[ xX]\]\s*|[-*+]\s+|\d+[.)]\s+)/;
 const INTAKE_HEADING_RE = /^\s{0,3}#{1,6}\s+(.*)$/;
-const INTAKE_FENCE_RE = /^(`{3,}|~{3,})/;
+const INTAKE_FENCE_RE = /^(`{3,}|~{3,})(.*)$/;
+
+interface IntakeFence {
+  char: string;
+  length: number;
+}
+
+/** Parse a trimmed line as a Markdown fence run, or null when it does not
+ * start with at least three backticks or tildes. Trailing text is an info
+ * string on an opener; a closer must have none (see
+ * {@link intakeFenceCloses}). */
+function intakeFenceRun(line: string): IntakeFence | null {
+  const match = INTAKE_FENCE_RE.exec(line);
+  if (match === null) return null;
+  const run = match[1] ?? "";
+  return { char: run.charAt(0), length: run.length };
+}
+
+/** True when the line closes the open fence (CommonMark): the same fence
+ * character, a run at least as long as the OPENER's run, and nothing but
+ * trailing whitespace after it. A shorter run or an info string
+ * (`` ```not-a-close ``) is body text, not a closer, so the quoted content
+ * after it stays inert. */
+function intakeFenceCloses(line: string, fence: IntakeFence): boolean {
+  const match = INTAKE_FENCE_RE.exec(line);
+  if (match === null) return false;
+  const run = match[1] ?? "";
+  return run.charAt(0) === fence.char && run.length >= fence.length && (match[2] ?? "").trim() === "";
+}
 
 const DECOMPOSITION_START_MARKER = "dispatch-groomer:decomposition:start";
 const DECOMPOSITION_END_MARKER = "dispatch-groomer:decomposition:end";
@@ -340,18 +367,17 @@ const PARENT_URL_REF_RE = /^https?:\/\/[^\s/]+\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.
  * cannot be mapped whole. */
 function acceptanceCriteriaTexts(body: string): { texts: string[]; overflow: boolean } {
   const texts: string[] = [];
-  let inFence = false;
-  let fenceChar = "";
+  let fence: IntakeFence | null = null;
   let heading = "";
   for (const raw of pySplitLines(body)) {
-    const fence = INTAKE_FENCE_RE.exec(raw.trim());
-    if (inFence) {
-      if (fence !== null && (fence[1] ?? "").charAt(0) === fenceChar) inFence = false;
+    const line = raw.trim();
+    if (fence !== null) {
+      if (intakeFenceCloses(line, fence)) fence = null;
       continue;
     }
-    if (fence !== null) {
-      inFence = true;
-      fenceChar = (fence[1] ?? "").charAt(0);
+    const opener = intakeFenceRun(line);
+    if (opener !== null) {
+      fence = opener;
       continue;
     }
     const headingMatch = INTAKE_HEADING_RE.exec(raw);
@@ -386,19 +412,18 @@ function decompositionSectionChildRefs(body: string, ownerRepo: string): { refs:
     }
   };
   const overflows = (refs: string[]): boolean => refs.length > MAX_DECOMPOSITION_CHILDREN_PER_ISSUE;
-  let inFence = false;
-  let fenceChar = "";
+  let fence: IntakeFence | null = null;
   let inMarkerRegion = false;
   let inHeadingSection = false;
   for (const raw of pySplitLines(body)) {
-    const fence = INTAKE_FENCE_RE.exec(raw.trim());
-    if (inFence) {
-      if (fence !== null && (fence[1] ?? "").charAt(0) === fenceChar) inFence = false;
+    const line = raw.trim();
+    if (fence !== null) {
+      if (intakeFenceCloses(line, fence)) fence = null;
       continue;
     }
-    if (fence !== null) {
-      inFence = true;
-      fenceChar = (fence[1] ?? "").charAt(0);
+    const opener = intakeFenceRun(line);
+    if (opener !== null) {
+      fence = opener;
       continue;
     }
     if (raw.includes(DECOMPOSITION_START_MARKER)) {
@@ -432,17 +457,16 @@ function decompositionSectionChildRefs(body: string, ownerRepo: string): { refs:
  * ambiguous parentage: the caller treats the child as non-attesting. */
 function childParentRefs(childBody: string, childRepo: string): string[] {
   const refs: string[] = [];
-  let inFence = false;
-  let fenceChar = "";
+  let fence: IntakeFence | null = null;
   for (const raw of pySplitLines(childBody)) {
-    const fence = INTAKE_FENCE_RE.exec(raw.trim());
-    if (inFence) {
-      if (fence !== null && (fence[1] ?? "").charAt(0) === fenceChar) inFence = false;
+    const line = raw.trim();
+    if (fence !== null) {
+      if (intakeFenceCloses(line, fence)) fence = null;
       continue;
     }
-    if (fence !== null) {
-      inFence = true;
-      fenceChar = (fence[1] ?? "").charAt(0);
+    const opener = intakeFenceRun(line);
+    if (opener !== null) {
+      fence = opener;
       continue;
     }
     const match = CHILD_PARENT_LINE_RE.exec(raw.trim());

@@ -714,6 +714,99 @@ test("#1750: task-list items inside code fences render no decomposition ownershi
   );
 });
 
+test("#1750: a shorter or decorated fence closer cannot expose quoted decomposition evidence", async () => {
+  // CommonMark: a closer must use the opener's character, be at least as long,
+  // and carry only trailing whitespace. Both shapes below used to close the
+  // fence early and parse `- [ ] still quoted (#123)` as trusted ownership.
+  const shapes = [
+    ["````markdown", "```", "````"],
+    ["```markdown", "```not-a-close", "```"],
+  ];
+  for (const [open, earlyClose, close] of shapes) {
+    const body = [
+      "## Acceptance criteria",
+      "",
+      open,
+      "quoted task",
+      earlyClose,
+      "- [ ] still quoted (#123)",
+      close,
+      "",
+    ].join("\n");
+    const getIssue = async (): Promise<ReadResult<unknown>> => ({
+      ok: true,
+      data: { number: 42, title: "Umbrella", state: "open", html_url: "u", labels: [{ name: "umbrella" }], body },
+    });
+    const result = await buildLinkedIssueContext({
+      pr: { title: "feat: increment (#42)", body: "Part of the umbrella." }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+    });
+    const rendered = text(result.artifacts.get("linked-issues.md"))
+      .split("\n")
+      .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
+    assert.deepEqual(rendered, [], `${open}: the quoted task-list item produced no ownership evidence`);
+  }
+});
+
+test("#1750: a shorter or decorated fence closer cannot expose quoted parentage", async () => {
+  const fencedParentage = [
+    ["````markdown", "quoted task", "```", "Parent: https://github.com/o/r/issues/42", "````"],
+    ["```markdown", "quoted task", "```not-a-close", "Parent: https://github.com/o/r/issues/42", "```"],
+  ];
+  for (const fenced of fencedParentage) {
+    // The acceptance criterion stays live so the only missing gate input is
+    // the quoted `Parent:` line: a parser that closes the fence early would
+    // attest the umbrella and render an ownership line.
+    const childBody = [
+      "## Acceptance criteria",
+      "",
+      ORGANIC_CHILD_CRITERIA[0]!,
+      "",
+      ...fenced,
+      "",
+    ].join("\n");
+    const { adapter } = organicAdapter({
+      umbrellaBody: organicUmbrellaBody([`- [ ] ${ORGANIC_PARENT_CRITERION}`], ["- #1677: https://forge.example/o/r/issues/1677"]),
+      children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+    });
+    const result = await buildLinkedIssueContext({
+      pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+    });
+    const rendered = text(result.artifacts.get("linked-issues.md"))
+      .split("\n")
+      .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
+    assert.deepEqual(rendered, [], `${fenced[0]}: the quoted Parent line proved no parentage`);
+  }
+});
+
+test("#1750: a shorter or decorated fence closer cannot expose quoted acceptance criteria", async () => {
+  const fencedCriteria = [
+    ["````markdown", "quoted task", "```", `- [ ] ${ORGANIC_CHILD_CRITERIA[0]!}`, "````"],
+    ["```markdown", "quoted task", "```not-a-close", `- [ ] ${ORGANIC_CHILD_CRITERIA[0]!}`, "```"],
+  ];
+  for (const fenced of fencedCriteria) {
+    // The Parent line stays live; only the acceptance criterion is quoted.
+    const childBody = [
+      "Parent: https://github.com/o/r/issues/42",
+      "",
+      "## Acceptance criteria",
+      "",
+      ...fenced,
+      "",
+    ].join("\n");
+    const { adapter } = organicAdapter({
+      umbrellaBody: organicUmbrellaBody([`- [ ] ${ORGANIC_PARENT_CRITERION}`], ["- #1677: https://forge.example/o/r/issues/1677"]),
+      children: new Map([["1677", { ok: true, data: { number: 1677, title: "Child", state: "open", html_url: "u", labels: [], body: childBody } }]]),
+    });
+    const result = await buildLinkedIssueContext({
+      pr: { title: "feat: increment", body: "Part of #42" }, repo: "o/r", adapter, isForkPr: "false", linear: noLinear,
+    });
+    const rendered = text(result.artifacts.get("linked-issues.md"))
+      .split("\n")
+      .filter((line) => line.startsWith(ORGANIC_DECOMPOSITION_LINE));
+    assert.deepEqual(rendered, [], `${fenced[0]}: the quoted criterion supplied no requirement identity`);
+  }
+});
+
 test("#1750: a body without task-list decomposition renders no ownership evidence (organic shape)", async () => {
   // The organic umbrella shape: task-list criteria WITHOUT child refs, plus a
   // flat decomposition list of child issues. Neither associates a specific
