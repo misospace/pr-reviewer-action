@@ -1305,6 +1305,19 @@ test("#1750: negation polarity is part of requirement identity", () => {
     "the comparison is symmetric",
   );
 
+  // #1750 review: a shared prefix BEFORE the negator must not carry the
+  // attestation across the polarity boundary.
+  const sharedPrefixPositive = "The review engine status checks MUST expose secrets.";
+  const sharedPrefixNegated = "The review engine status checks MUST NOT expose secrets.";
+  assert.ok(
+    !requirementIdentityAttests(sharedPrefixPositive, sharedPrefixNegated),
+    "an unnegated shared prefix does not attest an opposite-polarity criterion",
+  );
+  assert.ok(
+    !requirementIdentityAttests(sharedPrefixNegated, sharedPrefixPositive),
+    "and the shared-prefix bypass is closed in both directions",
+  );
+
   assert.ok(
     !requirementIdentityAttests(
       "The review engine SHALL accept webhook payloads.",

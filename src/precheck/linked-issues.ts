@@ -329,16 +329,32 @@ const NEGATION_WORDS: ReadonlySet<string> = new Set([
  * never collides with an unmarked one. */
 const NEGATION_PREFIX = "!";
 
+/** The lowercased alphanumeric word stream of one requirement text, with
+ * `n't` contractions normalized into `not` so they share the negator
+ * channel. */
+function requirementIdentityWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/n['\u2019]t\b/g, " not")
+    .match(/[a-z0-9]+/g) ?? [];
+}
+
+/** Whole-criterion negative polarity: any {@link NEGATION_WORDS} operator
+ * (or an `n't` contraction, normalized to `not`). Coarse by construction —
+ * there is no clause parser — which is fail closed: it can only refuse to
+ * attest, never grant an attestation. */
+function requirementIdentityNegated(text: string): boolean {
+  return requirementIdentityWords(text).some((word) => NEGATION_WORDS.has(word));
+}
+
 /** Casefolded substantial tokens of one requirement text: alphanumeric runs
  * of at least {@link MIN_REQUIREMENT_IDENTITY_TOKEN_CHARS} characters, minus
  * the normative boilerplate in {@link NORMATIVE_BOILERPLATE_TOKENS}, with
  * every token after a {@link NEGATION_WORDS} negator carrying
- * {@link NEGATION_PREFIX} so opposite polarity never compares equal. */
+ * {@link NEGATION_PREFIX} so a run that crosses the negator never compares
+ * equal to the unnegated form. */
 export function requirementIdentityTokens(text: string): string[] {
-  const words = text
-    .toLowerCase()
-    .replace(/n['\u2019]t\b/g, " not")
-    .match(/[a-z0-9]+/g) ?? [];
+  const words = requirementIdentityWords(text);
   const tokens: string[] = [];
   let negated = false;
   for (const word of words) {
@@ -380,13 +396,21 @@ export function requirementIdentityRun(parentTokens: readonly string[], childTok
  * substantial tokens? Normative boilerplate (`MUST`/`SHALL` and the rest of
  * {@link NORMATIVE_BOILERPLATE_TOKENS}) never counts, so two unrelated
  * criteria sharing a subject and a modal (`The review engine MUST …`) do not
- * attest; and polarity is part of identity, so `MUST publish X` never
- * attests `MUST NOT publish X` (see {@link NEGATION_WORDS}). Verbatim-equal
+ * attest; and polarity is part of identity, so a criterion is rejected
+ * outright when the two sides differ in whole-criterion polarity — `MUST
+ * publish X` never attests `MUST NOT publish X`, even when they share a long
+ * unnegated prefix (see {@link NEGATION_WORDS}). Verbatim-equal
  * criteria (the ledger content-id recipe case) trivially fire; the real
  * #1677/#740 texts differ and fire on the `same scheduler engine` phrase;
  * unrelated criteria sharing only scattered domain vocabulary stay below the
  * bar. */
 export function requirementIdentityAttests(parentText: string, childText: string): boolean {
+  // Opposite polarity is never the same requirement. This must be decided
+  // over the WHOLE criterion, not just the marked run: two criteria can share
+  // a long unnegated prefix (`review engine status checks`) before one side's
+  // `MUST NOT`, and that prefix must not carry an attestation across the
+  // polarity boundary.
+  if (requirementIdentityNegated(parentText) !== requirementIdentityNegated(childText)) return false;
   const parentTokens = requirementIdentityTokens(parentText);
   if (parentTokens.length < MIN_REQUIREMENT_IDENTITY_RUN) return false;
   const childTokens = requirementIdentityTokens(childText);
