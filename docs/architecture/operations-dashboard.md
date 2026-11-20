@@ -1,4 +1,4 @@
-# Operations dashboard (#742)
+# Operations dashboard (#742, redesigned #1717)
 
 The operations dashboard is a static web shell served by the controller
 admin listener. It gives an operator a browser view over the existing
@@ -40,8 +40,8 @@ listener can never silently disable the flag. The startup summary reports
 The dashboard paths sit OUTSIDE the `/admin/` namespace. This is what
 keeps the normative rule intact: every `/admin/*` route requires the
 bearer token, and the dashboard mount does not change that rule or add an
-exception to it. The shell itself needs no auth because it contains
-nothing: it is a form and some rendering code.
+exception to it. The shell itself needs no auth because it carries nothing: it is static structure,
+styles, and rendering code.
 
 The operator enters the admin bearer token in the browser. The script
 keeps the token in one in-memory JavaScript variable and in the token
@@ -56,7 +56,7 @@ to the same listener the shell came from.
 Every dashboard response carries:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-rONVvIFCCcUKe79zLNUofwEI2VTQb/s419LLyrxm4tQ='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-2UPZoIdLr/DB0rB7iH8yqCXgjRaaF654c+JAFCZDcgM='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 ```
 
 `style-src` names the SHA-256 hash of the style block in the shell, and
@@ -79,55 +79,56 @@ of any framing host (clickjacking). The responses also carry
 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
 `Cache-Control: no-store`.
 
+## Operator console
+
+The header carries product identity, overview/runs/diagnostics navigation,
+connection state, a system/dark/light theme cycle, and a compact token control.
+Theme preference is held only in memory. The overview composes readiness,
+queue counters, workers, adoption, recent runs, actionable failures, and a
+rereview action. Runs use a horizontally scrollable table with status chips,
+relative ages, short head SHAs, and cursor pagination backed by an in-memory
+cursor stack; an empty list has an explicit state. Run detail presents metadata,
+a lifecycle timeline, usage and cost provenance, publication status, and a
+danger-zoned cancel action. Diagnostics classify severity and place technical
+values in expandable native details.
+
 ## Rendering rule
 
-Every dynamic value the script inserts into the page goes through
+Every dynamic value inserted into the page goes through
 `document.createTextNode` (via the `text()` helper). Markup-injection DOM
-APIs are not used anywhere in the script. API data is rendered as text,
-so a hostile value in an API response cannot become markup in the
-operator's browser. Diagnostics are rendered exactly as the API returns
-them: the UI applies no un-redaction and no transformation. Redaction
-stays where
-it is enforced, in `src/admin/routes.ts`.
+APIs are not used. Runtime class names come only from fixed whitelist
+vocabularies; API values cannot choose classes. Diagnostics are rendered as
+returned by the API, with redaction remaining in `src/admin/routes.ts`.
 
 ## Actions
 
-The dashboard exposes the two admin mutations: a cancel button on a
-non-terminal run detail view calls `POST /admin/runs/{id}/cancel` after
-a `confirm()` dialog, and inputs plus a button call
-`POST /admin/rereview` with the `prKey` and reason fields (also behind a
-`confirm()` dialog). Both show the HTTP status and the fixed error
-body text on failure. There is no retry logic and no client-side state
-machine. Control-plane logic stays in the controller.
+A non-terminal run detail calls `POST /admin/runs/{id}/cancel` only after a
+`confirm()` dialog. The rereview form calls `POST /admin/rereview`, also behind
+`confirm()`. Both render human feedback with technical failure detail. Control-
+plane logic remains in the controller.
 
 ## Testing posture
 
-`tests-v3/admin-dashboard.test.ts` runs with the admin suite. It covers
-the fail-closed default (no option means fixed 404), the two routes with
-their exact content types and security headers, method and path
-discipline (including raw verbatim-path traversal requests that never
-serve shell content), the inert and byte-identical shell, the intact auth
-boundary on every data route, structural fence checks on the script
-source, the CSP style fence (the `style-src` hash equals the hash of the
-served style block, and no `'unsafe-inline'` source remains), and an
-EXECUTION fence test in the #252 pattern: the script runs
-in a `node:vm` sandbox against a minimal DOM stub, fed hostile API
-payloads (markup injection, fence escapes, attribute breakouts, control
-characters, a credential-shaped string), and every hostile string must
-arrive in the recorded DOM as verbatim text data through
-`createTextNode` only, one unique marker per render path (including a
-refused mutation's error body and the cancel button's call). A redaction
-test points the diagnostics seam at a credential-shaped value and makes
-sure that the API response stays redacted and the shell carries no
-un-redaction mechanism.
+`tests-v3/admin-dashboard.test.ts` covers route/auth/CSP pins, method and raw
+path discipline, inert shell behavior, structural fences, and the
+admin-API-compatibility pin. Its hostile execution fence runs the script in a
+`node:vm` DOM harness and proves one hostile marker per render path reaches only
+text nodes: readiness, adoption, queue workers key, runs rows, failures list,
+run-detail publication/usage, diagnostics, and mutation error bodies. UI-state
+coverage pins the `confirm()` refusal gate (no mutation request), asserts the
+cancel call, and exercises empty runs, auth/offline responses, pagination, and
+accepted/refused mutation feedback. A whitelist-completeness pin covers all
+lifecycle chip states, while the CSP/style-hash test, served header, and this
+documentation line must agree exactly. Redaction coverage confirms sensitive
+diagnostics remain filtered by the API.
 
 ## Out of scope
 
 The UI holds no control-plane logic, no websocket live state, no
 persistence, and no roles or authorization beyond the bearer token. An
 optional read-only role would be a follow-up. The dashboard is a
-demonstration-quality operator surface over the admin API, not a product
-with its own backend.
+product-quality operator console over the admin API, not a product with its
+own backend.
 
 ## Deployment notes
 
