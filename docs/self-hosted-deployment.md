@@ -322,36 +322,47 @@ unknown), and mount the shared claims on storage whose driver honors
 closed).
 
 Kubelet applies `fsGroup` to a freshly provisioned claim with a
-group-WRITABLE root (`0775`, uid 0), which the runtime's own cache-root
-trust check refuses — every job would fail "cache root is writable by
-group or other" before dispatch (#1725). In Kubernetes-executor mode the
-chart therefore renders a `fix-roots` init container that fixes the runs
-and workspace-cache claim roots to the shared-group shape before the
-controller starts: mode `2750`, owner uid 1000, group 65532 — owner-write
-only, with the shared group keeping the read/execute the #1631 exchange
-needs and the setgid bit keeping group inheritance for everything the
-runtime creates below the root (it chmods those components but never
-chgroups them). The fix is durable because no workload mounts these claims
-with `fsGroup` except the controller pod itself (#1736): kubelet's
-`OnRootMismatch` skips only when the root mode is a superset of `0770`
-*with* setgid, so a trusted `2750` root always re-triggers a full
-recursive restyle for an `fsGroup` mount — which is why the executor's
-worker Jobs carry no `fsGroup` (the shipped worker admission policy
-rejects one), and why any other workload mounting these claims must not
-either. The controller pod's own kubelet processing runs before
-`fix-roots`, so the repair repeats deterministically at every controller
-start, ahead of the controller process. Verify the sequence on a live
-install: run one executor job, launch a second one (a fresh worker pod
-mounting the same claims), then re-run
+group-WRITABLE root (`0775`, uid 0); a claim mounted without `fsGroup`
+keeps uid 0 at mode `0755`. Either way the runtime's own cache-root trust
+check refuses the root — "cache root is writable by group or other", or
+"not owned by the controller uid" — before dispatch (#1725, #1737). The
+chart therefore renders a `fix-roots` init container in every executor
+mode: it fixes the runs and workspace-cache claim roots before the
+controller starts, always to owner uid 1000 and group 65532, with a mode
+chosen by who writes below the root:
+- `workerExecutor.mode: kubernetes` → `2750`. The shared group keeps the
+  read/execute the #1631 exchange needs, and the setgid bit keeps group
+  inheritance for everything the runtime creates below the root (it
+  chmods those components but never chgroups them).
+- Controller-only → `0750`, no setgid. The local executor spawns the
+  worker as the controller's own uid and never changes group ownership
+  below these roots, so no cross-uid writer needs group inheritance; the
+  owner bits carry the whole write surface.
+
+The fix is durable because no workload mounts these claims with `fsGroup`
+except the controller pod itself (#1736): kubelet's `OnRootMismatch` skips
+only when the root mode is a superset of `0770` *with* setgid, so a
+trusted root always re-triggers a full recursive restyle for an `fsGroup`
+mount — which is why the executor's worker Jobs carry no `fsGroup` (the
+shipped worker admission policy rejects one), and why any other workload
+mounting these claims must not either. The controller pod's own kubelet
+processing runs before `fix-roots`, so the repair repeats deterministically
+at every controller start, ahead of the controller process. `fix-roots`
+runs as root with only `CHOWN`/`FOWNER`, so a namespace enforcing Pod
+Security `restricted` rejects the controller pod in every mode; use
+`baseline` (the constraint is also stated in the chart README). Verify the
+sequence on a live install: run one executor job, launch a second one (a
+fresh worker pod mounting the same claims in Kubernetes-executor mode),
+then re-run
 `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`
 inside the controller pod — the roots must still read `2750 1000 65532`
-and the follow-up job must not fail "cache root is writable by group or
-other". No repository test can simulate kubelet's fsGroup restyle, so
-this sequence is operator-side verification: run it once on a live
-install, and again after any executor or storage-driver change.
-Operators mounting pre-existing claims must provide
-the same root shape themselves; the contract is documented in the chart
-README.
+(Kubernetes executor) or `0750 1000 65532` (controller-only), and the
+follow-up job must not fail "cache root is writable by group or other".
+No repository test can simulate kubelet's fsGroup restyle, so this
+sequence is operator-side verification: run it once on a live install,
+and again after any executor or storage-driver change. Operators mounting
+pre-existing claims must provide the matching root shape themselves; the
+contract is documented in the chart README.
 
 External secret handling is the operator's choice: every secret can come
 from an `existingSecret`, so External Secrets, Sealed Secrets, or your vault

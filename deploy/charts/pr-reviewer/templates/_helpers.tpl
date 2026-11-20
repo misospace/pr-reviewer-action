@@ -354,48 +354,65 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if not (empty $sa) -}}
 {{- $_ := set $sa "automountServiceAccountToken" true -}}
 {{- end -}}
-{{- /* #1725: the kubelet applies fsGroup to freshly provisioned claim roots
-       as group-WRITABLE (mode 0775, uid 0), and the runtime's own trust
+{{- end -}}
+{{- /* #1725/#1737: the kubelet applies fsGroup to freshly provisioned claim
+       roots as group-WRITABLE (mode 0775), and a fresh claim root is
+       otherwise owned by uid 0 (mode 0755), while the runtime's own trust
        check (assertTrustedDirChain in src/acquisition/mirror.ts) refuses any
        cache root that is group/other-writable or not owned by the process
-       uid — every job would fail "cache root is writable by group or
-       other" before dispatch. The chart guarantees the documented
-       shared-group shape instead: root uid = the pod's runAsUser (the
-       controller), group = the shared worker group (fsGroup), mode 2750 —
-       owner-write only, with the shared group keeping read/execute, and
-       the setgid bit this fix itself sets, which must persist:
-       shareRunDirectoryGroup chmods the components below the root but
-       never chgroups them, so without root setgid each <jobId> dir would
-       inherit the controller's primary group (1000) instead of 65532 and
-       the worker would be refused traversal one level below the root.
-       A chart-owned
-       root init container chowns/chmods the claim roots before the
-       controller starts. Durability is NOT fsGroupChangePolicy
-       OnRootMismatch (#1736): that policy skips only when the root GID
-        matches AND the root mode is a superset of 0770 WITH setgid set
-       (requiresPermissionChange, kubernetes pkg/volume/volume_linux.go —
-       its own example treats 0750 as a mismatch), and a trusted root may
-       never be group-writable, so a 2750 root always re-triggers. The fix
-       survives because no workload mounts these claims with fsGroup
-       except the controller pod itself: the executor's worker Job manifest
-       carries no fsGroup (#1736, pinned by the worker admission policy),
-       and the controller pod's own fsGroup processing runs at pod startup
-       BEFORE this init container, which repairs the root again before the
-       controller process starts. Other workloads must never mount these
-       claims with fsGroup — any fsGroup mount recursively restyles the
-       whole claim (chgrp to its fsGroup plus group-writable bits) the
-       moment it starts. chown needs CAP_CHOWN and the post-handoff
-        chmod needs CAP_FOWNER; everything else stays dropped. The mounts
-        themselves ride the persistence globalMounts, which the common
-        library renders for every container type (container.spec calls
-        the volumeMounts field for init containers too) — the charts CI
-        pins that the example render carries both claim-root mounts on
-        fix-roots; operators who relocate controller.paths.* must keep
-        the persistence globalMounts in sync (an unmounted root fails
-        loudly: the read-only rootfs makes the init container error). */ -}}
+       uid — the controller would fail "cache root is writable by group or
+       other" (or "not owned by the controller uid") before the first job in
+       EVERY executor mode, not only the Kubernetes executor #1725/#1736
+       fixed. A chart-owned root init container therefore chowns/chmods the
+       claim roots before the controller starts in BOTH modes, because
+       neither executor can repair a root it does not own. The shape differs
+       per mode, decided by who writes below the root:
+       — kubernetes-executor: mode 2750, group = the shared worker group
+         (fsGroup), setgid set. Owner-write only, the shared group keeps
+         read/execute, and the setgid bit must persist:
+         shareRunDirectoryGroup chmods the components below the root but
+         never chgroups them, so without root setgid each <jobId> dir would
+         inherit the controller's primary group (1000) instead of 65532 and
+         the worker would be refused traversal one level below the root.
+       — controller-only: mode 0750, same owner/group, NO setgid. The local
+         executor spawns the worker as the controller's own uid and never
+         chowns/chgrps anything below these roots, so no cross-uid writer
+         consumes group inheritance: the owner bits are the entire write
+         surface, and group read/execute is just the declared fsGroup
+         posture. Copying the Kubernetes-mode setgid here by analogy would
+         add a bit no trace needs.
+       Durability is NOT fsGroupChangePolicy OnRootMismatch (#1736): that
+       policy skips only when the root GID matches AND the root mode is a
+       superset of 0770 WITH setgid set (requiresPermissionChange,
+       kubernetes pkg/volume/volume_linux.go — its own example treats 0750
+       as a mismatch), and a trusted root may never be group-writable, so a
+       fixed root always re-triggers. With fsGroup absent, kubelet performs
+       no restyle at all and the init container still fixes the fresh root's
+       uid 0 ownership. The fix survives because no workload mounts these
+       claims with fsGroup except the controller pod itself: the executor's
+       worker Job manifest carries no fsGroup (#1736, pinned by the worker
+       admission policy), and the controller pod's own fsGroup processing
+       runs at pod startup BEFORE this init container, which repairs the
+       root again before the controller process starts. Other workloads
+       must never mount these claims with fsGroup — any fsGroup mount
+       recursively restyles the whole claim (chgrp to its fsGroup plus
+       group-writable bits) the moment it starts. chown needs CAP_CHOWN and
+       the post-handoff chmod needs CAP_FOWNER; everything else stays
+       dropped. The mounts themselves ride the persistence globalMounts,
+       which the common library renders for every container type
+       (container.spec calls the volumeMounts field for init containers
+       too) — the charts CI pins that both example renders carry both
+       claim-root mounts on fix-roots; operators who relocate
+       controller.paths.* must keep the persistence globalMounts in sync (an
+       unmounted root fails loudly: the read-only rootfs makes the init
+       container error). */ -}}
 {{- $podSecurity := dig "defaultPodOptions" "securityContext" dict $v -}}
 {{- $rootUid := int64 ($podSecurity.runAsUser | default 1000) -}}
 {{- $rootGid := int64 ($podSecurity.fsGroup | default 65532) -}}
+{{- $claimRootMode := "0750" -}}
+{{- if $kubeExecutor -}}
+{{- $claimRootMode = "2750" -}}
+{{- end -}}
 {{- $quotedRoots := list -}}
 {{- range $claimRoot := (list $v.paths.runsRoot $v.paths.workspaceCacheRoot) -}}
 {{- $quotedRoots = append $quotedRoots (quote $claimRoot) -}}
@@ -404,7 +421,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- $fixRoots := dict
   "image" $container.image
   "command" (list "/bin/sh" "-c")
-  "args" (list (printf "chown %d:%d %s && chmod 2750 %s" $rootUid $rootGid $rootArgs $rootArgs))
+  "args" (list (printf "chown %d:%d %s && chmod %s %s" $rootUid $rootGid $rootArgs $claimRootMode $rootArgs))
   "securityContext" (dict
     "runAsNonRoot" false
     "runAsUser" 0
@@ -425,6 +442,5 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- fail "controller.controllers.main.initContainers must be a map keyed by container name (the common-library shape); a raw Kubernetes container list is not supported" -}}
 {{- end -}}
 {{- $_ := set $main "initContainers" (mustMergeOverwrite $operatorInitContainers (dict "fix-roots" $fixRoots)) -}}
-{{- end -}}
 {{- $_ := set $v "controllers" $controllers -}}
 {{- end -}}
