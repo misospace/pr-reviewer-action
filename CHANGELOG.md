@@ -1,5 +1,52 @@
 # Changelog
 
+## [3.10.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.9.0...source-v3.10.0) (2026-11-21)
+
+
+### Features
+
+* **charts:** publish the self-hosted Helm chart to GHCR as an OCI artifact ([#1708](https://github.com/misospace/pr-reviewer-action/issues/1708)) ([#1732](https://github.com/misospace/pr-reviewer-action/issues/1732)) ([9d1063b](https://github.com/misospace/pr-reviewer-action/commit/9d1063b14417aa3b6cd5f1de64405721d04b4a24))
+* **dashboard:** redesign the operations console into a product-quality operator UI ([#1717](https://github.com/misospace/pr-reviewer-action/issues/1717)) ([#1754](https://github.com/misospace/pr-reviewer-action/issues/1754)) ([516a7d8](https://github.com/misospace/pr-reviewer-action/commit/516a7d81071c2a70ac922005e52bee859e1c5853))
+* **images:** publish controller/worker images for PRs, commits, and releases ([#1704](https://github.com/misospace/pr-reviewer-action/issues/1704)) ([#1731](https://github.com/misospace/pr-reviewer-action/issues/1731)) ([1da77ee](https://github.com/misospace/pr-reviewer-action/commit/1da77eea5f817ff54b877cd546fff5f3932a1a9d))
+* **operator:** poll configured repositories every 15m by default ([#1719](https://github.com/misospace/pr-reviewer-action/issues/1719)) ([#1720](https://github.com/misospace/pr-reviewer-action/issues/1720)) ([12ba335](https://github.com/misospace/pr-reviewer-action/commit/12ba3353db712a32a69b4ed043d0dc9ba7dce2b9))
+* **platform:** GitLab forge adapter — seam, intake, read/publish adapters ([#740](https://github.com/misospace/pr-reviewer-action/issues/740)) ([#1733](https://github.com/misospace/pr-reviewer-action/issues/1733)) ([0eaa122](https://github.com/misospace/pr-reviewer-action/commit/0eaa1221af783723c3ca08d27807a58eb82b85ce))
+
+
+### Bug Fixes
+
+* **#1718:** bind the reconcile schedule through the daemon's canonical poll composition ([#1751](https://github.com/misospace/pr-reviewer-action/issues/1751)) ([528e033](https://github.com/misospace/pr-reviewer-action/commit/528e033933b29a8bc0da2390e61e5a2250924a56))
+* **#1723:** carry the delivering installation identity into webhook-minted jobs ([#1757](https://github.com/misospace/pr-reviewer-action/issues/1757)) ([fa74d01](https://github.com/misospace/pr-reviewer-action/commit/fa74d013df8471c98f491e49b934211b0ba46b77))
+* **#1724:** a material unknown can no longer exit the requirement trace without an explanation ([#1745](https://github.com/misospace/pr-reviewer-action/issues/1745)) ([83af758](https://github.com/misospace/pr-reviewer-action/commit/83af7581679458b7e0f6d265ee1fba8228c1a140))
+* **#1729:** require model confirmation before `investigation-complete` ([#1735](https://github.com/misospace/pr-reviewer-action/issues/1735)) ([99c4377](https://github.com/misospace/pr-reviewer-action/commit/99c4377c38700856db927b08c69f3f7c0faf9e34))
+* **#1741:** refuse moving-ref retags by superseded runs via a live-coordinate guard ([#1747](https://github.com/misospace/pr-reviewer-action/issues/1747)) ([8b879e9](https://github.com/misospace/pr-reviewer-action/commit/8b879e991f54da246b3febbf2392a051640d7ee8))
+* **#1741:** resume a partially published controller/worker image pair ([#1743](https://github.com/misospace/pr-reviewer-action/issues/1743)) ([2e59cbc](https://github.com/misospace/pr-reviewer-action/commit/2e59cbc18ac8f9dc0f7522c9df526c03c4eb72a7))
+* **#1749:** scope linked umbrella requirements out of non-closing child PRs ([#1750](https://github.com/misospace/pr-reviewer-action/issues/1750)) ([eab908a](https://github.com/misospace/pr-reviewer-action/commit/eab908abc85fb6f15ff4b6e4471e369950b84e9b))
+* **#1753:** satisfied runtime rows without an emitted enforcement citation are advisory proof-shape omissions ([112a727](https://github.com/misospace/pr-reviewer-action/commit/112a727353262f07e1ebc92e77ce6f592bc79e3b))
+* **chart:** default operator NetworkPolicies OFF ([#1715](https://github.com/misospace/pr-reviewer-action/issues/1715)) ([#1716](https://github.com/misospace/pr-reviewer-action/issues/1716)) ([f1bc606](https://github.com/misospace/pr-reviewer-action/commit/f1bc6064d5584e3894036fa442b1ef41ca8e92ef))
+* **chart:** fix fsGroup-provisioned claim roots with a fix-roots init container ([#1725](https://github.com/misospace/pr-reviewer-action/issues/1725)) ([#1736](https://github.com/misospace/pr-reviewer-action/issues/1736)) ([741a028](https://github.com/misospace/pr-reviewer-action/commit/741a0283991b40c570d5476a112602746995274b))
+* **chart:** give workers their own model-endpoint egress exception ([#1709](https://github.com/misospace/pr-reviewer-action/issues/1709)) ([#1739](https://github.com/misospace/pr-reviewer-action/issues/1739)) ([a17c93e](https://github.com/misospace/pr-reviewer-action/commit/a17c93e99229a4c5aaadb2d710fb65d2cf89371b))
+* **chart:** project the controller's service-account token via the bjw-s common 5.x 'pod' key ([#1728](https://github.com/misospace/pr-reviewer-action/issues/1728)) ([0b1b011](https://github.com/misospace/pr-reviewer-action/commit/0b1b0111d0fd875d670a155b55c7ebfd28387126)), closes [#1712](https://github.com/misospace/pr-reviewer-action/issues/1712)
+* **chart:** render fix-roots for controller-only installs ([#1737](https://github.com/misospace/pr-reviewer-action/issues/1737)) ([388f9c2](https://github.com/misospace/pr-reviewer-action/commit/388f9c22e7cdd2cccdcc33569e662f997f4ea043))
+* **chart:** sanitize credential env names exactly like the runtime's credentialEnvName ([#1710](https://github.com/misospace/pr-reviewer-action/issues/1710)) ([#1730](https://github.com/misospace/pr-reviewer-action/issues/1730)) ([7830548](https://github.com/misospace/pr-reviewer-action/commit/78305486e304614f48211dfb871d920429fc4ecf))
+* **controller:** honor default-evidence-profile: null as 'not configured' ([#1711](https://github.com/misospace/pr-reviewer-action/issues/1711)) ([#1734](https://github.com/misospace/pr-reviewer-action/issues/1734)) ([1d81c72](https://github.com/misospace/pr-reviewer-action/commit/1d81c727c051ab157779586983d454c3e2b1deec))
+* **deps:** update dependency astro (7.4.12 → 7.4.13) ([#1721](https://github.com/misospace/pr-reviewer-action/issues/1721)) ([46ae5bf](https://github.com/misospace/pr-reviewer-action/commit/46ae5bfd84413cd654bddd51b6693d56ebd57398))
+* **enforcement:** credit head-bound Tests and combined test CI for full-suite required checks ([#1703](https://github.com/misospace/pr-reviewer-action/issues/1703)) ([a64d7e9](https://github.com/misospace/pr-reviewer-action/commit/a64d7e9f21d8bf6579bd3d300f7c58bbb16e0973))
+* **enforcement:** settle dependency provenance only from the authoritative registry document ([#1748](https://github.com/misospace/pr-reviewer-action/issues/1748)) ([0cd1863](https://github.com/misospace/pr-reviewer-action/commit/0cd1863235f042e51864356ecdcc4bcbe569522a))
+* **enforcement:** settle gathered dependency evidence before the budget stop and attribute gh_api upstream lookups ([#1726](https://github.com/misospace/pr-reviewer-action/issues/1726)) ([#1746](https://github.com/misospace/pr-reviewer-action/issues/1746)) ([912ea65](https://github.com/misospace/pr-reviewer-action/commit/912ea650155cbc768a82a2f5e5ab06010b2c98fa))
+* **images:** publish only the exact SemVer release alias ([#1742](https://github.com/misospace/pr-reviewer-action/issues/1742)) ([#1744](https://github.com/misospace/pr-reviewer-action/issues/1744)) ([3a47709](https://github.com/misospace/pr-reviewer-action/commit/3a4770901ec465d0df4280f81aaf3d22d11ea1b8))
+* **images:** ship pgrep and expose spawn refusals ([#1722](https://github.com/misospace/pr-reviewer-action/issues/1722)) ([#1727](https://github.com/misospace/pr-reviewer-action/issues/1727)) ([7d96b1d](https://github.com/misospace/pr-reviewer-action/commit/7d96b1d163e02b835778a8526475996d948df361))
+
+
+### Chores
+
+* add LiteLLM review session affinity ([#1755](https://github.com/misospace/pr-reviewer-action/issues/1755)) ([9ba1a85](https://github.com/misospace/pr-reviewer-action/commit/9ba1a85ec0f4c423f3f6eb85c9d7a0c068bf1d72))
+
+
+### Documentation
+
+* **#1714:** document the Kubernetes API egress exception for kube-proxy-replacement clusters ([#1738](https://github.com/misospace/pr-reviewer-action/issues/1738)) ([1af0edd](https://github.com/misospace/pr-reviewer-action/commit/1af0edd0101b4c666ec64c0f1b3ec726aa7d8877))
+* **chart:** document reaching the admin dashboard from outside the pod ([#1740](https://github.com/misospace/pr-reviewer-action/issues/1740)) ([28f4a05](https://github.com/misospace/pr-reviewer-action/commit/28f4a057a38ace932d8743fa11dd0a31d4aaacce))
+
 ## [3.9.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.8.0...source-v3.9.0) (2026-11-18)
 
 
