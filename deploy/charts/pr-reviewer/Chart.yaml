@@ -15,8 +15,8 @@ type: application
 # `extra-files`), and .github/workflows/publish-chart.yaml refuses to
 # publish a tag they do not agree with. Independent chart releases would
 # be a deliberate separate versioning design, not implicit drift.
-version: 3.9.0 # x-release-please-version
-appVersion: "3.9.0" # x-release-please-version
+version: 3.10.0 # x-release-please-version
+appVersion: "3.10.0" # x-release-please-version
 dependencies:
   - name: common
     repository: https://bjw-s-labs.github.io/helm-charts
