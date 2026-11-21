@@ -132,7 +132,7 @@ import {
 } from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
-import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
+import { buildTrackedIndex, executeToolRequest, type ToolContext, type ToolDeps, type TrackedIndex } from "./executors.js";
 
 import { runProcess } from "../runtime/subprocess.js";
 import { gitEnv } from "../acquisition/git-env.js";
@@ -3271,6 +3271,14 @@ export interface HarnessDeps {
    * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
    * "platform transport not configured" behavior byte-for-byte. */
   ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
+  /** #1748 TEST SEAM ONLY: the tool fetch/resolver DI pair the executors'
+   * `ToolDeps` already declares (web_fetch/web_search ride `fetch` and the
+   * per-hop public-DNS gate rides `resolver`). Production callers never set
+   * it — the executors fall back to their own stack (`createToolFetch` /
+   * `systemResolver`) byte-for-byte. Tests inject it so a native-loop fixture
+   * can serve an authoritative-registry document to `web_fetch` without real
+   * network I/O. */
+  toolIo?: Pick<ToolDeps, "fetch" | "resolver">;
   /** #1598 (review): remaining wall-clock seconds the native loop may spend
    * (the evidence-failover caller's remaining share of the loop wall-clock
    * envelope). Unset keeps the configured ceiling byte-for-byte. */
@@ -3978,6 +3986,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     deps: {
       env: env as NodeJS.ProcessEnv,
       ...(deps.ghApi !== undefined ? { ghApi: deps.ghApi } : {}),
+      ...(deps.toolIo !== undefined ? deps.toolIo : {}),
     },
   };
 

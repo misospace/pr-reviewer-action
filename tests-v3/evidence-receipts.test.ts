@@ -775,11 +775,12 @@ test("#1657 (round 3): a security-advisory acquisition binds the changed version
   });
   assert.equal(evaluateRowEvidence(versionedAdvisory, ADVISORY_ROW, bound).state, "receipt-backed");
   // Provenance asserts WHO publishes the dependency, not which version —
-  // the changed version identity is not a provenance demand.
+  // the changed version identity is not a provenance demand. #1748: the
+  // binding evidence is the authoritative registry document for the slug.
   const versionedProvenance = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [{ slug: "example-pkg", versions: ["1.4.0"] }]);
   const provenance = buildEvidenceLedger({
-    toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
-    toolResults: [{ status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } }],
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg/1.4.0" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"example-pkg","version":"1.4.0","repository":{"type":"git","url":"git+https://github.com/example/example-pkg.git"}}', truncated: false } }],
   });
   assert.equal(evaluateRowEvidence(versionedProvenance, PROVENANCE_ROW, provenance).state, "receipt-backed");
 });
@@ -793,11 +794,11 @@ test("#1657 (round 3): a multi-obligation row needs EVERY kind covered — evide
   assert.equal(evaluateRowEvidence(both, "verify the update provenance and any referenced security advisory", advisoryOnly).state, "receipt-mismatch");
   const bothKinds = buildEvidenceLedger({
     toolCalls: [
-      { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg/1.4.0" }, status: "ok" },
       { tool: "web_search", args: { query: "example-pkg 1.4.0 security advisory CVE" }, status: "ok" },
     ],
     toolResults: [
-      { status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } },
+      { status: "ok", result: { content: '{"name":"example-pkg","version":"1.4.0"}', truncated: false } },
       { status: "ok", result: { results: '[{"title":"example-pkg 1.4.0 security advisory CVE"}]', truncated: false } },
     ],
   });
@@ -848,8 +849,8 @@ test("#1657 (round 8): security-advisory coverage binds the COMPLETE captured ve
 test("#1657 (round 9): a versionless entry backs provenance identity — and can never certify release_delta or security_advisory", () => {
   const reResolution = [{ slug: "example-pkg", versions: [] }];
   const publisherLedger = buildEvidenceLedger({
-    toolCalls: [{ tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" }],
-    toolResults: [{ status: "ok", result: { content: "example-pkg 1.4.0\n\nPublisher: Example Author\n", truncated: false } }],
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"example-pkg","dist-tags":{"latest":"1.4.0"}}', truncated: false } }],
   });
   assert.equal(
     evaluateRowEvidence(tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], reResolution), PROVENANCE_ROW, publisherLedger).state,
@@ -906,6 +907,166 @@ test("#1657 (round 9): a versionless entry backs provenance identity — and can
      evaluateRowEvidence(tag(DELTA_ROW, "objective", "dependency-evidence", ["release_delta"], pair), DELTA_ROW, splitDelta).receipts],
     ["receipt-backed", ["call-1", "call-2"]],
   );
+});
+
+// ── #1748: the provenance cell settles ONLY from the authoritative registry
+// document for the slug (the canonical-source rule). Slug identity on a
+// forge/source/other-registry acquisition never proves WHO publishes an npm
+// dependency — every one of those targets is registrable by an attacker.
+
+test("#1748: an authoritative registry document for the exact slug settles provenance — every accepted surface", () => {
+  const provenanceState = (url: string, body: string): string => evaluateRowEvidence(
+    provenanceTag, PROVENANCE_ROW,
+    buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: body, truncated: false } }],
+    }),
+  ).state;
+  // The API packument, the versioned manifest, the dist-tags metadata
+  // endpoint, and the website package page — all registry documents FOR the
+  // slug. A scoped registry path names a DIFFERENT package (@scope/pkg is
+  // not pkg): the exact-path rule refuses it for the bare slug.
+  assert.equal(provenanceState("https://registry.npmjs.org/example-pkg", '{"name":"example-pkg"}'), "receipt-backed");
+  assert.equal(provenanceState("https://registry.npmjs.org/example-pkg/1.4.0", '{"name":"example-pkg","version":"1.4.0"}'), "receipt-backed");
+  assert.equal(provenanceState("https://registry.npmjs.org/-/package/example-pkg/dist-tags", '{"latest":"1.4.0"}'), "receipt-backed");
+  assert.equal(provenanceState("https://www.npmjs.com/package/example-pkg", "package page"), "receipt-backed");
+  assert.equal(
+    provenanceState("https://registry.npmjs.org/@scope/example-pkg", '{"name":"@scope/example-pkg"}'),
+    "receipt-mismatch",
+    "the scoped package path binds scope/example-pkg, never the bare slug",
+  );
+  const scopedTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], ["scope/example-pkg"]);
+  assert.equal(evaluateRowEvidence(
+    scopedTag, PROVENANCE_ROW,
+    buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/@scope/example-pkg" }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: '{"name":"@scope/example-pkg"}', truncated: false } }],
+    }),
+  ).state, "receipt-backed");
+  // Review fix: the canonical npm scoped ENCODING — the whole name folded
+  // into ONE segment with the encoded slash (`@scope%2Fpkg`) — is the
+  // registry's own spelling for a scoped package and binds on every
+  // accepted surface too. That URL carries no literal `scope/example-pkg`
+  // token, so the canonical binding satisfies the identity gate itself.
+  const encodedState = (url: string, body: string): string => evaluateRowEvidence(
+    scopedTag, PROVENANCE_ROW,
+    buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: body, truncated: false } }],
+    }),
+  ).state;
+  assert.equal(encodedState("https://registry.npmjs.org/@scope%2Fexample-pkg", '{"name":"@scope/example-pkg"}'), "receipt-backed");
+  assert.equal(encodedState("https://registry.npmjs.org/@scope%2Fexample-pkg/1.4.0", '{"name":"@scope/example-pkg","version":"1.4.0"}'), "receipt-backed");
+  assert.equal(encodedState("https://registry.npmjs.org/-/package/@scope%2Fexample-pkg/dist-tags", '{"latest":"1.4.0"}'), "receipt-backed");
+  assert.equal(encodedState("https://www.npmjs.com/package/@scope%2Fexample-pkg", "package page"), "receipt-backed");
+  // The encoded scoped path names scope/example-pkg — a DIFFERENT package
+  // than the bare slug — and carries no literal bare-slug token (the `f` of
+  // the encoding is a segment-extend character), so it is not even a
+  // candidate for the bare-slug row.
+  assert.equal(
+    provenanceState("https://registry.npmjs.org/@scope%2Fexample-pkg", '{"name":"@scope/example-pkg"}'),
+    "receipt-absent",
+    "the encoded scoped path binds scope/example-pkg, never the bare slug",
+  );
+});
+
+test("#1748: a same-slug repository under an unrelated owner never settles provenance — forge, source-host web, or wildcard gh_api", () => {
+  const scopedTag = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], ["scope/example-pkg"]);
+  const attackerLedgers = [
+    // The forge-read channel (wildcard gh_api allowlist): even the EXACT
+    // canonical-repo path proves nothing without the registry document.
+    { tool: "gh_api", args: { endpoint: "repos/evil/example-pkg" }, status: "ok", result: { response: '{"full_name":"evil/example-pkg"}' } },
+    { tool: "gh_api", args: { endpoint: "repos/owner/example-pkg/contents/package.json" }, status: "ok", result: { response: '{"name":"example-pkg"}' } },
+    // A source-repository acquisition through the web channel.
+    { tool: "web_fetch", args: { url: "https://github.com/evil/example-pkg" }, status: "ok", result: { content: "evil/example-pkg", truncated: false } },
+    // A same-named artifact on a DIFFERENT registry (cross-registry collision).
+    { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok", result: { content: "example-pkg page", truncated: false } },
+    // A scoped sibling package on the npm website (@evil/example-pkg is a
+    // DIFFERENT package than example-pkg — the exact path rule refuses it).
+    { tool: "web_fetch", args: { url: "https://www.npmjs.com/package/@evil/example-pkg" }, status: "ok", result: { content: "sibling page", truncated: false } },
+    // A search query carrying the slug is not a registry document.
+    { tool: "web_search", args: { query: "example-pkg npm package publisher" }, status: "ok", result: { results: '[{"title":"example-pkg"}]', truncated: false } },
+  ] as const;
+  for (const call of attackerLedgers) {
+    const ledger = buildEvidenceLedger({
+      toolCalls: [{ tool: call.tool, args: call.args, status: call.status }],
+      toolResults: [{ status: call.status, result: call.result as Record<string, unknown> }],
+    });
+    // Each acquisition IS an attributed, verified provenance candidate
+    // carrying the slug identity — and still covers nothing: the cell is a
+    // mismatch (relevant receipts, none binding the canonical identity),
+    // never receipt-backed and never silently receipt-absent.
+    assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, ledger).state, "receipt-mismatch", JSON.stringify(call.args));
+  }
+  // A deep forge path containing a SCOPED slug is the same attack.
+  const scopedAttacker = buildEvidenceLedger({
+    toolCalls: [{ tool: "gh_api", args: { endpoint: "repos/evil/scope/example-pkg/contents/package.json" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { response: '{"name":"@scope/example-pkg"}' } }],
+  });
+  assert.equal(evaluateRowEvidence(scopedTag, PROVENANCE_ROW, scopedAttacker).state, "receipt-mismatch");
+  // Review fix: encoded scoped shapes that are NOT clean npm package
+  // documents stay fail-closed. The separator escape `%2f` is the ONLY
+  // legitimate encoding: a double-encoded slash, an escape in either half,
+  // or a third encoded segment names no clean document and carries no
+  // literal scoped-slug token, so the receipt is not even a candidate
+  // (`receipt-absent`); the mixed plain/encoded path carries the literal
+  // token but binds nothing (`receipt-mismatch`).
+  const encodedNegatives: ReadonlyArray<{ url: string; expected: string }> = [
+    { url: "https://registry.npmjs.org/@scope%252Fexample-pkg", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@sc%41ope%2Fexample-pkg", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@scope%2Fexample-pkg%2Fx", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@scope/example-pkg%2Fx", expected: "receipt-mismatch" },
+  ];
+  for (const { url, expected } of encodedNegatives) {
+    const ledger = buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: '{"name":"@scope/example-pkg"}', truncated: false } }],
+    });
+    assert.equal(evaluateRowEvidence(scopedTag, PROVENANCE_ROW, ledger).state, expected, url);
+  }
+  // A near-miss registry path (a DIFFERENT package) is not even a candidate.
+  const nearMiss = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg-es" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"example-pkg-es"}', truncated: false } }],
+  });
+  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, nearMiss).state, "receipt-absent");
+});
+
+test("#1748: an incomplete registry acquisition stays receipt-unverified; registry evidence for ONE entry never covers an aggregate row", () => {
+  // Truncated registry document: the acquisition happened but the receipt is
+  // incomplete — reason-coded unverified, never credited.
+  const truncated = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: '{"name":"example-pkg"', truncated: true } }],
+  });
+  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, truncated).state, "receipt-unverified");
+  // An aggregate provenance row over two slugs needs the registry document
+  // for EACH: a document for one (plus an attacker-repo read of the other)
+  // leaves the aggregate specifically unresolved (mismatch).
+  const aggregate = tag(PROVENANCE_ROW, "objective", "dependency-evidence", ["provenance"], [DEP_A, DEP_B]);
+  const mixed = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/evil/chalk" }, status: "ok" },
+    ],
+    toolResults: [
+      { status: "ok", result: { content: '{"name":"lodash"}' } },
+      { status: "ok", result: { response: '{"full_name":"evil/chalk"}' } },
+    ],
+  });
+  assert.equal(evaluateRowEvidence(aggregate, PROVENANCE_ROW, mixed).state, "receipt-mismatch");
+  const both = buildEvidenceLedger({
+    toolCalls: [
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/lodash" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/chalk" }, status: "ok" },
+    ],
+    toolResults: [
+      { status: "ok", result: { content: '{"name":"lodash"}' } },
+      { status: "ok", result: { content: '{"name":"chalk"}' } },
+    ],
+  });
+  const state = evaluateRowEvidence(aggregate, PROVENANCE_ROW, both);
+  assert.deepEqual([state.state, state.receipts], ["receipt-backed", ["call-1", "call-2"]]);
 });
 
 test("#1657 (round 3): the strict tag parser takes the {slug, versions} entry shape and refuses everything else", () => {

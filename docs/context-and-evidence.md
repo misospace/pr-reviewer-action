@@ -360,6 +360,17 @@ restricted to an explicit host allowlist:
 
 That's the default list. Any host not on it is refused.
 
+One operator-facing consequence of that default (#1748): the dependency-evidence
+**provenance** obligation settles only from the dependency's authoritative npm
+registry document (`registry.npmjs.org` packuments, versioned manifests and
+`-/package/…` metadata, or `npmjs.com` package pages) — never from a
+same-named repository on a forge, a same-named artifact on another registry,
+or a search result, because every one of those targets is registrable by an
+attacker. With the npm registry hosts refused (the default list), the
+provenance row stays fail-closed unresolved; add `registry.npmjs.org` (and
+`npmjs.com` for website pages) to `allowed-source-hosts` when runs should be
+able to settle provenance.
+
 ## The upstream link sanitizer
 
 Before publishing, `src/publish/sanitize.ts` neutralizes upstream GitHub

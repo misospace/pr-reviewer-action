@@ -236,6 +236,108 @@ export function dependencyEvidenceObligationsForCall(
 }
 
 /**
+ * #1748 (canonical-source rule): the AUTHORITATIVE registry package identity
+ * a web target names, or `null` when the target is not an authoritative
+ * registry document for a package. The provenance obligation SETTLES only
+ * from this shape (see `dependencyCellCovered`): a package's publisher/
+ * canonical-source fact is owned by the registry that enforces slug
+ * uniqueness for the ecosystem the dependency came from — npm here, the
+ * only ecosystem the trusted scope parse reads today. ANY repo on a forge,
+ * under ANY owner (including the true-sounding one), and any same-named
+ * artifact on a DIFFERENT registry (PyPI, crates, …) is registrable by an
+ * attacker and proves nothing about who publishes an npm dependency — a
+ * receipt whose target merely carries the slug never settles provenance.
+ *
+ * The surfaces accepted are exactly the npm registry's package documents —
+ * the API (`registry.npmjs.org`, including the `/-/package/<name>/…`
+ * metadata endpoints) and the website's package pages (`npmjs.com`, with or
+ * without `www.`) — and the package path must name the slug EXACTLY (after
+ * the scope parser's own normalization: lowercased, leading `@` stripped):
+ * the full packument `/<name>`, the versioned manifest `/<name>/<version>`,
+ * `/-/package/<name>/<rest>`, and `/package/<name>[/<rest>]` website pages —
+ * in either npm spelling of a scoped name: the plain two-segment form
+ * `@scope/pkg` or the canonical single-segment encoded form `@scope%2Fpkg`
+ * (that separator escape is the only accepted encoding; any other
+ * percent-escape, a near-miss path (`lodash-es`), or an attacker-scoped
+ * sibling `@evil/<name>` names no clean package document and binds
+ * nothing). A shallower page (registry root, search endpoints, a publisher
+ * profile) names no package document and binds nothing.
+ * A host carrying user-info or a port stays unset — fail closed, never an
+ * inferred identity. Lexical and total: never throws, never touches the
+ * network.
+ */
+const NPM_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
+  "registry.npmjs.org",
+  "npmjs.com",
+]);
+
+function registrySpecSlug(spec: string, rest: readonly string[]): string | null {
+  // The npm registry's canonical URL for a scoped package folds the whole
+  // name into ONE path segment with an encoded slash — `@scope%2Fpkg` — so
+  // that separator escape is legitimate here and binds the slug. It is the
+  // ONLY legitimate encoding: any other percent-escape (a double-encoded
+  // `%252F`, an encoded name character, an unscoped `%`) is not a clean
+  // package path — fail closed, never decoded-guessed. The decode is
+  // bounded to splitting that one separator: the scope and name halves must
+  // themselves be escape-free (and the name must not carry a second `@`),
+  // so a crafted segment cannot smuggle a slash, a scope marker, or any
+  // other identity character past this rule.
+  if (spec.startsWith("@")) {
+    const second = rest[0] ?? "";
+    if (second.includes("%")) return null;
+    if (spec.includes("%2f")) {
+      const encoded = spec.split("%2f");
+      const scope = encoded[0];
+      const name = encoded[1];
+      if (encoded.length !== 2 || scope === undefined || name === undefined) return null;
+      // The scope marker is the ONE leading `@`; the bare scope and the name
+      // must both be non-empty and escape-free.
+      const bareScope = scope.slice(1);
+      if (bareScope === "" || name === "" || scope.includes("%") || name.includes("%") || bareScope.includes("@") || name.includes("@")) {
+        return null;
+      }
+      return `${bareScope}/${name}`;
+    }
+    if (second === "" || spec.includes("%")) return null;
+    const slug = `${spec.slice(1)}/${second}`;
+    return slug === "" ? null : slug;
+  }
+  // An unscoped name segment carries no legitimate encoding.
+  if (spec === "" || spec.includes("%")) return null;
+  return spec;
+}
+
+export function authoritativeRegistryPackageSlug(url: string): string | null {
+  const lower = url.trim().toLowerCase();
+  const schemeAt = lower.indexOf("://");
+  if (schemeAt === -1) return null;
+  const rest = lower.slice(schemeAt + 3);
+  const pathStart = rest.indexOf("/");
+  const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  // A host carrying credentials or a port is not a clean registry origin.
+  if (rawHost.includes("@") || rawHost.includes(":")) return null;
+  const host = rawHost.replace(/^www\./, "");
+  if (!NPM_REGISTRY_HOSTS.has(host)) return null;
+  const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
+  const path = rawPath.replace(/\/+$/, "").replace(/^\//, "");
+  if (path === "") return null;
+  if (host === "registry.npmjs.org" && path.startsWith("-/package/")) {
+    const after = path.slice("-/package/".length);
+    const segments = after.split("/").filter((segment) => segment !== "");
+    return registrySpecSlug(segments[0] ?? "", segments.slice(1));
+  }
+  const segments = path.split("/").filter((segment) => segment !== "");
+  if (host === "registry.npmjs.org") {
+    return registrySpecSlug(segments[0] ?? "", segments.slice(1));
+  }
+  // The npm website: only /package/<name>[/<rest>] pages are package
+  // documents (a profile, a search page, or the site root names no package).
+  if (!path.startsWith("package/")) return null;
+  const after = segments.slice(1);
+  return registrySpecSlug(after[0] ?? "", after.slice(1));
+}
+
+/**
  * #1396: the obligation a deterministic dependency-evidence `must_check`
  * checklist text names (the DEPENDENCY_EVIDENCE_CHECKS family templates), or
  * null for any other check. The harness uses it to map a shown obligation row

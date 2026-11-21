@@ -367,7 +367,7 @@ inputs:
     v2_id: allowed_source_hosts
     required: false
     default: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io"
-    description: "Comma-separated list of hosts allowed for linked source fetching"
+    description: "Comma-separated list of hosts allowed for linked source fetching. The dependency-evidence provenance obligation settles only from the dependency's authoritative npm registry document (registry.npmjs.org / npmjs.com), so add those hosts when provenance settlement is wanted; with them refused the provenance row stays fail-closed unresolved."
   - id: related-code-context
     v2_id: related_code_context
     required: false

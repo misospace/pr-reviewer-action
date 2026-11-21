@@ -72,7 +72,7 @@
 import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { FORGE_READ_TOOL } from "../platform/endpoint.js";
-import { dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+import { authoritativeRegistryPackageSlug, dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
 
 export type { DependencyEvidenceObligation };
 
@@ -911,12 +911,41 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
   ].filter((value): value is string => typeof value === "string" && value !== "").join(" ");
 }
 
+/** #1748: whether one receipt carries a dependency slug as its EXACT
+ * identity — the generic segment-boundary token carry over the receipt's
+ * identity string, or the receipt's target being the canonical npm registry
+ * document naming the slug (`authoritativeRegistryPackageSlug`: the
+ * registry's own authoritative spelling, including the encoded scoped form
+ * `@scope%2Fpkg`, which carries no literal token). Shared by the row-level
+ * identity gate and the per-cell candidate derivation, so both stages agree
+ * on what counts as speaking about THIS dependency. */
+function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, slug: string): boolean {
+  return identityCarriesToken(receiptIdentityString(receipt), slug)
+    || authoritativeRegistryPackageSlug(receipt.subject.url ?? "") === slug;
+}
+
 /** Whether the given receipts cover one trusted scope entry under one
  * obligation kind. Every candidate receipt must carry the dependency slug
  * as an EXACT identity (kind-appropriate boundaries, never a substring);
  * beyond that the kind decides:
- * - `provenance` asserts WHO publishes the dependency — identity of the
- *   dependency itself is the whole binding;
+ * - `provenance` asserts WHO publishes the dependency. #1748 (canonical-
+ *   source rule): slug identity alone never proves it — any repo on a
+ *   forge under ANY owner, and any same-named artifact on a different
+ *   registry, is registrable by an attacker and carries the slug identity
+ *   without being the canonical publisher/source (native review 5979924243:
+ *   with a wildcard forge-read allowlist, an attacker-created same-named
+ *   repository satisfied the row). Provenance settles only from a receipt
+ *   whose own acquisition target IS the dependency's authoritative registry
+ *   document — `authoritativeRegistryPackageSlug` (the shared lexical rule)
+ *   must name exactly this slug. The rule is channel-neutral: it inspects
+ *   the receipt's target identity, so a forge-read receipt (`gh_api`) and a
+ *   forge-facing web fetch can never satisfy it (a forge serves no registry
+ *   document for a dependency slug), and a search query is not a document —
+ *   both stay attributed acquisitions that credit nothing here. When no
+ *   receipt presents the registry document, the cell stays uncovered
+ *   (`receipt-mismatch` beside verified same-slug acquisitions,
+ *   `receipt-absent`/`receipt-unverified` otherwise) — missing or unprovable
+ *   canonical identity is fail-closed, never inferred from model prose.
  * - `release_delta` asserts the old→new pair — the candidates must JOINTLY
  *   carry EVERY captured changed version, so one side alone (e.g. the old
  *   end of a wrong-range compare link) never covers;
@@ -927,11 +956,11 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  *   captured range only; it is never semantic vulnerability proof.
  * A VERSIONLESS entry (no captured changed-version identity — the parser
  * emits one for re-resolution-only changes) backs `provenance` alone: the
- * slug proves WHO the dependency is, never an exact old→new delta nor an
- * updated version range, so the version-asserting kinds stay uncovered
- * rather than crediting a kind-matched acquisition of the right slug. A
- * ONE-SIDED entry likewise certifies no `release_delta` (a delta needs
- * both endpoints); an advisory range may legitimately be one-endpoint
+ * registry document proves WHO the dependency is, never an exact old→new
+ * delta nor an updated version range, so the version-asserting kinds stay
+ * uncovered rather than crediting a kind-matched acquisition of the right
+ * slug. A ONE-SIDED entry likewise certifies no `release_delta` (a delta
+ * needs both endpoints); an advisory range may legitimately be one-endpoint
  * (an added package's updated version IS the captured range). */
 function dependencyCellCovered(
   receipts: readonly EvidenceReceipt[],
@@ -939,9 +968,17 @@ function dependencyCellCovered(
   entry: DependencyScopeEntry,
 ): boolean {
   const candidates = receipts.filter((receipt) => (receipt.subject.obligations ?? []).includes(kind)
-    && identityCarriesToken(receiptIdentityString(receipt), entry.slug));
+    && receiptCarriesDependencyIdentity(receipt, entry.slug));
   if (candidates.length === 0) return false;
-  if (kind === "provenance") return true;
+  if (kind === "provenance") {
+    // #1748: canonical-source rule — see the kind doc above. A web-fetch
+    // receipt whose target is the authoritative npm registry document FOR
+    // this exact slug is the binding evidence; every other attributed
+    // acquisition (forge reads, source-repo fetches, searches) stays a
+    // candidate that covers nothing.
+    return candidates.some((receipt) => receipt.kind === "web-fetch"
+      && authoritativeRegistryPackageSlug(receipt.subject.url ?? "") === entry.slug);
+  }
   // #1657 (round 9): a version-asserting kind needs captured version
   // identity to assert at all. A versionless entry (re-resolution-only
   // change) can certify NEITHER kind; a one-sided entry certifies no
@@ -979,15 +1016,25 @@ function dependencyReceiptCoverage(
   for (const receipt of ledger.receipts) {
     const attribution = receipt.subject.obligations ?? [];
     if (!kinds.some((kind) => attribution.includes(kind))) continue;
-    const identity = receiptIdentityString(receipt);
-    if (!scope.some((entry) => identityCarriesToken(identity, entry.slug))) continue;
+    // #1748: the identity gate is `receiptCarriesDependencyIdentity` — the
+    // generic token carry, OR the receipt's target being the canonical npm
+    // registry document for the slug (a strictly STRONGER identity proof:
+    // the canonical scoped spelling `@scope%2Fpkg` carries the slug as
+    // npm's own encoding, not as a literal substring). The canonical clause
+    // returns non-null only for npm-registry-host package documents naming
+    // the slug exactly, so it cannot widen the gate to any other channel or
+    // target.
+    if (!scope.some((entry) => receiptCarriesDependencyIdentity(receipt, entry.slug))) continue;
     // #1726: an upstream acquisition is trustworthy whether it came through
     // the open web or through the forge API's validated read seam (`gh_api` —
     // the channel the #1721 run actually re-routed to when its registry host
     // was refused by the source-host allowlist). Both carry the upstream
     // state the dependency obligations ask about; acquisition and
     // completeness are still validated, and the identity boundaries below
-    // are unchanged.
+    // are unchanged. (#1748: trust feeds the release-delta/advisory cells as
+    // before — but the provenance cell additionally demands the canonical
+    // registry binding, so a verified forge/source acquisition beside no
+    // registry document reads `receipt-mismatch`, never `receipt-backed`.)
     if (receipt.acquired && receipt.complete && (receipt.trust === "web" || receipt.trust === "forge")) {
       verified.push(receipt);
     } else {
