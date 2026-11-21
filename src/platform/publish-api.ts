@@ -16,7 +16,7 @@
 import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
 import { gitlabFetch } from "./gitlab.js";
-import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
+import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath, SHA_RE } from "./repo-ref.js";
 import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
@@ -1452,8 +1452,6 @@ export function gitlabReviewState(raw: unknown): string {
   return "";
 }
 
-const GITLAB_SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
-
 /**
  * GitLab publication seam (#740), following {@link ForgejoPublishApi}'s
  * structure: every operation reports failure instead of throwing where the
@@ -2077,7 +2075,7 @@ export class GitLabPublishApi implements PublishPlatformApi {
     state: "pending" | "running" | "success" | "failed" | "canceled",
     options: { name?: string; targetUrl?: string; description?: string } = {},
   ): Promise<boolean> {
-    if (!GITLAB_SHA_RE.test(sha)) return false;
+    if (!SHA_RE.test(sha)) return false;
     try {
       const body: Record<string, unknown> = { state };
       if (options.name !== undefined && options.name !== "") {
