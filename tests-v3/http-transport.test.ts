@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_TEXT_RESPONSE_MAX_BYTES,
   PlatformRequestError,
+  errorText,
   requestBytes,
   requestJson,
   requestText,
@@ -532,4 +533,27 @@ test("requestJson: a normal JSON body parses, an oversized one is too-large (not
     (e: unknown) => e instanceof PlatformRequestError && e.kind === "invalid-json",
     "the invalid-json path is unchanged for bodies within the cap",
   );
+});
+
+// ── errorText: the shared ReadResult error-channel rendering ─────────────
+
+test("errorText: Error.message for any Error, String() for everything else", () => {
+  assert.equal(errorText(new Error("boom")), "boom");
+  assert.equal(errorText(new PlatformRequestError("unusable payload", 500, "invalid-payload")), "unusable payload");
+  class CustomError extends Error {
+    constructor() {
+      super("typed message");
+      this.name = "CustomError";
+    }
+  }
+  assert.equal(errorText(new CustomError()), "typed message", "subclass messages render like the base Error's");
+  assert.equal(errorText(new Error("")), "", "an Error renders its (empty) message, never String(error)'s \"Error\"");
+});
+
+test("errorText: non-Errors render through String(), never duck-typed .message", () => {
+  assert.equal(errorText("plain text"), "plain text");
+  assert.equal(errorText(null), "null");
+  assert.equal(errorText(undefined), "undefined");
+  assert.equal(errorText(42), "42");
+  assert.equal(errorText({ message: "duck-typed" }), "[object Object]", "instanceof Error decides, not a message property");
 });

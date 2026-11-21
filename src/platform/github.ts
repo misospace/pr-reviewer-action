@@ -1,6 +1,6 @@
 import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
-import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+import { PlatformRequestError, errorText, requestJson, requestText, type FetchLike } from "./http.js";
 import {
   GITHUB_CONVERSATION_COMMENTS_QUERY,
   GITHUB_PR_BODY_REVISION_QUERY,
@@ -12,7 +12,7 @@ import {
   normalizeGithubReviewThreads,
   type ExternalCheck,
 } from "./normalize.js";
-import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
+import { parseRepoRef, repoScopedUrl, SHA_RE } from "./repo-ref.js";
 import { GITHUB_API_BASE, parsePlatformBaseUrl } from "./urls.js";
 import type {
   ExternalChecksOptions,
@@ -27,11 +27,6 @@ import type {
  * a hostile or looping API from paginating forever (100 x 100 reviews). */
 const MAX_PAGES = 100;
 const NUMBER_RE = /^[0-9]+$/;
-const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function parseJson(text: string): { ok: true; data: unknown } | { ok: false } {
   try {
