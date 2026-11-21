@@ -942,6 +942,31 @@ test("#1748: an authoritative registry document for the exact slug settles prove
       toolResults: [{ status: "ok", result: { content: '{"name":"@scope/example-pkg"}', truncated: false } }],
     }),
   ).state, "receipt-backed");
+  // Review fix: the canonical npm scoped ENCODING — the whole name folded
+  // into ONE segment with the encoded slash (`@scope%2Fpkg`) — is the
+  // registry's own spelling for a scoped package and binds on every
+  // accepted surface too. That URL carries no literal `scope/example-pkg`
+  // token, so the canonical binding satisfies the identity gate itself.
+  const encodedState = (url: string, body: string): string => evaluateRowEvidence(
+    scopedTag, PROVENANCE_ROW,
+    buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: body, truncated: false } }],
+    }),
+  ).state;
+  assert.equal(encodedState("https://registry.npmjs.org/@scope%2Fexample-pkg", '{"name":"@scope/example-pkg"}'), "receipt-backed");
+  assert.equal(encodedState("https://registry.npmjs.org/@scope%2Fexample-pkg/1.4.0", '{"name":"@scope/example-pkg","version":"1.4.0"}'), "receipt-backed");
+  assert.equal(encodedState("https://registry.npmjs.org/-/package/@scope%2Fexample-pkg/dist-tags", '{"latest":"1.4.0"}'), "receipt-backed");
+  assert.equal(encodedState("https://www.npmjs.com/package/@scope%2Fexample-pkg", "package page"), "receipt-backed");
+  // The encoded scoped path names scope/example-pkg — a DIFFERENT package
+  // than the bare slug — and carries no literal bare-slug token (the `f` of
+  // the encoding is a segment-extend character), so it is not even a
+  // candidate for the bare-slug row.
+  assert.equal(
+    provenanceState("https://registry.npmjs.org/@scope%2Fexample-pkg", '{"name":"@scope/example-pkg"}'),
+    "receipt-absent",
+    "the encoded scoped path binds scope/example-pkg, never the bare slug",
+  );
 });
 
 test("#1748: a same-slug repository under an unrelated owner never settles provenance — forge, source-host web, or wildcard gh_api", () => {
@@ -978,6 +1003,26 @@ test("#1748: a same-slug repository under an unrelated owner never settles prove
     toolResults: [{ status: "ok", result: { response: '{"name":"@scope/example-pkg"}' } }],
   });
   assert.equal(evaluateRowEvidence(scopedTag, PROVENANCE_ROW, scopedAttacker).state, "receipt-mismatch");
+  // Review fix: encoded scoped shapes that are NOT clean npm package
+  // documents stay fail-closed. The separator escape `%2f` is the ONLY
+  // legitimate encoding: a double-encoded slash, an escape in either half,
+  // or a third encoded segment names no clean document and carries no
+  // literal scoped-slug token, so the receipt is not even a candidate
+  // (`receipt-absent`); the mixed plain/encoded path carries the literal
+  // token but binds nothing (`receipt-mismatch`).
+  const encodedNegatives: ReadonlyArray<{ url: string; expected: string }> = [
+    { url: "https://registry.npmjs.org/@scope%252Fexample-pkg", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@sc%41ope%2Fexample-pkg", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@scope%2Fexample-pkg%2Fx", expected: "receipt-absent" },
+    { url: "https://registry.npmjs.org/@scope/example-pkg%2Fx", expected: "receipt-mismatch" },
+  ];
+  for (const { url, expected } of encodedNegatives) {
+    const ledger = buildEvidenceLedger({
+      toolCalls: [{ tool: "web_fetch", args: { url }, status: "ok" }],
+      toolResults: [{ status: "ok", result: { content: '{"name":"@scope/example-pkg"}', truncated: false } }],
+    });
+    assert.equal(evaluateRowEvidence(scopedTag, PROVENANCE_ROW, ledger).state, expected, url);
+  }
   // A near-miss registry path (a DIFFERENT package) is not even a candidate.
   const nearMiss = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg-es" }, status: "ok" }],

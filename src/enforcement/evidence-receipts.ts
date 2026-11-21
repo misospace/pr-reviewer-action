@@ -911,6 +911,19 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
   ].filter((value): value is string => typeof value === "string" && value !== "").join(" ");
 }
 
+/** #1748: whether one receipt carries a dependency slug as its EXACT
+ * identity — the generic segment-boundary token carry over the receipt's
+ * identity string, or the receipt's target being the canonical npm registry
+ * document naming the slug (`authoritativeRegistryPackageSlug`: the
+ * registry's own authoritative spelling, including the encoded scoped form
+ * `@scope%2Fpkg`, which carries no literal token). Shared by the row-level
+ * identity gate and the per-cell candidate derivation, so both stages agree
+ * on what counts as speaking about THIS dependency. */
+function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, slug: string): boolean {
+  return identityCarriesToken(receiptIdentityString(receipt), slug)
+    || authoritativeRegistryPackageSlug(receipt.subject.url ?? "") === slug;
+}
+
 /** Whether the given receipts cover one trusted scope entry under one
  * obligation kind. Every candidate receipt must carry the dependency slug
  * as an EXACT identity (kind-appropriate boundaries, never a substring);
@@ -955,7 +968,7 @@ function dependencyCellCovered(
   entry: DependencyScopeEntry,
 ): boolean {
   const candidates = receipts.filter((receipt) => (receipt.subject.obligations ?? []).includes(kind)
-    && identityCarriesToken(receiptIdentityString(receipt), entry.slug));
+    && receiptCarriesDependencyIdentity(receipt, entry.slug));
   if (candidates.length === 0) return false;
   if (kind === "provenance") {
     // #1748: canonical-source rule — see the kind doc above. A web-fetch
@@ -1003,8 +1016,15 @@ function dependencyReceiptCoverage(
   for (const receipt of ledger.receipts) {
     const attribution = receipt.subject.obligations ?? [];
     if (!kinds.some((kind) => attribution.includes(kind))) continue;
-    const identity = receiptIdentityString(receipt);
-    if (!scope.some((entry) => identityCarriesToken(identity, entry.slug))) continue;
+    // #1748: the identity gate is `receiptCarriesDependencyIdentity` — the
+    // generic token carry, OR the receipt's target being the canonical npm
+    // registry document for the slug (a strictly STRONGER identity proof:
+    // the canonical scoped spelling `@scope%2Fpkg` carries the slug as
+    // npm's own encoding, not as a literal substring). The canonical clause
+    // returns non-null only for npm-registry-host package documents naming
+    // the slug exactly, so it cannot widen the gate to any other channel or
+    // target.
+    if (!scope.some((entry) => receiptCarriesDependencyIdentity(receipt, entry.slug))) continue;
     // #1726: an upstream acquisition is trustworthy whether it came through
     // the open web or through the forge API's validated read seam (`gh_api` —
     // the channel the #1721 run actually re-routed to when its registry host

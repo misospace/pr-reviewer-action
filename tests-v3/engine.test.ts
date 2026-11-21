@@ -1956,7 +1956,7 @@ test("#1726: the loop's upstream evidence settles its dependency rows end to end
       // #1748 TEST SEAM: serve the registry document to web_fetch and pass
       // the per-hop DNS gate without real network I/O.
       toolIo: {
-        fetch: async (url: string) => ({ status: 200, headers: {}, body: url.includes("registry.npmjs.org") ? "{\"name\":\"lodash\",\"version\":\"4.5.6\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/lodash/lodash.git\"}}" : "{}" }),
+        fetch: async (url: string) => ({ status: 200, headers: {}, body: new URL(url).hostname === "registry.npmjs.org" ? "{\"name\":\"lodash\",\"version\":\"4.5.6\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/lodash/lodash.git\"}}" : "{}" }),
         resolver: async (_hostname: string) => ["93.184.216.34"],
       },
       runDir: root, workspace: root,
@@ -2093,7 +2093,7 @@ test("#1726: the fully evidenced positive case reaches native APPROVE end to end
       // the same injected fetch, so the stub answers the search shape too
       // (the JSON the mock server's /search route serves).
       toolIo: {
-        fetch: async (url: string) => url.includes("registry.npmjs.org")
+        fetch: async (url: string) => new URL(url).hostname === "registry.npmjs.org"
           ? { status: 200, headers: {}, body: "{\"name\":\"lodash\",\"version\":\"4.5.6\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/lodash/lodash.git\"}}" }
           : { status: 200, headers: {}, body: JSON.stringify({ results: [{ title: "lodash advisory DB", url: "https://github.com/advisories?query=lodash", content: "no advisory affects the 1.2.3..4.5.6 range" }] }) },
         resolver: async (_hostname: string) => ["93.184.216.34"],

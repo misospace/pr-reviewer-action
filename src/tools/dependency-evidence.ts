@@ -254,14 +254,17 @@ export function dependencyEvidenceObligationsForCall(
  * without `www.`) — and the package path must name the slug EXACTLY (after
  * the scope parser's own normalization: lowercased, leading `@` stripped):
  * the full packument `/<name>`, the versioned manifest `/<name>/<version>`,
- * `/-/package/<name>/<rest>`, and `/package/<name>[/<rest>]` website pages.
- * A shallower page (registry root, search endpoints, a publisher profile) or
- * a near-miss path (`lodash-es`, an attacker-scoped sibling `@evil/<name>`,
- * the URL-encoded scoped form `@scope%2Fpkg`, which fails the segment rule
- * exactly as it always has) names no package document and binds nothing.
- * URL-encoded-scoped and user-info/port'd hosts stay unset — fail closed,
- * never an inferred identity. Lexical and total: never throws, never
- * touches the network.
+ * `/-/package/<name>/<rest>`, and `/package/<name>[/<rest>]` website pages —
+ * in either npm spelling of a scoped name: the plain two-segment form
+ * `@scope/pkg` or the canonical single-segment encoded form `@scope%2Fpkg`
+ * (that separator escape is the only accepted encoding; any other
+ * percent-escape, a near-miss path (`lodash-es`), or an attacker-scoped
+ * sibling `@evil/<name>` names no clean package document and binds
+ * nothing). A shallower page (registry root, search endpoints, a publisher
+ * profile) names no package document and binds nothing.
+ * A host carrying user-info or a port stays unset — fail closed, never an
+ * inferred identity. Lexical and total: never throws, never touches the
+ * network.
  */
 const NPM_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "registry.npmjs.org",
@@ -269,18 +272,39 @@ const NPM_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
 ]);
 
 function registrySpecSlug(spec: string, rest: readonly string[]): string | null {
-  // Percent-encoded segments (the scoped form `@scope%2Fpkg`) are not the
-  // plain package path this rule binds — fail closed, never decoded-guessed.
-  if (spec.includes("%")) return null;
-  // The scope parser's slug normalization: a leading `@` starts a scoped
-  // name that spans the next path segment (`@scope/pkg` → `scope/pkg`).
+  // The npm registry's canonical URL for a scoped package folds the whole
+  // name into ONE path segment with an encoded slash — `@scope%2Fpkg` — so
+  // that separator escape is legitimate here and binds the slug. It is the
+  // ONLY legitimate encoding: any other percent-escape (a double-encoded
+  // `%252F`, an encoded name character, an unscoped `%`) is not a clean
+  // package path — fail closed, never decoded-guessed. The decode is
+  // bounded to splitting that one separator: the scope and name halves must
+  // themselves be escape-free (and the name must not carry a second `@`),
+  // so a crafted segment cannot smuggle a slash, a scope marker, or any
+  // other identity character past this rule.
   if (spec.startsWith("@")) {
     const second = rest[0] ?? "";
-    if (second === "" || second.includes("%")) return null;
+    if (second.includes("%")) return null;
+    if (spec.includes("%2f")) {
+      const encoded = spec.split("%2f");
+      const scope = encoded[0];
+      const name = encoded[1];
+      if (encoded.length !== 2 || scope === undefined || name === undefined) return null;
+      // The scope marker is the ONE leading `@`; the bare scope and the name
+      // must both be non-empty and escape-free.
+      const bareScope = scope.slice(1);
+      if (bareScope === "" || name === "" || scope.includes("%") || name.includes("%") || bareScope.includes("@") || name.includes("@")) {
+        return null;
+      }
+      return `${bareScope}/${name}`;
+    }
+    if (second === "" || spec.includes("%")) return null;
     const slug = `${spec.slice(1)}/${second}`;
     return slug === "" ? null : slug;
   }
-  return spec === "" ? null : spec;
+  // An unscoped name segment carries no legitimate encoding.
+  if (spec === "" || spec.includes("%")) return null;
+  return spec;
 }
 
 export function authoritativeRegistryPackageSlug(url: string): string | null {

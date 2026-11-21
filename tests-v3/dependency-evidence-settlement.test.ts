@@ -77,7 +77,21 @@ test("#1726: the evidence-channel admission predicate covers the forge-read chan
 
 const HEAD = "06c68c884ba5b64626f357cb37dd2ea728c7e9db";
 
-const CANDIDATE_ROWS = [
+/** The candidate-row shape the fold consumes (structurally — the helpers
+ * accept `unknown`; the annotation exists so a test can derive a variant
+ * scope, e.g. a scoped dependency slug, without fighting the literal
+ * union `CANDIDATE_ROWS` infers). */
+type FoldCandidateRow = {
+  id: string;
+  source: string;
+  text: string;
+  row_class: string;
+  gate?: string;
+  obligations?: string[];
+  dependency_scope?: Array<{ slug: string; versions: string[] }>;
+};
+
+const CANDIDATE_ROWS: FoldCandidateRow[] = [
   // obligation-1: the run's fifth row never rendered in the required-evidence
   // section — a non-gating (review-prompt) generic row; still folded.
   {
@@ -417,21 +431,27 @@ test("#1726 positive: registry provenance + compare + version-bound advisory + h
 // ---------------------------------------------------------------------------
 
 /** The obligation fold over one acquisition set (the replay's pipeline,
- * without the CI reconciliation the provenance assertions don't need). */
-function foldDependencyRows(toolCalls: unknown[], toolResults: unknown[]): ReturnType<typeof foldObligationDispositions> {
+ * without the CI reconciliation the provenance assertions don't need). The
+ * candidate rows default to the replay's fixture; a test may pass its own
+ * row list (same shape) to pin a scope the replay does not carry. */
+function foldDependencyRows(
+  toolCalls: unknown[],
+  toolResults: unknown[],
+  rows: readonly FoldCandidateRow[] = CANDIDATE_ROWS,
+): ReturnType<typeof foldObligationDispositions> {
   const ledger = buildEvidenceLedger({
     toolCalls, toolResults,
     certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [],
     ciEvidence: null, reviewedHeadSha: HEAD,
   });
-  const tags = checkEvidenceTagsFromArtifact(CANDIDATE_ROWS.map((row) => ({
+  const tags = checkEvidenceTagsFromArtifact(rows.map((row) => ({
     text: row.text,
     row_class: row.row_class,
     ...(row.gate !== undefined ? { gate: row.gate } : {}),
     ...(row.obligations !== undefined ? { obligations: row.obligations } : {}),
     ...(row.dependency_scope !== undefined ? { dependency_scope: row.dependency_scope } : {}),
   })));
-  const obligations = candidateRowsToObligations(CANDIDATE_ROWS, MUST_CHECK, tags);
+  const obligations = candidateRowsToObligations(rows, rows.map((row) => row.text), tags);
   return foldObligationDispositions(obligations, VERDICT_DISPOSITIONS, ledger, { readPaths: new Set<string>() });
 }
 
@@ -459,6 +479,53 @@ test("#1748 positive (web channel): the npm registry document settles the proven
   assert.equal(delta.status, "satisfied");
   assert.deepEqual(delta.evidence?.receipts, ["call-2"]);
   assert.equal(byId(rows, "obligation-5").evidence?.state, "receipt-absent");
+});
+
+test("#1748 positive (web channel, canonical scoped encoding): the encoded registry document settles the scoped provenance row", () => {
+  // npm spells a scoped packument with the encoded slash — `/@scope%2Fastro`
+  // — the registry's own canonical form for the slug. That URL carries no
+  // literal `scope/astro` token, so the canonical registry binding must
+  // satisfy the identity gate itself (review fix); everything else —
+  // attribution, trust, completeness, the provenance-only cell contract —
+  // is the same fold as the plain spelling.
+  const scopedRows = CANDIDATE_ROWS.map((row) => (
+    row.gate === "dependency-evidence"
+      ? { ...row, dependency_scope: [{ slug: "scope/astro", versions: ["7.4.12", "7.4.13"] }] }
+      : row
+  ));
+  const rows = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/@scope%2Fastro/7.4.13" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/withastro/astro/compare/v7.4.12...v7.4.13" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: "{\"name\":\"@scope/astro\",\"version\":\"7.4.13\",\"repository\":{\"url\":\"git+https://github.com/withastro/astro.git\"}}" } },
+      { status: "ok", result: { response: "{\"total_commits\":9}" } },
+    ],
+    scopedRows,
+  );
+  const provenance = byId(rows, "obligation-3");
+  assert.equal(provenance.status, "satisfied");
+  assert.equal(provenance.reason, "dependency-evidence");
+  assert.equal(provenance.evidence?.state, "receipt-backed");
+  assert.deepEqual(provenance.evidence?.receipts, ["call-1"]);
+  // The canonical clause neither leaks into the version-asserting cells nor
+  // substitutes for their own identity: the registry document is attributed
+  // provenance-only, and the compare fetch addresses the bare-astro repo —
+  // it carries no `scope/astro` identity at all — so the delta row stays
+  // receipt-absent in this scoped scope.
+  assert.equal(byId(rows, "obligation-4").evidence?.state, "receipt-absent");
+  // The encoded sibling under ANOTHER scope binds `evil/astro` — a different
+  // package — and carries no literal `scope/astro` token: the row stays
+  // specifically unresolved with no candidate receipt (fail-closed).
+  const siblingRows = foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/@evil%2Fastro/7.4.13" }, status: "ok" }],
+    [{ status: "ok", result: { content: "{\"name\":\"@evil/astro\",\"version\":\"7.4.13\"}", truncated: false } }],
+    scopedRows,
+  );
+  const siblingProvenance = byId(siblingRows, "obligation-3");
+  assert.equal(siblingProvenance.status, "unresolved");
+  assert.equal(siblingProvenance.evidence?.state, "receipt-absent");
 });
 
 test("#1748 attacker-repo negative (both channels): wildcard forge reads and source-repo fetches never settle provenance", () => {
