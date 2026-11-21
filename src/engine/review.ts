@@ -2302,7 +2302,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // The tier names the first-pass artifact slot; the loop limits follow
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
-      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, adapter.ghApi.bind(adapter));
+      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, adapter.ghApi.bind(adapter), undefined, undefined, dependencies.toolIo);
       checkpoint();
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
@@ -2329,6 +2329,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     signal: cancellation.scope.signal,
     generatedPaths, standards, runDir, workspace,
     ghApi: adapter.ghApi.bind(adapter),
+    ...(dependencies.toolIo !== undefined ? { toolIo: dependencies.toolIo } : {}),
     verdictContractIds: traceScopeIds,
   });
   checkpoint();
@@ -4751,6 +4752,10 @@ async function producePrimaryReview(input: ReviewCallInput & {
   /** The run's configured forge read capability for the fallback tier's
    * native loop (same adapter the primary tier binds). */
   ghApi?: HarnessDeps["ghApi"];
+  /** #1748 TEST SEAM ONLY: the loop's tool fetch/resolver DI pair (see
+   * ReviewDependencies.toolIo) — threaded to the primary and fallback
+   * investigations alike. */
+  toolIo?: HarnessDeps["toolIo"];
 }): Promise<{
   artifact: Record<string, unknown> | null;
   analysisEngine: string;
@@ -4902,6 +4907,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
     standards: input.standards,
     workspace: input.workspace,
     ghApi: input.ghApi,
+    ...(input.toolIo !== undefined ? { toolIo: input.toolIo } : {}),
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
     primaryHarness: harness,
     primaryVerdictElapsedSec: primary.elapsedSec,
@@ -5084,6 +5090,10 @@ async function runFallbackEvidenceHarness(input: {
   standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean };
   workspace: string;
   ghApi?: HarnessDeps["ghApi"];
+  /** #1748 TEST SEAM ONLY: the loop's tool fetch/resolver DI pair (see
+   * ReviewDependencies.toolIo) — the fallback investigation rides the same
+   * seam the primary loop does, so a fixture stubs it once for both. */
+  toolIo?: HarnessDeps["toolIo"];
   signal?: AbortSignal;
   primaryHarness: Record<string, unknown> | null;
   primaryVerdictElapsedSec: number | undefined;
@@ -5125,7 +5135,7 @@ async function runFallbackEvidenceHarness(input: {
     // keys). Re-resolving from env here would hand an inherited fallback
     // lane the primary-override endpoint/key/format while
     // callTier('fallback', ...) still dials the original resolved lane.
-    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, input.ghApi, wallClockRemainingSec, input.profiles.fallback);
+    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, input.ghApi, wallClockRemainingSec, input.profiles.fallback, input.toolIo);
   } catch (cause) {
     // #1094: a thrown message can quote a configured credential back — mask
     // like every other diagnostics line in this stage.

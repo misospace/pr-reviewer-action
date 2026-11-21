@@ -227,7 +227,7 @@ function byId(rows: ReplayOutput["obligations"], id: string) {
 // The #1721 replay (the authoritative failure shape and its fix).
 // ---------------------------------------------------------------------------
 
-test("#1726 replay: the run's upstream evidence the receipts could NOT see left 5/5 no-disposition on main — the fixed fold settles what the run acquired", () => {
+test("#1726 replay: the run's upstream evidence the receipts could NOT see left 5/5 no-disposition on main — the fixed fold settles what the run's acquisitions can prove", () => {
   const { obligations } = replay1721({});
   const total = obligations.length;
   const satisfied = obligations.filter((obligation) => obligation.status === "satisfied");
@@ -239,16 +239,21 @@ test("#1726 replay: the run's upstream evidence the receipts could NOT see left 
   // the run had executed the upstream lookups and 36/40 calls succeeded.
   assert.equal(total, 5);
 
-  // Post-fix: the provenance lookups the run demonstrably executed
-  // (gh_api contents/packages/astro — canonical publisher/source identity on
-  // the exact slug) settle the provenance row deterministically, with the
-  // receipts as provenance and reason `dependency-evidence`.
+  // #1748: the provenance lookups the run demonstrably executed
+  // (gh_api contents/packages/astro — the exact slug on a forge) no longer
+  // settle the provenance row: a forge repository under ANY owner carries
+  // the slug identity without being the canonical publisher/source, so the
+  // canonical-source rule demands the dependency's authoritative registry
+  // document (npm — which the run's config refused). The row stays
+  // unresolved with the specific reason-coded state: relevant receipts,
+  // none binding the canonical identity (receipt-mismatch) — fail closed,
+  // never inferred from the run's prose.
   const provenance = byId(obligations, "obligation-3");
-  assert.equal(provenance.status, "satisfied");
-  assert.equal(provenance.reason, "dependency-evidence");
-  assert.equal(provenance.cause, null);
-  assert.equal(provenance.evidence?.state, "receipt-backed");
-  assert.deepEqual(provenance.evidence?.receipts, ["call-2"]);
+  assert.equal(provenance.status, "unresolved");
+  assert.equal(provenance.reason, "no-disposition");
+  assert.equal(provenance.cause, "budget-exhausted");
+  assert.equal(provenance.evidence?.state, "receipt-mismatch");
+  assert.deepEqual(provenance.evidence?.receipts, []);
 
   // The release-delta row does NOT settle: the run's retained release lookup
   // carries only the NEW endpoint (v7.4.13) — a release_delta asserts the
@@ -284,11 +289,11 @@ test("#1726 replay: the run's upstream evidence the receipts could NOT see left 
   assert.equal(promptRow.status, "unresolved");
   assert.equal(promptRow.reason, "no-disposition");
 
-  // Net machine state: approval is STILL withheld — the delta and advisory
-  // evidence the run actually held does not meet the deterministic bar —
-  // but the ledger now names which rows settled and why the rest did not.
-  assert.equal(satisfied.length, 1);
-  assert.equal(unresolved.length, 4);
+  // Net machine state: approval is STILL withheld — nothing the run's
+  // forge-only acquisitions could prove meets the deterministic bar —
+  // and the ledger now names exactly why each row did not settle.
+  assert.equal(satisfied.length, 0);
+  assert.equal(unresolved.length, 5);
   assert.ok(unresolved.every((obligation) => obligation.source === "must_check" ? obligation.cause === "budget-exhausted" : true));
 });
 
@@ -313,15 +318,19 @@ test("#1726 replay: with genuinely no upstream acquisition the fold stays fail-c
 // within the existing budget's evidence.
 // ---------------------------------------------------------------------------
 
-test("#1726 positive: compare + version-bound advisory + head-bound green CI settle every applicable check", () => {
+test("#1726 positive: registry provenance + compare + version-bound advisory + head-bound green CI settle every applicable check", () => {
   const ledger = buildEvidenceLedger({
     toolCalls: [
-      { tool: "gh_api", args: { endpoint: "repos/withastro/astro" }, status: "ok" },
+      // #1748: the provenance acquisition is the dependency's authoritative
+      // registry document (the npm packument for the exact slug) — the one
+      // target whose identity binds the dependency to its canonical
+      // publisher/source.
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/astro" }, status: "ok" },
       { tool: "gh_api", args: { endpoint: "repos/withastro/astro/compare/v7.4.12...v7.4.13" }, status: "ok" },
       { tool: "web_search", args: { query: "astro npm security advisories 7.4.12 7.4.13" }, status: "ok" },
     ],
     toolResults: [
-      { status: "ok", result: { response: "{\"full_name\":\"withastro/astro\"}" } },
+      { status: "ok", result: { content: "{\"name\":\"astro\",\"dist-tags\":{\"latest\":\"7.4.13\"}}" } },
       { status: "ok", result: { response: "{\"total_commits\":9}" } },
       { status: "ok", result: { results: "no applicable advisories for 7.4.12..7.4.13" } },
     ],
@@ -361,6 +370,7 @@ test("#1726 positive: compare + version-bound advisory + head-bound green CI set
   const provenance = byId(reconciled, "obligation-3");
   assert.equal(provenance.status, "satisfied");
   assert.equal(provenance.reason, "dependency-evidence");
+  assert.ok(provenance.evidence?.receipts.includes("call-1"), "the registry document receipt backs the provenance row");
   const delta = byId(reconciled, "obligation-4");
   assert.equal(delta.status, "satisfied");
   assert.equal(delta.reason, "dependency-evidence");
@@ -393,6 +403,118 @@ test("#1726 positive: compare + version-bound advisory + head-bound green CI set
     const obligation = reconciled.find((entry) => entry.text === row.check)!;
     assert.equal(row.status, obligation.status, `coverage/obligation disagreement on: ${row.check}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// #1748: canonical-source provenance. The provenance cell settles ONLY from
+// evidence deterministically binding the changed dependency identity to its
+// canonical publisher/source — the dependency's authoritative registry
+// document (npm: the only ecosystem the trusted scope parse reads, and the
+// registry that owns its slugs' uniqueness). Positive and attacker-repo
+// negative fixtures for BOTH channels (web + forge-read); the
+// release-delta/advisory cells, the reserve budgets, and the loop are
+// untouched.
+// ---------------------------------------------------------------------------
+
+/** The obligation fold over one acquisition set (the replay's pipeline,
+ * without the CI reconciliation the provenance assertions don't need). */
+function foldDependencyRows(toolCalls: unknown[], toolResults: unknown[]): ReturnType<typeof foldObligationDispositions> {
+  const ledger = buildEvidenceLedger({
+    toolCalls, toolResults,
+    certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [],
+    ciEvidence: null, reviewedHeadSha: HEAD,
+  });
+  const tags = checkEvidenceTagsFromArtifact(CANDIDATE_ROWS.map((row) => ({
+    text: row.text,
+    row_class: row.row_class,
+    ...(row.gate !== undefined ? { gate: row.gate } : {}),
+    ...(row.obligations !== undefined ? { obligations: row.obligations } : {}),
+    ...(row.dependency_scope !== undefined ? { dependency_scope: row.dependency_scope } : {}),
+  })));
+  const obligations = candidateRowsToObligations(CANDIDATE_ROWS, MUST_CHECK, tags);
+  return foldObligationDispositions(obligations, VERDICT_DISPOSITIONS, ledger, { readPaths: new Set<string>() });
+}
+
+test("#1748 positive (web channel): the npm registry document settles the provenance row — and only that row", () => {
+  const rows = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/astro/7.4.13" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/withastro/astro/compare/v7.4.12...v7.4.13" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: "{\"name\":\"astro\",\"version\":\"7.4.13\",\"repository\":{\"url\":\"git+https://github.com/withastro/astro.git\"}}" } },
+      { status: "ok", result: { response: "{\"total_commits\":9}" } },
+    ],
+  );
+  const provenance = byId(rows, "obligation-3");
+  assert.equal(provenance.status, "satisfied");
+  assert.equal(provenance.reason, "dependency-evidence");
+  assert.equal(provenance.evidence?.state, "receipt-backed");
+  assert.deepEqual(provenance.evidence?.receipts, ["call-1"]);
+  // The version-asserting cells keep their own contracts: the compare
+  // receipt (both captured versions) settles the delta; the registry
+  // document alone never leaks into them, and the advisory row has no
+  // attributed acquisition at all in this fixture (receipt-absent).
+  const delta = byId(rows, "obligation-4");
+  assert.equal(delta.status, "satisfied");
+  assert.deepEqual(delta.evidence?.receipts, ["call-2"]);
+  assert.equal(byId(rows, "obligation-5").evidence?.state, "receipt-absent");
+});
+
+test("#1748 attacker-repo negative (both channels): wildcard forge reads and source-repo fetches never settle provenance", () => {
+  // With a wildcard forge-read allowlist every one of these acquisitions
+  // succeeds and is attributed provenance on the exact slug — the
+  // attacker-controlled repo, the TRUE canonical repo read through the
+  // forge, and a source-repo web fetch of a same-named repo. None of them
+  // is the registry document, so the provenance row stays specifically
+  // unresolved (relevant receipts, none binding the canonical identity) on
+  // both channels.
+  const rows = foldDependencyRows(
+    [
+      { tool: "gh_api", args: { endpoint: "repos/evil/astro" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/withastro/astro" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/evil/astro" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { response: "{\"full_name\":\"evil/astro\"}" } },
+      { status: "ok", result: { response: "{\"full_name\":\"withastro/astro\"}" } },
+      { status: "ok", result: { content: "evil/astro — same-named repository", truncated: false } },
+    ],
+  );
+  const provenance = byId(rows, "obligation-3");
+  assert.equal(provenance.status, "unresolved");
+  assert.equal(provenance.reason, "no-disposition");
+  assert.equal(provenance.evidence?.state, "receipt-mismatch");
+  assert.deepEqual(provenance.evidence?.receipts, []);
+  // The unchanged cells are untouched: nothing in these acquisitions
+  // addresses a release delta or an advisory surface, so those rows stay
+  // receipt-absent — the provenance hardening neither credits nor flips them.
+  assert.equal(byId(rows, "obligation-4").evidence?.state, "receipt-absent");
+  assert.equal(byId(rows, "obligation-5").evidence?.state, "receipt-absent");
+});
+
+test("#1748: registry provenance settles beside forge acquisitions it cannot vouch for — cells stay independent", () => {
+  // The registry document proves WHO publishes astro; the compare proves
+  // the exact old→new delta; the wildcard forge read proves nothing and
+  // credits nothing — the row settles from the joint cover of the two
+  // bindings it does have, with the forged receipt never listed.
+  const rows = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://registry.npmjs.org/astro" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/evil/astro/compare/v7.4.12...v7.4.13" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: "{\"name\":\"astro\",\"dist-tags\":{\"latest\":\"7.4.13\"}}" } },
+      { status: "ok", result: { response: "{\"total_commits\":40}" } },
+    ],
+  );
+  const provenance = byId(rows, "obligation-3");
+  assert.equal(provenance.status, "satisfied");
+  assert.deepEqual(provenance.evidence?.receipts, ["call-1"]);
+  // The DELTA cell is identity-bound, not registry-bound: the compare's
+  // version pair (even on an attacker repo) still covers the captured
+  // old→new identity — that settlement is untouched by #1748.
+  assert.equal(byId(rows, "obligation-4").status, "satisfied");
 });
 
 // ---------------------------------------------------------------------------
@@ -507,17 +629,19 @@ test("#1726 negative: a confirmed negative (unmet) is never argued away by recei
 });
 
 // ---------------------------------------------------------------------------
-// Round-trip: the settled rows survive the strict obligation artifact.
+// Round-trip: the reason-coded rows survive the strict obligation artifact.
 // ---------------------------------------------------------------------------
 
-test("#1726: the settlement reason round-trips through the strict artifact reader", () => {
+test("#1726: the reason-coded evidence state round-trips through the strict artifact reader", () => {
   const { obligations } = replay1721({});
   const artifact = reviewObligationsToArtifact(obligations, null);
   const readBack = reviewObligationsFromArtifact(artifact);
   assert.ok(readBack !== null);
+  // #1748: the replay's forge-only provenance acquisition stays unresolved —
+  // the specific receipt-mismatch state survives the strict artifact reader.
   const provenance = readBack.find((row) => row.id === "obligation-3");
-  assert.equal(provenance?.status, "satisfied");
-  assert.equal(provenance?.reason, "dependency-evidence");
+  assert.equal(provenance?.status, "unresolved");
+  assert.equal(provenance?.evidence?.state, "receipt-mismatch");
 });
 
 // ---------------------------------------------------------------------------

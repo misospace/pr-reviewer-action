@@ -44,6 +44,9 @@ export interface RunReviewOptions {
    * (see ReviewDependencies.executingActionVersion). Production paths never
    * set it; the engine falls back to the bundle's own build stamp. */
   executingActionVersion?: string;
+  /** #1748 TEST SEAM ONLY: the native loop's tool fetch/resolver DI pair
+   * (see ReviewDependencies.toolIo). Production paths never set it. */
+  toolIo?: ReviewDependencies["toolIo"];
 }
 
 export function runtimeBundleEntry(env: NodeJS.ProcessEnv): string | null {
@@ -112,6 +115,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ciGateEntry: (options.ciGate ? "" : (options.ciGateEntry ?? runtimeBundleEntry(env))) ?? "",
     ...(options.onAdmission !== undefined ? { onAdmission: options.onAdmission } : {}),
     ...(options.executingActionVersion !== undefined ? { executingActionVersion: options.executingActionVersion } : {}),
+    ...(options.toolIo !== undefined ? { toolIo: options.toolIo } : {}),
   };
   return runReviewEngine(request, dependencies);
 }

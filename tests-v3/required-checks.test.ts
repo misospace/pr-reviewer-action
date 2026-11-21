@@ -673,7 +673,7 @@ test("#1657: dependency-evidence rows are receipt-gated acquisition asks — pro
     "inspect the exact old→new upstream release delta for the updated dependency",
   ];
   const supported = ledgerWith([
-    { tool: "web_fetch", args: { url: "https://pypi.org/project/example-pkg/" }, status: "ok" },
+    { tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg" }, status: "ok" },
     { tool: "web_fetch", args: { url: "https://github.com/example/example-pkg/compare/v1.2.3...v1.4.0" }, status: "ok" },
   ]);
   // #1657 (round 9): the version-asserting kinds carry the COMPLETE captured

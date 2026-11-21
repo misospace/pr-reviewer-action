@@ -865,7 +865,7 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
  * keeps the loop byte-for-byte pre-#1145. #1210: likewise `ghApi` — the
  * run's configured forge read capability, bound to the native loop's
  * gh_api/repo_contents executors. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number, fallbackLane?: HarnessDeps["fallbackLane"]): Promise<void> {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number, fallbackLane?: HarnessDeps["fallbackLane"], toolIo?: HarnessDeps["toolIo"]): Promise<void> {
   const deps: HarnessDeps & { signal?: AbortSignal } = {
     env,
     cwd: runDir,
@@ -889,6 +889,7 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     // re-resolved from the route-rebound base keys. Unset keeps env
     // resolution (direct callers without a resolved profile).
     ...(fallbackLane !== undefined ? { fallbackLane } : {}),
+    ...(toolIo !== undefined ? { toolIo } : {}),
   };
   await runToolHarness(deps);
 }

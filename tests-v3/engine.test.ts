@@ -1890,16 +1890,19 @@ test("#1657: one executed acquisition cannot manufacture five satisfactions — 
   }
 });
 
-test("#1726: the loop's gh_api upstream evidence settles its dependency rows end to end — a closing verdict that echoes no check text can no longer lose the settlement", async () => {
+test("#1726: the loop's upstream evidence settles its dependency rows end to end — a closing verdict that echoes no check text can no longer lose the settlement", async () => {
   // The #1721 shape end to end: the scoped dependency plan's enforced window
-  // admits the run's upstream evidence through the channel the source-host
-  // allowlist left available (gh_api), every tracked row discharges, the
-  // loop settles early — and the closing verdict carries dispositions that
-  // echo NO check text (`required_check_dispositions: []`, the #1721
-  // no-disposition shape with zero parser drops). The validated receipts
-  // settle the provenance, release-delta, and advisory rows deterministically
-  // (the #12294 mixed shape: genuinely-evidenced rows settle, the rows the
-  // run genuinely could not evidence stay unresolved with exact reasons).
+  // admits the run's upstream evidence — the registry document the
+  // provenance row demands (#1748: web_fetch of the npm registry, served by
+  // the tool-fetch test seam) plus the forge acquisitions the wildcard
+  // gh_api allowlist admits — every tracked row discharges, the loop settles
+  // early — and the closing verdict carries dispositions that echo NO check
+  // text (`required_check_dispositions: []`, the #1721 no-disposition shape
+  // with zero parser drops). The validated receipts settle the provenance
+  // and release-delta rows deterministically (the #12294 mixed shape:
+  // genuinely-evidenced rows settle, the rows the run genuinely could not
+  // evidence stay unresolved with exact reasons). The wildcard forge
+  // allowlist alone proves no provenance: only the registry document does.
   async function ghEvidenceRun(): Promise<{
     result: Awaited<ReturnType<typeof runReview>>;
     runDir: string;
@@ -1914,12 +1917,13 @@ test("#1726: the loop's gh_api upstream evidence settles its dependency rows end
       if (hasTools) {
         const turn = loopTurns++;
         if (turn === 0) {
-          // One round, three upstream acquisitions: canonical repo
-          // identity (provenance), the exact old→new compare
-          // (release_delta, both captured versions), and the repo-scoped
-          // advisory list (security_advisory — slug identity only).
+          // One round, three upstream acquisitions: the authoritative
+          // registry document (provenance, #1748), the exact old→new
+          // compare (release_delta, both captured versions), and the
+          // repo-scoped advisory list (security_advisory — slug identity
+          // only).
           res.end(JSON.stringify({ id: "c0", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [
-            { id: "t1", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash"}' } },
+            { id: "t1", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://registry.npmjs.org/lodash/4.5.6"}' } },
             { id: "t2", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/compare/v1.2.3...v4.5.6"}' } },
             { id: "t3", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/security-advisories"}' } },
           ] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
@@ -1947,6 +1951,13 @@ test("#1726: the loop's gh_api upstream evidence settles its dependency rows end
         "ai-stream": "false", "review-routing-mode": "auto", "deep-review": "false",
         "tool-mode": "native_loop", "tool-max-requests": "6",
         "tool-allowed-gh-api-repos": "*",
+        "allowed-source-hosts": "registry.npmjs.org",
+      },
+      // #1748 TEST SEAM: serve the registry document to web_fetch and pass
+      // the per-hop DNS gate without real network I/O.
+      toolIo: {
+        fetch: async (url: string) => ({ status: 200, headers: {}, body: url.includes("registry.npmjs.org") ? "{\"name\":\"lodash\",\"version\":\"4.5.6\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/lodash/lodash.git\"}}" : "{}" }),
+        resolver: async (_hostname: string) => ["93.184.216.34"],
       },
       runDir: root, workspace: root,
       platformAdapter: {
@@ -1977,7 +1988,7 @@ test("#1726: the loop's gh_api upstream evidence settles its dependency rows end
     // The loop executed exactly the three scripted upstream lookups.
     const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ tool?: string; status?: string }> };
     assert.deepEqual((harness.tool_calls ?? []).map((call) => `${call.tool}:${call.status}`), [
-      "gh_api:ok", "gh_api:ok", "gh_api:ok",
+      "web_fetch:ok", "gh_api:ok", "gh_api:ok",
     ]);
     // The provenance and release-delta rows SETTLED deterministically from
     // the run's own validated receipts (reason `dependency-evidence`) — the
@@ -2016,11 +2027,12 @@ test("#1726: the loop's gh_api upstream evidence settles its dependency rows end
 test("#1726: the fully evidenced positive case reaches native APPROVE end to end — receipts + head-bound CI settle every gating row, the run publishes clean", async () => {
   // The issue's positive acceptance, end to end through the real pipeline:
   // a clean patch bump whose upstream evidence rides attributed channels
-  // (forge-read provenance + exact old→new compare + a version-bound
-  // advisory search) AND whose head carries a green test-named CI check
-  // (the scripted CI gate's head-bound evidence line). Every gating row
-  // settles — the dependency rows deterministically from the receipts, the
-  // suite row from the #1612 head-bound CI reconciliation — and the run
+  // (the authoritative registry document for provenance — #1748's
+  // canonical-source rule — plus the exact old→new compare and a
+  // version-bound advisory search) AND whose head carries a green test-named
+  // CI check (the scripted CI gate's head-bound evidence line). Every gating
+  // row settles — the dependency rows deterministically from the receipts,
+  // the suite row from the #1612 head-bound CI reconciliation — and the run
   // certifies native APPROVE (review_result clean, required-check coverage
   // complete), all inside the existing budget.
   async function fullyEvidencedRun(): Promise<{
@@ -2044,7 +2056,7 @@ test("#1726: the fully evidenced positive case reaches native APPROVE end to end
         const turn = loopTurns++;
         if (turn === 0) {
           res.end(JSON.stringify({ id: "c0", object: "chat.completion", model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [
-            { id: "t1", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash"}' } },
+            { id: "t1", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://registry.npmjs.org/lodash/4.5.6"}' } },
             { id: "t2", type: "function", function: { name: "gh_api", arguments: '{"endpoint":"repos/upstream/lodash/compare/v1.2.3...v4.5.6"}' } },
             { id: "t3", type: "function", function: { name: "web_search", arguments: '{"query":"lodash npm security advisories 1.2.3 4.5.6"}' } },
           ] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
@@ -2072,8 +2084,19 @@ test("#1726: the fully evidenced positive case reaches native APPROVE end to end
         "ai-stream": "false", "review-routing-mode": "auto", "deep-review": "false",
         "tool-mode": "native_loop", "tool-max-requests": "6",
         "tool-allowed-gh-api-repos": "*",
+        "allowed-source-hosts": "registry.npmjs.org",
         "search-url": `${server.url}/search`,
         "ci-status-check": "true",
+      },
+      // #1748 TEST SEAM: serve the registry document to web_fetch and pass
+      // the per-hop DNS gate without real network I/O. The search-url rides
+      // the same injected fetch, so the stub answers the search shape too
+      // (the JSON the mock server's /search route serves).
+      toolIo: {
+        fetch: async (url: string) => url.includes("registry.npmjs.org")
+          ? { status: 200, headers: {}, body: "{\"name\":\"lodash\",\"version\":\"4.5.6\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/lodash/lodash.git\"}}" }
+          : { status: 200, headers: {}, body: JSON.stringify({ results: [{ title: "lodash advisory DB", url: "https://github.com/advisories?query=lodash", content: "no advisory affects the 1.2.3..4.5.6 range" }] }) },
+        resolver: async (_hostname: string) => ["93.184.216.34"],
       },
       // The CI gate as an in-process workload branch: it writes the same
       // GITHUB_OUTPUT artifact the real gate child writes (the v2 stage ABI
@@ -2115,7 +2138,7 @@ test("#1726: the fully evidenced positive case reaches native APPROVE end to end
     // One round, three attributed upstream acquisitions.
     const harness = JSON.parse(readFileSync(join(run.runDir, "tool-harness.json"), "utf8")) as { tool_calls?: Array<{ tool?: string; status?: string }> };
     assert.deepEqual((harness.tool_calls ?? []).map((call) => `${call.tool}:${call.status}`), [
-      "gh_api:ok", "gh_api:ok", "web_search:ok",
+      "web_fetch:ok", "gh_api:ok", "web_search:ok",
     ]);
     // Every row settled: the generic ask folds on its applicability answer;
     // the suite ask discharges through the #1612 head-bound CI matcher

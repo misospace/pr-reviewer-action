@@ -1,6 +1,7 @@
 import type { RawInputs } from "../config/load-config.js";
 import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
+import type { ToolDeps } from "../tools/executors.js";
 import type { ciGateBranch } from "../gates/workloads.js";
 import type { PrecheckEvent, PrecheckOutput } from "../precheck/decide.js";
 import type { RunReviewResult } from "./review.js";
@@ -95,6 +96,13 @@ export interface ReviewDependencies {
    * engine takes the executing identity from the bundle's own build stamp
    * (src/version.ts), the only stamp a running build can vouch for. */
   executingActionVersion?: string;
+  /** #1748 TEST SEAM ONLY: the tool fetch/resolver DI pair the native loop's
+   * executors accept (`ToolDeps.fetch` serves web_fetch/web_search;
+   * `ToolDeps.resolver` backs the per-hop public-DNS gate). Production
+   * callers never set it — the executors fall back to their own stack
+   * byte-for-byte. Tests inject it so a loop fixture can serve an
+   * authoritative-registry document to web_fetch without real network I/O. */
+  toolIo?: Pick<ToolDeps, "fetch" | "resolver">;
 }
 
 export type { RunReviewResult as EngineRunResult };
