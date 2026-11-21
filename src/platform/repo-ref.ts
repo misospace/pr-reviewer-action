@@ -12,6 +12,14 @@
 
 const SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 
+/** The ONE forge commit-sha lexical rule for URL paths: the charset every
+ * forge reports shas in, and never a dot-only value (a `.`-only segment
+ * survives a charset check but is rewritten by `new URL()` normalization —
+ * the same hole this module's validators exist to close). Adapters refuse an
+ * unusable sha BEFORE it can reach a URL; each adapter previously kept a
+ * private copy of this pattern. */
+export const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
+
 export function isRepoSegment(segment: string): boolean {
   return SEGMENT_RE.test(segment) && segment !== "." && segment !== "..";
 }

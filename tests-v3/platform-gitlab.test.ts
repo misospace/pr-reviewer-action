@@ -210,14 +210,14 @@ test("getPr records the HTTP-status cause on a failed MR read", async () => {
 
 test("prToGitlabPrShape: draft precedence and unusable payload rejection", () => {
   const base = { iid: 1, id: 1, diff_refs: { base_sha: "b", head_sha: "h" }, source_project_id: 1, target_project_id: 1 };
-  const p1 = prToGitlabPrShape({ ...base, draft: true }, "a/b", "a/b", "1") as GitHubPrShape;
+  const p1 = prToGitlabPrShape({ ...base, draft: true }, "a/b", "a/b") as GitHubPrShape;
   assert.equal(p1.draft, true);
-  const p2 = prToGitlabPrShape({ ...base, work_in_progress: true }, "a/b", "a/b", "1") as GitHubPrShape;
+  const p2 = prToGitlabPrShape({ ...base, work_in_progress: true }, "a/b", "a/b") as GitHubPrShape;
   assert.equal(p2.draft, true);
-  const p3 = prToGitlabPrShape({ ...base }, "a/b", "a/b", "1") as GitHubPrShape;
+  const p3 = prToGitlabPrShape({ ...base }, "a/b", "a/b") as GitHubPrShape;
   assert.equal(p3.draft, undefined, "neither flag → unknown, never defaulted to not-draft");
-  assert.equal(prToGitlabPrShape({ ...base }, "a/b", null, "1"), null, "unproven source path refuses the projection");
-  const merged = prToGitlabPrShape({ ...base, state: "merged", merge_commit_sha: "m1" }, "a/b", "a/b", "1") as GitHubPrShape;
+  assert.equal(prToGitlabPrShape({ ...base }, "a/b", null), null, "unproven source path refuses the projection");
+  const merged = prToGitlabPrShape({ ...base, state: "merged", merge_commit_sha: "m1" }, "a/b", "a/b") as GitHubPrShape;
   assert.equal(merged.merged, true);
   assert.equal(merged.merge_commit_sha, "m1");
 });

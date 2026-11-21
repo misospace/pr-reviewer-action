@@ -14,6 +14,14 @@ export class PlatformRequestError extends Error {
   }
 }
 
+/** The shared rendering of a transport error for a ReadResult error channel:
+ * `Error.message` when the throw carries one, `String()` otherwise. Each
+ * adapter previously kept a private copy; one definition keeps the error
+ * text rendered identically across the read adapters. */
+export function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * #726 (engine cancellation): wrap a fetch implementation so every request
  * is ALSO bound to a caller-owned cancellation signal. The option's own

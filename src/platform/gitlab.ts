@@ -26,9 +26,9 @@
  *   MR that cannot answer that question fails the read cleanly rather than
  *   guessing "same repo" or "unknown". */
 
-import { PlatformRequestError, requestJson, type FetchLike } from "./http.js";
+import { PlatformRequestError, errorText, requestJson, type FetchLike } from "./http.js";
 import { normalizeForgejoConversationComments, normalizeForgejoPrFiles } from "./normalize.js";
-import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath } from "./repo-ref.js";
+import { gitlabProjectPathForDiagnostics, gitlabProjectScopedUrl, parseGitLabProjectPath, SHA_RE } from "./repo-ref.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import type {
   ExternalCheck,
@@ -41,7 +41,6 @@ import type {
 } from "./types.js";
 
 const NUMBER_RE = /^[1-9]\d*$/;
-const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 /** Page size and page cap of a GitLab list read. 100 is the REST default
  * maximum; the cap (20 pages, 2000 items) bounds the request loop so a huge
@@ -51,10 +50,6 @@ const GITLAB_LIST_MAX_PAGES = 20;
 /** Window of `listPrConversationComments` / `listReviewThreads`, matching the
  * v2 seam's 100-item snapshot cap. */
 const GITLAB_SNAPSHOT_CAP = 100;
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -132,7 +127,6 @@ export function prToGitlabPrShape(
   data: unknown,
   targetProjectPath: string,
   sourceProjectPath: string | null,
-  prNumber: string,
 ): unknown | null {
   if (!isObject(data)) return null;
   const iid = typeof data.iid === "number" || typeof data.iid === "string" ? data.iid : null;
@@ -144,7 +138,7 @@ export function prToGitlabPrShape(
   const state = typeof data.state === "string" ? data.state : undefined;
   const merged = state === "merged";
   return {
-    number: iid ?? prNumber,
+    number: iid,
     id: data.id ?? null,
     title: data.title ?? "",
     body: data.description ?? "",
@@ -322,7 +316,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
         }
         sourceProjectPath = path;
       }
-      const pr = prToGitlabPrShape(data, this.repo, sourceProjectPath, this.prNumber);
+      const pr = prToGitlabPrShape(data, this.repo, sourceProjectPath);
       if (pr === null) {
         this.lastPrReadFailure = new PlatformRequestError("MR read returned an unusable payload", null, "invalid-payload");
         return null;
@@ -513,8 +507,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
                 : row.renamed_file === true ? "renamed" : "modified",
             additions: typeof row.additions === "number" ? row.additions : 0,
             deletions: typeof row.deletions === "number" ? row.deletions : 0,
-            changes: typeof row.additions === "number" || typeof row.deletions === "number"
-              ? (typeof row.additions === "number" ? row.additions : 0) + (typeof row.deletions === "number" ? row.deletions : 0) : 0,
+            changes: (typeof row.additions === "number" ? row.additions : 0) + (typeof row.deletions === "number" ? row.deletions : 0),
             patch: typeof row.diff === "string" ? row.diff : "",
             previous_filename: row.renamed_file === true && oldPath !== "" ? oldPath : null,
           });

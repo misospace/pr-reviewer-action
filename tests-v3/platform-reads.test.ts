@@ -13,7 +13,7 @@ import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOri
   groupForgejoReviewThreads, normalizeGithubReviewThreads, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, githubReviewThreadsPageInfo, MAX_GITHUB_REVIEW_THREADS_CURSOR_CHARS, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
-import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
+import { parseRepoRef, repoScopedUrl, SHA_RE } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
@@ -1209,6 +1209,50 @@ test("the shared repo-ref validator rejects dot-only segments and extra segments
   for (const bad of DOT_REFS) assert.equal(parseRepoRef(bad), null, bad);
   assert.deepEqual(parseRepoRef("o.x/r..y"), { owner: "o.x", name: "r..y" });
   assert.deepEqual(parseRepoRef(".github/.dotfiles"), { owner: ".github", name: ".dotfiles" });
+});
+
+test("SHA_RE pins the lexical sha rule: charset yes, dot-only no", () => {
+  for (const good of [
+    "abc1234",
+    "AbCdEf",
+    "0f9e8d7c6b5a4938271605f4e3d2c1b0a9876543",
+    "a".repeat(64),
+    "1.2.3",
+    ".abc",
+    "a.",
+    "-dash",
+    "_underscore",
+  ]) assert.equal(SHA_RE.test(good), true, `charset member must be accepted: ${JSON.stringify(good)}`);
+  for (const bad of [
+    "",
+    ".",
+    "..",
+    "...",
+    "a/b",
+    "../x",
+    "a b",
+    "a\tb",
+    "a%2e",
+    "%2e%2e",
+    "sha;rm",
+    "a\nb",
+    "abc\n",
+  ]) assert.equal(SHA_RE.test(bad), false, `must be refused before reaching a URL: ${JSON.stringify(bad)}`);
+});
+
+test("SHA_RE refusals cover the dot segments a URL path would rewrite", () => {
+  // "." and ".." are the rewrite holes the rule exists for: URL normalization
+  // silently drops or resolves them before any origin/prefix check runs.
+  assert.equal(SHA_RE.test("."), false);
+  assert.notEqual(new URL("https://api.example/repos/o/r/commits/./status").pathname, "/repos/o/r/commits/./status");
+  assert.equal(SHA_RE.test(".."), false);
+  assert.equal(new URL("https://api.example/repos/o/r/commits/../status").pathname, "/repos/o/r/status", "dot-dot escapes the commit scope");
+  // "..." survives normalization unchanged but is refused anyway: dot-only values are outside the lexical contract.
+  assert.equal(SHA_RE.test("..."), false);
+  for (const sha of ["abc1234", "1.2.3", ".abc"]) {
+    assert.equal(SHA_RE.test(sha), true, sha);
+    assert.equal(new URL(`https://api.example/repos/o/r/commits/${sha}/status`).pathname, `/repos/o/r/commits/${sha}/status`, `${sha} must survive URL normalization unchanged`);
+  }
 });
 
 test("repoScopedUrl refuses a URL whose normalized path leaves the intended prefix", () => {

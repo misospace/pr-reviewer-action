@@ -1,7 +1,7 @@
 import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { ForgejoEnrichClient } from "./enrich.js";
 import { canonicalUserId, integrationOwnerIdFromAudience, type IdentityResolution } from "./owner-identity.js";
-import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+import { PlatformRequestError, errorText, requestJson, requestText, type FetchLike } from "./http.js";
 import {
   forgejoReviewCommentId,
   groupForgejoReviewThreads,
@@ -19,7 +19,7 @@ import {
   type ForgejoRunJobsNormalization,
   type ExternalCheck,
 } from "./normalize.js";
-import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
+import { parseRepoRef, repoScopedUrl, SHA_RE } from "./repo-ref.js";
 import { GITEA_INTEGRATION_REFUSAL, type GiteaFamilyForge } from "./resolve.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
@@ -36,11 +36,6 @@ import type {
  * struct, and the commit-status read carries the CI signal. */
 const FORGEJO_EMPTY_CHECK_RUNS = '{"check_runs":[],"total_count":0}';
 const NUMBER_RE = /^[0-9]+$/;
-const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
