@@ -378,31 +378,49 @@ The rules this buys, and their limits:
   URL/query-shape rules, bound to the producer-parsed dependency scope. That
   scope (`dependency_scope` on the tagged rows) is the COMPLETE trustworthy
   set of dependency updates the PR's diff actually changes — exact
-  `{slug, versions}` entries parsed ONLY from producer-recognized dependency
-  surfaces (npm lockfile package blocks, npm manifest dependency sections,
-  Helm chart manifests), carrying the exact changed old→new version identity
-  where the diff shape has one. A receipt backs the row only when, per
-  obligation kind, the validated receipts JOINTLY cover EVERY entry — slug
-  as an exact identity, and, for every kind that asserts the update itself
-  (release delta AND advisory), the COMPLETE captured changed-version
-  identity: an advisory check naming only one endpoint of a captured
-  `old → new` range never certifies the updated range (acquisition
-  provenance bound to the captured range — never semantic vulnerability
-  proof). A versionless entry (the parser emits one for re-resolution-only
-  changes) certifies `provenance` only — the slug proves WHO the dependency
-  is, never an exact delta or an updated version range — and a one-sided
-  entry certifies no release delta; a kind-matched acquisition of the right
-  slug then stays `receipt-mismatch` and the objective row stays
-  material-unresolved through the existing disposition path (never a
-  blocker, never versions inferred from prose, URLs, or receipt text).
-  Attribution is HUNK-LOCAL: a `@@` header resets the lockfile
-  package, manifest section, and chart identity, so a previous hunk's block
-  header, dependency section, or chart name never carries into this one
-  (this hunk's own context may re-establish it). Version identity is EXACT:
-  a lockfile version comes only from the package block's actual `"version"`
+  `{slug, versions[, kind][, digests]}` entries parsed ONLY from
+  producer-recognized dependency surfaces (npm lockfile package blocks, npm
+  manifest dependency sections, Helm chart manifests, and — #1763 —
+  container-image / OCI-chart surfaces: Kustomize files, Flux HelmReleases,
+  Kubernetes workloads, compose files, Helm values files, Dockerfiles),
+  carrying the exact changed old→new version identity where the diff shape
+  has one. An absent `kind` is `npm` (every pre-#1763 entry/artifact keeps
+  byte-identical semantics); `image`/`chart` entries name the canonical
+  registry identity (Docker Hub canonicalized to `docker.io/…`, `library/`
+  stripped) and carry changed `sha256` digests when pinned. A receipt backs
+  the row only when, per obligation kind, the validated receipts JOINTLY
+  cover EVERY entry — identity per the entry's kind: an npm entry's exact
+  slug, and #1763's image/chart identity via the exact slug token, the
+  canonical registry-catalog page, or the namespace/artifact-name source
+  carry — and, for every kind that asserts the update itself (release delta
+  AND advisory), the COMPLETE captured changed-version identity: an advisory
+  check naming only one endpoint of a captured `old → new` range never
+  certifies the updated range (acquisition provenance bound to the captured
+  range — never semantic vulnerability proof). Provenance settles by ONE
+  canonical-source rule per ecosystem (#1748 → #1763): an npm entry only
+  from the canonical npm registry document, an image/chart entry only from
+  the canonical registry-catalog page for the exact artifact path — a
+  same-named repository/image under another owner, a forge read, or a search
+  query proves nothing about who publishes the artifact. A versionless entry
+  (the parser emits one for re-resolution-only changes) certifies
+  `provenance` only — the identity proves WHO the dependency is, never an
+  exact delta or an updated version range — and a one-sided entry certifies
+  no release delta; a kind-matched acquisition of the right identity then
+  stays `receipt-mismatch` and the objective row stays material-unresolved
+  through the existing disposition path (never a blocker, never versions
+  inferred from prose, URLs, or receipt text). Attribution is HUNK-LOCAL: a
+  `@@` header resets the lockfile package, manifest section, chart identity,
+  and image/chart anchor, so a previous hunk's block header, dependency
+  section, chart name, or image anchor never carries into this one (this
+  hunk's own context may re-establish it). Version identity is EXACT: a
+  lockfile version comes only from the package block's actual `"version"`
   field validated as one version token — never from relation values, ranges,
   resolved URLs, engines or integrity hashes; a chart version only from the
-  `version`/`appVersion` field anchored to chart identity in the same hunk.
+  `version`/`appVersion` field anchored to chart identity in the same hunk;
+  an image version only from the reference's own tag or an anchored
+  `version:`/`appVersion:`/`tag:` line, as one exact token (full `x.y.z` or
+  short dotted like `7.2`, one optional leading `v`) — `latest` or
+  `bookworm` is not a checkable version identity and fails closed.
   Unchanged hunk-context neighbors never enter scope; dependency-shaped text
   outside a recognized surface never does; on a lockfile surface ANY changed
   line the current hunk cannot attribute to a package block fails the WHOLE
@@ -410,9 +428,13 @@ The rules this buys, and their limits:
   every JSON value shape (boolean, number, null, object, array), so the only
   changed lines that stay non-scope metadata while unattributed are
   structural punctuation and the lockfile root object's own keys inside the
-  attributed root; and overflow, unattributable shapes, and unread
-  dependency surfaces (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows
-  stay unresolved rather than certifying a partial update set.
+  attributed root; on an image surface an unanchored changed version line or
+  an image-shaped-but-unparseable line (`newName:`/`newTag:`, a failed
+  reference, a stray `oci://`) likewise fails the WHOLE scope CLOSED, while
+  plain non-image config content in the same file is legitimately ignored;
+  and overflow, unattributable shapes, and unread dependency surfaces
+  (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows stay unresolved
+  rather than certifying a partial update set.
 - **No repair from prose.** Malformed or stale provenance is visible and
   reason-coded; nothing rewrites a disposition.
 - **Surfaces for #1656/#1659**: every coverage and obligation row carries
