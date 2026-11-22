@@ -332,7 +332,10 @@ export class ReviewQueueController {
    *
    *  The stamp carries NO superseding job id: that absence is exactly
    *  what distinguishes the operator's cancellation from a supersession
-   *  (`isOperatorCancellation`). */
+   *  (`isOperatorCancellation`). An already-superseded-but-unsettled
+   *  active record is CONVERTED to the operator attribution here, so a
+   *  cancellation acknowledgement is never contradicted by the durable
+   *  record. */
   cancel(jobId: string): "cancelled" | "cancel-requested" | "unknown" | "terminal" {
     this.ensureLoaded();
     const record = this.records.get(jobId);
@@ -346,13 +349,27 @@ export class ReviewQueueController {
       return "cancelled";
     }
     // An active generation: the attempt is aborted and its own settle
-    // reports the cancellation. `supersededByJobId` stays EMPTY — the
+    // reports the cancellation. `supersededByJobId` is CLEARED — the
     // operator's cancellation is distinguishable by exactly that.
+    //
+    // The clear also wins the supersession race (#1772): a newer
+    // generation may already have stamped this record
+    // (`cancelRequested` + `supersededByJobId` + abort) before the
+    // operator clicked Cancel. The stamp would keep the record
+    // supersession-shaped at settle time (`cancelled-by-supersession`,
+    // or `superseded` on a failed settle) while the seam had already
+    // acknowledged the operator's cancellation. Once the operator's
+    // intent is registered it OWNS the attribution — the same rule the
+    // enqueue sweep applies in the other order, where an
+    // operator-cancelled record keeps its empty superseder. The
+    // newer generation runs regardless: this only says why THIS
+    // generation ended.
     this.records.set(
       jobId,
       Object.freeze({
         ...record,
         cancelRequested: true,
+        supersededByJobId: "",
       }),
     );
     const entry = this.controllers.get(jobId);

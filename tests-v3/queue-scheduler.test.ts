@@ -1495,6 +1495,73 @@ test("enqueue: a newer generation never overwrites an operator cancellation's at
   assert.equal(settled.supersededByJobId, "", "never reported as superseded");
 });
 
+test("cancel: cancelling an already-superseded active generation converts it to the operator's attribution (#1772 race)", async () => {
+  // The race: generation A runs; a newer head enqueues B, so A carries
+  // the supersession stamp (cancelRequested + supersededByJobId +
+  // abort). Before A's attempt settles, the operator clicks Cancel on
+  // A. The seam answers `cancel-requested` — the admin route will
+  // acknowledge 200 — so the durable record MUST settle with the
+  // operator's attribution, never supersession-shaped.
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  const inv = executor.last();
+
+  controller.enqueue(makeJob("job-b"));
+  const supersessionStamped = controller.recordFor("job-a")!;
+  assert.equal(supersessionStamped.cancelRequested, true, "the supersession aborted A");
+  assert.equal(supersessionStamped.supersededByJobId, "job-b", "the superseder is stamped before the click");
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  const stamped = controller.recordFor("job-a")!;
+  assert.equal(stamped.cancelRequested, true);
+  assert.equal(
+    stamped.supersededByJobId,
+    "",
+    "the operator's click CONVERTS the attribution: the acknowledgement cannot outlive a supersession stamp",
+  );
+
+  inv.settle(CANCELLED);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator", "never cancelled-by-supersession");
+  assert.equal(settled.supersededByJobId, "", "never reported as superseded");
+  assert.ok(isOperatorCancellation(settled));
+
+  // The newer generation is untouched: it still owns the prKey.
+  assert.equal(controller.recordFor("job-b")!.state, "queued", "B keeps the newer head");
+});
+
+test("cancel: a failed settle of an already-superseded, operator-cancelled generation never reads as superseded (#1772 race)", async () => {
+  // Same race as above; the aborted worker dies with `failed` instead
+  // of `cancelled`. Before the operator's click converted the record,
+  // this settle path retired A as `superseded` — contradicting the
+  // cancellation the admin route had already acknowledged.
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  const inv = executor.last();
+
+  controller.enqueue(makeJob("job-b"));
+  assert.equal(controller.recordFor("job-a")!.supersededByJobId, "job-b");
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  inv.settle(FAILED);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled", "the operator's cancellation outranks the failed settle");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+  assert.equal(settled.supersededByJobId, "", "never reported as superseded");
+
+  await controller.tick();
+  assert.equal(
+    executor.invocations.filter((invocation) => invocation.record.job.jobId === "job-a").length,
+    1,
+    "the cancelled generation is never requeued or rerun",
+  );
+});
+
 test("cancel: a record settled by the operator still classifies as an operator cancellation (#1772)", () => {
   const { controller } = setup();
   controller.enqueue(makeJob("job-a"));

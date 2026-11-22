@@ -116,6 +116,13 @@ data route stays bearer-protected (see
   its attempt), so the route ACKNOWLEDGES the cancellation instead of
   promising it; the durable run settles `cancelled` when the attempt
   observes the abort. The effect seam may still refuse; refusals are `409` too.
+  If a newer head had already stamped the live generation (supersession
+  requested its abort but it had not settled yet), the operator's click
+  CONVERTS the record to the operator attribution — clearing the pending
+  superseder — so the acknowledgement and the durable settlement always
+  agree: the generation ends `cancelled` / `cancelled-by-operator`, never
+  supersession-shaped. The newer generation still runs; the conversion
+  only says why THIS generation ended.
 - **Contract change (#1781), disclosed for out-of-repo consumers:** releases
   through v3.10.0 answered `202` on `POST /admin/runs/{runId}/cancel`; this
   surface now answers `200` with the same `{ "cancelled": true }` body.
