@@ -9,9 +9,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  apiRequest,
   apiTlsServername,
   buildMaterial,
   IN_CLUSTER_API_SERVICE_NAME,
@@ -32,6 +35,12 @@ test("an IP-literal API host derives the conventional SNI name, not the IP (#177
   assert.equal(apiTlsServername("10.43.0.1"), "kubernetes.default.svc");
   assert.equal(apiTlsServername("172.30.0.1"), "kubernetes.default.svc");
   assert.equal(apiTlsServername("fd00::1"), "kubernetes.default.svc");
+});
+
+test("a bracketed IPv6 literal is the same IP, not an invalid SNI hostname (#1773)", () => {
+  assert.equal(apiTlsServername("[fd00::1]"), "kubernetes.default.svc");
+  assert.equal(apiTlsServername("[::1]"), "kubernetes.default.svc");
+  assert.equal(apiTlsServername("[kubernetes.internal]"), "[kubernetes.internal]");
 });
 
 test("a hostname API host keeps servername === host (unchanged)", () => {
@@ -66,4 +75,30 @@ test("the transport never opts out of certificate verification (#1773)", () => {
     /tlsOptions\.servername = material\.servername;/,
     "the https branch must present the derived servername, never the raw host",
   );
+});
+
+test("the live https request options carry the derived servername, not the ClusterIP (#1773)", async () => {
+  const original = https.request;
+  let captured: https.RequestOptions | undefined;
+  (https as { request: unknown }).request = (options: https.RequestOptions) => {
+    captured = options;
+    const fake = new http.ClientRequest("http://127.0.0.1:1", () => undefined);
+    fake.on("error", () => undefined);
+    process.nextTick(() => fake.destroy(new Error("stubbed")));
+    return fake;
+  };
+  const dir = fakeServiceAccountDir();
+  let material: ReturnType<typeof buildMaterial> | undefined;
+  try {
+    material = buildMaterial({ serviceAccountDir: dir, host: "10.43.0.1", port: "443" });
+    await assert.rejects(apiRequest(material, "GET", "/apis/batch/v1/namespaces/default/jobs", null));
+  } finally {
+    (https as { request: unknown }).request = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.ok(captured, "the transport must go through https.request");
+  assert.ok(material);
+  assert.equal(captured.servername, "kubernetes.default.svc", "the live TLS identity is the derived name, never the IP");
+  assert.equal(captured.host, "10.43.0.1", "the socket still connects to the projected host");
+  assert.equal((captured.ca as Buffer).equals(material.ca as Buffer), true, "verification anchors on the projected CA");
 });

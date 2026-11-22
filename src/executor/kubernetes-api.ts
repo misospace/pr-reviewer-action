@@ -44,7 +44,7 @@
 
 import { readFileSync } from "node:fs";
 import { request as httpRequest, type RequestOptions } from "node:http";
-import { request as httpsRequest } from "node:https";
+import https from "node:https";
 import { isIP } from "node:net";
 
 /** The https request options extend the http ones with the TLS trust
@@ -126,7 +126,10 @@ export interface InClusterKubernetesApiOptions {
  * Every provisioned apiserver certificate carries it (plus the short
  * `kubernetes` form and the advertise address) in its SAN set — which is
  * exactly why it, and never the service ClusterIP, is the TLS identity
- * an in-cluster client verifies against (#1773). */
+ * an in-cluster client verifies against (#1773). A control plane whose
+ * apiserver certificate omits this SAN (a non-default service name or
+ * namespace) must project a hostname `KUBERNETES_SERVICE_HOST` instead:
+ * `apiTlsServername` then keeps that host verbatim as the SNI identity. */
 export const IN_CLUSTER_API_SERVICE_NAME = "kubernetes.default.svc";
 
 /** The TLS server name (SNI and certificate-verification identity) for the
@@ -135,9 +138,13 @@ export const IN_CLUSTER_API_SERVICE_NAME = "kubernetes.default.svc";
  * e.g. `10.43.0.1`) — and no apiserver certificate carries an IP SAN for its
  * service ClusterIP, so an IP SNI fails every handshake (#1773). An IP
  * literal therefore presents the conventional service DNS name; an actual
- * hostname is kept verbatim. The socket still connects to `host` unchanged. */
+ * hostname is kept verbatim. The socket still connects to `host` unchanged.
+ * A bracketed IPv6 literal (`[fd00::1]`, the URL authority form) is the same
+ * address — brackets are never valid SNI either — so the IP test sees the
+ * bare form while a bracketed non-IP stays a verbatim host. */
 export function apiTlsServername(host: string): string {
-  return isIP(host) === 0 ? host : IN_CLUSTER_API_SERVICE_NAME;
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return isIP(bare) === 0 ? host : IN_CLUSTER_API_SERVICE_NAME;
 }
 
 export interface ApiMaterial {
@@ -272,7 +279,7 @@ export function apiRequest(
     // exactly the line that follows it.
     const request = material.scheme === "https"
       // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
-      ? httpsRequest(options)
+      ? https.request(options)
       // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
       : httpRequest(options);
     request.on("timeout", () => {

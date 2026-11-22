@@ -2747,7 +2747,7 @@ test("the file-access suppressions stay standalone directly above their sinks", 
     );
     assert.match(
       next,
-      /https?Request\(options\)/,
+      /(?:https?Request|https\.request)\(options\)/,
       "the suppression must sit directly above the request call it silences",
     );
   }
