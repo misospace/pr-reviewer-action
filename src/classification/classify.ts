@@ -4345,7 +4345,8 @@ const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][
  * Flux HelmReleases, Kubernetes workloads, compose files, Helm values files,
  * and Dockerfiles: the surfaces Renovate's docker and helm-oci managers
  * bump. Dependency-shaped text in any OTHER changed file still never
- * enters trusted scope. */
+ * enters trusted scope — the one content-recognized exception is the Flux
+ * OCIRepository manifest marker below. */
 const IMAGE_SURFACE_SHAPE_RES: readonly RegExp[] = [
   /(^|\/)kustomization(\.ya?ml)?$/i,
   /(^|\/)[^/]*(helmrelease|helm-release|helm_release)[^/]*\.ya?ml$/i,
@@ -4355,6 +4356,53 @@ const IMAGE_SURFACE_SHAPE_RES: readonly RegExp[] = [
   /(^|\/)Dockerfile(\..+)?$/i,
   /\.dockerfile$/i,
 ];
+/** #1763 (review finding on #1782): Flux OCIRepository manifests are named
+ * after the RELEASE (`prometheus-blackbox-exporter.yaml`), not after their
+ * kind, so no file-name shape above matches them and the `oci://` url +
+ * `ref.tag` bump this grammar already parses never reaches it. Recognition
+ * therefore also reads CONTENT: a YAML file whose own diff carries the
+ * Kubernetes document-marker PAIR at ROOT column — a `kind: OCIRepository`
+ * line and an `apiVersion: source.toolkit.fluxcd.io/…` line (context,
+ * added, or removed, in any hunk; the diff prefix char is the only leading
+ * byte allowed, so an indented mention in prose or a list item marks
+ * nothing) — is an image/chart surface for this diff. Stricter than the
+ * row-gate's `CHART_PR_MARKER_RE` because this feeds TRUSTED identity, not
+ * a classification lane: both markers belong to a genuine Flux source
+ * manifest, and a bare keyword mention must not open the grammar. The
+ * marker needs no hunk position: recognition is FILE-level, while
+ * attribution stays HUNK-LOCAL, so a bump whose hunk cannot anchor fails
+ * the scope CLOSED like every other unattributable identity. A marker in a
+ * non-YAML file (docs, test fixture) recognizes nothing; HelmRelease
+ * manifests keep their existing file-name arm (their `spec.chart.spec.version`
+ * has no anchor in this grammar, so content-recog for them would fail-close
+ * mixed diffs without ever parsing — deliberately left out). */
+const FLUX_OCI_REPOSITORY_KIND_RE = /^[-+ ]?kind\s*:\s*["']?OCIRepository["']?\s*$/;
+const FLUX_SOURCE_API_VERSION_RE = /^[-+ ]?apiVersion\s*:\s*["']?source\.toolkit\.fluxcd\.io\//;
+const FLUX_SURFACE_YAML_RE = /\.ya?ml$/i;
+
+/** The changed YAML files of this diff whose own region carries BOTH Flux
+ * source-manifest markers (file-scoped: a marker in one file's diff says
+ * nothing about another file, same rule as `diffFileRegions`). A
+ * `diff --git` header whose path this grammar cannot resolve claims no
+ * file, so the following lines attribute to nothing here. */
+function fluxOciRepositorySurfaceFiles(diffLines: readonly string[]): Set<string> {
+  const files = new Set<string>();
+  const kindFiles = new Set<string>();
+  const apiVersionFiles = new Set<string>();
+  let currentFile = "";
+  for (const line of diffLines) {
+    if (line.startsWith("diff --git ")) {
+      const fileHeader = DIFF_GIT_HEADER.exec(line);
+      currentFile = fileHeader === null ? "" : (fileHeader[1] ?? "");
+      continue;
+    }
+    if (currentFile === "" || !FLUX_SURFACE_YAML_RE.test(currentFile)) continue;
+    if (FLUX_OCI_REPOSITORY_KIND_RE.test(line)) kindFiles.add(currentFile);
+    else if (FLUX_SOURCE_API_VERSION_RE.test(line)) apiVersionFiles.add(currentFile);
+    if (kindFiles.has(currentFile) && apiVersionFiles.has(currentFile)) files.add(currentFile);
+  }
+  return files;
+}
 /** A `repository:` key line (bitnami-style values images): the repo part
  * alone, tag carried separately on `tag:` lines, registry (when the chart
  * splits it out) on a sibling `registry:` line. */
@@ -4452,7 +4500,10 @@ function canonicalImageSlug(repo: string): string | null {
  * package blocks, npm manifest dependency sections, Helm chart manifests,
  * and — #1763 — container-image / OCI-chart surfaces: Kustomize files,
  * Flux HelmReleases, Kubernetes workloads, compose files, Helm values
- * files, Dockerfiles). Each entry names the dependency exactly (lowercased,
+ * files, Dockerfiles, and (Flux names OCIRepository manifests after the
+ * release, not the kind) YAML files whose own diff carries the root-column
+ * `apiVersion: source.toolkit.fluxcd.io/…` + `kind: OCIRepository`
+ * document-marker pair). Each entry names the dependency exactly (lowercased,
  * `scope/pkg` normalized) and carries the exact version tokens from the
  * CHANGED lines that introduced it — the trustworthy old→new identity
  * where the diff shape carries one. A package enters scope only when THIS
@@ -4514,6 +4565,12 @@ function canonicalImageSlug(repo: string): string | null {
  * attributed at all; the rows fail closed the same way at the receipt seam.
  */
 export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
+  const diffLines = fullDiffText.split("\n");
+  // #1763 (review finding on #1782): file-level content recognition of Flux
+  // OCIRepository manifests happens in a pre-pass over the WHOLE diff —
+  // attribution below stays hunk-local, but recognition must not depend on
+  // the marker line falling inside the bump hunk's context window.
+  const fluxOciSurfaceFiles = fluxOciRepositorySurfaceFiles(diffLines);
   // #1763: entries accumulate kind and digests beside versions; first-seen
   // order is preserved and the first writer's kind wins. npm-era entries
   // leave kind undefined and never gain digests.
@@ -4780,9 +4837,9 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     // Any other changed line here is non-image content (a replicas count,
     // a comment) — neither scope nor failure.
   };
-  for (const line of fullDiffText.split("\n")) {
+  for (const line of diffLines) {
     if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
-    const fileHeader = /^diff --git a\/(\S+)/.exec(line);
+    const fileHeader = DIFF_GIT_HEADER.exec(line);
     if (fileHeader !== null) {
       flushImageHunk();
       currentFile = fileHeader[1] ?? "";
@@ -4793,12 +4850,28 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       if (UNPARSED_DEPENDENCY_SURFACE_RES.some((pattern) => pattern.test(currentFile))) scopeComplete = false;
       continue;
     }
+    if (line.startsWith("diff --git ")) {
+      // A file header whose path the shared `DIFF_GIT_HEADER` grammar cannot
+      // resolve (git's octal-quoted form for non-ASCII paths; an unquoted
+      // path with an embedded space): its region cannot be attributed to a
+      // file name at all, so it must never leak into the PREVIOUS file's
+      // surface — attribute nothing to it, and fail the WHOLE scope closed:
+      // a changed file this parser cannot even name is the most complete
+      // kind of incompleteness.
+      flushImageHunk();
+      currentFile = "";
+      resetAttribution();
+      scopeComplete = false;
+      continue;
+    }
     // Trusted scope comes ONLY from recognized dependency surfaces.
     const inLockfile = NPM_LOCKFILE_SHAPE_RE.test(currentFile);
     const inManifest = NPM_MANIFEST_SHAPE_RE.test(currentFile);
     const inChartYaml = CHART_MANIFEST_SHAPE_RE.test(currentFile);
-    // #1763: container-image / OCI-chart surfaces.
-    const inImageSurface = IMAGE_SURFACE_SHAPE_RES.some((pattern) => pattern.test(currentFile));
+    // #1763: container-image / OCI-chart surfaces (file name OR, for Flux
+    // OCIRepository manifests, the file's own `kind:` content marker).
+    const inImageSurface = IMAGE_SURFACE_SHAPE_RES.some((pattern) => pattern.test(currentFile))
+      || fluxOciSurfaceFiles.has(currentFile);
     if (!inLockfile && !inManifest && !inChartYaml && !inImageSurface) continue;
     if (line.startsWith("index ")) continue;
     if (line.startsWith("@@")) {

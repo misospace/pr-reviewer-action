@@ -380,9 +380,15 @@ The rules this buys, and their limits:
   set of dependency updates the PR's diff actually changes — exact
   `{slug, versions[, kind][, digests]}` entries parsed ONLY from
   producer-recognized dependency surfaces (npm lockfile package blocks, npm
-  manifest dependency sections, Helm chart manifests, and — #1763 —
-  container-image / OCI-chart surfaces: Kustomize files, Flux HelmReleases,
-  Kubernetes workloads, compose files, Helm values files, Dockerfiles),
+   manifest dependency sections, Helm chart manifests, and — #1763 —
+   container-image / OCI-chart surfaces: Kustomize files, Flux HelmReleases,
+   Kubernetes workloads, compose files, Helm values files, Dockerfiles, and
+   — Flux names OCIRepository manifests after the release, not the kind, so
+   recognition of that surface reads the root-column document-marker pair
+   `apiVersion: source.toolkit.fluxcd.io/…` + `kind: OCIRepository` in the
+   file's own diff instead of the file name; a `diff --git` header whose path
+   the parser cannot resolve (quoted non-ASCII, embedded space) fails the
+   WHOLE scope closed),
   carrying the exact changed old→new version identity where the diff shape
   has one. An absent `kind` is `npm` (every pre-#1763 entry/artifact keeps
   byte-identical semantics); `image`/`chart` entries name the canonical
