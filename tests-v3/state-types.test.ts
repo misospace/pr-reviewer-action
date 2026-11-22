@@ -555,8 +555,9 @@ test("record surfaces carry no secret-bearing fields", () => {
 });
 
 test("an oversized executor failure reason is bounded before the durable record, not rejected by it (#1786 review)", () => {
-  // The worst-case #1775 git-stderr class (~336 chars: exit prefix +
-  // 300-char capped class) exceeds REASON_MAX_CHARS. The pair below is
+  // The worst-case #1775 git-stderr message (~337 chars: exit prefix +
+  // 300-char capped class + truncation marker) exceeds REASON_MAX_CHARS.
+  // The pair below is
   // the writer's guarantee: an unbounded reason is REFUSED fail-closed
   // (never half-written), and the one sanitizer on the daemon's terminal
   // path truncates it into the range the reader accepts — so a verbose

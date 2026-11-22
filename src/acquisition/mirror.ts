@@ -186,15 +186,19 @@ const GIT_STDERR_CONTEXT_MAX_CHARS = 300;
  * capture cap: the capture keeps the HEAD of the stream, so the last-line
  * heuristic may then surface progress padding rather than git's terminal
  * error line. The marker tells the operator never to read the class as
- * the whole story (#1786 review). */
+ * the whole story (#1786 review). A hostile child can print the literal
+ * to fake truncation, but the marker only ever DEGRADES trust in the
+ * class, never elevates it, so forging it gains nothing. */
 const GIT_STDERR_TRUNCATED_NOTE = "[stderr truncated]";
 
-/** Compose the failure class from a failed git run's stderr: strip Unicode
- * format characters (Cf: bidi overrides/isolates, zero-width marks, BOM)
- * FIRST — they are invisible text-spoofing material in an operator-visible
- * record, and removing them before the URL and secret passes reassembles
- * remotes and echoed credentials that were split across them to evade
- * those passes. Then drop remote material (scheme URLs and
+/** Compose the failure class from a failed git run's stderr: normalize to
+ * NFC and strip invisible Unicode FIRST — format characters (Cf: bidi
+ * overrides/isolates, zero-width marks, BOM) and leftover combining marks
+ * (Mn after NFC recomposition: grapheme joiners, variation selectors).
+ * They are text-spoofing material in an operator-visible record, and
+ * removing them before the URL and secret passes reassembles remotes and
+ * echoed credentials that were split across them to evade those passes.
+ * Then drop remote material (scheme URLs and
  * `user@host:path` scp-style remotes are argv/env material and never
  * belong in a durable failure reason; the stripping over-approximates,
  * which is safe), keep the LAST line (git ends with its terminal error;
@@ -218,7 +222,8 @@ function describeGitStderr(
   }
   const withoutRemotes = stderr
     .toString("utf8")
-    .replace(/\p{Cf}/gu, "")
+    .normalize("NFC")
+    .replace(/[\p{Cf}\p{Mn}]/gu, "")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, "<url>")
     .replace(/\b[\w.+-]+@(?:\[[^\]]*\]|[\w.-]+):[^\s]*/g, "<url>");
   let last = "";

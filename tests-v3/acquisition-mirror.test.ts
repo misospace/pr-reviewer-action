@@ -278,11 +278,14 @@ test("ensureMirror: invisible format characters cannot spoof the surfaced class 
       // Attacker-influenced stderr built from the boundary characters
       // themselves (#252): a right-to-left override wrapping a spoofed
       // tail, isolates, zero-width joins inside an otherwise-plain word,
-      // and a scheme URL split across a zero-width space (it must
-      // reassemble and STRIP, not survive the URL pass unmatched).
+      // a scheme URL split across a zero-width space, and the same
+      // evasion replayed with combining marks (grapheme joiner, variation
+      // selector), which are Mn, not Cf — both split URLs must
+      // reassemble and STRIP, not survive the URL pass unmatched.
       const spoofed =
         "fatal: review clean \u202Eno leak here\u202D\u2066done\u2069 re\u200Bpo\u200Drt failed " +
-        "unable to access https:/\u200B/canary-zw-host.invalid/zw/repo.git/";
+        "unable to access https:/\u200B/canary-zw-host.invalid/zw/repo.git/ " +
+        "and ht\u034Ftp://canary-mn-host.invalid/mn/repo.git\uFE0F/ too";
       await writeFile(
         cfGit,
         "#!/bin/sh\n" +
@@ -305,12 +308,12 @@ test("ensureMirror: invisible format characters cannot spoof the surfaced class 
       await assert.rejects(cache.ensureMirror(), (error: unknown) => {
         assert.ok(error instanceof AcquisitionError);
         assert.match(error.message, /git fetch: exited 128/);
-        // No Unicode format character survives into the operator-visible
-        // reason: no bidi override/isolate, no zero-width mark.
-        assert.ok(!/[\p{Cf}]/u.test(error.message), "failure reason must be format-character-free");
-        // The zero-width-split URL reassembled and was stripped, not
+        // No invisible Unicode survives into the operator-visible reason:
+        // no bidi override/isolate, no zero-width mark, no combining mark.
+        assert.ok(!/[\p{Cf}\p{Mn}]/u.test(error.message), "failure reason must be invisible-character-free");
+        // Both invisible-split URLs reassembled and were stripped, not
         // surfaced as text the URL pass missed.
-        assert.doesNotMatch(error.message, /canary-zw-host\.invalid|zw\/repo|https:\/\//);
+        assert.doesNotMatch(error.message, /canary-zw-host\.invalid|canary-mn-host\.invalid|zw\/repo|mn\/repo|https:\/\//);
         assert.match(error.message, /<url>/);
         // The spoofed-over content is inert plain text, single-line.
         assert.ok(!error.message.includes("\n") && !error.message.includes("\r"));
@@ -334,11 +337,16 @@ test("ensureMirror: a credential echoed with zero-width splices is still masked 
       const scratch = await mkdtemp(join(tmpdir(), "acq-cfcred-"));
       const cfCredGit = join(scratch, "git");
       const opaqueAuth = "opaque-canary-secret-4b8e1c55";
-      // The credential echoed back with invisible format characters
-      // spliced INTO the literal, so a plain exact-match pass would walk
-      // past it. Format stripping runs first and reassembles the exact
-      // credential before the known-secret pass sees it.
-      const interleaved = Array.from(opaqueAuth).join("\u200B");
+      // The credential echoed back with invisible characters spliced INTO
+      // the literal — zero-width spaces, combining grapheme joiners, and
+      // variation selectors (Cf and Mn) — so a plain exact-match pass
+      // would walk past it. The NFC + invisible-character strip runs
+      // first and reassembles the exact credential before the
+      // known-secret pass sees it.
+      const invisibles = ["\u200B", "\u034F", "\uFE0F"];
+      const interleaved = Array.from(opaqueAuth)
+        .map((char, index) => invisibles[index % invisibles.length] + char)
+        .join("");
       await writeFile(
         cfCredGit,
         "#!/bin/sh\n" +
@@ -363,7 +371,7 @@ test("ensureMirror: a credential echoed with zero-width splices is still masked 
         assert.ok(error instanceof AcquisitionError);
         assert.match(error.message, /auth echoed/);
         assert.ok(!error.message.includes(opaqueAuth), "the reassembled credential must never surface");
-        assert.ok(!/[\p{Cf}]/u.test(error.message), "no format character survives");
+        assert.ok(!/[\p{Cf}\p{Mn}]/u.test(error.message), "no invisible character survives");
         // Masked in place (the line survives), not smuggled through as
         // unreassembled fragments.
         assert.match(error.message, /⟦•⟧/);
