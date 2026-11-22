@@ -361,10 +361,26 @@ export type EvidenceGateKind = "ci-evidence" | "dependency-evidence" | "source-i
  * producer parsed into a row's scope — the exact dependency slug plus the
  * exact version tokens carried by the CHANGED dependency lines that
  * introduced it (the trustworthy old→new identity where the diff shape
- * carries one; empty where it does not). */
+ * carries one; empty where it does not).
+ *
+ * #1763: the scope is ecosystem-complete. An `image`/`chart` entry names a
+ * canonical container-registry identity (registry host + repository path,
+ * Docker Hub canonicalized to `docker.io/…` with `library/` stripped), and
+ * `digests` carries the changed `sha256` digests (bare lowercase hex) when
+ * the ref pins them. ABSENT `kind` is `npm` — every pre-#1763 artifact and
+ * producer keeps npm semantics byte-for-byte (#1748's canonical-registry
+ * provenance rule is the npm-kind rule; the image/chart provenance rule is
+ * the canonical registry CATALOG binding, never a source-repo name match). */
+export type DependencyScopeKind = "npm" | "image" | "chart";
+
 export interface DependencyScopeEntry {
   slug: string;
   versions: string[];
+  kind?: DependencyScopeKind;
+  /** #1763: changed image-manifest digests (64-char lowercase hex, the
+   * `sha256:` prefix stripped). Advisory/explanatory identity — the
+   * version-asserting obligations bind `versions`, never these. */
+  digests?: string[];
 }
 
 /** The producer's dependency-scope parse result: either the COMPLETE
