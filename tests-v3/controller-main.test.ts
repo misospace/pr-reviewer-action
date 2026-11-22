@@ -3085,8 +3085,15 @@ test("#1781 review: the shape gate refuses traversal-shaped keys before any forg
   }
   assert.deepEqual(prReads, [], "a traversal-shaped key never reaches the forge");
 
-  // The gate is not widened by accident: the valid key still schedules.
+  // The gate is not widened by accident: the valid key still schedules,
+  // and a dot-CONTAINING identity (`.`/`..` only being the refusal) is a
+  // valid key — a future over-tightened rule breaks here, not in production.
   const accepted = await admin("owner/repo#7");
   assert.equal(accepted.status, 202);
-  assert.deepEqual(prReads, [{ repoFullName: "owner/repo", prNumber: 7 }]);
+  const acceptedDotted = await admin("owner.io/sub.name#7");
+  assert.equal(acceptedDotted.status, 202, "a dotted repository identity is a valid key");
+  assert.deepEqual(prReads, [
+    { repoFullName: "owner/repo", prNumber: 7 },
+    { repoFullName: "owner.io/sub.name", prNumber: 7 },
+  ]);
 });

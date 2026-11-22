@@ -471,6 +471,11 @@ test("an invalid rereview form never reaches the controller", async () => {
   await traversalKey.listeners["#rereview:click"]![0]!();
   assert.ok(!traversalKey.paths.includes("/admin/rereview"), "a traversal-shaped key never POSTs");
   assert.ok(traversalKey.containerText("rereview-msg").includes("The PR key must look like owner/repo#123."), traversalKey.containerText("rereview-msg"));
+  // And the mirror positive: a dot-CONTAINING identity passes the client
+  // gate, so a future over-tightened rule fails here, not at the controller.
+  const dottedKey = harness({ form: { prKey: "owner.io/sub.name#7" }, responses: { "/admin/rereview": { status: 202, body: '{"jobId":"dotted-rereview-sentinel"}' } } });
+  await dottedKey.listeners["#rereview:click"]![0]!();
+  assert.ok(dottedKey.paths.includes("/admin/rereview"), "a dotted repository identity is not refused by the form gate");
 });
 
 test("state chip whitelist covers every lifecycle state", () => {
