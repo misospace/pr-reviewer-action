@@ -51,11 +51,17 @@ interface LoginTransaction { readonly state: string; readonly nonce: string; rea
 export class AdminSessionStore {
   private readonly entries = new Map<string, AdminSessionPrincipal | LoginTransaction>();
   constructor(private readonly nowMs: () => number = Date.now, private readonly limit = 1024) {}
-  private put<T extends AdminSessionPrincipal | LoginTransaction>(value: T): string {
+  private sweepExpired(): void {
     for (const [id, item] of this.entries) if (item.expiresAtMs <= this.nowMs()) this.entries.delete(id);
+  }
+  private put<T extends AdminSessionPrincipal | LoginTransaction>(value: T): string {
+    this.sweepExpired();
     if (this.entries.size >= this.limit) {
-      const oldest = [...this.entries].sort((a, b) => a[1].expiresAtMs - b[1].expiresAtMs)[0];
-      if (oldest) this.entries.delete(oldest[0]);
+      // Evict the oldest PENDING TRANSACTION first: a login flood must never
+      // push a live operator session out of the store.
+      const sorted = [...this.entries].sort((a, b) => a[1].expiresAtMs - b[1].expiresAtMs);
+      const victim = sorted.find(([, item]) => !("subject" in item)) ?? sorted[0];
+      if (victim) this.entries.delete(victim[0]);
     }
     const id = randomBytes(32).toString("base64url");
     this.entries.set(id, value);
@@ -64,14 +70,16 @@ export class AdminSessionStore {
   create(principal: Omit<AdminSessionPrincipal, "csrfToken" | "expiresAtMs">, ttlMs: number): string {
     return this.put({ ...principal, csrfToken: randomBytes(32).toString("base64url"), expiresAtMs: this.nowMs() + ttlMs });
   }
-  createTransaction(): { readonly id: string; readonly transaction: LoginTransaction } {
-    // /auth/login is unauthenticated, so pending transactions get their own
-    // small budget: a login flood is refused (503 at the route) instead of
-    // evicting live operator sessions from the shared store.
+  // Returns null once the pending-transaction cap is full: /auth/login is
+  // unauthenticated, so a login flood is refused instead of being allowed to
+  // evict live sessions. The sweep runs BEFORE the count so expired
+  // transactions always free their slots again — the cap must never wedge.
+  createTransaction(): { readonly id: string; readonly transaction: LoginTransaction } | null {
+    this.sweepExpired();
     const transactionCap = Math.min(this.limit, 256);
     let pending = 0;
     for (const item of this.entries.values()) if (!("subject" in item)) pending += 1;
-    if (pending >= transactionCap) throw new Error("login transaction limit reached");
+    if (pending >= transactionCap) return null;
     const transaction = { state: randomBytes(32).toString("base64url"), nonce: randomBytes(32).toString("base64url"), pkceVerifier: randomBytes(32).toString("base64url"), expiresAtMs: this.nowMs() + 600_000 };
     return { id: this.put(transaction), transaction };
   }

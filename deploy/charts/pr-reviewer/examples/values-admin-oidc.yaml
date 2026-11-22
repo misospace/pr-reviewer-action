@@ -75,13 +75,22 @@ workerExecutor:
   mode: disabled
 
 # Browser access to the admin listener. With networkPolicy.enabled the
-# default-deny controller policy opens the admin port only to the
-# serviceMonitor namespace, so the OIDC redirect and the dashboard need an
-# explicit ingress rule — narrow `from` to your ingress controller or
-# operator network:
+# default-deny controller policy opens the admin port only for Prometheus
+# scrapes from the release namespace when serviceMonitor is on — and
+# serviceMonitor defaults off, so by default the port is closed to everyone,
+# including the gateway serving the dashboard sign-in flow. Add an explicit
+# ingress rule and narrow `from` to your gateway (chart README, "network
+# policy" section):
 networkPolicy:
   enabled: true
   additionalIngress:
-    - ports:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
         - protocol: TCP
           port: 8081

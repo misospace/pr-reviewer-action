@@ -441,3 +441,24 @@ test("auth and redaction are covered", async (t) => {
   assert.equal((await fetch(f.base + "/admin/diagnostics")).status, 401);
   assert.equal((await fetch(f.base + "/dashboard")).status, 200);
 });
+test("OIDC logout: a refused logout keeps the signed-in identity; a 401 signs out", async () => {
+  const responses = (logout: { status: number; body: string }) => ({
+    "/auth/config": { status: 200, body: '{"mode":"oidc"}' },
+    "/auth/session": { status: 200, body: '{"authenticated":true,"subject":"sub-1","csrfToken":"csrf-1"}' },
+    "/auth/logout": logout,
+  });
+  // Server-side refusal (e.g. store error): the UI stays signed in and says so.
+  const refused = harness({ responses: responses({ status: 500, body: '{"error":"logout-refused"}' }) });
+  await refused.untilSettled(() => refused.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const refusedClicks = refused.listeners["button:click"]!;
+  await refusedClicks[refusedClicks.length - 1]!();
+  await refused.untilSettled(() => refused.containerText("auth").includes("Sign out failed"), "refusal note renders");
+  assert.ok(refused.containerText("auth").includes("sub-1"));
+  // A 401 means the session is already gone: the UI returns to sign-in.
+  const expired = harness({ responses: responses({ status: 401, body: '{"error":"unauthorized"}' }) });
+  await expired.untilSettled(() => expired.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const expiredClicks = expired.listeners["button:click"]!;
+  await expiredClicks[expiredClicks.length - 1]!();
+  await expired.untilSettled(() => expired.containerText("auth").includes("Sign in"), "sign-in state renders");
+  assert.ok(!expired.containerText("auth").includes("sub-1"));
+});

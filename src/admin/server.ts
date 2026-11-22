@@ -123,8 +123,14 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
           response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", "", secureCookies, 0), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;
         }
         if (url.pathname === "/auth/login" && method === "GET") {
+          const created = sessions.createTransaction();
+          if (!created) {
+            // Pending-transaction cap full (login flood): send the browser
+            // back to the dashboard's sign-in state instead of a bare 503 —
+            // /auth/login is a top-level browser navigation.
+            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.end(); return;
+          }
           try {
-            const created = sessions.createTransaction();
             response.statusCode = 302; response.setHeader("location", await oidc.authorizationUrl(created.transaction, callbackUrl));
             response.setHeader("cache-control", "no-store");
             response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", created.id, secureCookies, 600)); response.end(); return;

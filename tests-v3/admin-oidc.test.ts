@@ -59,11 +59,11 @@ test("OIDC policy, bounded cookie parsing, and fixed-expiry session store", () =
   const id = store.create({ subject: "sub", email: "", groups: [] }, 500);
   assert.equal(store.validate(id)?.subject, "sub");
   assert.notEqual(store.validate(id)?.csrfToken, "");
-  const transaction = store.createTransaction();
+  const transaction = store.createTransaction()!;
   assert.equal(store.takeTransaction(transaction.id)?.state, transaction.transaction.state);
   assert.equal(store.takeTransaction(transaction.id), null);
   // A session-cookie lookup that names a live transaction must not destroy it.
-  const live = store.createTransaction();
+  const live = store.createTransaction()!;
   assert.equal(store.validate(live.id), null);
   assert.equal(store.takeTransaction(live.id)?.state, live.transaction.state);
   assert.equal(parseCookie("session=%ZZ", "session"), undefined);
@@ -72,12 +72,31 @@ test("OIDC policy, bounded cookie parsing, and fixed-expiry session store", () =
   const expiredId = expiring.create({ subject: "expired", email: "", groups: [] }, 10);
   assert.equal(new AdminSessionStore(() => 111).validate(expiredId), null);
   // A login flood must be refused, never allowed to evict live sessions:
-  // pending transactions carry their own cap and the next create throws.
+  // pending transactions carry their own cap and the next create refuses.
   const flooded = new AdminSessionStore(() => 100);
   const floodSession = flooded.create({ subject: "operator", email: "", groups: [] }, 500);
-  for (let i = 0; i < 256; i++) flooded.createTransaction();
-  assert.throws(() => flooded.createTransaction(), /login transaction limit reached/);
+  for (let i = 0; i < 256; i++) assert.notEqual(flooded.createTransaction(), null);
+  assert.equal(flooded.createTransaction(), null);
   assert.equal(flooded.validate(floodSession)?.subject, "operator");
+  // Expired transactions must free their slots: advancing past the 10-minute
+  // transaction TTL un-wedges the cap (the sweep runs BEFORE the count).
+  let clock = 100;
+  const winding = new AdminSessionStore(() => clock);
+  for (let i = 0; i < 256; i++) assert.notEqual(winding.createTransaction(), null);
+  assert.equal(winding.createTransaction(), null);
+  clock = 100 + 600_000 + 1;
+  assert.notEqual(winding.createTransaction(), null);
+  // Near the store limit a new entry evicts the oldest PENDING TRANSACTION,
+  // never a live session — even when the sessions expire sooner.
+  const crowded = new AdminSessionStore(() => 100, 4);
+  const keep = [
+    crowded.create({ subject: "s1", email: "", groups: [] }, 10),
+    crowded.create({ subject: "s2", email: "", groups: [] }, 10),
+    crowded.create({ subject: "s3", email: "", groups: [] }, 10),
+  ];
+  assert.notEqual(crowded.createTransaction(), null);
+  assert.notEqual(crowded.createTransaction(), null);
+  assert.deepEqual(keep.map((id) => crowded.validate(id)?.subject), ["s1", "s2", "s3"]);
 });
 
 test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and CSRF", async (t) => {
@@ -183,6 +202,19 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   assert.equal(multiAudCallback.status, 302);
   assert.equal(multiAudCallback.headers.get("location"), "/dashboard?login=failed");
   assert.equal(multiAudCallback.headers.get("cache-control"), "no-store");
+  // A login flood exhausts the pending-transaction cap: further /auth/login
+  // navigations bounce to the dashboard sign-in state instead of minting
+  // more transactions (each provider redirect below consumed nothing).
+  let providerRedirects = 0;
+  let refused = false;
+  for (let i = 0; i < 300 && !refused; i++) {
+    const attempt = await fetch(`${base}/auth/login`, { redirect: "manual" });
+    assert.equal(attempt.status, 302);
+    if (attempt.headers.get("location") === "/dashboard?login=failed") refused = true;
+    else providerRedirects++;
+  }
+  assert.ok(refused, "login transaction cap never refused");
+  assert.ok(providerRedirects >= 256, `expected >=256 provider redirects before refusal, got ${providerRedirects}`);
 });
 
 test("OIDC session identity never displays an unverified email claim", async (t) => {

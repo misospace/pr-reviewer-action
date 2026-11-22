@@ -771,7 +771,7 @@ const DASHBOARD_JS = `"use strict";
   }
   function renderOidcAuth(connected, identity) {
     const box = document.getElementById("auth"); box.replaceChildren();
-    if (connected) { const who = el("span", "", box); text(who, identity); const logout = el("button", "", box); text(logout, "Logout"); logout.addEventListener("click", async () => { const result = await api("/auth/logout", { method: "POST" }); if (!result.ok) { renderOidcAuth(true, identity); const error = el("span", "failure", document.getElementById("auth")); text(error, "Sign out failed. The session is still signed in."); return; } csrfToken = ""; renderOidcAuth(false); setConnection("disconnected", "chip chip-none"); }); }
+    if (connected) { const who = el("span", "", box); text(who, identity); const logout = el("button", "", box); text(logout, "Logout"); logout.addEventListener("click", async () => { const result = await api("/auth/logout", { method: "POST" }); if (result.ok || result.status === 401) { csrfToken = ""; renderOidcAuth(false); setConnection("disconnected", "chip chip-none"); return; } renderOidcAuth(true, identity); const error = el("span", "failure", document.getElementById("auth")); text(error, "Sign out failed. The session is still signed in."); }); }
     else { const login = el("button", "primary", box); text(login, "Sign in"); login.addEventListener("click", () => { window.location.href = "/auth/login"; }); }
     if (new URLSearchParams(window.location.search).get("login") === "failed") { const error = el("span", "failure", box); text(error, "Sign in failed."); }
   }
