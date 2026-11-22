@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { authorizeClaims, buildCookie, csrfMatches, parseCookie, parseOidcAdminAuth, AdminSessionStore } from "../src/admin/oidc.js";
+import { authorizeClaims, attestedEmail, buildCookie, csrfMatches, parseCookie, parseOidcAdminAuth, AdminSessionStore } from "../src/admin/oidc.js";
 import { createServer } from "node:http";
 import { generateKeyPairSync, sign } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -39,6 +39,13 @@ test("OIDC policy, bounded cookie parsing, and fixed-expiry session store", () =
   assert.equal(authorizeClaims({ email: "A@example.test", email_verified: true }, parsed.config), true);
   assert.equal(authorizeClaims({ email: "not@example.org", email_verified: true }, parsed.config), false);
   assert.equal(authorizeClaims({}, parsed.config), false);
+  // Boundary tokens: attestation absent, explicitly false, or a non-boolean
+  // truthy string must never produce a displayable email (#252).
+  assert.equal(attestedEmail({ email: "a@example.test" }), "");
+  assert.equal(attestedEmail({ email: "a@example.test", email_verified: false }), "");
+  assert.equal(attestedEmail({ email: "a@example.test", email_verified: "true" }), "");
+  assert.equal(attestedEmail({ email: "a@example.test", email_verified: true }), "a@example.test");
+  assert.equal(attestedEmail({ email_verified: true }), "");
   const subjectConfig = parseOidcAdminAuth({ ...env, PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS: "", PR_REVIEWER_ADMIN_OIDC_ALLOWED_SUBJECTS: "alice" });
   if (subjectConfig.mode === "oidc") assert.equal(authorizeClaims({ sub: "alice" }, subjectConfig.config), true);
   const trailing = parseOidcAdminAuth({ ...env, PR_REVIEWER_ADMIN_OIDC_ISSUER: "https://issuer.example.test/" });
@@ -169,6 +176,89 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   assert.equal(multiAudCallback.status, 302);
   assert.equal(multiAudCallback.headers.get("location"), "/dashboard?login=failed");
   assert.equal(multiAudCallback.headers.get("cache-control"), "no-store");
+});
+
+test("OIDC session identity never displays an unverified email claim", async (t) => {
+  // Authorization may succeed through a non-email authority (here an allowed
+  // subject). The session identity must still refuse a bare `email` claim:
+  // only `email_verified: true` earns display, or /auth/session hands the
+  // dashboard a self-asserted address as the signed-in identity.
+  const subjectEnv = { ...env, PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS: "", PR_REVIEWER_ADMIN_OIDC_ALLOWED_SUBJECTS: "allowed-sub" };
+  const parsed = parseOidcAdminAuth(subjectEnv);
+  assert.equal(parsed.mode, "oidc");
+  if (parsed.mode !== "oidc") return;
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const publicJwk = publicKey.export({ format: "jwk" });
+  let tokenEmailVerified: boolean | "true" | undefined = false;
+  let nonce = "";
+  const issueIdToken = (issueNonce: string): string => {
+    const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "key-1" })).toString("base64url");
+    const claims = Buffer.from(JSON.stringify({ iss: parsed.config.issuer, aud: parsed.config.clientId, azp: parsed.config.clientId, exp: Math.floor(Date.now() / 1000) + 300, iat: Math.floor(Date.now() / 1000), nonce: issueNonce, sub: "allowed-sub", email: "admin@example.test", ...(tokenEmailVerified === undefined ? {} : { email_verified: tokenEmailVerified }), groups: [] })).toString("base64url");
+    const signingInput = `${header}.${claims}`;
+    const signature = sign("RSA-SHA256", Buffer.from(signingInput), privateKey).toString("base64url");
+    return `${signingInput}.${signature}`;
+  };
+  const providerFetch: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/openid-configuration")) return Response.json({ issuer: parsed.config.issuer, authorization_endpoint: "https://issuer.example.test/authorize", token_endpoint: "https://issuer.example.test/token", jwks_uri: "https://issuer.example.test/jwks" });
+    if (url.endsWith("/jwks")) return Response.json({ keys: [{ ...publicJwk, kid: "key-1", use: "sig" }] });
+    if (url.endsWith("/token")) return Response.json({ id_token: issueIdToken(nonce) });
+    throw new Error("unexpected provider request");
+  };
+  const deps: ControllerAdminDeps = {
+    readiness: async () => ({ components: [] }), listRuns: async () => ({ runs: [] }), getRun: async () => null,
+    adoptionStatus: async () => ({ repositories: [] }), queueStatus: async () => ({ depthByState: { queued: 0, starting: 0, running: 0, publishing: 0, completed: 0, failed: 0, cancelled: 0, superseded: 0 }, oldestAgeMs: 0, activeWorkersByExecutor: {} }),
+    diagnostics: async () => ({}), forceRereview: async () => ({ jobId: "job" }), cancelRun: async () => ({ cancelled: true }), audit: () => undefined,
+  };
+  const host = createAdminHost({ deps, auth: parsed, token: "break-glass", oidcFetch: providerFetch });
+  const server = createServer(host.handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+  const login = await fetch(`${base}/auth/login`, { redirect: "manual" });
+  assert.equal(login.status, 302);
+  nonce = new URL(login.headers.get("location")!).searchParams.get("nonce")!;
+  const txCookie = login.headers.get("set-cookie")!.split(";")[0]!;
+  const callback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(login.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: txCookie }, redirect: "manual" });
+  assert.equal(callback.status, 302);
+  assert.equal(callback.headers.get("location"), "/dashboard");
+  const sessionCookie = callback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
+  const session = await fetch(`${base}/auth/session`, { headers: { cookie: sessionCookie } });
+  assert.equal(session.status, 200);
+  const principal = await session.json() as { subject: string; email: string };
+  assert.equal(principal.subject, "allowed-sub");
+  assert.equal(principal.email, "");
+  // Once the provider attests email_verified, the same address becomes the
+  // displayed identity on the next login.
+  tokenEmailVerified = true;
+  const verifiedLogin = await fetch(`${base}/auth/login`, { redirect: "manual" });
+  nonce = new URL(verifiedLogin.headers.get("location")!).searchParams.get("nonce")!;
+  const verifiedTx = verifiedLogin.headers.get("set-cookie")!.split(";")[0]!;
+  const verifiedCallback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(verifiedLogin.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: verifiedTx }, redirect: "manual" });
+  assert.equal(verifiedCallback.status, 302);
+  const verifiedCookie = verifiedCallback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
+  const verifiedSession = await fetch(`${base}/auth/session`, { headers: { cookie: verifiedCookie } });
+  assert.equal(verifiedSession.status, 200);
+  const verifiedPrincipal = await verifiedSession.json() as { subject: string; email: string };
+  assert.equal(verifiedPrincipal.subject, "allowed-sub");
+  assert.equal(verifiedPrincipal.email, "admin@example.test");
+  // Attestation absent or a non-boolean truthy string: the session must stay
+  // subject-keyed, not fall back to the bare email claim.
+  for (const absent of [undefined, "true" as const]) {
+    tokenEmailVerified = absent;
+    const bareLogin = await fetch(`${base}/auth/login`, { redirect: "manual" });
+    nonce = new URL(bareLogin.headers.get("location")!).searchParams.get("nonce")!;
+    const bareTx = bareLogin.headers.get("set-cookie")!.split(";")[0]!;
+    const bareCallback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(bareLogin.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: bareTx }, redirect: "manual" });
+    assert.equal(bareCallback.status, 302);
+    const bareCookie = bareCallback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
+    const bareSession = await fetch(`${base}/auth/session`, { headers: { cookie: bareCookie } });
+    assert.equal(bareSession.status, 200);
+    const barePrincipal = await bareSession.json() as { subject: string; email: string };
+    assert.equal(barePrincipal.subject, "allowed-sub");
+    assert.equal(barePrincipal.email, "");
+  }
 });
 
 test("OIDC discovery endpoints must use secure transports (fail closed)", async (t) => {

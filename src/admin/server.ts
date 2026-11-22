@@ -13,7 +13,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminAuthenticator } from "./auth.js";
-import { AdminSessionStore, OidcAdminProvider, buildCookie, parseCookie, authorizeClaims, csrfMatches, type AdminAuthConfig } from "./oidc.js";
+import { AdminSessionStore, OidcAdminProvider, attestedEmail, buildCookie, parseCookie, authorizeClaims, csrfMatches, type AdminAuthConfig } from "./oidc.js";
 import { readBoundedBody } from "./http-body.js";
 import { serveDashboard, type AdminDashboardOptions, type DashboardResponse } from "./dashboard.js";
 import { AdminMetricsRegistry, type AdminMetricsOptions } from "./metrics.js";
@@ -139,7 +139,12 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
             const claims = await oidc.exchange(code, tx, callbackUrl);
             if (!authorizeClaims(claims, oidcConfig)) throw new Error("OIDC identity is not allowed");
             if (typeof claims.sub !== "string" || !claims.sub || claims.sub.length > 512) throw new Error("invalid subject");
-            const id = sessions.create({ subject: claims.sub, email: typeof claims.email === "string" ? claims.email.slice(0, 320) : "" , groups: Array.isArray(claims.groups) ? claims.groups.filter((x): x is string => typeof x === "string").slice(0, 128) : [] }, oidcConfig.sessionTtlMs);
+            // The session identity must never display a bare `email` claim:
+            // only a provider-attested `email_verified: true` earns it (#1785).
+            // When a subject- or group-authorized token carries an unverified
+            // email, the session stays subject-keyed and the dashboard falls
+            // back to the subject.
+            const id = sessions.create({ subject: claims.sub, email: attestedEmail(claims), groups: Array.isArray(claims.groups) ? claims.groups.filter((x): x is string => typeof x === "string").slice(0, 128) : [] }, oidcConfig.sessionTtlMs);
             response.statusCode = 302; response.setHeader("location", "/dashboard");
             response.setHeader("cache-control", "no-store");
             response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", id, secureCookies, Math.floor(oidcConfig.sessionTtlMs / 1000)), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;

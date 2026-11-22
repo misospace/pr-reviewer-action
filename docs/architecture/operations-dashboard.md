@@ -43,7 +43,7 @@ The session and transaction cookies are HttpOnly, Path=/, SameSite=Lax, and Secu
 
 The dashboard reads the public `/auth/config` mode. In OIDC mode the browser uses same-origin cookies and never receives a credential for storage. In both modes no credential is written to browser-accessible persistence; the bearer token, where used, stays in memory only.
 
-Authorization policy: the subject, email, and group allowlists combine as OR, and an email entry matches only with `email_verified: true`. See the admin API document for the full claim-validation rules. An expired or revoked session answers `401`, and the shell returns to the sign-in state on the next request instead of showing stale authenticated data.
+Authorization policy: the subject, email, and group allowlists combine as OR, and an email entry matches only with `email_verified: true`. See the admin API document for the full claim-validation rules. The displayed identity follows the same rule: `/auth/session` carries the email only when the provider attested it, and an unverified or absent claim renders the signed subject instead. An expired or revoked session answers `401`, and the shell returns to the sign-in state on the next request instead of showing stale authenticated data.
 
 ## Why the shell is unauthenticated but carries no data
 

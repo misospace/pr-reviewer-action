@@ -82,7 +82,7 @@ independent of admin authentication configuration.
 Authorization policy facts an operator relies on:
 
 - The subject, email, and group lists combine as OR: a claim that satisfies any configured list authorizes the session. Keep each list as tight as the policy needs.
-- An email list entry matches only when the provider attests `email_verified: true`; a bare `email` claim is self-asserted and never authorizes on its own. The group list trusts the provider's `groups` claim, so use it only with a provider whose group membership is operator-controlled.
+- An email list entry matches only when the provider attests `email_verified: true`; a bare `email` claim is self-asserted and never authorizes on its own. The same rule governs the displayed identity: the session stores and `/auth/session` returns the email only when attested, so with an unverified or absent claim the dashboard shows the signed subject instead. The group list trusts the provider's `groups` claim, so use it only with a provider whose group membership is operator-controlled.
 - Issuer comparison tolerates a trailing-slash difference on either side; configure the issuer exactly as the provider publishes it.
 - ID tokens must be RS256 signed by a key from the provider's JWKS; the key set is cached for at most 15 minutes. `iss`, `aud`, `azp` (when present), `exp`, `iat`, and the login `nonce` are all validated.
 

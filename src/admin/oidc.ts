@@ -94,6 +94,13 @@ export function parseCookie(header: string | string[] | undefined, name: string)
 export function buildCookie(name: string, value: string, secure: boolean, maxAge: number): string {
   return `${name}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
 }
+export function attestedEmail(claims: Record<string, unknown>): string {
+  // The one rule for trusting the `email` claim, shared by authorization
+  // (`authorizeClaims`) and the session identity (#1785): the provider must
+  // attest `email_verified: true` — a bare `email` claim is self-asserted
+  // and must never authorize or display on its own.
+  return claims.email_verified === true && typeof claims.email === "string" ? claims.email.slice(0, 320) : "";
+}
 export function authorizeClaims(claims: Record<string, unknown>, config: OidcAdminConfig): boolean {
   // The lists combine as OR: a claim that satisfies ANY configured list is
   // authorized. Within the email list, a match counts only when the provider
@@ -102,9 +109,8 @@ export function authorizeClaims(claims: Record<string, unknown>, config: OidcAdm
   let matched = false;
   if (config.allowedSubjects.length) matched ||= typeof claims.sub === "string" && config.allowedSubjects.includes(claims.sub);
   if (config.allowedEmails.length) {
-    const email = typeof claims.email === "string" ? claims.email.toLowerCase() : "";
-    const verified = claims.email_verified === true;
-    matched ||= verified && config.allowedEmails.some((allowed) => allowed.startsWith("@") ? email.endsWith(allowed) : email === allowed);
+    const email = attestedEmail(claims).toLowerCase();
+    matched ||= config.allowedEmails.some((allowed) => allowed.startsWith("@") ? email.endsWith(allowed) : email === allowed);
   }
   if (config.allowedGroups.length) {
     const groups = Array.isArray(claims.groups) ? claims.groups.filter((item): item is string => typeof item === "string") : [];
