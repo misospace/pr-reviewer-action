@@ -73,3 +73,15 @@ controller:
 
 workerExecutor:
   mode: disabled
+
+# Browser access to the admin listener. With networkPolicy.enabled the
+# default-deny controller policy opens the admin port only to the
+# serviceMonitor namespace, so the OIDC redirect and the dashboard need an
+# explicit ingress rule — narrow `from` to your ingress controller or
+# operator network:
+networkPolicy:
+  enabled: true
+  additionalIngress:
+    - ports:
+        - protocol: TCP
+          port: 8081

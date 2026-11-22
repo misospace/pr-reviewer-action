@@ -65,6 +65,13 @@ export class AdminSessionStore {
     return this.put({ ...principal, csrfToken: randomBytes(32).toString("base64url"), expiresAtMs: this.nowMs() + ttlMs });
   }
   createTransaction(): { readonly id: string; readonly transaction: LoginTransaction } {
+    // /auth/login is unauthenticated, so pending transactions get their own
+    // small budget: a login flood is refused (503 at the route) instead of
+    // evicting live operator sessions from the shared store.
+    const transactionCap = Math.min(this.limit, 256);
+    let pending = 0;
+    for (const item of this.entries.values()) if (!("subject" in item)) pending += 1;
+    if (pending >= transactionCap) throw new Error("login transaction limit reached");
     const transaction = { state: randomBytes(32).toString("base64url"), nonce: randomBytes(32).toString("base64url"), pkceVerifier: randomBytes(32).toString("base64url"), expiresAtMs: this.nowMs() + 600_000 };
     return { id: this.put(transaction), transaction };
   }

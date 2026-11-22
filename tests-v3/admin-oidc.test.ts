@@ -71,6 +71,13 @@ test("OIDC policy, bounded cookie parsing, and fixed-expiry session store", () =
   const expiring = new AdminSessionStore(() => 100);
   const expiredId = expiring.create({ subject: "expired", email: "", groups: [] }, 10);
   assert.equal(new AdminSessionStore(() => 111).validate(expiredId), null);
+  // A login flood must be refused, never allowed to evict live sessions:
+  // pending transactions carry their own cap and the next create throws.
+  const flooded = new AdminSessionStore(() => 100);
+  const floodSession = flooded.create({ subject: "operator", email: "", groups: [] }, 500);
+  for (let i = 0; i < 256; i++) flooded.createTransaction();
+  assert.throws(() => flooded.createTransaction(), /login transaction limit reached/);
+  assert.equal(flooded.validate(floodSession)?.subject, "operator");
 });
 
 test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and CSRF", async (t) => {
