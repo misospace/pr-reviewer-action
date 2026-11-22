@@ -170,3 +170,66 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   assert.equal(multiAudCallback.headers.get("location"), "/dashboard?login=failed");
   assert.equal(multiAudCallback.headers.get("cache-control"), "no-store");
 });
+
+test("OIDC discovery endpoints must use secure transports (fail closed)", async (t) => {
+  const parsed = parseOidcAdminAuth(env);
+  assert.equal(parsed.mode, "oidc");
+  if (parsed.mode !== "oidc") return;
+  const deps: ControllerAdminDeps = {
+    readiness: async () => ({ components: [] }), listRuns: async () => ({ runs: [] }), getRun: async () => null,
+    adoptionStatus: async () => ({ repositories: [] }), queueStatus: async () => ({ depthByState: { queued: 0, starting: 0, running: 0, publishing: 0, completed: 0, failed: 0, cancelled: 0, superseded: 0 }, oldestAgeMs: 0, activeWorkersByExecutor: {} }),
+    diagnostics: async () => ({}), forceRereview: async () => ({ jobId: "job" }), cancelRun: async () => ({ cancelled: true }), audit: () => undefined,
+  };
+  const start = async (providerFetch: typeof fetch) => {
+    const host = createAdminHost({ deps, auth: parsed, token: "break-glass", oidcFetch: providerFetch });
+    const server = createServer(host.handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    return server;
+  };
+  // A discovery document pointing the flow at a plaintext (non-loopback)
+  // endpoint must refuse: the code exchange and JWKS fetch are attacker
+  // controlled otherwise, even with an https issuer. Each endpoint is
+  // exercised independently — the validations run in order, so a single
+  // all-http fixture would only ever reach the first one.
+  const insecureFetch: typeof fetch = async (input) => {
+    if (String(input).endsWith("/.well-known/openid-configuration")) return Response.json({ issuer: `${parsed.config.issuer}/`, authorization_endpoint: "http://issuer.example.test/authorize", token_endpoint: "http://issuer.example.test/token", jwks_uri: "http://issuer.example.test/jwks" });
+    throw new Error("unexpected provider request");
+  };
+  const insecure = await start(insecureFetch);
+  const insecureAddress = insecure.address() as AddressInfo;
+  const refused = await fetch(`http://127.0.0.1:${insecureAddress.port}/auth/login`, { redirect: "manual" });
+  assert.equal(refused.status, 503);
+  // https authorization endpoint, plaintext token endpoint: metadata()
+  // validates every endpoint at discovery time, so the login refuses before
+  // any redirect is rendered.
+  const insecureTokenFetch: typeof fetch = async (input) => {
+    if (String(input).endsWith("/.well-known/openid-configuration")) return Response.json({ issuer: `${parsed.config.issuer}/`, authorization_endpoint: `${parsed.config.issuer}/authorize`, token_endpoint: "http://issuer.example.test/token", jwks_uri: `${parsed.config.issuer}/jwks` });
+    throw new Error("unexpected provider request");
+  };
+  const insecureToken = await start(insecureTokenFetch);
+  const insecureTokenAddress = insecureToken.address() as AddressInfo;
+  const tokenLogin = await fetch(`http://127.0.0.1:${insecureTokenAddress.port}/auth/login`, { redirect: "manual" });
+  assert.equal(tokenLogin.status, 503);
+  // https authorization and token endpoints, plaintext jwks_uri: same
+  // discovery-time refusal — signature verification must never fetch the
+  // JWKS over plaintext.
+  const insecureJwksFetch: typeof fetch = async (input) => {
+    if (String(input).endsWith("/.well-known/openid-configuration")) return Response.json({ issuer: `${parsed.config.issuer}/`, authorization_endpoint: `${parsed.config.issuer}/authorize`, token_endpoint: `${parsed.config.issuer}/token`, jwks_uri: "http://issuer.example.test/jwks" });
+    throw new Error("unexpected provider request");
+  };
+  const insecureJwks = await start(insecureJwksFetch);
+  const insecureJwksAddress = insecureJwks.address() as AddressInfo;
+  const jwksLogin = await fetch(`http://127.0.0.1:${insecureJwksAddress.port}/auth/login`, { redirect: "manual" });
+  assert.equal(jwksLogin.status, 503);
+  // Loopback http endpoints stay available for local development providers.
+  const loopbackFetch: typeof fetch = async (input) => {
+    if (String(input).endsWith("/.well-known/openid-configuration")) return Response.json({ issuer: `${parsed.config.issuer}/`, authorization_endpoint: "http://127.0.0.1:9999/authorize", token_endpoint: "http://127.0.0.1:9999/token", jwks_uri: "http://127.0.0.1:9999/jwks" });
+    throw new Error("unexpected provider request");
+  };
+  const loopback = await start(loopbackFetch);
+  const loopbackAddress = loopback.address() as AddressInfo;
+  const allowed = await fetch(`http://127.0.0.1:${loopbackAddress.port}/auth/login`, { redirect: "manual" });
+  assert.equal(allowed.status, 302);
+  assert.ok(new URL(allowed.headers.get("location")!).searchParams.get("code_challenge"));
+});

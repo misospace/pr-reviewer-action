@@ -154,7 +154,14 @@ export class OidcAdminProvider {
     if (this.discovery) return this.discovery;
     const data = await this.getJson(`${this.config.issuer}/.well-known/openid-configuration`);
     if (!sameIssuer(data.issuer, this.config.issuer) || typeof data.authorization_endpoint !== "string" || typeof data.token_endpoint !== "string" || typeof data.jwks_uri !== "string") throw new Error("invalid OIDC discovery document");
-    this.discovery = { ...(data as unknown as Discovery), issuer: this.config.issuer };
+    // Every endpoint the flow then talks to must satisfy the same transport
+    // policy as the operator-configured URLs: an https issuer must not be
+    // able to hand us a plaintext code exchange or JWKS endpoint (http stays
+    // available for loopback providers in local development).
+    const authorization = checkedUrl(data.authorization_endpoint, "OIDC authorization_endpoint");
+    const token = checkedUrl(data.token_endpoint, "OIDC token_endpoint");
+    const jwks = checkedUrl(data.jwks_uri, "OIDC jwks_uri");
+    this.discovery = { issuer: this.config.issuer, authorization_endpoint: authorization.toString(), token_endpoint: token.toString(), jwks_uri: jwks.toString() };
     return this.discovery;
   }
   async authorizationUrl(transaction: LoginTransaction, callback: string): Promise<string> {
