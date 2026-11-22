@@ -4836,6 +4836,13 @@ test("#1763: quoted-key spellings of image/repository/registry bypass no arm", (
     '-  "image": evil/foo:1.2.3\n' +
     '+  "image": evil/foo:1.2.4\n';
   assert.deepEqual(parseDependencyScope(quotedImage), { available: false });
+  const quotedTag =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    " image:\n" +
+    '   repository: bitnami/postgresql\n' +
+    '-  "tag": 1.2.3\n' +
+    '+  "tag": 1.2.4\n';
+  assert.deepEqual(parseDependencyScope(quotedTag), { available: false });
 });
 
 test("#1763: a changed registry: is a provenance switch and ungrammar-missing image keys are unattributable — both fail CLOSED", () => {

@@ -420,17 +420,23 @@ The rules this buys, and their limits:
   an image version only from the reference's own tag or an anchored
   `version:`/`appVersion:`/`tag:` line, as one exact token (full `x.y.z` or
   short dotted like `7.2`, one optional leading `v`) — `latest` or
-  `bookworm` is not a checkable version identity and fails closed.
-  Unchanged hunk-context neighbors never enter scope; dependency-shaped text
-  outside a recognized surface never does; on a lockfile surface ANY changed
-  line the current hunk cannot attribute to a package block fails the WHOLE
-  scope CLOSED rather than being silently omitted — package content comes in
-  every JSON value shape (boolean, number, null, object, array), so the only
-  changed lines that stay non-scope metadata while unattributed are
-  structural punctuation and the lockfile root object's own keys inside the
-  attributed root; on an image surface an unanchored changed version line or
-  an image-shaped-but-unparseable line (`newName:`/`newTag:`, a failed
-  reference, a stray `oci://`) likewise fails the WHOLE scope CLOSED, while
+  `bookworm` is not a checkable version identity and fails closed. A
+  split-key `registry:` (bitnami-style `<registry>/<repository>` spellings)
+  is resolved per key column in a per-hunk pre-pass and qualifies only
+  same-column host-less repo values; a `registry:` value that is not one
+  clean host, two distinct hosts at one column, or any CHANGED `registry:`
+  (a provenance switch, never a version refresh) fails the WHOLE scope
+  CLOSED. Unchanged hunk-context neighbors never enter scope;
+  dependency-shaped text outside a recognized surface never does; on a
+  lockfile surface ANY changed line the current hunk cannot attribute to a
+  package block fails the WHOLE scope CLOSED rather than being silently
+  omitted — package content comes in every JSON value shape (boolean,
+  number, null, object, array), so the only changed lines that stay
+  non-scope metadata while unattributed are structural punctuation and the
+  lockfile root object's own keys inside the attributed root; on an image
+  surface an unanchored changed version line or an image-shaped-but-unparseable
+  line (`newName:`/`newTag:`, a failed or quoted-key reference, a stray
+  `oci://`, marker residue) likewise fails the WHOLE scope CLOSED, while
   plain non-image config content in the same file is legitimately ignored;
   and overflow, unattributable shapes, and unread dependency surfaces
   (yarn/pnpm/go/pip/…) fail the scope CLOSED — the rows stay unresolved

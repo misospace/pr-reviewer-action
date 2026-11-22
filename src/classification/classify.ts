@@ -4395,7 +4395,7 @@ const IMAGE_VERSION_LINE_RE = /^\s*(?:version|appVersion)\s*:\s*["']?([A-Za-z0-9
 const IMAGE_UNPARSEABLE_LINE_RES: readonly RegExp[] = [
   /\b(?:newName|newTag)\s*:/i,
   /(?:@sha256:|\boci:\/\/)/,
-  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:["']?(?:image|repository|registry)["']?\s*:|\bFROM(?=\s|$))/i,
+  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:["']?(?:image|repository|registry|tag)["']?\s*:|\bFROM(?=\s|$))/i,
 ];
 /** #1763: the short dotted image tag (`7.2`) alongside the full exact
  * DEPENDENCY_SCOPE_EXACT_VERSION_RE — image tags are commonly two-segment.
