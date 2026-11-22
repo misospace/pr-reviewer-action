@@ -4802,6 +4802,42 @@ test("#1763: the split-key registry resolves order-independently, poisons on unv
   assert.deepEqual(parseDependencyScope(explicitKey), { available: false });
 });
 
+test("#1763: registries resolve per key column — a sibling at another column never strips the qualifier, two hosts at one column fail CLOSED", () => {
+  const qualified =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   registry: harbor.corp\n" +
+    "   repository: team/app\n" +
+    "-  tag: 1.0.0\n" +
+    "+  tag: 1.0.1\n" +
+    " extra:\n" +
+    "   nested:\n" +
+    "     registry: other.example.com\n";
+  assert.deepEqual(parseDependencyScope(qualified), {
+    available: true,
+    entries: [{ slug: "harbor.corp/team/app", versions: ["1.0.0", "1.0.1"], kind: "image" }],
+  });
+  const ambiguous = qualified.replace("   registry: harbor.corp", "   registry: docker.io").replace("     registry: other.example.com", "   registry: harbor.corp");
+  assert.deepEqual(parseDependencyScope(ambiguous), { available: false });
+});
+
+test("#1763: quoted-key spellings of image/repository/registry bypass no arm", () => {
+  const quotedRegistry =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    '-  "registry": docker.io\n' +
+    '+  "registry": evil.example.com\n' +
+    '   "repository": bitnami/postgresql\n';
+  assert.deepEqual(parseDependencyScope(quotedRegistry), { available: false });
+  const quotedImage =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    '-  "image": evil/foo:1.2.3\n' +
+    '+  "image": evil/foo:1.2.4\n';
+  assert.deepEqual(parseDependencyScope(quotedImage), { available: false });
+});
+
 test("#1763: a changed registry: is a provenance switch and ungrammar-missing image keys are unattributable — both fail CLOSED", () => {
   const registrySwitch =
     "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +

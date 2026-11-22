@@ -4367,10 +4367,12 @@ const IMAGE_REPOSITORY_LINE_RE = /^\s*repository\s*:\s*["']?([A-Za-z0-9][A-Za-z0
  * rendered pull target is then unknown, and an unknown identity must never
  * default to Docker Hub. A CHANGED registry is a provenance switch, not a
  * version refresh — it fails the scope closed on its own. */
-const IMAGE_REGISTRY_LINE_RE = /^\s*registry\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9.:-]*)["']?\s*$/;
-/** Any line spelling a `registry:` key, list-item marker included — the
- * pre-pass recognition shape (its value then faces IMAGE_REGISTRY_LINE_RE). */
-const IMAGE_REGISTRY_KEY_RE = /^\s*(?:-\s+)*registry\s*:/i;
+const IMAGE_REGISTRY_LINE_RE = /^\s*["']?registry["']?\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9.:-]*)["']?\s*$/;
+/** Any line spelling a `registry:` key, list-item marker or quoted-key
+ * spelling included — the pre-pass recognition shape (its value then faces
+ * IMAGE_REGISTRY_LINE_RE; a quoted `"registry":` provenance switch must not
+ * bypass the rule any more than a bare one). */
+const IMAGE_REGISTRY_KEY_RE = /^\s*(?:-\s+)*["']?registry["']?\s*:/i;
 /** One clean registry host (optionally `:port`): dotted, label-shaped. */
 const IMAGE_REGISTRY_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(?::\d{1,5})?$/;
 /** An OCI chart `url:` line (Flux OCIRepositories): the chart slug is the
@@ -4393,7 +4395,7 @@ const IMAGE_VERSION_LINE_RE = /^\s*(?:version|appVersion)\s*:\s*["']?([A-Za-z0-9
 const IMAGE_UNPARSEABLE_LINE_RES: readonly RegExp[] = [
   /\b(?:newName|newTag)\s*:/i,
   /(?:@sha256:|\boci:\/\/)/,
-  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:(?:image|FROM)\b|(?:repository|registry)\s*:)/i,
+  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:["']?(?:image|repository|registry)["']?\s*:|\bFROM(?=\s|$))/i,
 ];
 /** #1763: the short dotted image tag (`7.2`) alongside the full exact
  * DEPENDENCY_SCOPE_EXACT_VERSION_RE — image tags are commonly two-segment.
@@ -4532,17 +4534,17 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   let npmSectionDepth = 0;
   let chartSlug: string | null = null;
   let imageAnchor: { slug: string; kind: "image" | "chart" } | null = null;
-  // #1763: the split-key `registry:` host this hunk established (bitnami-
-  // style values images spell `<registry>/<repository>` across two keys);
-  // it qualifies a host-less repo value at the SAME key column (siblings of
-  // one mapping — an exact-`registry:` key at another column belongs to a
-  // different structure), exactly as the chart's own template renders it.
-  // Resolved in a per-hunk pre-pass: key ORDER inside the hunk proves
-  // nothing. An exact-`registry:` value this grammar cannot validate
-  // (template, path suffix, junk) fails the hunk's scope CLOSED — the
-  // rendered pull target is then unknown, and an unknown identity must
-  // never default to Docker Hub.
-  let imageRegistry: { host: string; indent: number } | null = null;
+  // #1763: the split-key `registry:` hosts this hunk established, keyed by
+  // key column (bitnami-style values images spell `<registry>/<repository>`
+  // across two SIBLING keys — an exact-`registry:` line at another column
+  // belongs to a different structure and qualifies nothing). Resolved in a
+  // per-hunk pre-pass: key ORDER inside the hunk proves nothing. An
+  // exact-`registry:` value this grammar cannot validate (template, path
+  // suffix, junk) fails the hunk's scope CLOSED — the rendered pull target
+  // is then unknown, and an unknown identity must never default to Docker
+  // Hub; two DISTINCT valid hosts at one column are equally ambiguous and
+  // fail closed too (never a silent "last wins" swap).
+  const imageRegistry = new Map<number, string>();
   // #1763: image-surface lines buffer until their hunk ends (the pre-pass
   // needs the whole hunk before any line can be attributed).
   const imageHunkBuffer: Array<{ raw: string; changed: boolean }> = [];
@@ -4552,7 +4554,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     npmSectionDepth = 0;
     chartSlug = null;
     imageAnchor = null;
-    imageRegistry = null;
+    imageRegistry.clear();
   };
   const normalizeSlug = (rawName: string): string =>
     rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
@@ -4652,15 +4654,21 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     return slug;
   };
   // #1763: qualify a host-less repo value with this hunk's split-key
-  // `registry:` host before canonicalization (the `<registry>/<repository>`
-  // rendering), for sibling keys only — a same-`registry:` key at another
-  // key column belongs to a different structure and must not force a join
-  // (or a false split). A value that carries its own dotted host ignores
-  // the qualifier — same precedence as the chart template.
+  // `registry:` host at the SAME key column before canonicalization (the
+  // `<registry>/<repository>` rendering) — a `registry:` line at another
+  // column belongs to a different structure and must not force a join (or
+  // a false split). Residual (base-resident only — a CHANGED registry
+  // always fails): column equality is not full mapping scope, so two
+  // same-column `registry:`/`repository:` pairs under different parents in
+  // ONE hunk window can still cross-join; ±3-line context bounds the
+  // exposure and the provenance binding stays catalog-exact. A value that
+  // carries its own dotted host ignores the qualifier — same precedence as
+  // the chart template.
   const joinImageRegistry = (repo: string, keyColumn: number): string => {
-    if (imageRegistry === null || keyColumn !== imageRegistry.indent) return repo;
+    const host = imageRegistry.get(keyColumn);
+    if (host === undefined) return repo;
     const first = repo.split("/")[0] ?? "";
-    return first.includes(".") || first === "localhost" ? repo : `${imageRegistry.host}/${repo}`;
+    return first.includes(".") || first === "localhost" ? repo : `${host}/${repo}`;
   };
   // #1763: the key column of a raw line — leading indentation plus any
   // list-item markers (a list of maps renders its first key on the dash:
@@ -4671,8 +4679,10 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   };
   // #1763: resolve this hunk's split-key registries over the WHOLE hunk
   // before attributing any line (key order proves nothing), then replay.
-  // An exact-`registry:` value that is not one clean host fails the scope
-  // CLOSED; the last valid one wins.
+  // Resolution is PER KEY COLUMN: an exact-`registry:` value that is not
+  // one clean host, or two DISTINCT valid hosts at one column, fail the
+  // scope CLOSED — a qualifier is never silently overwritten and an
+  // unknown pull target never defaults to Docker Hub.
   const flushImageHunk = (): void => {
     if (imageHunkBuffer.length === 0) return;
     const hunk = imageHunkBuffer.splice(0);
@@ -4680,11 +4690,14 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       if (!IMAGE_REGISTRY_KEY_RE.test(entry.raw)) continue;
       const field = IMAGE_REGISTRY_LINE_RE.exec(entry.raw.trim().replace(/^-\s+/, ""));
       const host = field === null ? "" : (field[1] ?? "").toLowerCase();
-      if (host === "" || !IMAGE_REGISTRY_HOST_RE.test(host)) {
+      const column = imageKeyColumn(entry.raw);
+      const previous = imageRegistry.get(column);
+      if (host === "" || !IMAGE_REGISTRY_HOST_RE.test(host)
+        || (previous !== undefined && previous !== host)) {
         scopeComplete = false;
         continue;
       }
-      imageRegistry = { host, indent: imageKeyColumn(entry.raw) };
+      imageRegistry.set(column, host);
     }
     for (const entry of hunk) applyImageSurfaceLine(entry.raw, entry.changed);
   };
