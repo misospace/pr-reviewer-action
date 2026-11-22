@@ -4758,6 +4758,50 @@ test("#1763: a split-key registry: context qualifies the host-less repository: a
   assert.deepEqual(parseDependencyScope(port), { available: false });
 });
 
+test("#1763: the split-key registry resolves order-independently, poisons on unvalidatable values, and joins siblings only", () => {
+  // Key order proves nothing: the registry AFTER the repository still qualifies it.
+  const reversed =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   repository: foo/bar\n" +
+    "   registry: ghcr.io\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(reversed), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A templated or path-bearing registry value makes the rendered pull
+  // target unknown — fail CLOSED, never default to Docker Hub.
+  for (const value of ['"{{ .Values.global.registry }}"', "harbor.internal/team", "-evil.com", '""', ""]) {
+    const templated = reversed.replace("registry: ghcr.io", `registry: ${value}`);
+    assert.deepEqual(parseDependencyScope(templated), { available: false }, value);
+  }
+  // An exact `registry:` key at ANOTHER column belongs to a different
+  // structure and must not force a join.
+  const otherColumn =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " extras:\n" +
+    "   nested:\n" +
+    "     registry: evil.example.com\n" +
+    " image:\n" +
+    "   repository: nginx\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(otherColumn), {
+    available: true,
+    entries: [{ slug: "docker.io/nginx", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A YAML explicit-key residue hides a reference that failed every grammar.
+  const explicitKey =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-    ? image: evil/foo:1.2.3\n" +
+    "+    ? image: evil/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(explicitKey), { available: false });
+});
+
 test("#1763: a changed registry: is a provenance switch and ungrammar-missing image keys are unattributable — both fail CLOSED", () => {
   const registrySwitch =
     "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +

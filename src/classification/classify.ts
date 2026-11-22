@@ -4359,11 +4359,20 @@ const IMAGE_SURFACE_SHAPE_RES: readonly RegExp[] = [
  * alone, tag carried separately on `tag:` lines, registry (when the chart
  * splits it out) on a sibling `registry:` line. */
 const IMAGE_REPOSITORY_LINE_RE = /^\s*repository\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
-/** A split-key `registry:` line (bitnami-style values images): the registry
- * HOST that qualifies a host-less `repository:` value. A CHANGED registry
- * is a provenance switch, not a version refresh — it fails the scope closed;
- * an unchanged one joins this hunk's anchor identity. */
+/** A split-key `registry:` KEY line (bitnami-style values images): the
+ * registry host that qualifies a same-indent host-less `repository:`/`image:`
+ * value is resolved in a per-hunk PRE-PASS (key order inside the hunk proves
+ * nothing), and a value this grammar cannot validate — a path suffix, a
+ * template, anything not one clean host — poisons the hunk CLOSED: the
+ * rendered pull target is then unknown, and an unknown identity must never
+ * default to Docker Hub. A CHANGED registry is a provenance switch, not a
+ * version refresh — it fails the scope closed on its own. */
 const IMAGE_REGISTRY_LINE_RE = /^\s*registry\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9.:-]*)["']?\s*$/;
+/** Any line spelling a `registry:` key, list-item marker included — the
+ * pre-pass recognition shape (its value then faces IMAGE_REGISTRY_LINE_RE). */
+const IMAGE_REGISTRY_KEY_RE = /^\s*(?:-\s+)*registry\s*:/i;
+/** One clean registry host (optionally `:port`): dotted, label-shaped. */
+const IMAGE_REGISTRY_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(?::\d{1,5})?$/;
 /** An OCI chart `url:` line (Flux OCIRepositories): the chart slug is the
  * value after `oci://`. */
 const OCI_CHART_URL_LINE_RE = /^\s*url\s*:\s*["']?(oci:\/\/[A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
@@ -4371,21 +4380,20 @@ const OCI_CHART_URL_LINE_RE = /^\s*url\s*:\s*["']?(oci:\/\/[A-Za-z0-9][A-Za-z0-9
  * inside an image/chart surface. */
 const IMAGE_VERSION_LINE_RE = /^\s*(?:version|appVersion)\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9._+-]*)["']?\s*$/;
 /** #1763: image-SHAPED changed lines this parser cannot read into a trusted
- * identity — Renovate's post-processing keys, a `@sha256:` token that failed
- * the reference grammar, an `image:`/`FROM`/`repository:`/`registry:` line
- * that failed it (a grammar-MISSING `repository: evil:5000/app` is an
- * identity this scope cannot represent, never a silent omission), and the
- * list-dash RESIDUE of a doubled marker the surface strip could not consume
- * (the identity it hides failed every grammar). These fail the WHOLE scope
- * closed; every OTHER changed line in the surface (plain config keys,
- * comments) is ignored — a values file legitimately carries non-image
+ * identity — Renovate's post-processing keys, a `@sha256:`/`oci://` token
+ * that failed every grammar, and an image KEY line (`image`/`FROM`/
+ * `repository`/`registry`) no grammar consumed: at any leading marker depth
+ * (one list dash is stripped before the grammars run; a doubled dash, a
+ * `? key` explicit key, or a `!!tag` residue hides a reference that failed
+ * parsing — an identity this scope cannot represent, never a silent
+ * omission). These fail the WHOLE scope closed; every OTHER changed line in
+ * the surface (plain config keys, comments, a URL merely CONTAINING the
+ * word `image:`) is ignored — a values file legitimately carries non-image
  * content. */
 const IMAGE_UNPARSEABLE_LINE_RES: readonly RegExp[] = [
   /\b(?:newName|newTag)\s*:/i,
-  /@sha256:/,
-  /^\s*(?:image|FROM)\b/i,
-  /^\s*(?:repository|registry)\s*:/i,
-  /^-\s*(?:(?:image|FROM)\b|(?:repository|registry|url)\s*:)/i,
+  /(?:@sha256:|\boci:\/\/)/,
+  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:(?:image|FROM)\b|(?:repository|registry)\s*:)/i,
 ];
 /** #1763: the short dotted image tag (`7.2`) alongside the full exact
  * DEPENDENCY_SCOPE_EXACT_VERSION_RE — image tags are commonly two-segment.
@@ -4477,12 +4485,16 @@ function canonicalImageSlug(repo: string): string | null {
  * #1763: image/chart entries carry `kind` and (when pinned) `digests`;
  * npm-era entries keep exactly `{slug, versions}` so every pre-#1763
  * consumer stays byte-compatible. Attribution in the image surface is
- * HUNK-LOCAL like npm: a full image reference (`image:`/`FROM`, or a
+ * HUNK-LOCAL like npm (image-surface lines are settled and replayed when
+ * their hunk ends): a full image reference (`image:`/`FROM`, or a
  * `repository:` key) or an `oci://` chart `url:` — from CONTEXT or changed
- * lines — anchors this hunk, and a changed `tag:`/`version:`/`appVersion:`
- * line records against the anchor (no anchor → fail closed). Image repos
- * canonicalize through `canonicalImageSlug` (Docker Hub → `docker.io/…`,
- * `library/` stripped). Version tokens must be exact checkable identities
+ * lines — anchors this hunk, qualified by the hunk's split-key `registry:`
+ * host at the SAME key column (order-independent; a `registry:` value that
+ * is not one clean host fails the scope CLOSED, a CHANGED one always does),
+ * and a changed `tag:`/`version:`/`appVersion:` line records against the
+ * anchor (no anchor → fail closed). Image repos canonicalize through
+ * `canonicalImageSlug` (Docker Hub → `docker.io/…`, `library/` stripped).
+ * Version tokens must be exact checkable identities
  * (full x.y.z or short dotted like `7.2`, one optional leading `v`);
  * `latest`/`bookworm` fails closed. Image-shaped-but-unparseable changed
  * lines (`newName:`/`newTag:`, a failed `@sha256:`/`image:`/`FROM` line,
@@ -4522,16 +4534,25 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   let imageAnchor: { slug: string; kind: "image" | "chart" } | null = null;
   // #1763: the split-key `registry:` host this hunk established (bitnami-
   // style values images spell `<registry>/<repository>` across two keys);
-  // it qualifies a host-less repo value before canonicalization, exactly as
-  // the chart's own template renders it.
-  let imageRegistryHost: string | null = null;
+  // it qualifies a host-less repo value at the SAME key column (siblings of
+  // one mapping — an exact-`registry:` key at another column belongs to a
+  // different structure), exactly as the chart's own template renders it.
+  // Resolved in a per-hunk pre-pass: key ORDER inside the hunk proves
+  // nothing. An exact-`registry:` value this grammar cannot validate
+  // (template, path suffix, junk) fails the hunk's scope CLOSED — the
+  // rendered pull target is then unknown, and an unknown identity must
+  // never default to Docker Hub.
+  let imageRegistry: { host: string; indent: number } | null = null;
+  // #1763: image-surface lines buffer until their hunk ends (the pre-pass
+  // needs the whole hunk before any line can be attributed).
+  const imageHunkBuffer: Array<{ raw: string; changed: boolean }> = [];
   const resetAttribution = (): void => {
     braceDepth = 0;
     currentBlockSlug = null;
     npmSectionDepth = 0;
     chartSlug = null;
     imageAnchor = null;
-    imageRegistryHost = null;
+    imageRegistry = null;
   };
   const normalizeSlug = (rawName: string): string =>
     rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
@@ -4632,54 +4653,69 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   };
   // #1763: qualify a host-less repo value with this hunk's split-key
   // `registry:` host before canonicalization (the `<registry>/<repository>`
-  // rendering). A value that carries its own dotted host ignores the
-  // qualifier — same precedence as the chart template.
-  const joinImageRegistry = (repo: string): string => {
-    if (imageRegistryHost === null) return repo;
+  // rendering), for sibling keys only — a same-`registry:` key at another
+  // key column belongs to a different structure and must not force a join
+  // (or a false split). A value that carries its own dotted host ignores
+  // the qualifier — same precedence as the chart template.
+  const joinImageRegistry = (repo: string, keyColumn: number): string => {
+    if (imageRegistry === null || keyColumn !== imageRegistry.indent) return repo;
     const first = repo.split("/")[0] ?? "";
-    return first.includes(".") || first === "localhost" ? repo : `${imageRegistryHost}/${repo}`;
+    return first.includes(".") || first === "localhost" ? repo : `${imageRegistry.host}/${repo}`;
   };
-  // #1763: one line of an image/chart surface (content sign-stripped and
-  // trimmed, exactly like the npm paths). ANCHORS come from context and
-  // changed lines (a full image ref, a `repository:` key, an `oci://` chart
-  // `url:`, qualified by a context split-key `registry:` host); scope
-  // ENTRIES and version/digest identity come from changed lines only —
-  // context never enters scope, same rule as npm block headers. A version
-  // line with no anchor in THIS hunk fails closed; a changed `registry:`
-  // (a provenance switch, not a version refresh) and every
-  // image-shaped-but-unparseable changed line fail the WHOLE scope; every
-  // other changed line is plain config content this surface legitimately
-  // carries and stays ignored.
-  const applyImageSurfaceLine = (rawContent: string, changed: boolean): void => {
+  // #1763: the key column of a raw line — leading indentation plus any
+  // list-item markers (a list of maps renders its first key on the dash:
+  // `- registry:` and `  repository:` are the same column).
+  const imageKeyColumn = (raw: string): number => {
+    const marker = /^\s*(?:-\s+)*/.exec(raw);
+    return marker === null ? 0 : marker[0].length;
+  };
+  // #1763: resolve this hunk's split-key registries over the WHOLE hunk
+  // before attributing any line (key order proves nothing), then replay.
+  // An exact-`registry:` value that is not one clean host fails the scope
+  // CLOSED; the last valid one wins.
+  const flushImageHunk = (): void => {
+    if (imageHunkBuffer.length === 0) return;
+    const hunk = imageHunkBuffer.splice(0);
+    for (const entry of hunk) {
+      if (!IMAGE_REGISTRY_KEY_RE.test(entry.raw)) continue;
+      const field = IMAGE_REGISTRY_LINE_RE.exec(entry.raw.trim().replace(/^-\s+/, ""));
+      const host = field === null ? "" : (field[1] ?? "").toLowerCase();
+      if (host === "" || !IMAGE_REGISTRY_HOST_RE.test(host)) {
+        scopeComplete = false;
+        continue;
+      }
+      imageRegistry = { host, indent: imageKeyColumn(entry.raw) };
+    }
+    for (const entry of hunk) applyImageSurfaceLine(entry.raw, entry.changed);
+  };
+  // #1763: one line of an image/chart surface. ANCHORS come from context
+  // and changed lines (a full image ref, a `repository:` key, an `oci://`
+  // chart `url:`, qualified by this hunk's pre-passed split-key `registry:`
+  // host); scope ENTRIES and version/digest identity come from changed
+  // lines only — context never enters scope, same rule as npm block
+  // headers. A version line with no anchor in THIS hunk fails closed; a
+  // changed `registry:` (a provenance switch, not a version refresh) and
+  // every image-shaped-but-unparseable changed line fail the WHOLE scope;
+  // every other changed line is plain config content this surface
+  // legitimately carries and stays ignored.
+  const applyImageSurfaceLine = (rawLine: string, changed: boolean): void => {
     // #1763: a YAML list-item marker ("  - image: …" in a k8s `images:`
     // list) is spelling, not structure — strip ONE leading `- ` so the
     // list-rendered reference reaches the same grammars as a mapping one.
-    // A doubled marker keeps a leading dash after the strip, matches no
-    // grammar, and lands in the image-shaped-unparseable fail-closed arm.
-    const content = rawContent.replace(/^-\s+/, "");
-    // A split-key `registry:` line is recognized BEFORE the reference
-    // grammar: spelled with or without the space after the colon, it is a
-    // registry qualifier, and letting `registry:evil.example.com` reach the
-    // optional-prefix reference regex would read it as a bogus repository
-    // named "registry". A CHANGED registry is a provenance switch, not a
-    // version refresh — fail closed; an unchanged one qualifies this hunk's
-    // host-less repo values.
-    const registry = IMAGE_REGISTRY_LINE_RE.exec(content);
-    if (registry !== null) {
-      if (changed) { scopeComplete = false; return; }
-      const host = (registry[1] ?? "").toLowerCase();
-      // A registry qualifier that is not a dotted host (optionally with a
-      // port) names no registry this parser can map — poison the hunk.
-      if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?$/.test(host)) {
-        scopeComplete = false;
-        return;
-      }
-      imageRegistryHost = host;
+    // Any further marker residue matches no grammar and lands in the
+    // image-shaped-unparseable fail-closed arm.
+    const keyColumn = imageKeyColumn(rawLine);
+    const content = rawLine.trim().replace(/^-\s+/, "");
+    // A `registry:` key line is owned by the hunk pre-pass; here only the
+    // CHANGED side needs the local rule: a registry switch is a provenance
+    // change, not a version refresh — fail closed whatever the value.
+    if (IMAGE_REGISTRY_KEY_RE.test(content)) {
+      if (changed) scopeComplete = false;
       return;
     }
     const ref = parseImageRefLine(content);
     if (ref !== null && ref.repo !== "") {
-      const slug = imageScopeSlug(joinImageRegistry(ref.repo));
+      const slug = imageScopeSlug(joinImageRegistry(ref.repo, keyColumn));
       if (slug === null) return;
       imageAnchor = { slug, kind: "image" };
       if (!changed) return;
@@ -4691,7 +4727,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (ref === null) {
       const repository = IMAGE_REPOSITORY_LINE_RE.exec(content);
       if (repository !== null) {
-        const slug = imageScopeSlug(joinImageRegistry(repository[1] ?? ""));
+        const slug = imageScopeSlug(joinImageRegistry(repository[1] ?? "", keyColumn));
         if (slug === null) return;
         imageAnchor = { slug, kind: "image" };
         if (changed) recordChangedEntry(slug, null, "image");
@@ -4735,6 +4771,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
     const fileHeader = /^diff --git a\/(\S+)/.exec(line);
     if (fileHeader !== null) {
+      flushImageHunk();
       currentFile = fileHeader[1] ?? "";
       resetAttribution();
       // A changed dependency surface this parser does not read breaks the
@@ -4753,9 +4790,11 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (line.startsWith("index ")) continue;
     if (line.startsWith("@@")) {
       // #1657 (review round 8): hunk-local attribution. A previous hunk's
-      // block header, dependency section, or chart identity proves nothing
-      // about the lines in THIS hunk — reset, and let this hunk's own
-      // context re-establish what it shows.
+      // block header, dependency section, chart identity, or split-key
+      // registry proves nothing about the lines in THIS hunk — settle and
+      // replay the buffer belonging to the previous hunk first, then reset,
+      // and let this hunk's own context re-establish what it shows.
+      flushImageHunk();
       resetAttribution();
       continue;
     }
@@ -4786,9 +4825,10 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
         if (NPM_SECTION_OPEN_RE.test(content)) npmSectionDepth = 1;
         else if (NPM_SECTION_CLOSE_RE.test(content)) npmSectionDepth = 0;
       } else if (inImageSurface) {
-        // #1763: an unchanged image ref / `repository:` / `oci://` url line
-        // anchors this hunk's version lines — without entering scope itself.
-        applyImageSurfaceLine(content, false);
+        // #1763: buffered until the hunk ends; an unchanged image ref /
+        // `repository:` / `oci://` url line anchors this hunk's version
+        // lines — without entering scope itself.
+        imageHunkBuffer.push({ raw: line.slice(1), changed: false });
       } else {
         // The chart's own unchanged identity line anchors this hunk's
         // version lines to the chart — without entering the scope itself.
@@ -4855,8 +4895,9 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       continue;
     }
     if (inImageSurface) {
-      // #1763: the image/chart identity rules for changed lines.
-      applyImageSurfaceLine(content, true);
+      // #1763: buffered until the hunk ends; the image/chart identity rules
+      // then run over the settled hunk (split-key registries included).
+      imageHunkBuffer.push({ raw: line.slice(1), changed: true });
       continue;
     }
     // Helm chart manifest: the chart's own identity on a changed line.
@@ -4878,6 +4919,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       recordChangedEntry(chartSlug, chartVersion[1] ?? "");
     }
   }
+  flushImageHunk();
   if (!scopeComplete) return { available: false };
   return {
     available: true,
