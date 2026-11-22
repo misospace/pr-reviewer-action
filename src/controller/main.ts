@@ -76,6 +76,7 @@ import {
 import type { ApiFormat } from "../config/types.js";
 import { forgeProductLabel, forgeTokenFromEnv } from "../platform/forge-identity.js";
 import type { FetchLike } from "../platform/http.js";
+import { parseRepoRef } from "../platform/repo-ref.js";
 import {
   buildWorkerCredentialPlan,
   InMemorySecretVault,
@@ -639,8 +640,12 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
  * `#`, and a POSITIVE decimal PR number with no leading zero. A URL
  * scheme, whitespace, a path, or a padded number is refused — the key
  * names one pull request, and a key that could name several is never
- * resolved by guessing. The reason a refusal carries names the grammar,
- * never the operator's input. */
+ * resolved by guessing. A DOT-ONLY segment (`.` or `..`) is no repository
+ * identity either: the parsed identity is validated through the platform's
+ * ONE repository-reference validator, so a traversal-shaped key like
+ * `../..#7` gets the shape refusal at this gate, never the opaque forge
+ * refusal it would later reach. The reason a refusal carries names the
+ * grammar, never the operator's input. */
 const PR_KEY_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
 
 function parsePrKey(prKey: string): { readonly repoFullName: string; readonly prNumber: number } | null {
@@ -649,6 +654,12 @@ function parsePrKey(prKey: string): { readonly repoFullName: string; readonly pr
   if (match === null) return null;
   const prNumber = Number(match[3]);
   if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  // The charset match is not a repository identity: a dot-only segment
+  // survives it and is exactly the shape the platform's repo-ref validator
+  // refuses (`parseRepoRef` rejects `.`/`..` for the URL-normalization hole
+  // it exists to close). Refuse the same shapes HERE, at the shape gate, so
+  // the operator reads the grammar, not a downstream "could not be read".
+  if (parseRepoRef(`${match[1]}/${match[2]}`) === null) return null;
   // The identity carries the SAME canonical case the intake's forge
   // normalizer produces (`normalizeRepoFullName`: trim + lowercase): the
   // adoption records, the allow/denylist matching, and the generation

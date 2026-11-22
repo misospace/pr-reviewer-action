@@ -3011,3 +3011,82 @@ test("#1781 review: the adoption gate sees the operator's key in the canonical c
     "both reads reached the forge under the canonical identity",
   );
 });
+
+test("#1781 review: the shape gate refuses traversal-shaped keys before any forge read", async (t) => {
+  // A dot-only segment (`.`/`..`) passes the admin layer's wide identifier
+  // vocabulary but is no repository identity: the platform's repo-ref
+  // validator refuses exactly those segments. The controller's shape gate
+  // must therefore refuse `../..#7` with the grammar as its reason — never
+  // reach the forge, where the same key surfaces as the opaque "could not
+  // be read". A valid key through the same gate still schedules.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-shape-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+
+  const admin = (prKey: string): Promise<Response> =>
+    fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+      method: "POST",
+      headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+      body: JSON.stringify({ prKey, reason: "manual" }),
+    });
+
+  for (const traversalKey of ["../..#7", "./repo#7", "owner/..#7", "owner/.#7"]) {
+    const refused = await admin(traversalKey);
+    assert.equal(refused.status, 409, `${traversalKey} is refused at the shape gate`);
+    assert.equal(
+      (await refused.json() as { detail?: string }).detail,
+      "the PR key must be owner/repo#123",
+      `${traversalKey} gets the grammar as its reason, not a forge-read failure`,
+    );
+  }
+  assert.deepEqual(prReads, [], "a traversal-shaped key never reaches the forge");
+
+  // The gate is not widened by accident: the valid key still schedules.
+  const accepted = await admin("owner/repo#7");
+  assert.equal(accepted.status, 202);
+  assert.deepEqual(prReads, [{ repoFullName: "owner/repo", prNumber: 7 }]);
+});

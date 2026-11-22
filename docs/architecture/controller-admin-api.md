@@ -116,6 +116,12 @@ data route stays bearer-protected (see
   its attempt), so the route ACKNOWLEDGES the cancellation instead of
   promising it; the durable run settles `cancelled` when the attempt
   observes the abort. The effect seam may still refuse; refusals are `409` too.
+- **Contract change (#1781), disclosed for out-of-repo consumers:** releases
+  through v3.10.0 answered `202` on `POST /admin/runs/{runId}/cancel`; this
+  surface now answers `200` with the same `{ "cancelled": true }` body.
+  A consumer that checks `res.ok` (the shipped dashboard does) is
+  unaffected; one that requires exactly `202` must accept `200`. No other
+  route's status codes changed.
 
 | Mutation | Request body | Accepted | Refused |
 |---|---|---|---|
@@ -124,12 +130,20 @@ data route stays bearer-protected (see
 
 - **The PR key names ONE pull request.** The controller's grammar is
   `owner/repo#123`: an owner and a repository of `[A-Za-z0-9._-]`, a `#`,
-  and a POSITIVE decimal number with no leading zero. The admin layer's
-  own shape gate is the wider, trimmed identifier vocabulary
+  and a POSITIVE decimal number with no leading zero. A dot-only segment
+  (`.` or `..`) is no repository identity: the parsed owner/repository pass
+  the platform's ONE repository-reference validator (`parseRepoRef`, which
+  refuses exactly those segments), so a traversal-shaped key like
+  `../..#7` is refused AT THE SHAPE GATE with the grammar as its reason —
+  never a forge read that surfaces the opaque "could not be read". The
+  admin layer's own shape gate is the wider, trimmed identifier vocabulary
   (`[A-Za-z0-9._/@#:-]`, at most 512 characters) and refuses anything
   else with a `400`; the controller's stricter parse refuses the rest as
   a `409` with its reason. A key that could name several pull requests is
-  never resolved by guessing.
+  never resolved by guessing. The dashboard's client-side pattern carries
+  the same rules (the same charset, the same dot-segment refusal, the same
+  digit cap) so the form refuses what the controller refuses without a
+  round trip.
 - **The parsed repository identity carries the intake's canonical case.**
   The controller lowercases the owner/repository the same way the intake's
   forge normalizer does (`normalizeRepoFullName`), so a mixed-case key
@@ -306,7 +320,12 @@ the refusal reason reaching the operator (the seam's reason verbatim,
 the `400` naming the offending field, and a hostile or oversized reason
 bounded and redacted), audit target identity and settlement timestamp on
 both mutation paths (including refused, failed-lookup, and error
-outcomes), a broken audit clock, body cap, and fixed 404s.
+outcomes), a broken audit clock, body cap, and fixed 404s. The daemon's
+own composition (`tests-v3/controller-main.test.ts`) pins the two
+mutations end to end and the key grammar: the canonical-case identity for
+a mixed-case operator key, and the shape gate refusing a traversal-shaped
+key (`../..#7`, `owner/..#7`) with the grammar as its reason before any
+forge read.
 
 ## Out of scope
 

@@ -465,6 +465,12 @@ test("an invalid rereview form never reaches the controller", async () => {
   await paddedKey.listeners["#rereview:click"]![0]!();
   assert.ok(!paddedKey.paths.includes("/admin/rereview"), "a padded PR number never POSTs");
   assert.ok(paddedKey.containerText("rereview-msg").includes("The PR key must look like owner/repo#123."), paddedKey.containerText("rereview-msg"));
+  // The client gate refuses what the controller's shape gate refuses: a
+  // dot-only segment passes the charset but is no repository identity.
+  const traversalKey = harness({ form: { prKey: "../..#7" } });
+  await traversalKey.listeners["#rereview:click"]![0]!();
+  assert.ok(!traversalKey.paths.includes("/admin/rereview"), "a traversal-shaped key never POSTs");
+  assert.ok(traversalKey.containerText("rereview-msg").includes("The PR key must look like owner/repo#123."), traversalKey.containerText("rereview-msg"));
 });
 
 test("state chip whitelist covers every lifecycle state", () => {

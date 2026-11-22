@@ -233,9 +233,11 @@ const DASHBOARD_JS = `"use strict";
   let currentCursor = "";
   let nextCursor = "";
   // The PR key grammar the controller enforces: an owner, a repository, a
-  // "#", and a positive PR number. The form refuses a key the controller
-  // would reject, so the operator learns the shape without a round trip.
-  const PR_KEY_PATTERN = /^([A-Za-z0-9._-]+)\\/([A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
+  // "#", and a positive PR number, and never a dot-only segment ("." or
+  // "..") — the platform's repo-ref rule the controller applies at its
+  // shape gate. The form refuses a key the controller would reject, so the
+  // operator learns the shape without a round trip.
+  const PR_KEY_PATTERN = /^((?!\\.\\.?\\/)[A-Za-z0-9._-]+)\\/((?!\\.\\.?#)[A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
   // The example is spelled with an escaped separator, exactly like the
   // field's placeholder: the served shell carries no raw repository
   // identity, while the operator still reads the real shape.
