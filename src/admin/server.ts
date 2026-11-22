@@ -10,9 +10,10 @@
  * text redactor is specialized for PR artifacts and is not sufficient as a
  * diagnostics key/URL sanitizer.
  */
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminAuthenticator } from "./auth.js";
+import { AdminSessionStore, OidcAdminProvider, buildCookie, parseCookie, authorizeClaims, csrfMatches, type AdminAuthConfig } from "./oidc.js";
 import { readBoundedBody } from "./http-body.js";
 import { serveDashboard, type AdminDashboardOptions, type DashboardResponse } from "./dashboard.js";
 import { AdminMetricsRegistry, type AdminMetricsOptions } from "./metrics.js";
@@ -30,6 +31,7 @@ export interface AdminMcpOptions extends McpMountOptions {}
 export interface AdminHostOptions extends AdminMetricsOptions {
   readonly deps: ControllerAdminDeps;
   readonly token?: string;
+  readonly auth?: AdminAuthConfig;
   readonly maxBodyBytes?: number;
   readonly nowMs?: () => number;
   readonly requestId?: () => string;
@@ -43,6 +45,7 @@ export interface AdminHostOptions extends AdminMetricsOptions {
    * and the shell itself carries zero dynamic data: every data route stays
    * bearer-protected. */
   readonly dashboard?: AdminDashboardOptions;
+  readonly oidcFetch?: typeof fetch;
 }
 export interface AdminHost { readonly handler: (request: IncomingMessage, response: ServerResponse) => void; readonly registry: AdminMetricsRegistry; readonly authenticator: AdminAuthenticator; readonly mcp: McpHost | null }
 const BODY_TOO_LARGE = '{"error":"body too large"}';
@@ -52,6 +55,10 @@ const NOT_FOUND = '{"error":"not found"}';
 function send(response: ServerResponse, status: number, body: unknown, contentType = "application/json; charset=utf-8"): void {
   response.statusCode = status;
   response.setHeader("content-type", contentType);
+  // Authenticated JSON responses (admin API and /auth/*) must never be stored
+  // by an intervening cache: a cookie-authenticated body is not covered by
+  // the Authorization-header rule that keeps shared caches honest.
+  response.setHeader("cache-control", "no-store");
   response.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 function readBody(request: IncomingMessage, cap: number): Promise<{ readonly body: Buffer | null; readonly tooLarge: boolean }> {
@@ -61,7 +68,12 @@ function readBody(request: IncomingMessage, cap: number): Promise<{ readonly bod
 export function createAdminHost(options: AdminHostOptions): AdminHost {
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_ADMIN_BODY_BYTES;
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new RangeError("invalid admin body cap");
-  const authenticator = new AdminAuthenticator(options.token);
+  const oidcConfig = options.auth?.mode === "oidc" ? options.auth.config : null;
+  const authenticator = new AdminAuthenticator(options.token, oidcConfig !== null);
+  const sessions = oidcConfig === null ? null : new AdminSessionStore();
+  const oidc = oidcConfig === null ? null : new OidcAdminProvider(oidcConfig, options.oidcFetch ?? fetch);
+  const secureCookies = oidcConfig?.redirectBase.startsWith("https://") ?? false;
+  const callbackUrl = oidcConfig === null ? "" : `${oidcConfig.redirectBase}/auth/callback`;
   const registry = new AdminMetricsRegistry(options);
   const nowMs = options.nowMs ?? Date.now;
   // A broken clock must never break the request path: an unusable value
@@ -91,6 +103,52 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       let url: URL;
       try { url = new URL(request.url ?? "/", `http://${host}`); } catch { send(response, 404, NOT_FOUND); return; }
       if (!(method === "GET" || method === "POST")) { send(response, 404, NOT_FOUND); return; }
+      if (url.pathname.startsWith("/auth/")) {
+        if (url.pathname === "/auth/config" && method === "GET") { send(response, 200, { mode: oidcConfig === null ? "token" : "oidc" }); return; }
+        if (oidcConfig === null || oidc === null || sessions === null) { send(response, 404, NOT_FOUND); return; }
+        const sessionId = parseCookie(request.headers.cookie, "pr_reviewer_admin_session");
+        if (url.pathname === "/auth/session" && method === "GET") {
+          const session = sessions.validate(sessionId);
+          if (!session) { send(response, 401, { authenticated: false }); return; }
+          send(response, 200, { authenticated: true, subject: session.subject, email: session.email, csrfToken: session.csrfToken }); return;
+        }
+        if (url.pathname === "/auth/logout" && method === "POST") {
+          const session = sessions.validate(sessionId);
+          if (!session) { send(response, 401, { error: "unauthorized" }); return; }
+          if (!csrfMatches(session.csrfToken, request.headers["x-csrf-token"])) { send(response, 403, { error: "forbidden" }); return; }
+          sessions.destroy(sessionId); response.statusCode = 204;
+          // Cookie-bearing responses bypass send(): no-store must be set here
+          // too, or an intermediary cache may store and replay them.
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", "", secureCookies, 0), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;
+        }
+        if (url.pathname === "/auth/login" && method === "GET") {
+          try {
+            const created = sessions.createTransaction();
+            response.statusCode = 302; response.setHeader("location", await oidc.authorizationUrl(created.transaction, callbackUrl));
+            response.setHeader("cache-control", "no-store");
+            response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", created.id, secureCookies, 600)); response.end(); return;
+          } catch { send(response, 503, { error: "authentication unavailable" }); return; }
+        }
+        if (url.pathname === "/auth/callback" && method === "GET") {
+          const txId = parseCookie(request.headers.cookie, "pr_reviewer_oidc_tx");
+          const tx = sessions.takeTransaction(txId);
+          try {
+            const code = url.searchParams.get("code"); const state = url.searchParams.get("state");
+            if (!tx || !code || code.length > 4096 || !state || state.length !== tx.state.length || !timingSafeEqual(Buffer.from(state), Buffer.from(tx.state))) throw new Error("invalid login transaction");
+            const claims = await oidc.exchange(code, tx, callbackUrl);
+            if (!authorizeClaims(claims, oidcConfig)) throw new Error("OIDC identity is not allowed");
+            if (typeof claims.sub !== "string" || !claims.sub || claims.sub.length > 512) throw new Error("invalid subject");
+            const id = sessions.create({ subject: claims.sub, email: typeof claims.email === "string" ? claims.email.slice(0, 320) : "" , groups: Array.isArray(claims.groups) ? claims.groups.filter((x): x is string => typeof x === "string").slice(0, 128) : [] }, oidcConfig.sessionTtlMs);
+            response.statusCode = 302; response.setHeader("location", "/dashboard");
+            response.setHeader("cache-control", "no-store");
+            response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", id, secureCookies, Math.floor(oidcConfig.sessionTtlMs / 1000)), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;
+          } catch {
+            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)); response.end(); return;
+          }
+        }
+        send(response, 404, NOT_FOUND); return;
+      }
       if (mcp !== null && url.pathname === "/mcp") {
         mcp.handler(request, response);
         return;
@@ -120,11 +178,14 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
           try { body = JSON.parse(raw.body.toString("utf8")) as unknown; } catch { send(response, 400, { error: "invalid request" }); return; }
         }
       }
+      const session = sessions?.validate(parseCookie(request.headers.cookie, "pr_reviewer_admin_session")) ?? undefined;
       const responseData = await dispatchAdminRoute({ deps: options.deps, auth: authenticator, metrics: registry, nowMs: safeNowMs }, {
         method,
         pathname: url.pathname,
         search: url.search,
         ...(request.headers.authorization === undefined ? {} : { authorization: request.headers.authorization }),
+        ...(session === undefined ? {} : { session }),
+        ...(request.headers["x-csrf-token"] === undefined ? {} : { csrfToken: request.headers["x-csrf-token"] }),
         ...(request.headers["content-type"] === undefined ? {} : { contentType: request.headers["content-type"] }),
         ...(body === undefined ? {} : { body }),
         requestId: `${requestId()}-${safeNowMs().toString(36)}`,

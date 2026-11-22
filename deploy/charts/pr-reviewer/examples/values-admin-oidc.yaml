@@ -1,0 +1,75 @@
+# Admin OIDC example: the #1770 dashboard sign-in flow (Authorization Code
+# + PKCE) instead of the pasted admin bearer token. Layerable on any complete
+# example, and complete on its own here (Forgejo instance, external
+# PostgreSQL, local executor). The break-glass admin token is intentionally
+# absent: PR_REVIEWER_ADMIN_TOKEN stays unset and the surface authenticates
+# through OIDC sessions alone. Install:
+#
+#   helm install pr-reviewer deploy/charts/pr-reviewer \
+#     -f deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml
+#
+# Prerequisite Secrets (in the release namespace):
+#   pr-reviewer-instance-config  key instance-config.yaml  (see examples/README.md)
+#   pr-reviewer-control-plane    key dsn                   (postgres://...)
+#   forgejo-token                key token
+#   oidc-client                  key client-secret         (the OIDC client secret)
+---
+controller:
+  # The instance config comes from an existing Secret (full schema:
+  # docs/operator-config-and-adoption.md).
+  instanceConfigExistingSecret:
+    name: pr-reviewer-instance-config
+    key: instance-config.yaml
+
+  # External PostgreSQL — never deployed by this chart.
+  controlPlaneUrlExistingSecret:
+    name: pr-reviewer-control-plane
+    key: dsn
+
+  admin:
+    enabled: true
+    port: 8081
+    dashboard: true
+    auth:
+      mode: oidc
+      oidc:
+        issuer: https://identity.example.test
+        clientId: pr-reviewer
+        redirectBase: https://reviewer.example.test
+        allowedEmails:
+          - operator@example.test
+        existingSecret:
+          name: oidc-client
+          key: client-secret
+
+  # Poll the listed repository at the chart's default 15-minute interval.
+  reconcile:
+    repos:
+      - example-org/example-repo
+
+  forgeAuth:
+    platform: forgejo
+    forgejo:
+      existingSecret:
+        name: forgejo-token
+        key: token
+
+  credentials:
+    model-key:
+      existingSecret:
+        name: model-credentials
+        key: model-key
+
+  controllers:
+    main:
+      containers:
+        main:
+          image:
+            repository: ghcr.io/example/pr-reviewer-controller
+            # Digest pin from the image-publish run summary; the tag is
+            # then only a readable label (rendered as repo:tag@digest).
+            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            tag: "3.10.0" # x-release-please-version
+
+workerExecutor:
+  mode: disabled
