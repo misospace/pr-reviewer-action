@@ -182,25 +182,43 @@ interface GitRunResult {
 /** Cap for the git stderr class surfaced in a failure reason (#1775). */
 const GIT_STDERR_CONTEXT_MAX_CHARS = 300;
 
-/** Compose the failure class from a failed git run's stderr: drop remote
- * material first (scheme URLs and `user@host:path` scp-style remotes are
- * argv/env material and never belong in a durable failure reason; the
- * stripping over-approximates, which is safe), keep the LAST line (git
- * ends with its terminal error; progress noise rides carriage-return
- * segments), replace remaining whitespace and C0/C1 control characters
- * (ANSI escapes must never reach a terminal that later prints the record)
- * with single spaces, then apply the shared secret redaction — including
- * the exact credential of THIS invocation, which a hostile or echoing
- * child could otherwise return verbatim — and the cap. Residual local
+/** Prepended to the class when the captured stderr hit the subprocess
+ * capture cap: the capture keeps the HEAD of the stream, so the last-line
+ * heuristic may then surface progress padding rather than git's terminal
+ * error line. The marker tells the operator never to read the class as
+ * the whole story (#1786 review). */
+const GIT_STDERR_TRUNCATED_NOTE = "[stderr truncated]";
+
+/** Compose the failure class from a failed git run's stderr: strip Unicode
+ * format characters (Cf: bidi overrides/isolates, zero-width marks, BOM)
+ * FIRST — they are invisible text-spoofing material in an operator-visible
+ * record, and removing them before the URL and secret passes reassembles
+ * remotes and echoed credentials that were split across them to evade
+ * those passes. Then drop remote material (scheme URLs and
+ * `user@host:path` scp-style remotes are argv/env material and never
+ * belong in a durable failure reason; the stripping over-approximates,
+ * which is safe), keep the LAST line (git ends with its terminal error;
+ * progress noise rides carriage-return segments), replace remaining
+ * whitespace and C0/C1 control characters (ANSI escapes must never reach
+ * a terminal that later prints the record) with single spaces, prepend
+ * the truncation note when the capture was capped, then apply the shared
+ * secret redaction — including the exact credential of THIS invocation,
+ * which a hostile or echoing child could otherwise return verbatim — and
+ * the cap (the note leads, so it always survives the cap). Residual local
  * paths git echoes (cache root, cwd) are operator-internal material in an
  * operator-visible record and accepted. Returns "" when nothing survives,
  * so the caller keeps the bare exit-code message. */
-function describeGitStderr(stderr: Buffer, secrets: readonly (string | null | undefined)[]): string {
+function describeGitStderr(
+  stderr: Buffer,
+  secrets: readonly (string | null | undefined)[],
+  truncated: boolean,
+): string {
   if (stderr.length === 0) {
     return "";
   }
   const withoutRemotes = stderr
     .toString("utf8")
+    .replace(/\p{Cf}/gu, "")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, "<url>")
     .replace(/\b[\w.+-]+@(?:\[[^\]]*\]|[\w.-]+):[^\s]*/g, "<url>");
   let last = "";
@@ -210,7 +228,8 @@ function describeGitStderr(stderr: Buffer, secrets: readonly (string | null | un
       last = collapsed;
     }
   }
-  return maskDiagnostic(last, secrets, GIT_STDERR_CONTEXT_MAX_CHARS);
+  const surfaced = truncated ? `${GIT_STDERR_TRUNCATED_NOTE} ${last}`.trimEnd() : last;
+  return maskDiagnostic(surfaced, secrets, GIT_STDERR_CONTEXT_MAX_CHARS);
 }
 
 async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunResult> {
@@ -229,7 +248,9 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
   // Diagnostics carry the subcommand label and the outcome; a failed
   // non-zero run additionally carries the bounded, URL-stripped, masked
   // stderr class (#1775 — `exited 128` alone hid the SSL trust-store
-  // failure in the pilot). Never argv content, clone URLs, or tokens.
+  // failure in the pilot), marked as truncated when the capture was
+  // capped and therefore head-only. Never argv content, clone URLs, or
+  // tokens.
   if (result.status === "timeout") {
     throw new AcquisitionError("fetch_timeout", `git ${opts.label}: timed out after ${opts.timeoutMs}ms`);
   }
@@ -245,7 +266,7 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
     );
   }
   if (result.status !== "exited" || result.exitCode !== 0) {
-    const stderrClass = describeGitStderr(result.stderr, opts.diagnosticSecrets ?? []);
+    const stderrClass = describeGitStderr(result.stderr, opts.diagnosticSecrets ?? [], result.stderrTruncated);
     throw new AcquisitionError(
       failureCode,
       `git ${opts.label}: exited ${result.exitCode ?? result.signal ?? "unknown"}` +

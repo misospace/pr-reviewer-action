@@ -267,6 +267,173 @@ test("ensureMirror: an echoing child cannot return this run's credential in the 
   }
 });
 
+test("ensureMirror: invisible format characters cannot spoof the surfaced class (#1786 review)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "cfspoof/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-cfgit-"));
+      const cfGit = join(scratch, "git");
+      // Attacker-influenced stderr built from the boundary characters
+      // themselves (#252): a right-to-left override wrapping a spoofed
+      // tail, isolates, zero-width joins inside an otherwise-plain word,
+      // and a scheme URL split across a zero-width space (it must
+      // reassemble and STRIP, not survive the URL pass unmatched).
+      const spoofed =
+        "fatal: review clean \u202Eno leak here\u202D\u2066done\u2069 re\u200Bpo\u200Drt failed " +
+        "unable to access https:/\u200B/canary-zw-host.invalid/zw/repo.git/";
+      await writeFile(
+        cfGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          `    printf '%s\\n' '${spoofed}' >&2\n` +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "cfspoof/repo",
+        cloneUrl: `${fixture.baseUrl}/cfspoof/repo.git`,
+        gitBinary: cfGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.match(error.message, /git fetch: exited 128/);
+        // No Unicode format character survives into the operator-visible
+        // reason: no bidi override/isolate, no zero-width mark.
+        assert.ok(!/[\p{Cf}]/u.test(error.message), "failure reason must be format-character-free");
+        // The zero-width-split URL reassembled and was stripped, not
+        // surfaced as text the URL pass missed.
+        assert.doesNotMatch(error.message, /canary-zw-host\.invalid|zw\/repo|https:\/\//);
+        assert.match(error.message, /<url>/);
+        // The spoofed-over content is inert plain text, single-line.
+        assert.ok(!error.message.includes("\n") && !error.message.includes("\r"));
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a credential echoed with zero-width splices is still masked in place (#1786 review)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "cfcred/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-cfcred-"));
+      const cfCredGit = join(scratch, "git");
+      const opaqueAuth = "opaque-canary-secret-4b8e1c55";
+      // The credential echoed back with invisible format characters
+      // spliced INTO the literal, so a plain exact-match pass would walk
+      // past it. Format stripping runs first and reassembles the exact
+      // credential before the known-secret pass sees it.
+      const interleaved = Array.from(opaqueAuth).join("\u200B");
+      await writeFile(
+        cfCredGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          `    printf 'fatal: auth echoed %s\\n' '${interleaved}' >&2\n` +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "cfcred/repo",
+        cloneUrl: `${fixture.baseUrl}/cfcred/repo.git`,
+        credentials: { cloneUrl: `${fixture.baseUrl}/cfcred/repo.git`, authorization: opaqueAuth },
+        gitBinary: cfCredGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.match(error.message, /auth echoed/);
+        assert.ok(!error.message.includes(opaqueAuth), "the reassembled credential must never surface");
+        assert.ok(!/[\p{Cf}]/u.test(error.message), "no format character survives");
+        // Masked in place (the line survives), not smuggled through as
+        // unreassembled fragments.
+        assert.match(error.message, /⟦•⟧/);
+        assert.ok(!error.message.includes("opaque\u200B"), "no fragment of the spliced credential survives");
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a capped head-only stderr capture is marked as truncated, never passed off as the class (#1786 review)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "capnoise/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-capgit-"));
+      const capGit = join(scratch, "git");
+      // More padding than runProcess captures (1 MiB): the capture keeps
+      // the HEAD, so git's terminal error line — printed after the
+      // padding — is provably NOT in what the sanitizer can see. The
+      // failure reason must say the capture was truncated instead of
+      // presenting the padding head as git's real error class.
+      await writeFile(
+        capGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          "    head -c 1500000 /dev/zero | tr '\\0' 'A' >&2\n" +
+          "    printf 'fatal: THE REAL TERMINAL ERROR LINE\\n' >&2\n" +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "capnoise/repo",
+        cloneUrl: `${fixture.baseUrl}/capnoise/repo.git`,
+        gitBinary: capGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        assert.match(error.message, /\[stderr truncated\]/, "the head-only capture is honestly marked");
+        assert.ok(
+          !error.message.includes("THE REAL TERMINAL ERROR LINE"),
+          "the uncaptured tail is never claimed",
+        );
+        assert.match(error.message, /^git fetch: exited 128: \[stderr truncated\] /);
+        assert.ok(!error.message.includes("\n") && !error.message.includes("\r"), "stays single-line");
+        assert.ok(error.message.length <= 400, `failure reason must stay bounded: ${error.message.length}`);
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("ensureMirror: init + full fetch, warm ensure is incremental (no rebuild, no reclone)", async () => {
   const fixture = await startGitHttpFixture();
   try {
