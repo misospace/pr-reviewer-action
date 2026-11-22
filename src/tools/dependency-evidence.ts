@@ -460,10 +460,14 @@ function normalizeSourceRepoClaim(raw: string): string | null {
   const path = rest.split(/[?#]/, 1)[0] ?? "";
   const segments = path.split("/").filter((segment) => segment !== "");
   if (segments.length < 3) return null;
-  const host = segments[0]!.replace(/^www\./, "");
+  // The spelling strips run to fixpoint so the rule is idempotent on its
+  // own output (the persisted `source_repo` must survive the strict
+  // reader's re-check): `www.www.`, `…git.git`.
+  let host = segments[0]!;
+  while (host.startsWith("www.")) host = host.slice("www.".length);
   const owner = segments[1]!;
   let repo = segments[2]!;
-  if (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  while (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
   for (const segment of [host, owner, repo]) {
     if (segment === "" || segment.includes("@") || segment.includes(":") || segment.includes("%")) return null;
   }
@@ -548,14 +552,15 @@ export function sourceRepoSurfaceIdentity(url: string): string | null {
   const pathStart = rest.indexOf("/");
   const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
   if (rawHost.includes("@") || rawHost.includes(":")) return null;
-  const host = rawHost.replace(/^www\./, "");
+  let host = rawHost;
+  while (host.startsWith("www.")) host = host.slice("www.".length);
   if (host === "" || host.includes("%") || !host.includes(".")) return null;
   const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
   const segments = rawPath.split("/").filter((segment) => segment !== "");
   if (segments.length < 2) return null;
   const owner = segments[0]!;
   let repo = segments[1]!;
-  if (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  while (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
   if (owner === "" || repo === "" || owner.includes("%") || repo.includes("%")) return null;
   return `${host}/${owner}/${repo}`;
 }

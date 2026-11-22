@@ -53,7 +53,7 @@ import {
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
-import { canonicalRegistryCatalogImageIdentity, registryDocumentSourceRepo, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
+import { canonicalRegistryCatalogImageIdentity, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
 import { Conversation } from "../src/model/conversation.js";
@@ -1419,9 +1419,14 @@ test("#1782: registryDocumentSourceRepo / sourceRepoSurfaceIdentity — the lexi
     ['{"source":"https://github.com/o/r/tree/main"}', "github.com/o/r"],
     ['{"repository":"https://gitlab.example.org/team/component","x":1}', "gitlab.example.org/team/component"],
     ['"source": "https://github.com/o/r", "other": "https://github.com/o/r"', "github.com/o/r"],
+    ['{"source":"https://github.com/o/r.git.git"}', "github.com/o/r"],
+    ['{"source":"https://www.www.example.com/o/r"}', "example.com/o/r"],
   ];
   for (const [content, expected] of cases) {
     assert.equal(registryDocumentSourceRepo(content), expected, content);
+    // Every accepted claim is exactly its own canonical form: the strict
+    // ledger reader's re-check always survives the round-trip.
+    assert.equal(isCanonicalSourceRepoIdentity(expected), true, expected);
   }
   // No claim, malformed claims, and CONFLICTING claims all yield nothing.
   for (const content of [
