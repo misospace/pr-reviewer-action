@@ -4734,6 +4734,66 @@ test("#1763: a YAML list-item image ref (the real k8s images: shape) parses like
   });
 });
 
+test("#1763: a split-key registry: context qualifies the host-less repository: anchor", () => {
+  const diff =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   registry: ghcr.io\n" +
+    "   repository: foo/bar\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // `docker.io` (or its absence) keeps the plain Docker Hub canonical.
+  const hub = diff.replace("registry: ghcr.io", "registry: docker.io");
+  assert.deepEqual(parseDependencyScope(hub), {
+    available: true,
+    entries: [{ slug: "docker.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A port-carrying registry makes the joined identity unmappable — fail closed.
+  const port = diff.replace("registry: ghcr.io", "registry: evil.example.com:5000");
+  assert.deepEqual(parseDependencyScope(port), { available: false });
+});
+
+test("#1763: a changed registry: is a provenance switch and ungrammar-missing image keys are unattributable — both fail CLOSED", () => {
+  const registrySwitch =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "-  registry: docker.io\n" +
+    "+  registry: evil.example.com\n" +
+    "   repository: bitnami/postgresql\n" +
+    "   tag: 16.4.0-debian-13\n";
+  assert.deepEqual(parseDependencyScope(registrySwitch), { available: false });
+  // Space-less spelling reaches the same arm, never the reference grammar.
+  assert.deepEqual(parseDependencyScope(registrySwitch.replace("registry: docker.io", "registry:docker.io").replace("registry: evil.example.com", "registry:evil.example.com")), { available: false });
+  // A repository value the grammar cannot carry (port) is an identity this
+  // scope cannot represent — fail closed, never silently omit the new side.
+  const hostileRepository =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "-  repository: bitnami/postgresql\n" +
+    "+  repository: evil:5000/postgresql\n" +
+    "   tag: 16.4.0-debian-13\n";
+  assert.deepEqual(parseDependencyScope(hostileRepository), { available: false });
+  // A doubled list marker hides an image line that failed every grammar.
+  const doubledDash =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-    - - image: evil/foo:1.2.3\n" +
+    "+    - - image: evil/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(doubledDash), { available: false });
+  // localhost is a local registry, never a Docker Hub namespace.
+  const local =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-      image: localhost/foo:1.2.3\n" +
+    "+      image: localhost/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(local), { available: false });
+});
+
 test("#1763: an OCI chart url context anchors changed tag lines to the chart identity", () => {
   const diff =
     "diff --git a/apps/helm-release-sealed.yaml b/apps/helm-release-sealed.yaml\n" +

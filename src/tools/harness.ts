@@ -1917,7 +1917,7 @@ export function buildPlanningContext(
                         slug: entry.slug,
                         versions: [...entry.versions],
                         ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
-                        ...(entry.digests !== undefined ? { digests: [...entry.digests] } : {}),
+                        ...(entry.digests !== undefined && entry.digests.length > 0 ? { digests: [...entry.digests] } : {}),
                       })),
                     }
                     : {}),

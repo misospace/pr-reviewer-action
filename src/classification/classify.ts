@@ -4356,8 +4356,14 @@ const IMAGE_SURFACE_SHAPE_RES: readonly RegExp[] = [
   /\.dockerfile$/i,
 ];
 /** A `repository:` key line (bitnami-style values images): the repo part
- * alone, tag carried separately on `tag:` lines. */
+ * alone, tag carried separately on `tag:` lines, registry (when the chart
+ * splits it out) on a sibling `registry:` line. */
 const IMAGE_REPOSITORY_LINE_RE = /^\s*repository\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
+/** A split-key `registry:` line (bitnami-style values images): the registry
+ * HOST that qualifies a host-less `repository:` value. A CHANGED registry
+ * is a provenance switch, not a version refresh — it fails the scope closed;
+ * an unchanged one joins this hunk's anchor identity. */
+const IMAGE_REGISTRY_LINE_RE = /^\s*registry\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9.:-]*)["']?\s*$/;
 /** An OCI chart `url:` line (Flux OCIRepositories): the chart slug is the
  * value after `oci://`. */
 const OCI_CHART_URL_LINE_RE = /^\s*url\s*:\s*["']?(oci:\/\/[A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
@@ -4366,14 +4372,20 @@ const OCI_CHART_URL_LINE_RE = /^\s*url\s*:\s*["']?(oci:\/\/[A-Za-z0-9][A-Za-z0-9
 const IMAGE_VERSION_LINE_RE = /^\s*(?:version|appVersion)\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9._+-]*)["']?\s*$/;
 /** #1763: image-SHAPED changed lines this parser cannot read into a trusted
  * identity — Renovate's post-processing keys, a `@sha256:` token that failed
- * the reference grammar, an `image:`/`FROM` line that failed it. These fail
- * the WHOLE scope closed; every OTHER changed line in the surface (plain
- * config keys, comments) is ignored — a values file legitimately carries
- * non-image content. */
+ * the reference grammar, an `image:`/`FROM`/`repository:`/`registry:` line
+ * that failed it (a grammar-MISSING `repository: evil:5000/app` is an
+ * identity this scope cannot represent, never a silent omission), and the
+ * list-dash RESIDUE of a doubled marker the surface strip could not consume
+ * (the identity it hides failed every grammar). These fail the WHOLE scope
+ * closed; every OTHER changed line in the surface (plain config keys,
+ * comments) is ignored — a values file legitimately carries non-image
+ * content. */
 const IMAGE_UNPARSEABLE_LINE_RES: readonly RegExp[] = [
   /\b(?:newName|newTag)\s*:/i,
   /@sha256:/,
   /^\s*(?:image|FROM)\b/i,
+  /^\s*(?:repository|registry)\s*:/i,
+  /^-\s*(?:(?:image|FROM)\b|(?:repository|registry|url)\s*:)/i,
 ];
 /** #1763: the short dotted image tag (`7.2`) alongside the full exact
  * DEPENDENCY_SCOPE_EXACT_VERSION_RE — image tags are commonly two-segment.
@@ -4401,6 +4413,9 @@ function canonicalImageSlug(repo: string): string | null {
   const segments = path.split("/");
   if (segments.some((segment) => segment === "")) return null;
   const host = segments[0] ?? "";
+  // `localhost` is Docker's local-registry convention, never a Docker Hub
+  // namespace — an identity this parser cannot map to any public catalog.
+  if (host === "localhost") return null;
   if (host.includes(".")) {
     if (!DOCKER_HUB_HOSTS.has(host)) {
       return DEPENDENCY_SCOPE_SLUG_RE.test(path) ? path : null;
@@ -4505,12 +4520,18 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   let npmSectionDepth = 0;
   let chartSlug: string | null = null;
   let imageAnchor: { slug: string; kind: "image" | "chart" } | null = null;
+  // #1763: the split-key `registry:` host this hunk established (bitnami-
+  // style values images spell `<registry>/<repository>` across two keys);
+  // it qualifies a host-less repo value before canonicalization, exactly as
+  // the chart's own template renders it.
+  let imageRegistryHost: string | null = null;
   const resetAttribution = (): void => {
     braceDepth = 0;
     currentBlockSlug = null;
     npmSectionDepth = 0;
     chartSlug = null;
     imageAnchor = null;
+    imageRegistryHost = null;
   };
   const normalizeSlug = (rawName: string): string =>
     rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
@@ -4609,13 +4630,24 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (slug === null || !usableSlug(slug)) { scopeComplete = false; return null; }
     return slug;
   };
+  // #1763: qualify a host-less repo value with this hunk's split-key
+  // `registry:` host before canonicalization (the `<registry>/<repository>`
+  // rendering). A value that carries its own dotted host ignores the
+  // qualifier — same precedence as the chart template.
+  const joinImageRegistry = (repo: string): string => {
+    if (imageRegistryHost === null) return repo;
+    const first = repo.split("/")[0] ?? "";
+    return first.includes(".") || first === "localhost" ? repo : `${imageRegistryHost}/${repo}`;
+  };
   // #1763: one line of an image/chart surface (content sign-stripped and
   // trimmed, exactly like the npm paths). ANCHORS come from context and
   // changed lines (a full image ref, a `repository:` key, an `oci://` chart
-  // `url:`); scope ENTRIES and version/digest identity come from changed
-  // lines only — context never enters scope, same rule as npm block
-  // headers. A version line with no anchor in THIS hunk fails closed;
-  // image-shaped-but-unparseable changed lines fail the WHOLE scope; every
+  // `url:`, qualified by a context split-key `registry:` host); scope
+  // ENTRIES and version/digest identity come from changed lines only —
+  // context never enters scope, same rule as npm block headers. A version
+  // line with no anchor in THIS hunk fails closed; a changed `registry:`
+  // (a provenance switch, not a version refresh) and every
+  // image-shaped-but-unparseable changed line fail the WHOLE scope; every
   // other changed line is plain config content this surface legitimately
   // carries and stays ignored.
   const applyImageSurfaceLine = (rawContent: string, changed: boolean): void => {
@@ -4625,9 +4657,29 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     // A doubled marker keeps a leading dash after the strip, matches no
     // grammar, and lands in the image-shaped-unparseable fail-closed arm.
     const content = rawContent.replace(/^-\s+/, "");
+    // A split-key `registry:` line is recognized BEFORE the reference
+    // grammar: spelled with or without the space after the colon, it is a
+    // registry qualifier, and letting `registry:evil.example.com` reach the
+    // optional-prefix reference regex would read it as a bogus repository
+    // named "registry". A CHANGED registry is a provenance switch, not a
+    // version refresh — fail closed; an unchanged one qualifies this hunk's
+    // host-less repo values.
+    const registry = IMAGE_REGISTRY_LINE_RE.exec(content);
+    if (registry !== null) {
+      if (changed) { scopeComplete = false; return; }
+      const host = (registry[1] ?? "").toLowerCase();
+      // A registry qualifier that is not a dotted host (optionally with a
+      // port) names no registry this parser can map — poison the hunk.
+      if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?$/.test(host)) {
+        scopeComplete = false;
+        return;
+      }
+      imageRegistryHost = host;
+      return;
+    }
     const ref = parseImageRefLine(content);
     if (ref !== null && ref.repo !== "") {
-      const slug = imageScopeSlug(ref.repo);
+      const slug = imageScopeSlug(joinImageRegistry(ref.repo));
       if (slug === null) return;
       imageAnchor = { slug, kind: "image" };
       if (!changed) return;
@@ -4639,7 +4691,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (ref === null) {
       const repository = IMAGE_REPOSITORY_LINE_RE.exec(content);
       if (repository !== null) {
-        const slug = imageScopeSlug(repository[1] ?? "");
+        const slug = imageScopeSlug(joinImageRegistry(repository[1] ?? ""));
         if (slug === null) return;
         imageAnchor = { slug, kind: "image" };
         if (changed) recordChangedEntry(slug, null, "image");
