@@ -45,6 +45,7 @@
 import { readFileSync } from "node:fs";
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 
 /** The https request options extend the http ones with the TLS trust
  * material and the SNI host name. */
@@ -121,9 +122,29 @@ export interface InClusterKubernetesApiOptions {
   readonly maxResponseBytes?: number;
 }
 
+/** The conventional in-cluster DNS name of the Kubernetes API service.
+ * Every provisioned apiserver certificate carries it (plus the short
+ * `kubernetes` form and the advertise address) in its SAN set — which is
+ * exactly why it, and never the service ClusterIP, is the TLS identity
+ * an in-cluster client verifies against (#1773). */
+export const IN_CLUSTER_API_SERVICE_NAME = "kubernetes.default.svc";
+
+/** The TLS server name (SNI and certificate-verification identity) for the
+ * API endpoint. `KUBERNETES_SERVICE_HOST` is the kubelet-projected service
+ * address and in the overwhelming default case an IP literal (the ClusterIP,
+ * e.g. `10.43.0.1`) — and no apiserver certificate carries an IP SAN for its
+ * service ClusterIP, so an IP SNI fails every handshake (#1773). An IP
+ * literal therefore presents the conventional service DNS name; an actual
+ * hostname is kept verbatim. The socket still connects to `host` unchanged. */
+export function apiTlsServername(host: string): string {
+  return isIP(host) === 0 ? host : IN_CLUSTER_API_SERVICE_NAME;
+}
+
 export interface ApiMaterial {
   readonly scheme: "http" | "https";
   readonly host: string;
+  /** TLS server name derived from `host` by `apiTlsServername` (#1773). */
+  readonly servername: string;
   readonly port: string;
   readonly token: string;
   readonly ca: Buffer | null;
@@ -192,6 +213,7 @@ export function buildMaterial(options: InClusterKubernetesApiOptions): ApiMateri
   return {
     scheme,
     host,
+    servername: apiTlsServername(host),
     port,
     token,
     ca,
@@ -230,11 +252,13 @@ export function apiRequest(
       },
     };
     if (material.scheme === "https") {
-      // Verify the endpoint against the projected CA bundle; SNI must be
-      // the API host or the handshake fails (never `rejectUnauthorized:false`).
+      // Verify the endpoint against the projected CA bundle; SNI is the
+      // derived API identity (`material.servername`, #1773: the IP-literal
+      // ClusterIP is never a certificate SAN) while the socket still
+      // connects to `material.host` (never `rejectUnauthorized:false`).
       const tlsOptions = options as HttpsRequestOptions;
       if (material.ca !== null) tlsOptions.ca = material.ca;
-      tlsOptions.servername = material.host;
+      tlsOptions.servername = material.servername;
     }
     // The bearer token and CA material are PROJECTED FILES by contract
     // (#734 in-cluster posture): reading them and sending them to the
