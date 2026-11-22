@@ -996,7 +996,10 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  *   artifact name (review finding on #1763): a same-named artifact under
  *   another owner or registry is registrable by an attacker and carries
  *   that name token without being the changed image, so fetched evidence
- *   binds through the owner segment the attacker cannot register.
+ *   binds through the owner segment — the attacker cannot BE that owner,
+ *   and merely REGISTERING a surface that spells the owner string is the
+ *   generic any-position token carry the npm version-asserting cells have
+ *   always accepted.
  * Shared by the row-level identity gate and the per-cell candidate
  * derivation, so both stages agree on what counts as speaking about THIS
  * dependency. */
@@ -1014,26 +1017,30 @@ function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, entry: Depen
  * normalized registry identity `<host>/<path…>` binds an identity string
  * through its OWNER (first path segment after the host) under the exact
  * slug-token boundary rule — the segment a genuine upstream source surface
- * (the owner's release/compare pages) spells and an attacker cannot
- * register. A FETCHED surface (web_fetch, forge-read) never carries the
- * bare artifact NAME: a same-named artifact under another owner or on
- * another registry is registrable by an attacker and carries the name
- * token without being the changed image, so name-only fetched evidence is
- * no candidate at all (the owner-blind `github.com/evil/<name>/compare/…`
- * settles nothing). The SEARCH channel is different: a query is not an
+ * (the owner's release/compare pages) spells. A FETCHED surface (web_fetch,
+ * forge-read) never carries the bare artifact NAME: a same-named artifact
+ * under another owner or on another registry is registrable by an attacker
+ * and carries the name token without being the changed image, so name-only
+ * fetched evidence is no candidate at all (the owner-blind
+ * `github.com/evil/<name>/compare/…` settles nothing). Binding through the
+ * owner means the attacker cannot BE the publisher of the surface they
+ * fetch; spelling the owner string on a surface they DO control
+ * (`evil/<owner>`) is the generic any-position token carry the npm
+ * version-asserting cells have always accepted — accepted residual,
+ * pinned by test. The SEARCH channel is different: a query is not an
  * attacker-registerable surface, and an advisory lookup legitimately names
  * the ARTIFACT rather than its owner (`"<name> <old> <new> advisory"`), so
- * a `web-search` receipt carries through the name or the owner. A slug
- * with no owner segment (shorter than `<host>/<ns>/<name>`) carries
- * nothing through this clause; #1748's canonical-source hardening is
- * untouched for npm entries. */
+ * a `web-search` receipt carries through the name (any slug, including the
+ * two-segment official-Hub identity `docker.io/<name>`, whose base-image
+ * advisories are exactly this shape) or the owner. #1748's
+ * canonical-source hardening is untouched for npm entries. */
 function imageScopeSegmentCarry(receipt: EvidenceReceipt, slug: string): boolean {
   const segments = slug.split("/").filter((segment) => segment !== "");
-  if (segments.length < 3) return false;
-  const namespace = segments[1]!;
-  if (identityCarriesToken(receiptIdentityString(receipt), namespace)) return true;
+  if (segments.length < 2) return false;
+  const identity = receiptIdentityString(receipt);
+  if (segments.length >= 3 && identityCarriesToken(identity, segments[1]!)) return true;
   return receipt.kind === "web-search"
-    && identityCarriesToken(receiptIdentityString(receipt), segments[segments.length - 1]!);
+    && identityCarriesToken(identity, segments[segments.length - 1]!);
 }
 
 /** Every dotted-numeric token (any length: `7.2`, `11.21.3`) — the tag

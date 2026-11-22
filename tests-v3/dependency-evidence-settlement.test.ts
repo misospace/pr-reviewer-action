@@ -1217,4 +1217,41 @@ test("#1763 (review): a FETCHED surface binds an image entry only through its OW
   ), "obligation-3");
   assert.equal(ownerRead.status, "unresolved");
   assert.equal(ownerRead.evidence?.state, "receipt-mismatch");
+
+  // (5) The pinned accepted residual: SPELLING the owner string as a
+  // repository name the attacker controls (`evil/sirkirby`) is the generic
+  // any-position token carry the npm version-asserting cells have always
+  // accepted (a repo `evil/webpack` beside the npm slug `webpack`). The
+  // security this rule buys is that the attacker cannot BE the owner whose
+  // surfaces a genuine delta lives on — not that they can never spell its
+  // name from a surface they control.
+  const ownerAsRepoName = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/evil/sirkirby/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "repo named after the owner, attacker-controlled" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(ownerAsRepoName.status, "satisfied");
+});
+
+test("#1763 (review): two-segment official-Hub identities settle advisories through the search NAME carry, never a fetched name", () => {
+  const rows = imageRows([{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
+  // The base-image advisory shape names the ARTIFACT, not any owner: the
+  // web-search channel carries it even with no owner segment to bind.
+  const advisory = byId(foldDependencyRows(
+    [{ tool: "web_search", args: { query: "alpine 3.20.1 3.21.0 advisory" }, status: "ok" }],
+    [{ status: "ok", result: { results: "no CVEs reported for 3.21.0" } }],
+    rows,
+  ), "obligation-5");
+  assert.equal(advisory.status, "satisfied");
+  assert.equal(advisory.evidence?.state, "receipt-backed");
+  // A fetched surface still needs more than the bare official-image name:
+  // the generic full-slug token or the exact catalog document binds, an
+  // `example.com/alpine/…` page is no candidate for `docker.io/alpine`.
+  const fetchedName = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://example.com/alpine/releases/3.20.1-to-3.21.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "release notes" } }],
+    rows,
+  ), "obligation-4");
+  assert.equal(fetchedName.status, "unresolved");
+  assert.equal(fetchedName.evidence?.state, "receipt-absent");
 });

@@ -355,7 +355,7 @@ The native tool loop's `web_fetch` tool, and any linked-source fetching, are
 restricted to an explicit host allowlist:
 
 ```yaml
-    allowed-source-hosts: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io"
+    allowed-source-hosts: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io,ghcr.io,hub.docker.com,docker.io,quay.io"
 ```
 
 That's the default list. Any host not on it is refused.
@@ -366,14 +366,18 @@ dependency's authoritative registry document — for npm that is the
 `registry.npmjs.org` packument (versioned manifests and `-/package/…`
 metadata, or `npmjs.com` package pages); for a container image or OCI chart
 it is the canonical registry catalog page for the exact artifact path
-(`ghcr.io`, `hub.docker.com`/`docker.io`, `quay.io`) — never from a
-same-named repository on a forge, a same-named artifact on another registry
-or under another owner, or a search result, because every one of those
-targets is registrable by an attacker. The container-registry catalog hosts
-are in the default list so the organic image bump settles; the npm registry
-hosts are not, so with them refused the npm provenance row stays fail-closed
-unresolved — add `registry.npmjs.org` (and `npmjs.com` for website pages) to
-`allowed-source-hosts` when runs should be able to settle npm provenance.
+(`ghcr.io`, `hub.docker.com`/`docker.io`, `quay.io`, plus the
+`gcr.io`/`registry.k8s.io`/`mcr.microsoft.com`/`public.ecr.aws` families) —
+never from a same-named repository on a forge, a same-named artifact on
+another registry or under another owner, or a search result, because every
+one of those targets is registrable by an attacker. The core
+container-registry catalog hosts are in the default list so the organic
+image bump settles; the npm registry hosts and the remaining catalog hosts
+(`gcr.io` and its regional variants, `registry.k8s.io`, `k8s.gcr.io`,
+`mcr.microsoft.com`, `public.ecr.aws`, `gallery.ecr.aws`) are not, so with
+the host a row needs refused its provenance row stays fail-closed
+unresolved — add that registry's host to `allowed-source-hosts` when runs
+should be able to settle its provenance.
 
 ## The upstream link sanitizer
 
