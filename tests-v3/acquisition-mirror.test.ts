@@ -111,6 +111,162 @@ test("ensureMirror: a refused git spawn reports the launch reason, not exited un
   }
 });
 
+test("ensureMirror: a failing git run surfaces a bounded masked stderr class, never URL material (#1775)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "stderrclass/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-sslgit-"));
+      const sslGit = join(scratch, "git");
+      // A git whose fetch dies the way a trust-store-less image dies
+      // (exit 128 + "SSL CA cert"), with a credential-bearing canary URL
+      // and a megabyte-sized padding run planted in the same stderr line:
+      // the failure reason must carry the class, single-line, bounded,
+      // with every URL/remote token replaced. Feeds the boundary token to
+      // the boundary itself (#252).
+      await writeFile(
+        sslGit,
+          "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          "    printf 'remote: Counting objects: 100%% (1/1)\\rremote: noise\\r' >&2\n" +
+          "    printf \"error: could not read from remote 'git@canary-scp.invalid:./secret/path/repo.git'\\n\" >&2\n" +
+          "    printf \"fatal: unable to access 'https://canary-token@canary-host.invalid/leak/repo.git/': Problem with the SSL CA cert (path? access rights?) " +
+            "A".repeat(1000) +
+            "\\n\" >&2\n" +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "stderrclass/repo",
+        cloneUrl: `${fixture.baseUrl}/stderrclass/repo.git`,
+        gitBinary: sslGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        // The exit code AND the class that #1775 buried are both present.
+        assert.match(error.message, /git fetch: exited 128/);
+        assert.match(error.message, /SSL CA cert/);
+        // Single line: no child newline/CR reaches the failure reason.
+        assert.ok(!error.message.includes("\n"), "failure reason stays single-line");
+        assert.ok(!error.message.includes("\r"), "failure reason stays single-line");
+        // Never argv/URL material: not the scheme-URL canary, not the
+        // scp-style `user@host:./path` remote, not even inside the fatal
+        // line; and the LAST line survives (the noise lines above it do
+        // not replace it).
+        assert.doesNotMatch(error.message, /canary-token|canary-host\.invalid|canary-scp\.invalid|secret\/path|https:\/\//);
+        assert.match(error.message, /<url>/);
+        // Bounded: exit-code prefix + capped class + truncation marker.
+        assert.match(error.message, /\.\.\.\[truncated\]$/);
+        assert.ok(error.message.length <= 400, `failure reason must stay bounded: ${error.message.length}`);
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a failed git run with empty stderr keeps the bare exit-code message (#1775)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "quietfail/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-quietgit-"));
+      const quietGit = join(scratch, "git");
+      await writeFile(
+        quietGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then exit 128; fi\n' +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "quietfail/repo",
+        cloneUrl: `${fixture.baseUrl}/quietfail/repo.git`,
+        gitBinary: quietGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        assert.equal(error.message, "git fetch: exited 128");
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: an echoing child cannot return this run's credential in the failure reason (#1775)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "echocred/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-echogit-"));
+      const echoGit = join(scratch, "git");
+      // The exact fetch credential (an opaque token with no recognizable
+      // framing, so no heuristic pattern would catch it) printed back on
+      // the TERMINAL stderr line, where last-line selection keeps it:
+      // only the known-secret pass, fed the literal from the call site,
+      // can then keep it out of the durable reason.
+      const opaqueAuth = "opaque-canary-secret-9f3a7d21";
+      await writeFile(
+        echoGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          "    printf 'fatal: Authentication failed (auth=%s)\\n' \"$GIT_CONFIG_VALUE_0\" >&2\n" +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "echocred/repo",
+        cloneUrl: `${fixture.baseUrl}/echocred/repo.git`,
+        credentials: { cloneUrl: `${fixture.baseUrl}/echocred/repo.git`, authorization: opaqueAuth },
+        gitBinary: echoGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        assert.match(error.message, /Authentication failed/);
+        assert.match(error.message, /⟦•⟧/, "the credential was masked in place, not dropped with the line");
+        assert.ok(!error.message.includes(opaqueAuth), "the literal credential must never surface");
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("ensureMirror: init + full fetch, warm ensure is incremental (no rebuild, no reclone)", async () => {
   const fixture = await startGitHttpFixture();
   try {

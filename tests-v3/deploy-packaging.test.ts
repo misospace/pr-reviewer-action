@@ -671,9 +671,13 @@ test("Dockerfile: non-root USER 1000, exec-form entrypoint, worker argv", () => 
   assert.doesNotMatch(dockerfile, /npm start|sh -c|bash -c/);
   assert.doesNotMatch(dockerfile, /COPY --from=build .*node_modules/);
   // Both production targets inherit the same runtime stage. The subprocess
-  // boundary refuses every launch without pgrep; pin the image contract.
-  assert.match(dockerfile, /apt-get install -y --no-install-recommends git procps/);
+  // boundary refuses every launch without pgrep, and git's https transport
+  // has no trust store without the ca-certificates bundle (#1775: it is
+  // only a Recommends, so --no-install-recommends drops it). Pin the
+  // image contract: package list AND the in-layer assertions.
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends git procps ca-certificates/);
   assert.match(dockerfile, /command -v git && command -v pgrep && command -v pkill/);
+  assert.match(dockerfile, /test -f \/etc\/ssl\/certs\/ca-certificates\.crt/);
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists/);
   // #1584: every external base image stays pinned by sha256 digest, and
   // the whole file builds on ONE base revision. Stage-name FROMs are
