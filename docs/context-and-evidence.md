@@ -360,16 +360,20 @@ restricted to an explicit host allowlist:
 
 That's the default list. Any host not on it is refused.
 
-One operator-facing consequence of that default (#1748): the dependency-evidence
-**provenance** obligation settles only from the dependency's authoritative npm
-registry document (`registry.npmjs.org` packuments, versioned manifests and
-`-/package/…` metadata, or `npmjs.com` package pages) — never from a
-same-named repository on a forge, a same-named artifact on another registry,
-or a search result, because every one of those targets is registrable by an
-attacker. With the npm registry hosts refused (the default list), the
-provenance row stays fail-closed unresolved; add `registry.npmjs.org` (and
-`npmjs.com` for website pages) to `allowed-source-hosts` when runs should be
-able to settle provenance.
+One operator-facing consequence of that default (#1748, #1763): the
+dependency-evidence **provenance** obligation settles only from the
+dependency's authoritative registry document — for npm that is the
+`registry.npmjs.org` packument (versioned manifests and `-/package/…`
+metadata, or `npmjs.com` package pages); for a container image or OCI chart
+it is the canonical registry catalog page for the exact artifact path
+(`ghcr.io`, `hub.docker.com`/`docker.io`, `quay.io`) — never from a
+same-named repository on a forge, a same-named artifact on another registry
+or under another owner, or a search result, because every one of those
+targets is registrable by an attacker. The container-registry catalog hosts
+are in the default list so the organic image bump settles; the npm registry
+hosts are not, so with them refused the npm provenance row stays fail-closed
+unresolved — add `registry.npmjs.org` (and `npmjs.com` for website pages) to
+`allowed-source-hosts` when runs should be able to settle npm provenance.
 
 ## The upstream link sanitizer
 

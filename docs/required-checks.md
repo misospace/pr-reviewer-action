@@ -391,8 +391,11 @@ The rules this buys, and their limits:
   the row only when, per obligation kind, the validated receipts JOINTLY
   cover EVERY entry — identity per the entry's kind: an npm entry's exact
   slug, and #1763's image/chart identity via the exact slug token, the
-  canonical registry-catalog page, or the namespace/artifact-name source
-  carry — and, for every kind that asserts the update itself (release delta
+  canonical registry-catalog page, or the OWNER-segment source carry (the
+  bare artifact name never carries a fetched surface — a same-named
+  artifact under another owner is attacker-registrable — and only an
+  advisory `web_search` query may name the artifact) — and, for every kind
+  that asserts the update itself (release delta
   AND advisory), the COMPLETE captured changed-version identity: an advisory
   check naming only one endpoint of a captured `old → new` range never
   certifies the updated range (acquisition provenance bound to the captured

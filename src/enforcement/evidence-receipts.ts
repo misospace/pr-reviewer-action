@@ -985,14 +985,18 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  *   Hub's `/r/library/<name>` and `/_/<name>` surfaces canonicalize to
  *   `docker.io/<name>`);
  * - `image`/`chart` additionally carry through the registry identity's
- *   NAMESPACE or artifact-NAME segment (`imageScopeSegmentCarry`): an
- *   image's release delta and advisories live on the upstream surface
- *   (source-repo compare, advisory search), which never spells the
- *   registry-host-prefixed slug — this widens only the CANDIDATE gate for
- *   the version-asserting cells (whose settlement still requires the joint
- *   carry of every captured version, the same standard under which an
- *   attacker-repo compare could cover an npm delta pre-#1748); the
- *   provenance cell stays registry-catalog-bound.
+ *   OWNER (namespace) segment, and — on the SEARCH channel only — its
+ *   artifact-NAME segment (`imageScopeSegmentCarry`): an image's release
+ *   delta and advisories live on the upstream surface (source-repo
+ *   compare, advisory search), which never spells the registry-host-
+ *   prefixed slug — this widens only the CANDIDATE gate for the
+ *   version-asserting cells (whose settlement still requires the joint
+ *   carry of every captured version); the provenance cell stays
+ *   registry-catalog-bound. A FETCHED surface never carries the bare
+ *   artifact name (review finding on #1763): a same-named artifact under
+ *   another owner or registry is registrable by an attacker and carries
+ *   that name token without being the changed image, so fetched evidence
+ *   binds through the owner segment the attacker cannot register.
  * Shared by the row-level identity gate and the per-cell candidate
  * derivation, so both stages agree on what counts as speaking about THIS
  * dependency. */
@@ -1001,25 +1005,35 @@ function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, entry: Depen
   const url = receipt.subject.url ?? "";
   if (entry.kind === "image" || entry.kind === "chart") {
     return canonicalRegistryCatalogImageIdentity(url) === entry.slug
-      || imageScopeSegmentCarry(receiptIdentityString(receipt), entry.slug);
+      || imageScopeSegmentCarry(receipt, entry.slug);
   }
   return authoritativeRegistryPackageSlug(url) === entry.slug;
 }
 
 /** #1763: the source-surface carry for an `image`/`chart` entry: the
  * normalized registry identity `<host>/<path…>` binds an identity string
- * that carries its namespace (first path segment) or its artifact name
- * (final path segment) under the exact slug-token boundary rule — the shape
- * a genuine upstream release/advisory lookup of that artifact names. A
- * slug with no namespace+name pair (shorter than `<host>/<ns>/<name>`)
- * carries nothing through this clause; #1748's canonical-source hardening
- * is untouched for npm entries. */
-function imageScopeSegmentCarry(identity: string, slug: string): boolean {
+ * through its OWNER (first path segment after the host) under the exact
+ * slug-token boundary rule — the segment a genuine upstream source surface
+ * (the owner's release/compare pages) spells and an attacker cannot
+ * register. A FETCHED surface (web_fetch, forge-read) never carries the
+ * bare artifact NAME: a same-named artifact under another owner or on
+ * another registry is registrable by an attacker and carries the name
+ * token without being the changed image, so name-only fetched evidence is
+ * no candidate at all (the owner-blind `github.com/evil/<name>/compare/…`
+ * settles nothing). The SEARCH channel is different: a query is not an
+ * attacker-registerable surface, and an advisory lookup legitimately names
+ * the ARTIFACT rather than its owner (`"<name> <old> <new> advisory"`), so
+ * a `web-search` receipt carries through the name or the owner. A slug
+ * with no owner segment (shorter than `<host>/<ns>/<name>`) carries
+ * nothing through this clause; #1748's canonical-source hardening is
+ * untouched for npm entries. */
+function imageScopeSegmentCarry(receipt: EvidenceReceipt, slug: string): boolean {
   const segments = slug.split("/").filter((segment) => segment !== "");
   if (segments.length < 3) return false;
   const namespace = segments[1]!;
-  const name = segments[segments.length - 1]!;
-  return identityCarriesToken(identity, name) || identityCarriesToken(identity, namespace);
+  if (identityCarriesToken(receiptIdentityString(receipt), namespace)) return true;
+  return receipt.kind === "web-search"
+    && identityCarriesToken(receiptIdentityString(receipt), segments[segments.length - 1]!);
 }
 
 /** Every dotted-numeric token (any length: `7.2`, `11.21.3`) — the tag
@@ -1166,7 +1180,8 @@ function dependencyReceiptCoverage(
     // Each canonical clause returns non-null only for its own registry
     // vocabulary naming the identity exactly, so neither widens the gate to
     // another channel or target; image/chart entries also pass through the
-    // namespace/name source-surface carry, which only ever feeds the
+    // owner-segment source-surface carry (artifact name only on the search
+    // channel — `imageScopeSegmentCarry`), which only ever feeds the
     // version-asserting cells' candidate set.
     if (!scope.some((entry) => receiptCarriesDependencyIdentity(receipt, entry))) continue;
     // #1726: an upstream acquisition is trustworthy whether it came through

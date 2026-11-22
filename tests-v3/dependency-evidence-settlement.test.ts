@@ -1080,18 +1080,19 @@ test("#1763: Docker Hub spellings normalize to the docker.io/<name> identity —
 });
 
 test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisories, and unverified acquisitions never settle image rows", () => {
-  // (a) A same-named repository under an UNRELATED owner: attributed
-  // provenance and it carries the artifact-name identity — but it is not
-  // the canonical ghcr catalog, so the cell is a mismatch beside a verified
-  // relevant acquisition, fail closed exactly like the #1748 attacker-repo
-  // rule on the npm side.
+  // (a) A same-named repository under an UNRELATED owner carries the bare
+  // artifact NAME, but a FETCHED surface binds only through the OWNER
+  // segment: the attacker-registered repo names no candidate identity for
+  // this entry at all — `receipt-absent`, fail closed even before the
+  // canonical-catalog provenance rule (a same-OWNER source read is the
+  // mismatch case, pinned below).
   const attacker = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://github.com/evil/unifi-network-mcp" }, status: "ok" }],
     [{ status: "ok", result: { content: "same-named repository, different owner" } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-3");
   assert.equal(attacker.status, "unresolved");
-  assert.equal(attacker.evidence?.state, "receipt-mismatch");
+  assert.equal(attacker.evidence?.state, "receipt-absent");
 
   // (b) release_delta with the WRONG old endpoint: the candidate carries
   // the namespace identity and the new version, but not the captured old
@@ -1161,4 +1162,59 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   ), "obligation-5");
   assert.equal(digestAdvisory.status, "unresolved");
   assert.equal(digestAdvisory.evidence?.state, "receipt-mismatch");
+});
+
+test("#1763 (review): a FETCHED surface binds an image entry only through its OWNER segment — attacker same-name artifacts are no candidate", () => {
+  // (1) The exact attack the carry must refuse: an attacker-registered
+  // same-named repo whose compare URL spells BOTH captured versions. The
+  // fetched name token carries nothing without the owner, so the delta row
+  // never even sees a candidate — `receipt-absent`, not a settle.
+  const attackerDelta = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/evil/unifi-network-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "2 commits between attacker tags" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(attackerDelta.status, "unresolved");
+  assert.equal(attackerDelta.evidence?.state, "receipt-absent");
+
+  // (2) The same-named IMAGE on the registry under another owner: a real
+  // canonical catalog page OF A DIFFERENT artifact — it attributes
+  // provenance and carries the name, but names no identity for THIS entry.
+  const attackerImage = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://ghcr.io/evil/unifi-network-mcp" }, status: "ok" }],
+    [{ status: "ok", result: { content: "{\"schemaVersion\":2}" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-3");
+  assert.equal(attackerImage.status, "unresolved");
+  assert.equal(attackerImage.evidence?.state, "receipt-absent");
+
+  // (3) Hostile boundary tokens (#252): the owner segment must appear as
+  // an exact slug token — a lookalike namespace embeds it inside a longer
+  // identity and carries nothing, even though the name and versions fit.
+  const lookalike = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirbyy/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "lookalike owner namespace" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(lookalike.status, "unresolved");
+  assert.equal(lookalike.evidence?.state, "receipt-absent");
+
+  // (4) The intentional counterpart of (1): the organic #12359 shape —
+  // the owner's source repo spells a DIFFERENT name than the image
+  // artifact — still settles through the owner carry, and a same-owner
+  // source read beside no canonical catalog is the provenance MISMATCH
+  // case (a relevant acquisition that covers nothing).
+  const ownerDelta = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "9 commits" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(ownerDelta.status, "satisfied");
+  const ownerRead = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp" }, status: "ok" }],
+    [{ status: "ok", result: { content: "source repository root" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-3");
+  assert.equal(ownerRead.status, "unresolved");
+  assert.equal(ownerRead.evidence?.state, "receipt-mismatch");
 });
