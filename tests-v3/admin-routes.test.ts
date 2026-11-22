@@ -352,6 +352,15 @@ test("the operator's reason rides the rereview audit row, redacted, and never on
   assert.doesNotMatch(audited, /sk-12345678901234567890/);
   assert.match(audited, /REDACTED/);
   assert.ok(audited.length <= 256, "the audited reason keeps the request's own bound");
+  // Control/format/bidi characters never reach the durable row verbatim:
+  // `validateReason` gates only C0 and CR/LF, so a C1 control, a bidi
+  // override, a zero-width joiner, and a line separator all pass the request
+  // gate and must be stripped before the ledger write.
+  const hostile = "re\u200bview\u202ethis\u008f head\u2029 now\u200d";
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: hostile } }));
+  const sanitized = events[events.length - 1]!.reason ?? "";
+  assert.doesNotMatch(sanitized, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, "no control or format character survives into the ledger");
+  assert.equal(sanitized, "re view this head now");
 });
 
 test("query and unknown routes fail closed", async () => {

@@ -208,12 +208,17 @@ async function audit(context: AdminRouteContext, event: Omit<AdminAuditEvent, "a
  *
  * The reason is operator free text on its way to a DURABLE ledger, so it
  * passes the same redaction every other outbound string passes: a
- * credential shape must never be written down. The bounds are the request's
- * own (`validateReason`: trimmed, one line, at most 256 characters); the
+ * credential shape must never be written down. It passes the same character
+ * sanitation too: `validateReason` rejects only C0 controls and CR/LF, so a
+ * C1 control, a bidi override, or a zero-width character would otherwise be
+ * persisted verbatim — invisible to a human reader, present to anything that
+ * renders or re-emits the ledger. The bounds are the request's own
+ * (`validateReason`: trimmed, one line, at most 256 characters); the
  * redaction can lengthen the text, so the result is capped at the same
  * bound. */
 function auditedReason(reason: string): string {
-  return redactSecretShapes(reason).slice(0, MAX_AUDIT_REASON);
+  const cleaned = reason.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim();
+  return redactSecretShapes(cleaned).slice(0, MAX_AUDIT_REASON);
 }
 function redactDiagnostics(values: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
   const output: Record<string, string | number | boolean> = {};
