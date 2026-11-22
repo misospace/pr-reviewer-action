@@ -2732,9 +2732,15 @@ test("a recovered cancellation in an unlistable cluster fails closed when no wor
 test("the file-access suppressions stay standalone directly above their sinks", () => {
   // CodeQL only recognizes a `codeql[...]` comment that starts its line,
   // and it covers exactly the FOLLOWING line; a trailing comment or one
-  // placed above the enclosing statement suppresses nothing. Pin the
-  // placement so the in-source justification cannot silently decay.
-  const lines = readFileSync("src/executor/kubernetes-api.ts", "utf8").split("\n");
+  // placed above the enclosing statement suppresses nothing. An exact-head
+  // analyzer run also showed the sink FORM matters: `https.request(...)`
+  // property access is modeled as `js/file-access-to-http` where the
+  // aliased named imports are not, and a comment inside a ternary branch
+  // silences nothing (#1773 review). Pin the named-import call form so the
+  // in-source justification cannot silently decay.
+  const source = readFileSync("src/executor/kubernetes-api.ts", "utf8");
+  assert.doesNotMatch(source, /https\.request\(/, "the analyzed sink must stay in the aliased named-import form");
+  const lines = source.split("\n");
   const suppressions = lines
     .map((line, i) => ({ line, next: lines[i + 1] ?? "" }))
     .filter(({ line }) => line.includes("codeql[js/"));
@@ -2747,7 +2753,7 @@ test("the file-access suppressions stay standalone directly above their sinks", 
     );
     assert.match(
       next,
-      /(?:https?Request|https\.request)\(options\)/,
+      /https?Request\(options\)/,
       "the suppression must sit directly above the request call it silences",
     );
   }

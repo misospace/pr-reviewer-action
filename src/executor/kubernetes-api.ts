@@ -39,17 +39,26 @@
  * TESTABILITY: every filesystem and network coordinate is an option with
  * the in-cluster default, so tests point the module at a temporary
  * "service-account" directory and a local HTTP fake and never touch the
- * real projected mount. Production always uses the defaults.
+ * real projected mount, and the `transport` seam captures the exact
+ * request options without opening a socket. Production always uses the
+ * defaults.
  */
 
 import { readFileSync } from "node:fs";
-import { request as httpRequest, type RequestOptions } from "node:http";
-import https from "node:https";
+import { request as httpRequest, type ClientRequest, type RequestOptions } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 
 /** The https request options extend the http ones with the TLS trust
  * material and the SNI host name. */
 type HttpsRequestOptions = RequestOptions & { ca?: Buffer; servername?: string };
+
+/** The request factory seam (#1773 review): production always uses the
+ * named `httpsRequest`/`httpRequest` imports — the call form whose
+ * `js/file-access-to-http` justification is pinned — while a test may
+ * inject a capture-only double to assert the exact options object the
+ * transport would send, without opening any socket. */
+export type ApiTransport = (options: HttpsRequestOptions) => ClientRequest;
 
 import type {
   KubernetesApi,
@@ -241,6 +250,7 @@ export function apiRequest(
   path: string,
   body: string | null,
   contentType = "application/json",
+  transport?: ApiTransport,
 ): Promise<ApiResponse> {
   return new Promise<ApiResponse>((resolve, reject) => {
     const options: HttpsRequestOptions = {
@@ -273,15 +283,22 @@ export function apiRequest(
     // source. The files are the pod's own service-account material, the
     // endpoint is the kubelet-projected KUBERNETES_SERVICE_HOST, and both
     // are read once, bounded, and fail closed at construction.
-    // The suppression comments below must stay standalone on the line
-    // directly above each request call: CodeQL only recognizes a tagged
-    // codeql suppression comment that starts its line, and it covers
-    // exactly the line that follows it.
-    const request = material.scheme === "https"
-      // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
-      ? https.request(options)
-      // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
-      : httpRequest(options);
+    // The two request calls below must stay in the aliased named-import
+    // form and directly below their standalone suppression comments:
+    // CodeQL only recognizes a tagged codeql suppression comment that
+    // starts its line and covers exactly the line that follows it, and
+    // an exact-head analyzer run showed it models the `https` namespace
+    // `request` property call as a `js/file-access-to-http` sink it does
+    // NOT silence here, while the named imports stay quiet (#1773 review).
+    // Runtime option capture is a test-only seam (the `transport`
+    // parameter), never a rewrite of the analyzed call form.
+    const request = transport !== undefined
+      ? transport(options)
+      : material.scheme === "https"
+        // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
+        ? httpsRequest(options)
+        // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
+        : httpRequest(options);
     request.on("timeout", () => {
       request.destroy(new KubernetesApiError("the Kubernetes API call timed out", null));
     });

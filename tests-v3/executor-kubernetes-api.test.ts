@@ -8,9 +8,9 @@
  * never skipped. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import http from "node:http";
-import https from "node:https";
+import type { ClientRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,6 +18,7 @@ import {
   apiTlsServername,
   buildMaterial,
   IN_CLUSTER_API_SERVICE_NAME,
+  type ApiTransport,
 } from "../src/executor/kubernetes-api.js";
 
 function fakeServiceAccountDir(): string {
@@ -78,25 +79,33 @@ test("the transport never opts out of certificate verification (#1773)", () => {
 });
 
 test("the live https request options carry the derived servername, not the ClusterIP (#1773)", async () => {
-  const original = https.request;
-  let captured: https.RequestOptions | undefined;
-  (https as { request: unknown }).request = (options: https.RequestOptions) => {
+  let captured: Parameters<ApiTransport>[0] | undefined;
+  const captureTransport: ApiTransport = (options) => {
     captured = options;
-    const fake = new http.ClientRequest("http://127.0.0.1:1", () => undefined);
-    fake.on("error", () => undefined);
-    process.nextTick(() => fake.destroy(new Error("stubbed")));
-    return fake;
+    // A fully inert double: the request surface the transport uses is an
+    // EventEmitter plus write/end/destroy stubs. No ClientRequest is
+    // constructed and no socket is ever opened; `end` only schedules the
+    // error that settles the call.
+    const request = Object.assign(new EventEmitter(), {
+      write: (): boolean => true,
+      end: (): void => {
+        process.nextTick(() => request.emit("error", new Error("stubbed transport")));
+      },
+      destroy: (): void => undefined,
+    });
+    return request as unknown as ClientRequest;
   };
   const dir = fakeServiceAccountDir();
   let material: ReturnType<typeof buildMaterial> | undefined;
   try {
     material = buildMaterial({ serviceAccountDir: dir, host: "10.43.0.1", port: "443" });
-    await assert.rejects(apiRequest(material, "GET", "/apis/batch/v1/namespaces/default/jobs", null));
+    await assert.rejects(
+      apiRequest(material, "GET", "/apis/batch/v1/namespaces/default/jobs", null, "application/json", captureTransport),
+    );
   } finally {
-    (https as { request: unknown }).request = original;
     rmSync(dir, { recursive: true, force: true });
   }
-  assert.ok(captured, "the transport must go through https.request");
+  assert.ok(captured, "the transport must receive the real request options");
   assert.ok(material);
   assert.equal(captured.servername, "kubernetes.default.svc", "the live TLS identity is the derived name, never the IP");
   assert.equal(captured.host, "10.43.0.1", "the socket still connects to the projected host");
