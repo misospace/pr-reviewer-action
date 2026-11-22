@@ -2836,3 +2836,178 @@ test("#1772: the admin surface drives the REAL composition (a forced rereview mi
   assert.ok(cancelRow !== undefined, "the cancel was audited");
   assert.ok(!("reason" in cancelRow!), "the cancel row carries no reason field at all");
 });
+
+test("#1772: a mixed-case operator key carries the intake's canonical identity (#1781 review)", async (t) => {
+  // The adoption records, the allow/denylist matching, and the generation
+  // identity all key on the LOWERCASED form the intake's forge normalizer
+  // produces. A forced rereview keyed with the operator's mixed-case spelling
+  // must reach the forge and the queue as that same canonical identity: never
+  // miss the adoption record, never mint a generation whose identity diverges
+  // from the intake's for the same head.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-case-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+
+  const rereview = await fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+    method: "POST",
+    headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+    body: JSON.stringify({ prKey: "Owner/Repo#7", reason: "manual" }),
+  });
+  assert.equal(rereview.status, 202);
+  const accepted = await rereview.json() as { jobId?: string };
+  assert.equal(typeof accepted.jobId, "string");
+  assert.deepEqual(
+    prReads,
+    [{ repoFullName: "owner/repo", prNumber: 7 }],
+    "the forge read used the canonical (lowercased) identity, not the operator's spelling",
+  );
+
+  await waitFor(() => {
+    try {
+      const snapshot = JSON.parse(readFileSync(join(env.PR_REVIEWER_DURABLE_STATE_DIR!, "queue-snapshot.json"), "utf8")) as {
+        records: Array<{ job: { jobId: string; repoFullName: string; prNumber: number } }>;
+      };
+      return snapshot.records.some(
+        (record) => record.job.jobId === accepted.jobId && record.job.repoFullName === "owner/repo" && record.job.prNumber === 7,
+      );
+    } catch {
+      return false;
+    }
+  });
+});
+
+test("#1781 review: the adoption gate sees the operator's key in the canonical case", async (t) => {
+  // The adoption gate's allow/denylist matching keys on the canonical
+  // (lowercased) identity. A mixed-case operator key must therefore neither
+  // miss its allowlist entry (a false refusal of an adopted repository) nor
+  // slip past a denylist entry (the hard-off layer bypassed by spelling).
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-gate-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(
+    configPath,
+    GITHUB_INSTANCE_CONFIG.replace(
+      "adoption:\n  mode: all_allowed\n  discovered-default: adopt",
+      "adoption:\n  mode: allowlist\n  allowlist:\n    - owner/repo\n  denylist:\n    - denied/repo\n  discovered-default: adopt",
+    ),
+    "utf8",
+  );
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+  const admin = (body: Record<string, string>): Promise<Response> =>
+    fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+      method: "POST",
+      headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  // The allowlisted repository: the mixed-case key reaches the gate as the
+  // canonical identity, hits the allowlist entry, and schedules.
+  const allowed = await admin({ prKey: "Owner/Repo#7", reason: "manual" });
+  assert.equal(allowed.status, 202, "the mixed-case key hits the allowlist through the canonical identity");
+  const accepted = await allowed.json() as { jobId?: string };
+  assert.equal(typeof accepted.jobId, "string");
+
+  // The denylisted repository: the mixed-case key reaches the gate as the
+  // canonical identity too, so the hard-off layer refuses it.
+  const refused = await admin({ prKey: "Denied/Repo#8", reason: "manual" });
+  assert.equal(refused.status, 409, "the denylist beats the operator's spelling");
+  assert.equal(
+    (await refused.json() as { detail?: string }).detail,
+    "the repository is not adopted for review",
+  );
+
+  assert.deepEqual(
+    prReads,
+    [
+      { repoFullName: "owner/repo", prNumber: 7 },
+      { repoFullName: "denied/repo", prNumber: 8 },
+    ],
+    "both reads reached the forge under the canonical identity",
+  );
+});

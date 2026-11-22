@@ -130,6 +130,13 @@ data route stays bearer-protected (see
   else with a `400`; the controller's stricter parse refuses the rest as
   a `409` with its reason. A key that could name several pull requests is
   never resolved by guessing.
+- **The parsed repository identity carries the intake's canonical case.**
+  The controller lowercases the owner/repository the same way the intake's
+  forge normalizer does (`normalizeRepoFullName`), so a mixed-case key
+  names the same repository a webhook event would. The adoption record, the
+  allow/denylist match, and the generation identity all key on this
+  canonical form, so the operator's spelling can never miss the adoption
+  gate or mint a generation whose identity diverges from the intake's.
 - **Every refusal names itself.** No mutation answers with a bare
   status: the body carries `detail` — the reason the effect seam gave,
   or the admin layer's own fixed reason for an unknown run, a terminal

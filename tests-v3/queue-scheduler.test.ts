@@ -1403,7 +1403,7 @@ test("cancel: a terminal record is refused without a mutation", async () => {
 });
 
 test("cancel: a queued record settles cancelled with the operator attribution", () => {
-  const { clock, controller } = setup();
+  const { controller } = setup();
   controller.enqueue(makeJob("job-a"));
   const before = controller.recordFor("job-a")!;
 

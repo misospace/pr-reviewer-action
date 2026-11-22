@@ -115,6 +115,7 @@ import type {
   ControllerAdminDeps,
   ReadinessComponent,
 } from "../admin/types.js";
+import { normalizeRepoFullName } from "../events/normalize.js";
 import type { FollowUpForgeAdapter } from "../ingress/followup-host.js";
 import type { ReconcileReport } from "../ingress/reconcile.js";
 import {
@@ -648,7 +649,16 @@ function parsePrKey(prKey: string): { readonly repoFullName: string; readonly pr
   if (match === null) return null;
   const prNumber = Number(match[3]);
   if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
-  return { repoFullName: `${match[1]}/${match[2]}`, prNumber };
+  // The identity carries the SAME canonical case the intake's forge
+  // normalizer produces (`normalizeRepoFullName`: trim + lowercase): the
+  // adoption records, the allow/denylist matching, and the generation
+  // identity all key on that canonical form, so a mixed-case operator key
+  // names the same repository the webhook event would — it can never miss
+  // the adoption record, and can never mint a generation whose identity
+  // diverges from the intake's for the same head.
+  const repoFullName = normalizeRepoFullName(`${match[1]}/${match[2]}`);
+  if (repoFullName === "") return null;
+  return { repoFullName, prNumber };
 }
 
 /** The admin surface's thin deps (#737): projections over the control
