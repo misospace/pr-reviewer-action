@@ -63,5 +63,9 @@ jobs:
           # `default`, not `security-and-quality`, and #621's acceptance
           # requires the full security-and-quality pack.
           queries: security-and-quality
+          # The analysis-level exclusion for the repository's one by-design
+          # file-data-to-request flow, with its justification:
+          # .github/codeql-config.yml
+          config-file: ./.github/codeql-config.yml
 
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

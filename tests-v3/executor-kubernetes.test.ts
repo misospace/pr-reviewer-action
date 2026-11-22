@@ -2729,15 +2729,14 @@ test("a recovered cancellation in an unlistable cluster fails closed when no wor
   rmSync(second.root, { recursive: true, force: true });
 });
 
-test("the file-access suppressions stay standalone directly above their sinks", () => {
-  // CodeQL only recognizes a `codeql[...]` comment that starts its line,
-  // and it covers exactly the FOLLOWING line; a trailing comment or one
-  // placed above the enclosing statement suppresses nothing. An exact-head
-  // analyzer run also showed the sink FORM matters: `https.request(...)`
-  // property access is modeled as `js/file-access-to-http` where the
-  // aliased named imports are not, and a comment inside a ternary branch
-  // silences nothing (#1773 review). Pin the named-import call form so the
-  // in-source justification cannot silently decay.
+test("the file-access suppressions sit directly above their own request statements", () => {
+  // CodeQL only recognizes a `codeql[...]` comment that starts its line, and
+  // it covers exactly the FOLLOWING line; a trailing comment suppresses
+  // nothing. An exact-head analyzer run also showed the sink FORM matters:
+  // `https.request(...)` property access is modeled as
+  // `js/file-access-to-http` where the aliased named imports are not. Pin
+  // the named-import call form and the standalone-statement placement, so
+  // the in-source justification cannot silently decay (#1773 review).
   const source = readFileSync("src/executor/kubernetes-api.ts", "utf8");
   assert.doesNotMatch(source, /https\.request\(/, "the analyzed sink must stay in the aliased named-import form");
   const lines = source.split("\n");
@@ -2753,8 +2752,30 @@ test("the file-access suppressions stay standalone directly above their sinks", 
     );
     assert.match(
       next,
-      /https?Request\(options\)/,
-      "the suppression must sit directly above the request call it silences",
+      /^\s*request = (https|http)Request\(options\);\s*$/,
+      "the suppression must sit directly above the request statement it silences — not inside a conditional expression",
     );
   }
+});
+
+test("the CodeQL analysis excludes the one by-design file-data-to-request flow", () => {
+  // The in-source tagged comment above each sink silences the finding only
+  // when the analysis also runs CodeQL's alert-suppression query, and no
+  // standard suite runs it — so the analysis-level exclusion is what
+  // actually stops the finding. Pin the exclusion AND its wiring, so
+  // neither can disappear or widen silently.
+  const config = readFileSync(".github/codeql-config.yml", "utf8");
+  assert.match(config, /query-filters:/, "the exclusion must be a query filter, not a whole-file exclusion");
+  const excluded = [...config.matchAll(/^\s*id:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+  assert.deepEqual(
+    excluded,
+    ["js/file-access-to-http"],
+    "the analysis-level exclusion must stay scoped to the one by-design flow",
+  );
+  const workflow = readFileSync(".github/workflows/codeql.yml", "utf8");
+  assert.match(
+    workflow,
+    /config-file: \.\/\.github\/codeql-config\.yml/,
+    "the CodeQL workflow must pass the exclusion config to the init step",
+  );
 });

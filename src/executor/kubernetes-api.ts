@@ -283,22 +283,35 @@ export function apiRequest(
     // source. The files are the pod's own service-account material, the
     // endpoint is the kubelet-projected KUBERNETES_SERVICE_HOST, and both
     // are read once, bounded, and fail closed at construction.
-    // The two request calls below must stay in the aliased named-import
-    // form and directly below their standalone suppression comments:
-    // CodeQL only recognizes a tagged codeql suppression comment that
-    // starts its line and covers exactly the line that follows it, and
-    // an exact-head analyzer run showed it models the `https` namespace
-    // `request` property call as a `js/file-access-to-http` sink it does
-    // NOT silence here, while the named imports stay quiet (#1773 review).
+    //
+    // The two request calls below keep the aliased named-import form and
+    // each sit in a statement of their own, directly below their own
+    // tagged suppression comment. CodeQL covers exactly the line that
+    // FOLLOWS such a comment, so the sink belongs on that line and its
+    // justification belongs on the line above it.
+    //
+    // The tagged comments are the in-source justification for this flow,
+    // but they are NOT what silences the finding: CodeQL honors an
+    // in-source suppression comment only when the analysis also runs the
+    // language's alert-suppression query, and no standard query suite runs
+    // it — the `security-and-quality` suite this repository selects does
+    // not (verified against the CodeQL CLI the action resolves to: the
+    // suite's query list holds no alert-suppression query, and that same
+    // suite over this file still reports the finding with the comments in
+    // place). The analysis-level exclusion that actually silences it is
+    // `.github/codeql-config.yml`.
     // Runtime option capture is a test-only seam (the `transport`
     // parameter), never a rewrite of the analyzed call form.
-    const request = transport !== undefined
-      ? transport(options)
-      : material.scheme === "https"
-        // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
-        ? httpsRequest(options)
-        // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
-        : httpRequest(options);
+    let request: ClientRequest;
+    if (transport !== undefined) {
+      request = transport(options);
+    } else if (material.scheme === "https") {
+      // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
+      request = httpsRequest(options);
+    } else {
+      // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
+      request = httpRequest(options);
+    }
     request.on("timeout", () => {
       request.destroy(new KubernetesApiError("the Kubernetes API call timed out", null));
     });

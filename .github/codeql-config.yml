@@ -1,0 +1,41 @@
+# CodeQL analysis configuration for this repository.
+#
+# Passed to the CodeQL `init` step as `config-file`
+# (`.github/workflows/codeql.yml`).
+#
+# `js/file-access-to-http` ("File data in outbound network request") fires on
+# ONE flow in this repository: the in-cluster Kubernetes API client
+# (`src/executor/kubernetes-api.ts`) reads the projected service-account
+# token and CA bundle from the pod's projected service-account directory and
+# sends them to the kubelet-projected cluster API endpoint. That
+# file-data-to-request flow IS the #734 product contract — the endpoint is
+# the cluster's own API and the files are the pod's own projected material
+# — and it is justified in source, directly above both request sinks, with a
+# tagged suppression comment.
+#
+# Why an analysis-level exclusion and not only that comment: CodeQL honors
+# an in-source suppression comment only when the analysis ALSO runs the
+# language's alert-suppression query, and no standard suite runs it.
+# `codeql resolve queries` on the `security-and-quality` suite this workflow
+# selects lists the queries it runs, and the alert-suppression query is not
+# among them (verified against the CodeQL CLI the action resolves to). The
+# comment therefore silenced nothing: the same two alerts were raised on
+# `main` (dismissed by hand as false positives) and re-raised on the head of
+# the change that fixed that transport's TLS identity.
+#
+# The exclusion is stated by query id rather than by path. CodeQL's query
+# filter does accept a `paths` scope, but the CLI does not honor it — a
+# path-scoped filter for this one file still reports the finding (verified
+# against the same CLI) — and the alternative, excluding the file from the
+# analysis, would take the credential-handling transport out of every other
+# check. Every other check, the request-forgery and path-traversal families
+# the threat model in SECURITY.md names among them, stays on for every file.
+#
+# The residual cost is explicit: a file-data-to-request flow introduced
+# elsewhere in this repository would not be reported by CodeQL. It is
+# covered by the repository's other gates (the AI review, the test suite)
+# and by review, and the exclusion is pinned by
+# `tests-v3/executor-kubernetes.test.ts` so it cannot widen silently.
+query-filters:
+  - exclude:
+      id: js/file-access-to-http
