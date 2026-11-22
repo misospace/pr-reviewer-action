@@ -110,8 +110,40 @@ data route stays bearer-protected (see
   admin layer validates the `prKey` shape (fail closed), audits, and
   reports the new `jobId` (`202`). A refused effect is `409`.
 - **Cancel only targets a live run:** unknown run → `404`, terminal run
-  → `409` (also the idempotent second-cancel outcome), active run →
-  `202`. The effect seam may still refuse; refusals are `409` too.
+  → `409` (also the idempotent second-cancel outcome), an active run →
+  `200 { "cancelled": true }`. The effect seam applied the cancellation
+  before the route answered (the queue stamped the generation and aborted
+  its attempt), so the route ACKNOWLEDGES the cancellation instead of
+  promising it; the durable run settles `cancelled` when the attempt
+  observes the abort. The effect seam may still refuse; refusals are `409` too.
+
+| Mutation | Request body | Accepted | Refused |
+|---|---|---|---|
+| `POST /admin/rereview` | `{"prKey": "owner/repo#123", "reason": "<one line>"}` | `202 {"jobId": "<generation id>"}` | `400` invalid request, `409` refused effect |
+| `POST /admin/runs/{runId}/cancel` | `{}` | `200 {"cancelled": true}` | `404` unknown run, `409` terminal run, `409` refused effect |
+
+- **The PR key names ONE pull request.** The controller's grammar is
+  `owner/repo#123`: an owner and a repository of `[A-Za-z0-9._-]`, a `#`,
+  and a POSITIVE decimal number with no leading zero. The admin layer's
+  own shape gate is the wider, trimmed identifier vocabulary
+  (`[A-Za-z0-9._/@#:-]`, at most 512 characters) and refuses anything
+  else with a `400`; the controller's stricter parse refuses the rest as
+  a `409` with its reason. A key that could name several pull requests is
+  never resolved by guessing.
+- **Every refusal names itself.** No mutation answers with a bare
+  status: the body carries `detail` — the reason the effect seam gave,
+  or the admin layer's own fixed reason for an unknown run, a terminal
+  run, or a malformed request. The error field stays the stable class
+  name (`request refused`, `cancellation refused`, `run is terminal`,
+  `run not found`, `invalid request`), and `detail` is the "why".
+- **A seam reason is free text, so it passes ONE bounded projection.**
+  The input is capped (1 KiB) BEFORE any pattern runs, the
+  control/format/bidi characters are replaced (never rendered), the
+  whitespace collapses, the credential shapes are redacted through the
+  shared `redactSecretShapes` pass, and the RESULT is capped (200
+  characters). A blank or unusable reason falls back to a fixed phrase,
+  so the operator never gets an empty "why" and the response never
+  carries an unbounded or credential-shaped string.
 - **Auditability:** every mutation attempt that carries a validated target
   settles first, then records `{ atMs, requestId, action, target, outcome }`
   through the injected `audit` sink. `target` is `{ kind: "run" | "pr",
@@ -130,7 +162,21 @@ data route stays bearer-protected (see
   never swallowed silently — it bumps
   `pr_reviewer_admin_audit_failures_total`. This is a deliberate
   tradeoff: auditing after settlement keeps the audit record truthful
-  about what actually happened.
+  about what actually happened. Every attempted outcome writes exactly
+  ONE row — accepted, refused, or error — and the row is written after
+  the effect settled, never before.
+- **The operator's WHY rides the row.** The rereview's `reason` is a
+  required, validated input, so the row carries it: `reason` is present
+  on every rereview row (accepted, refused, and error) and ABSENT on
+  every cancel row — the cancel request carries no reason, and the field
+  is omitted rather than written as an empty value, so a row's shape
+  stays byte-compatible. The reason is operator free text on its way to a
+  durable ledger, so it passes the same redaction every other outbound
+  string passes (a credential shape is never written down) and keeps the
+  request's own bounds (trimmed, one line, at most 256 characters, capped
+  again after the redaction can lengthen it). It is never echoed into an
+  HTTP response body: the response carries the EFFECT's refusal reason,
+  not the operator's text.
 
 ## Readiness exposure (two projections, one seam)
 
@@ -249,9 +295,11 @@ hostile readiness seam, the bounded/redacted readiness detail on the
 authenticated route (including quoted and keyed credential assignments),
 metrics cardinality sanity and parseable exposition, diagnostics
 redaction, rereview/cancel effect + audit ordering and refusal codes,
-audit target identity and settlement timestamp on both mutation paths
-(including refused, failed-lookup, and error outcomes), a broken audit
-clock, body cap, and fixed 404s.
+the refusal reason reaching the operator (the seam's reason verbatim,
+the `400` naming the offending field, and a hostile or oversized reason
+bounded and redacted), audit target identity and settlement timestamp on
+both mutation paths (including refused, failed-lookup, and error
+outcomes), a broken audit clock, body cap, and fixed 404s.
 
 ## Out of scope
 

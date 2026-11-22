@@ -97,6 +97,9 @@ export interface AdminAuditEvent {
   readonly requestId: string;
   readonly target: AdminAuditTarget;
   readonly outcome: "accepted" | "refused" | "error";
+  /** The operator's stated reason for the mutation; absent when the
+   *  mutation carries none (the cancel request has no reason). */
+  readonly reason?: string;
 }
 export interface ControllerAdminDeps {
   readiness(): Promise<{ readonly components: readonly ReadinessComponent[] }>;

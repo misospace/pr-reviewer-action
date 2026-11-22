@@ -15,6 +15,7 @@ import { join } from "node:path";
 
 import {
   InMemoryControlPlaneStore,
+  newRunRecord,
   type AdoptedRepositoryRecord,
   type ControlPlaneStore,
   type IdempotencyKeyRecord,
@@ -24,7 +25,13 @@ import {
   type StateMutation,
   type UsageAggregate,
 } from "../src/state/index.js";
-import { emptyQueueSnapshot, InMemoryQueueStore, type QueueStore } from "../src/queue/index.js";
+import {
+  emptyQueueSnapshot,
+  InMemoryQueueStore,
+  isOperatorCancellation,
+  newJobRecord,
+  type QueueStore,
+} from "../src/queue/index.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 import type { InstanceConfig } from "../src/config/instance-config.js";
 import type { MirrorCache, WorkspaceHandle } from "../src/acquisition/index.js";
@@ -53,6 +60,15 @@ import { buildReviewJob } from "../src/jobs/generation.js";
 const HEAD = "aa11bb22cc33dd44ee55ff667788990001122334";
 const BASE = "dd44ee55ff66aa77bb88cc99001122334455667788";
 const GITHUB_WEBHOOK_SECRET = "github-app-webhook-secret";
+
+/** The PR-identity read the daemon's forge capability seam takes (#1772):
+ * the repository, the pull request, and the installation the read
+ * authenticates as. */
+type PrIdentityRead = {
+  readonly repoFullName: string;
+  readonly prNumber: number;
+  readonly installationId: string;
+};
 
 function instanceConfig(): InstanceConfig {
   return {
@@ -264,6 +280,12 @@ interface Harness {
   readonly controlPlane: ControlPlaneStore;
   readonly forgePublishes: Array<{ job: ReviewJob; resultPayload: string }>;
   readonly heads: Array<string | null>;
+  /** The PR reads the daemon's capability was asked for (#1772). */
+  readonly prReads: Array<{
+    repoFullName: string;
+    prNumber: number;
+    installationId: string;
+  }>;
   readonly dirs: { durableStateDir: string; runsRoot: string; workspaceCacheRoot: string };
   readonly fake: FakeExecution;
   daemon: ControllerDaemon;
@@ -284,6 +306,7 @@ async function start(overrides: {
   const controlPlane = overrides.controlPlane ?? new InMemoryControlPlaneStore();
   const forgePublishes: Array<{ job: ReviewJob; resultPayload: string }> = [];
   const heads: Array<string | null> = [];
+  const prReads: Array<{ repoFullName: string; prNumber: number; installationId: string }> = [];
   const fake = overrides.fake ?? new FakeExecution(overrides.hangUntilAbort ?? false);
   const options: ControllerDaemonOptions = {
     instance: instanceConfig(),
@@ -296,6 +319,14 @@ async function start(overrides: {
       currentHeadSha: async () => {
         const head = heads.shift();
         return head === undefined ? HEAD : head;
+      },
+      readPrIdentity: async (input) => {
+        prReads.push({
+          repoFullName: input.repoFullName,
+          prNumber: input.prNumber,
+          installationId: input.installationId,
+        });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
       },
       publish: async (input) => {
         forgePublishes.push({ job: input.job, resultPayload: input.resultPayload });
@@ -322,7 +353,7 @@ async function start(overrides: {
     ...overrides.options,
   };
   const daemon = await startControllerDaemon(options);
-  return { controlPlane, forgePublishes, heads, dirs, fake, daemon };
+  return { controlPlane, forgePublishes, heads, prReads, dirs, fake, daemon };
 }
 
 function cleanup(h: Pick<Harness, "dirs">): void {
@@ -477,6 +508,7 @@ test("startup fails closed when durable state cannot be proven usable", async ()
       forge: {
         mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
         currentHeadSha: async () => HEAD,
+        readPrIdentity: async (_input: PrIdentityRead) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
         publish: async () => ({ publicationId: "x" }),
       },
       resolveProfiles: async () => ({ executor: "default", model: "m", evidence: "e" }),
@@ -2143,6 +2175,7 @@ test("a poll platform that disagrees with the intake platform fails closed", asy
           forge: {
             mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
             currentHeadSha: async () => HEAD,
+            readPrIdentity: async (_input: PrIdentityRead) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
             publish: async () => ({ publicationId: "x" }),
           },
           resolveProfiles: async () => ({ executor: "default", model: "m", evidence: "e" }),
@@ -2942,6 +2975,7 @@ test("reconcile binds exactly one pass, and poll names the platform it mints wit
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input: PrIdentityRead) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async () => ({ publicationId: "x" }),
     },
     resolveProfiles: async () => ({ executor: "default", model: "m", evidence: "e" }),
@@ -3862,4 +3896,287 @@ test("a gitea-labelled poll converges with the webhook intake on ONE generation 
   assert.equal(store.load().records[0]!.job.jobId, webhookJobId);
   await settleFor(200);
   assert.equal(h.fake.started.length, 1, "exactly one generation was ever executed");
+});
+
+// ── forced rereview + run cancellation (#1772) ──────────────────────────
+
+/** The instance config of a daemon that serves ONE GitHub integration: a
+ * forced rereview mints against the SERVED platform, so the composition
+ * must name one. */
+function instanceConfigWithForge(
+  adoption: Partial<InstanceConfig["adoption"]> = {},
+): InstanceConfig {
+  const base = instanceConfig();
+  return {
+    ...base,
+    forges: [
+      {
+        name: "gh",
+        kind: "github",
+        endpoint: "https://api.github.com",
+        credential: "gh-cred",
+      },
+    ],
+    adoption: { ...base.adoption, ...adoption },
+  } as InstanceConfig;
+}
+
+/** Poll the durable run record until it reaches `state` (bounded). */
+async function waitForRun(
+  controlPlane: ControlPlaneStore,
+  runId: string,
+  state: string,
+  budgetMs = 10_000,
+): Promise<RunRecord> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const run = await controlPlane.getRun(runId);
+    if (run !== null && run.state === state) return run;
+    if (Date.now() > deadline) {
+      assert.ok(run !== null && run.state === state, `the run never reached '${state}'`);
+      return run!;
+    }
+    await settleFor(20);
+  }
+}
+
+test("forceRereview: a daemon that serves no unambiguous platform refuses before it reads the forge (#1772)", async (t) => {
+  const h = await start();
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const result = await h.daemon.forceRereview({ repoFullName: "owner/repo", prNumber: 7 });
+  assert.equal(result.status, "refused");
+  assert.equal(
+    result.status === "refused" ? result.reason : "",
+    "this daemon serves no unambiguous forge platform",
+  );
+  assert.equal(h.prReads.length, 0, "no forge read happened without a platform");
+});
+
+test("forceRereview: a repository the adoption policy refuses mints nothing (#1772)", async (t) => {
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: instanceConfigWithForge({ mode: "allowlist", allowlist: [] }),
+      githubInstallationId: "12345",
+      queueStore: store,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const result = await h.daemon.forceRereview({ repoFullName: "owner/repo", prNumber: 7 });
+  assert.equal(result.status, "refused");
+  assert.equal(
+    result.status === "refused" ? result.reason : "",
+    "the repository is not adopted for review",
+  );
+  assert.equal(store.load().records.length, 0, "no generation was queued");
+  const state = await h.controlPlane.exportState();
+  assert.equal(state.idempotencyKeys.length, 0, "no durable generation reservation was taken");
+  assert.equal(h.fake.started.length, 0, "no review ran");
+});
+
+test("forceRereview: an adopted repository schedules a fresh generation with the intake's identity (#1772)", async (t) => {
+  const store = new InMemoryQueueStore();
+  const controlPlane = new InMemoryControlPlaneStore();
+  const h = await start({
+    controlPlane,
+    options: {
+      instance: instanceConfigWithForge(),
+      githubInstallationId: "12345",
+      forgeIntegration: "gh",
+      queueStore: store,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await adoptRepository(controlPlane, {
+    adoptionEpoch: "7",
+    configFingerprint: "abcdef0123456789",
+  });
+  // The intake mints the FIRST generation of this head.
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  const intakeRecord = store.load().records[0]!;
+  assert.equal(intakeRecord.job.configFingerprint, "abcdef0123456789", "the resolved config fingerprint");
+  assert.equal(intakeRecord.job.adoptionEpoch, "7", "the resolved adoption epoch");
+  assert.equal(intakeRecord.job.forgeIntegration, "gh", "the bound forge integration");
+
+  // The operator forces a rereview of the SAME head.
+  const forced = await h.daemon.forceRereview({ repoFullName: "owner/repo", prNumber: 7 });
+  assert.equal(forced.status, "scheduled");
+  const forcedJobId = forced.status === "scheduled" ? forced.jobId : "";
+  const forcedRecord = store
+    .load()
+    .records.find((record) => record.job.jobId === forcedJobId);
+  assert.ok(forcedRecord !== undefined, "the forced generation is queued");
+  assert.notEqual(
+    forcedRecord!.job.jobId,
+    intakeRecord.job.jobId,
+    "a fresh nonce mints a FRESH generation of the same head",
+  );
+  assert.notEqual(forcedRecord!.job.nonce, "", "the forced generation carries a fresh nonce");
+  assert.equal(intakeRecord.job.nonce, "", "the intake mints no nonce");
+  for (const field of [
+    "platform",
+    "installationId",
+    "repoFullName",
+    "prNumber",
+    "prId",
+    "headSha",
+    "baseSha",
+    "configFingerprint",
+    "adoptionEpoch",
+    "forgeIntegration",
+    "fork",
+    "kind",
+  ] as const) {
+    assert.equal(
+      forcedRecord!.job[field],
+      intakeRecord.job[field],
+      `the forced generation carries the same ${field} as the intake-minted one`,
+    );
+  }
+  // The capability's own PR read produced the head the generation names.
+  assert.deepEqual(
+    h.prReads,
+    [{ repoFullName: "owner/repo", prNumber: 7, installationId: "12345" }],
+    "the forge capability read the pull request AS the daemon's installation",
+  );
+});
+
+test("forceRereview: a GitHub daemon with no configured installation refuses before it reads (#1772)", async (t) => {
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: instanceConfigWithForge(),
+      // No App installation configured: there is no credential to read a
+      // (possibly private) pull request with.
+      queueStore: store,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const result = await h.daemon.forceRereview({ repoFullName: "owner/repo", prNumber: 7 });
+  assert.equal(result.status, "refused");
+  assert.equal(
+    result.status === "refused" ? result.reason : "",
+    "this daemon has no configured GitHub App installation",
+  );
+  assert.equal(h.prReads.length, 0, "no unauthenticated read happened");
+  assert.equal(store.load().records.length, 0, "no generation was queued");
+});
+
+test("cancelRun: an unknown run id is refused (#1772)", async (t) => {
+  const h = await start();
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const result = await h.daemon.cancelRun("no-such-run");
+  assert.equal(result.status, "refused");
+  assert.equal(result.status === "refused" ? result.reason : "", "no run with that id");
+});
+
+test("cancelRun: a run's live generation is cancelled and settles cancelled-by-operator (#1772)", async (t) => {
+  const store = new InMemoryQueueStore();
+  const h = await start({ hangUntilAbort: true, options: { queueStore: store } });
+  t.after(() => {
+    h.fake.dispose();
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  const result = await h.daemon.cancelRun(request.runId);
+  assert.equal(result.status, "cancelled");
+
+  // The durable run settles `cancelled` with the operator's attribution —
+  // never a supersession and never a shutdown.
+  const run = await waitForRun(h.controlPlane, request.runId, "cancelled");
+  assert.equal(run.failureReason, "cancelled-by-operator");
+  assert.equal(run.supersededByJobId, "", "the run was never superseded");
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === request.jobId);
+    return record !== undefined && record.state === "cancelled";
+  });
+  const record = store.load().records.find((entry) => entry.job.jobId === request.jobId)!;
+  assert.equal(record.failureReason, "cancelled-by-operator");
+  assert.equal(record.supersededByJobId, "", "the generation was never superseded");
+});
+
+test("cancelRun: a queued generation's durable run settles cancelled-by-operator (#1772)", async (t) => {
+  // A generation that is QUEUED with a spent attempt (the shape a
+  // requeued generation has) and the durable run of that attempt: the
+  // operator cancels it before it is dispatched. The queue record and
+  // the durable run must agree on WHY the generation ended — the
+  // operator's cancellation, not a generic cancellation.
+  const clock = { t: 1_000_000 };
+  const store = new InMemoryQueueStore();
+  const controlPlane = new InMemoryControlPlaneStore();
+  const job = buildReviewJob(event(), {});
+  assert.notEqual(job, null, "the intake event mints a job");
+  const jobId = job!.jobId;
+  // Ready far in the future: the seeded generation is never dispatched.
+  const record = Object.freeze({
+    ...newJobRecord(job!, clock.t, 3_600_000),
+    attempt: 1,
+  });
+  store.save({ version: 1, records: [record] });
+  const runId = executionRunId(jobId, 1);
+  await controlPlane.apply([
+    {
+      kind: "create-run",
+      record: newRunRecord(
+        {
+          runId,
+          jobId,
+          kind: "review",
+          executorIdentity: "local",
+          headSha: HEAD,
+          configFingerprint: "",
+          attempt: 1,
+        },
+        clock.t,
+      ),
+    },
+  ]);
+
+  const h = await start({
+    controlPlane,
+    options: { queueStore: store, now: () => clock.t, tickIntervalMs: 500 },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  const result = await h.daemon.cancelRun(runId);
+  assert.equal(result.status, "cancelled");
+
+  // The queue record carries the operator's attribution AND still
+  // classifies as an operator cancellation.
+  const settled = store.load().records.find((entry) => entry.job.jobId === jobId)!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+  assert.equal(
+    isOperatorCancellation(settled),
+    true,
+    "the settled record still classifies as the operator's cancellation",
+  );
+
+  // The durable run mirror agrees: the run settles cancelled with the
+  // operator's reason.
+  const run = await waitForRun(h.controlPlane, runId, "cancelled");
+  assert.equal(run.failureReason, "cancelled-by-operator");
+  assert.equal(run.supersededByJobId, "", "the run was never superseded");
 });

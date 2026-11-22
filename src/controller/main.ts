@@ -632,6 +632,25 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   };
 }
 
+/** The admin surface's PR key: `"<owner>/<repo>#<prNumber>"`.
+ *
+ * ONE strict grammar: an owner and a repository of `[A-Za-z0-9._-]`, a
+ * `#`, and a POSITIVE decimal PR number with no leading zero. A URL
+ * scheme, whitespace, a path, or a padded number is refused — the key
+ * names one pull request, and a key that could name several is never
+ * resolved by guessing. The reason a refusal carries names the grammar,
+ * never the operator's input. */
+const PR_KEY_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
+
+function parsePrKey(prKey: string): { readonly repoFullName: string; readonly prNumber: number } | null {
+  if (typeof prKey !== "string") return null;
+  const match = PR_KEY_PATTERN.exec(prKey);
+  if (match === null) return null;
+  const prNumber = Number(match[3]);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  return { repoFullName: `${match[1]}/${match[2]}`, prNumber };
+}
+
 /** The admin surface's thin deps (#737): projections over the control
  * plane and the running daemon. Mutations this composition cannot express
  * yet refuse HONESTLY (a bounded reason the admin sees) instead of
@@ -783,11 +802,22 @@ function createAdminDeps(deps: {
         intakeInstallationRefusals: intakeInstallation.refusals,
       };
     },
-    async forceRereview() {
-      return { refused: "forced rereview is not available in this composition" };
+    async forceRereview(input) {
+      // The PR key grammar: "<owner>/<repo>#<prNumber>". ONE definition,
+      // parsed strictly: a malformed key is refused, never guessed at.
+      const parsed = parsePrKey(input.prKey);
+      if (parsed === null) {
+        return { refused: "the PR key must be owner/repo#123" };
+      }
+      const result = await deps.daemon.forceRereview({
+        repoFullName: parsed.repoFullName,
+        prNumber: parsed.prNumber,
+      });
+      return result.status === "scheduled" ? { jobId: result.jobId } : { refused: result.reason };
     },
-    async cancelRun() {
-      return { refused: "run cancellation is not available in this composition" };
+    async cancelRun(input) {
+      const result = await deps.daemon.cancelRun(input.runId);
+      return result.status === "cancelled" ? { cancelled: true } : { refused: result.reason };
     },
     audit: (event) => {
       audit(JSON.stringify({
@@ -796,6 +826,12 @@ function createAdminDeps(deps: {
         requestId: event.requestId,
         target: event.target,
         outcome: event.outcome,
+        // The operator's stated reason rides the row when the mutation
+        // carries one (the rereview): the ledger must answer WHY the
+        // operator forced it. The key is OMITTED — never `undefined` — when
+        // there is no reason (the cancel), so the row's shape stays
+        // byte-compatible.
+        ...(event.reason === undefined ? {} : { reason: event.reason }),
       }));
     },
   };

@@ -979,8 +979,83 @@ test("reconcile: moved-job arrays are sorted lexicographically", () => {
   assert.deepEqual(result.failed, ["omega"]);
 });
 
+test("reconcile: an OPERATOR-cancelled active record is settled cancelled, never requeued (#1772)", () => {
+  // The operator cancelled a running generation and the process died
+  // before the attempt observed the abort: recovery must NOT resurrect
+  // it (a requeue would run the cancelled review again) and must keep
+  // the operator's attribution.
+  const operatorCancelled = makeRecord("j-op", {
+    state: "running",
+    attempt: 1,
+    cancelRequested: true,
+    // NO superseder beside the flag: that absence is what makes it the
+    // operator's cancellation.
+    supersededByJobId: "",
+    leaseOwner: "lease-stale",
+    leaseExpiresAtMs: NOW - 1,
+  });
+  const operatorCancelledPublishing = makeRecord("j-op-pub", {
+    state: "publishing",
+    attempt: 1,
+    cancelRequested: true,
+    supersededByJobId: "",
+    leaseOwner: "lease-stale",
+    leaseExpiresAtMs: NOW - 1,
+    resultHeadSha: "aa11bb22cc33dd44ee55ff667788990001122334",
+  });
+
+  const result = reconcileRecoveredSnapshot(
+    makeSnapshot([operatorCancelled, operatorCancelledPublishing]),
+    NOW,
+    3,
+  );
+
+  assert.deepEqual(result.requeued, [], "the cancelled generation is never requeued");
+  assert.deepEqual(result.failed, [], "it did not fail either");
+  for (const record of result.snapshot.records) {
+    assert.equal(record.state, "cancelled");
+    assert.equal(record.failureReason, "cancelled-by-operator");
+    assert.equal(record.cancelRequested, true, "the cancellation stays recorded");
+    assert.equal(record.supersededByJobId, "", "no superseder was invented");
+    assert.equal(record.leaseOwner, "", "the abandoned lease is released");
+    assert.equal(record.leaseExpiresAtMs, 0);
+    assert.equal(record.updatedAtMs, NOW);
+  }
+});
+
+test("reconcile: a SUPERSESSION-cancelled record keeps the requeue behaviour (#1772)", () => {
+  // The superseder stamped beside the flag: the newer generation owns
+  // the prKey, so this one stays a stale attempt and is requeued
+  // exactly as before.
+  const superseded = makeRecord("j-sup", {
+    state: "running",
+    attempt: 1,
+    cancelRequested: true,
+    supersededByJobId: "j-newer",
+    leaseOwner: "lease-stale",
+    leaseExpiresAtMs: NOW - 1,
+  });
+
+  const result = reconcileRecoveredSnapshot(makeSnapshot([superseded]), NOW, 3);
+
+  assert.deepEqual(result.requeued, ["j-sup"]);
+  assert.deepEqual(result.failed, []);
+  const moved = result.snapshot.records[0]!;
+  assert.equal(moved.state, "queued");
+  assert.equal(moved.cancelRequested, false);
+  assert.equal(moved.supersededByJobId, "j-newer");
+});
+
 test("reconcile: never mutates the input snapshot or its records", () => {
-  const victim = makeRecord("j-v", { state: "running", cancelRequested: true, attempt: 1 });
+  // A SUPERSESSION-cancelled record (the superseder stamped beside the
+  // flag): it keeps the requeue behaviour — only the OPERATOR's
+  // cancellation (no superseder beside the flag) settles cancelled.
+  const victim = makeRecord("j-v", {
+    state: "running",
+    cancelRequested: true,
+    supersededByJobId: "j-newer",
+    attempt: 1,
+  });
   const snapshot = makeSnapshot([victim]);
   const before = JSON.stringify(snapshot);
 

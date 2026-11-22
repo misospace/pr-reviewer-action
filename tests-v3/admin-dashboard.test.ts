@@ -221,6 +221,10 @@ interface HarnessOptions {
   responses?: Record<string, { status: number; body: string }>;
   reject?: string;
   confirm?: () => boolean;
+  /** The rereview form's field values: the client's own gate reads them
+   *  before it decides to POST. The default is a VALID pair, so a test that
+   *  exercises the API path does not have to restate it. */
+  form?: { readonly prKey?: string; readonly reason?: string };
 }
 function harness(options: HarnessOptions = {}) {
   const textData: string[] = [];
@@ -276,6 +280,13 @@ function harness(options: HarnessOptions = {}) {
   } });
   vm.runInContext(DASHBOARD_JS, sandbox);
   elements.get("token")!.raw.value = "token-user-input";
+  // The rereview form's field values: the client's own gate reads them.
+  const formValue = (id: string, value: string): void => {
+    document.getElementById(id);
+    elements.get(id)!.raw.value = value;
+  };
+  formValue("rereview-key", options.form?.prKey ?? "owner/repo#7");
+  formValue("rereview-reason", options.form?.reason ?? "manual");
   function containerText(id: string): string {
     let out = "";
     const walk = (node: any) => {
@@ -347,7 +358,7 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
     },
     responses: {
       "/admin/rereview": { status: 202, body: '{"jobId":"accepted-rereview-sentinel"}' },
-      "/admin/runs/active/cancel": { status: 202, body: '{"cancelled":true}' },
+      "/admin/runs/active/cancel": { status: 200, body: '{"cancelled":true}' },
     },
   });
   vm.runInContext("loadAll(); undefined", h.sandbox);
@@ -380,9 +391,11 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   const refused = harness({ responses: { "/admin/rereview": { status: 409, body: '{"error":"refused-rereview-sentinel"}' } } });
   vm.runInContext("document.getElementById('token').value='token'; undefined", refused.sandbox);
   await refused.listeners["#rereview:click"]![0]!();
-  await refused.untilSettled(() => refused.textData.includes("Rereview was not accepted."), "rereview refusal");
+  await refused.untilSettled(() => refused.textData.includes("Rereview was refused."), "rereview refusal");
   assert.ok(refused.paths.includes("/admin/rereview"));
   assert.ok(refused.textData.some((x) => x.includes("HTTP 409")));
+  // The controller's own reason reaches the operator, not a bare status.
+  assert.ok(refused.textData.some((x) => x.includes("refused-rereview-sentinel")));
   const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
   vm.runInContext("loadRunDetail('refused'); undefined", cancelRefused.sandbox);
   await cancelRefused.untilSettled(() => Boolean(cancelRefused.listeners["button:click"]?.length), "cancel refusal button");
@@ -392,7 +405,8 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(cancelRefused.textData.some((x) => x.includes("HTTP 409")));
   assert.ok(!cancelRefused.propertyWrites.some((write) => String(write.value).includes("cancel-refusal-sentinel")));
-  assert.ok(cancelRefused.textData.includes("Cancellation was not accepted."));
+  assert.ok(cancelRefused.textData.includes("Cancellation was refused."));
+  assert.ok(cancelRefused.textData.some((x) => x.includes("cancel-refusal-sentinel")));
   const theme = h.listeners["#theme:click"]![0]!;
   await theme({ currentTarget: h.elements.get("theme")!.proxy });
   assert.equal(h.documentElement?.dataset.theme, "dark");
@@ -409,8 +423,50 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await denied.listeners["button:click"]![denied.listeners["button:click"]!.length - 1]!();
   await denied.listeners["#rereview:click"]![0]!();
   assert.ok(!denied.paths.some((path) => path.endsWith("/cancel") || path === "/admin/rereview"));
-  assert.ok(!denied.textData.some((text) => ["Cancellation accepted.", "Rereview accepted.", "was not accepted"].some((value) => text.includes(value))));
+  assert.ok(!denied.textData.some((text) => ["Cancellation accepted.", "Rereview accepted.", "was not accepted", "was refused"].some((value) => text.includes(value))));
 });
+test("the controller's refusal reason reaches the operator (409)", async () => {
+  const h = harness({
+    responses: { "/admin/rereview": { status: 409, body: JSON.stringify({ error: "request refused", detail: "the repository is not adopted for review" }) } },
+  });
+  await h.listeners["#rereview:click"]![0]!();
+  await h.untilSettled(() => h.textData.includes("Rereview was refused."), "rereview refusal");
+  assert.ok(h.paths.includes("/admin/rereview"), "a well-formed request reaches the controller");
+  const feedback = h.containerText("rereview-msg");
+  assert.ok(feedback.includes("Rereview was refused."), feedback);
+  assert.ok(feedback.includes("the repository is not adopted for review"), feedback);
+});
+
+test("a refused cancellation shows the controller's reason (409)", async () => {
+  const h = harness({
+    payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } },
+    responses: { "/admin/runs/refused/cancel": { status: 409, body: JSON.stringify({ error: "cancellation refused", detail: "the run has no queued generation" }) } },
+  });
+  vm.runInContext("loadRunDetail('refused'); undefined", h.sandbox);
+  await h.untilSettled(() => Boolean(h.listeners["button:click"]?.length), "cancel refusal button");
+  const buttons = h.listeners["button:click"]!;
+  await buttons[buttons.length - 1]!();
+  await h.untilSettled(() => h.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
+  await h.untilSettled(() => h.textData.includes("Cancellation was refused."), "cancel refusal headline");
+  assert.ok(h.textData.some((x) => x.includes("the run has no queued generation")));
+  assert.ok(!h.propertyWrites.some((write) => String(write.value).includes("the run has no queued generation")));
+});
+
+test("an invalid rereview form never reaches the controller", async () => {
+  const noReason = harness({ form: { reason: "   " } });
+  await noReason.listeners["#rereview:click"]![0]!();
+  assert.ok(!noReason.paths.includes("/admin/rereview"), "an empty reason never POSTs");
+  assert.ok(noReason.containerText("rereview-msg").includes("The reason is required."), noReason.containerText("rereview-msg"));
+  const badKey = harness({ form: { prKey: "owner/repo" } });
+  await badKey.listeners["#rereview:click"]![0]!();
+  assert.ok(!badKey.paths.includes("/admin/rereview"), "a malformed PR key never POSTs");
+  assert.ok(badKey.containerText("rereview-msg").includes("The PR key must look like owner/repo#123."), badKey.containerText("rereview-msg"));
+  const paddedKey = harness({ form: { prKey: "owner/repo#007" } });
+  await paddedKey.listeners["#rereview:click"]![0]!();
+  assert.ok(!paddedKey.paths.includes("/admin/rereview"), "a padded PR number never POSTs");
+  assert.ok(paddedKey.containerText("rereview-msg").includes("The PR key must look like owner/repo#123."), paddedKey.containerText("rereview-msg"));
+});
+
 test("state chip whitelist covers every lifecycle state", () => {
   const actual = vm.runInContext("({ queued: stateChipClass('queued'), starting: stateChipClass('starting'), running: stateChipClass('running'), publishing: stateChipClass('publishing'), completed: stateChipClass('completed'), failed: stateChipClass('failed'), cancelled: stateChipClass('cancelled'), superseded: stateChipClass('superseded'), unknown: stateChipClass('unrecognized') })", harness().sandbox);
   for (const state of ["queued", "starting", "running", "publishing", "completed", "failed", "cancelled", "superseded"]) {

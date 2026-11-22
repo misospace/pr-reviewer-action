@@ -70,6 +70,40 @@ const MAX_READINESS_COMPONENTS = 64;
  * the redactor work on an unbounded string. */
 const MAX_NAME_INPUT = 256;
 const MAX_DETAIL_INPUT = 1024;
+/** The refusal reason a seam supplied (#1772): free text that reaches the
+ * operator, so it is bounded like every other seam string. The INPUT is
+ * capped before any pattern runs, and the RESULT is capped after the
+ * redaction (a redaction marker can be longer than the text it replaces). */
+const MAX_REFUSAL_INPUT = 1024;
+const MAX_REFUSAL_REASON = 200;
+/** The phrase a blank or unusable refusal falls back to: the operator always
+ * gets a reason, never an empty "why". */
+const REFUSAL_FALLBACK = "the request was refused";
+/** The audited operator reason's cap: the request's own bound
+ * (`validateReason`), re-applied after the redaction can lengthen it. */
+const MAX_AUDIT_REASON = 256;
+
+/** The refusal reason as the operator may read it (#1772).
+ *
+ * The reason is seam-supplied free text: it may carry a credential shape, a
+ * control/format/bidi character, or megabytes of noise. ONE bounded
+ * projection owns that, so the admin layer never echoes an unbounded or
+ * credential-shaped string: the input is capped BEFORE any pattern runs, the
+ * unsafe characters are replaced (never rendered), the whitespace collapses,
+ * the secret shapes are redacted, and the result is capped. A blank reason
+ * falls back to a fixed phrase. */
+function boundedRefusalReason(reason: unknown): string {
+  if (typeof reason !== "string") return REFUSAL_FALLBACK;
+  const cleaned = reason
+    .slice(0, MAX_REFUSAL_INPUT)
+    .replace(UNSAFE_CHARS, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned === "") return REFUSAL_FALLBACK;
+  const redacted = redactSecretShapes(cleaned).replace(/\s+/g, " ").trim();
+  if (redacted === "") return REFUSAL_FALLBACK;
+  return redacted.slice(0, MAX_REFUSAL_REASON);
+}
 /** The unauthenticated surface echoes PLAIN IDENTIFIERS only, and only up to
  * the documented 64-character limit: a longer name is REFUSED outright, not
  * truncated into a different name the seam never declared. */
@@ -170,6 +204,17 @@ async function audit(context: AdminRouteContext, event: Omit<AdminAuditEvent, "a
   const settled: AdminAuditEvent = { ...event, atMs: auditTimestamp(context) };
   try { await context.deps.audit(settled); } catch { context.metrics.bumpAuditFailure(); }
 }
+/** The operator's stated reason as the audit sink may record it (#1772).
+ *
+ * The reason is operator free text on its way to a DURABLE ledger, so it
+ * passes the same redaction every other outbound string passes: a
+ * credential shape must never be written down. The bounds are the request's
+ * own (`validateReason`: trimmed, one line, at most 256 characters); the
+ * redaction can lengthen the text, so the result is capped at the same
+ * bound. */
+function auditedReason(reason: string): string {
+  return redactSecretShapes(reason).slice(0, MAX_AUDIT_REASON);
+}
 function redactDiagnostics(values: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
   const output: Record<string, string | number | boolean> = {};
   for (const [rawKey, value] of Object.entries(values).slice(0, 128)) {
@@ -216,20 +261,29 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
   if (method === "POST" && pathname === "/admin/rereview") {
     if (request.contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return fixed(415, { error: "content type required" });
     const body = request.body;
-    if (typeof body !== "object" || body === null || Array.isArray(body)) return fixed(400, { error: "invalid request" });
+    // Every invalid shape NAMES the offending field and why (#1772): the
+    // operator learns what to fix without reading the source.
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return fixed(400, { error: "invalid request", detail: "the request body must be a JSON object" });
     const record = body as Record<string, unknown>;
     const prKey = validatePrKey(record["prKey"]);
+    if (prKey === null) return fixed(400, { error: "invalid request", detail: "the PR key must be a trimmed identifier of letters, digits, and . _ / @ # : -" });
     const reason = validateReason(record["reason"]);
-    if (prKey === null || reason === null) return fixed(400, { error: "invalid request" });
-    let event: Omit<AdminAuditEvent, "atMs">;
+    if (reason === null) return fixed(400, { error: "invalid request", detail: "the reason must be a trimmed, non-empty single line" });
+    // The operator's WHY rides the audit row: a rereview the trail cannot
+    // explain is a mutation nobody can justify later.
+    const stated = auditedReason(reason);
     try {
       const result = await context.deps.forceRereview({ prKey, reason, requestId: request.requestId });
-      const refused = "refused" in result;
-      event = { action: "rereview", requestId: request.requestId, target: { kind: "pr", id: prKey }, outcome: refused ? "refused" : "accepted" };
-      await audit(context, event);
-      return refused ? fixed(409, { error: "request refused" }) : fixed(202, { jobId: result.jobId });
+      if ("refused" in result) {
+        await audit(context, { action: "rereview", requestId: request.requestId, target: { kind: "pr", id: prKey }, outcome: "refused", reason: stated });
+        // The seam's refusal reason reaches the operator, bounded and
+        // redacted: a refusal without a reason is a dead button.
+        return fixed(409, { error: "request refused", detail: boundedRefusalReason(result.refused) });
+      }
+      await audit(context, { action: "rereview", requestId: request.requestId, target: { kind: "pr", id: prKey }, outcome: "accepted", reason: stated });
+      return fixed(202, { jobId: result.jobId });
     } catch {
-      await audit(context, { action: "rereview", requestId: request.requestId, target: { kind: "pr", id: prKey }, outcome: "error" });
+      await audit(context, { action: "rereview", requestId: request.requestId, target: { kind: "pr", id: prKey }, outcome: "error", reason: stated });
       return fixed(500, { error: "request failed" });
     }
   }
@@ -245,24 +299,28 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
     }
     if (method === "POST" && match[2] === "cancel") {
       if (request.contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return fixed(415, { error: "content type required" });
-      let accepted: { cancelled: true } | { refused: string };
+      let cancelled: { cancelled: true };
       try {
         const before = await context.deps.getRun(runId);
         // Admin-layer refusals settle too: the operator attempted a mutation
         // against a known target, so the audit trail records the attempt.
         if (before === null) {
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });
-          return fixed(404, { error: "run not found" });
+          return fixed(404, { error: "run not found", detail: "no run with that id" });
         }
         if (["completed", "failed", "cancelled", "superseded"].includes(before.state)) {
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });
-          return fixed(409, { error: "run is terminal" });
+          return fixed(409, { error: "run is terminal", detail: "the run already settled" });
         }
         const result = await context.deps.cancelRun({ runId, requestId: request.requestId });
-        const refused = "refused" in result;
-        await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: refused ? "refused" : "accepted" });
-        if (refused) return fixed(409, { error: "cancellation refused" });
-        accepted = result;
+        if ("refused" in result) {
+          await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });
+          // The seam's refusal reason reaches the operator, bounded and
+          // redacted: the operator learns WHY the cancellation did not happen.
+          return fixed(409, { error: "cancellation refused", detail: boundedRefusalReason(result.refused) });
+        }
+        await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
+        cancelled = result;
       } catch {
         await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "error" });
         return fixed(500, { error: "request failed" });
@@ -270,7 +328,12 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
       // Outside the try: a metrics failure must not produce a second audit
       // record for a mutation that already settled.
       context.metrics.recordCancellation();
-      return fixed(202, accepted);
+      // The cancellation is APPLIED when the route answers (#1772): the
+      // effect seam stamped the generation and aborted its attempt, so the
+      // operator gets an acknowledgement, not an acceptance promise. The
+      // durable run settles `cancelled` when the attempt observes the
+      // abort.
+      return fixed(200, cancelled);
     }
   }
   return fixed(404, { error: "not found" });

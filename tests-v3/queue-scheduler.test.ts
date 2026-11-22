@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import {
   InMemoryQueueStore,
   JsonFileQueueStore,
+  isOperatorCancellation,
   ReviewQueueController,
   newJobRecord,
   type ExecutionOutcome,
@@ -1373,4 +1374,191 @@ test("liveness: a hung publish on the prior generation does not strand a newer g
   const bAfter = controller.recordFor("job-b")!;
   assert.equal(bAfter.state, "completed", "B's state is unchanged by A's late publish");
   assert.equal(bAfter.resultHeadSha, HEAD_SHA);
+});
+
+// ── operator cancellation (#1772) ───────────────────────────────────────
+
+test("cancel: an unknown job id is refused without a mutation", () => {
+  const { controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  assert.equal(controller.cancel("job-missing"), "unknown");
+  assert.equal(controller.recordFor("job-missing"), null, "no record was created");
+  assert.equal(controller.recordFor("job-a")!.state, "queued", "the queue is untouched");
+});
+
+test("cancel: a terminal record is refused without a mutation", async () => {
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  const before = controller.recordFor("job-a")!;
+  assert.equal(before.state, "completed");
+
+  assert.equal(controller.cancel("job-a"), "terminal");
+  const after = controller.recordFor("job-a")!;
+  assert.equal(after.state, "completed", "a settled generation is never re-settled");
+  assert.equal(after.failureReason, before.failureReason);
+  assert.equal(after.updatedAtMs, before.updatedAtMs, "nothing was mutated");
+});
+
+test("cancel: a queued record settles cancelled with the operator attribution", () => {
+  const { clock, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  const before = controller.recordFor("job-a")!;
+
+  assert.equal(controller.cancel("job-a"), "cancelled");
+  const after = controller.recordFor("job-a")!;
+  assert.equal(after.state, "cancelled");
+  assert.equal(after.failureReason, "cancelled-by-operator");
+  assert.equal(after.leaseOwner, "");
+  assert.equal(after.leaseExpiresAtMs, 0);
+  assert.ok(after.updatedAtMs >= before.updatedAtMs);
+});
+
+test("cancel: an active record is stamped, aborted, and settles cancelled — never superseded, never retried", async () => {
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  const inv = executor.last();
+  assert.equal(inv.record.state, "running");
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  const stamped = controller.recordFor("job-a")!;
+  assert.equal(stamped.cancelRequested, true, "the cancellation is requested");
+  assert.equal(
+    stamped.supersededByJobId,
+    "",
+    "the operator's cancellation carries NO superseder — that absence is what distinguishes it",
+  );
+  assert.equal(inv.signal.aborted, true, "the live attempt is aborted");
+
+  inv.settle(CANCELLED);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+  assert.equal(settled.supersededByJobId, "", "never reported as superseded");
+  assert.equal(settled.attempt, 1, "the attempt was spent once, never retried");
+
+  // A cancelled generation is never re-dispatched.
+  await controller.tick();
+  assert.equal(executor.invocations.length, 1, "the cancelled generation never ran again");
+});
+
+test("cancel: a failed attempt of an operator-cancelled generation settles cancelled, never requeued", async () => {
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  const inv = executor.last();
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  inv.settle(FAILED);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled", "a failure is not a retry after an operator cancellation");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+
+  await controller.tick();
+  assert.equal(executor.invocations.length, 1, "the cancelled generation is never redispatched");
+});
+
+test("enqueue: a newer generation never overwrites an operator cancellation's attribution (#1772)", async () => {
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  const inv = executor.last();
+
+  // The operator cancels the running generation.
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  assert.equal(controller.recordFor("job-a")!.cancelRequested, true);
+  assert.equal(controller.recordFor("job-a")!.supersededByJobId, "");
+
+  // A newer head arrives before the aborted attempt settles: the
+  // superseder is NOT stamped onto the operator-cancelled record.
+  const result = controller.enqueue(makeJob("job-b"));
+  assert.equal(result.disposition, "superseded-running");
+  const stamped = controller.recordFor("job-a")!;
+  assert.equal(stamped.cancelRequested, true, "the cancellation flag stays");
+  assert.equal(
+    stamped.supersededByJobId,
+    "",
+    "the superseder is never stamped onto an operator-cancelled record",
+  );
+
+  // The aborted attempt settles: the operator's attribution survives.
+  inv.settle(CANCELLED);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+  assert.equal(settled.supersededByJobId, "", "never reported as superseded");
+});
+
+test("cancel: a record settled by the operator still classifies as an operator cancellation (#1772)", () => {
+  const { controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  assert.equal(controller.cancel("job-a"), "cancelled");
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+  assert.equal(settled.cancelRequested, true, "the cancellation stays recorded");
+  assert.equal(settled.supersededByJobId, "");
+  assert.equal(
+    isOperatorCancellation(settled),
+    true,
+    "the SETTLED record still classifies as the operator's cancellation (the run mirror's reason agrees)",
+  );
+});
+
+test("publish: a publish that already succeeded settles completed, not cancelled (#1772)", async () => {
+  // The publish is in flight when the operator cancels: the review
+  // comment still lands on the forge, and a cancellation cannot
+  // unpublish it — the truthful account is `completed`.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { executor, controller } = setup({ publisher: hungPublisher });
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.notEqual(deferred.current, null, "the publish is in flight");
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  assert.equal(controller.recordFor("job-a")!.cancelRequested, true);
+
+  deferred.current!(true);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "completed", "the published review is not reported as cancelled");
+  assert.equal(settled.failureReason, "", "no cancellation is reported over a published review");
+});
+
+test("publish: an operator-cancelled generation is never published and settles cancelled-by-operator (#1772)", async () => {
+  // The first publish attempt failed: the generation awaits a retry.
+  // The operator cancels before the retry fires — the retry must never
+  // publish, and the generation settles with the operator's reason.
+  const publisher = new RecordingPublisher([false]);
+  const { clock, executor, controller } = setup({ publisher });
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.equal(publisher.calls.length, 1, "the first publish attempt happened");
+
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  clock.t += 500;
+  await controller.tick();
+  assert.equal(publisher.calls.length, 1, "the retry never fires for a cancelled generation");
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
 });

@@ -31,7 +31,12 @@ import { dirname } from "node:path";
 import { COMMENT_ID_PATTERN, INSTALLATION_ID_PATTERN } from "../events/normalize.js";
 import type { ReviewJob, ReviewJobKind, ReviewTrigger } from "../jobs/types.js";
 import type { JobLifecycleState, JobRecord } from "./types.js";
-import { isActiveState, prIdentityKey } from "./types.js";
+import {
+  isActiveState,
+  isOperatorCancellation,
+  OPERATOR_CANCELLATION_REASON,
+  prIdentityKey,
+} from "./types.js";
 import { isPlainObject } from "../platform/object.js";
 
 /** One durable snapshot: the whole queue as of a commit point. */
@@ -591,12 +596,24 @@ export class JsonFileQueueStore implements QueueStore {
  *     `"lease-expired-attempt-limit"` (lease also cleared; attempt
  *     left as-is).
  *
+ * An ACTIVE record the OPERATOR cancelled (`cancelRequested` with NO
+ * superseding job id beside it — `isOperatorCancellation`) is NEVER
+ * requeued: it settles `cancelled` with the operator's attribution
+ * (`cancelled-by-operator`), its lease released, and appears in NEITHER
+ * returned array — it was neither requeued nor failed. Requeueing it
+ * would run the review the operator cancelled (duplicate model spend)
+ * and erase their attribution. A supersession-cancelled record (a
+ * superseder stamped beside the flag) keeps the behaviour above
+ * exactly: the superseding generation owns the prKey now.
+ *
  * Records with a LIVE lease, `queued` records, and terminal records
  * pass through unchanged (same reference). A `publishing` record that
  * already holds its durable result (`resultHeadSha` non-empty) is
  * NEVER requeued or failed: it stays `publishing` with its stale lease
  * cleared (`leaseOwner` "", `leaseExpiresAtMs` 0) so the restarted
- * controller retries the publish instead of rerunning the executor.
+ * controller retries the publish instead of rerunning the executor —
+ * unless the OPERATOR cancelled it, which settles it `cancelled` above
+ * (a cancelled generation's result is never published).
  * Returns a NEW frozen
  * snapshot plus the moved jobIds:
  * `{ snapshot, requeued: string[], failed: string[] }` (both arrays
@@ -654,6 +671,29 @@ export function reconcileRecoveredSnapshot(
     // fields can ride along into the new snapshot; its nested job is the
     // VALIDATED (rebuilt, frozen) one.
     const base = normalizeJobRecord(element, rebuilt[index]!.job);
+    if (isOperatorCancellation(record)) {
+      // The OPERATOR cancelled this generation before the process died:
+      // it must NOT be requeued. A requeue would dispatch the review the
+      // operator cancelled (duplicate model spend) and reset the flag
+      // that carries their attribution. It settles `cancelled` with the
+      // operator's reason, its lease released, and is reported as NEITHER
+      // requeued nor failed — it was neither.
+      //
+      // A SUPERSESSION-cancelled record (a superseder stamped beside the
+      // flag) keeps the behaviour below exactly: the superseding
+      // generation owns the prKey now, and this one is a stale attempt.
+      const moved: JobRecord = Object.freeze({
+        ...base,
+        state: "cancelled",
+        failureReason: OPERATOR_CANCELLATION_REASON,
+        leaseOwner: "",
+        leaseExpiresAtMs: 0,
+        cancelRequested: true,
+        updatedAtMs: nowMs,
+      });
+      records.push(moved);
+      continue;
+    }
     if (record.state === "publishing" && record.resultHeadSha !== "") {
       // Durable work is never requeued: keep it publishing and drop
       // the abandoned lease so the next controller retries the publish.

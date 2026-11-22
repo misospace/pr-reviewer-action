@@ -44,8 +44,10 @@ import {
 import type { JobRecord } from "./types.js";
 import {
   isActiveState,
+  isOperatorCancellation,
   isTerminalState,
   newJobRecord,
+  OPERATOR_CANCELLATION_REASON,
   prIdentityKey,
   withState,
 } from "./types.js";
@@ -278,12 +280,18 @@ export class ReviewQueueController {
         // dies first, or from the executor's cancellation settle) can
         // attribute the supersession even after the superseder itself
         // has reached a terminal state.
+        //
+        // An OPERATOR-cancelled record keeps its (empty) superseder: the
+        // operator cancelled THIS generation, and a newer head arriving
+        // afterwards does not change why it ended. Stamping the
+        // superseder here would make the record read as a supersession
+        // and erase the operator's attribution (#1772).
         this.records.set(
           existingId,
           Object.freeze({
             ...existing,
             cancelRequested: true,
-            supersededByJobId: jobId,
+            ...(isOperatorCancellation(existing) ? {} : { supersededByJobId: jobId }),
           }),
         );
         const entry = this.controllers.get(existingId);
@@ -302,6 +310,55 @@ export class ReviewQueueController {
         ? "superseded-queued"
         : "queued";
     return { disposition, jobId };
+  }
+
+  /** Cancel one generation, by job id (#1772): the queue's OWN
+   *  cancellation seam.
+   *
+   *  WHY the queue owns it: the queue is the scheduling truth — only it
+   *  can abort a live attempt, release its lease, and settle the record.
+   *  An operator's cancellation is NOT a supersession: the record
+   *  settles `cancelled` with the operator attribution
+   *  (`cancelled-by-operator`), never `superseded` — the operator's
+   *  intent ("stop this review") must never be reported as "a newer
+   *  head replaced it".
+   *
+   *  - `unknown` — no record with that id (no mutation);
+   *  - `terminal` — the record already settled (no mutation);
+   *  - `cancelled` — a `queued` record settled `cancelled` now;
+   *  - `cancel-requested` — an active record was stamped and its
+   *    executor aborted; the attempt settles `cancelled` when it
+   *    observes the abort.
+   *
+   *  The stamp carries NO superseding job id: that absence is exactly
+   *  what distinguishes the operator's cancellation from a supersession
+   *  (`isOperatorCancellation`). */
+  cancel(jobId: string): "cancelled" | "cancel-requested" | "unknown" | "terminal" {
+    this.ensureLoaded();
+    const record = this.records.get(jobId);
+    if (record === undefined) return "unknown";
+    if (isTerminalState(record.state)) return "terminal";
+    const now = this.nowMsFn();
+    if (record.state === "queued") {
+      // A queued generation holds no worker: it settles immediately.
+      this.settleOperatorCancellation(jobId, record, now);
+      this.save();
+      return "cancelled";
+    }
+    // An active generation: the attempt is aborted and its own settle
+    // reports the cancellation. `supersededByJobId` stays EMPTY — the
+    // operator's cancellation is distinguishable by exactly that.
+    this.records.set(
+      jobId,
+      Object.freeze({
+        ...record,
+        cancelRequested: true,
+      }),
+    );
+    const entry = this.controllers.get(jobId);
+    if (entry !== undefined) entry.controller.abort();
+    this.save();
+    return "cancel-requested";
   }
 
   /** One scheduling pass: lease expiry, deadline expiry, publish
@@ -564,6 +621,14 @@ export class ReviewQueueController {
       }
       if (record.leaseExpiresAtMs <= 0 || record.leaseExpiresAtMs > now) continue;
       this.abortAndForget(jobId);
+      if (isOperatorCancellation(record)) {
+        // The operator cancelled this generation and its worker died
+        // before it observed the abort: the record settles `cancelled`
+        // and is NEVER requeued — a requeue would resurrect a
+        // generation the operator already cancelled (#1772).
+        this.settleOperatorCancellation(jobId, record, now);
+        continue;
+      }
       if (record.attempt < this.options.maxAttempts) {
         const superseder = this.findSupersedingSibling(record);
         if (superseder !== null) {
@@ -616,6 +681,13 @@ export class ReviewQueueController {
       // The abandoned attempt's AbortController dies with the record —
       // no leaked controllers.
       this.abortAndForget(jobId);
+      if (isOperatorCancellation(record)) {
+        // The operator's cancellation is the reason the generation
+        // ended; the deadline is not (#1772). The record settles
+        // `cancelled` either way — only the attribution differs.
+        this.settleOperatorCancellation(jobId, record, now);
+        continue;
+      }
       this.records.set(
         jobId,
         Object.freeze({
@@ -641,6 +713,13 @@ export class ReviewQueueController {
       // The supersession gate is re-checked before EVERY publish
       // attempt: a superseded generation is retired, not published.
       if (!this.mayPublish(record)) {
+        if (isOperatorCancellation(record)) {
+          // The operator cancelled it: the durable result is never
+          // published, and the generation settles `cancelled` with the
+          // operator attribution (#1772).
+          this.settleOperatorCancellation(jobId, record, now);
+          continue;
+        }
         this.records.set(
           jobId,
           Object.freeze({
@@ -740,6 +819,16 @@ export class ReviewQueueController {
       return;
     }
     const now = this.nowMsFn();
+    // The operator's cancellation outranks every other outcome (#1772):
+    // the generation settles `cancelled` with the operator attribution —
+    // never `superseded` (a false attribution) and never a retry (a
+    // requeued generation would run a review the operator cancelled).
+    if (isOperatorCancellation(record)) {
+      this.settleOperatorCancellation(jobId, record, now);
+      this.releaseController(jobId, token);
+      this.save();
+      return;
+    }
     if (outcome.status === "completed") {
       await this.settleCompleted(jobId, token, record, outcome, now);
     } else if (outcome.status === "failed") {
@@ -952,6 +1041,33 @@ export class ReviewQueueController {
     // check, so a stale publish can never resurrect a re-dispatched
     // prKey.
     if (!this.mayPublish(current)) {
+      if (isOperatorCancellation(current)) {
+        if (published) {
+          // The publish ALREADY succeeded: the review comment is on the
+          // forge, and a cancellation cannot unpublish it. The truthful
+          // account of what the forge now carries is the normal
+          // `completed` path — telling the operator the review was
+          // cancelled while its verdict is published would be a lie
+          // about the forge's state (#1772).
+          this.records.set(
+            jobId,
+            Object.freeze({
+              ...withState(current, "completed", now),
+              nextRetryAtMs: 0,
+              leaseOwner: "",
+              leaseExpiresAtMs: 0,
+            }),
+          );
+        } else {
+          // The publish did NOT succeed: the operator's cancellation
+          // stopped it (or stopped a pending retry), so the generation
+          // settles `cancelled` with the operator's attribution — the
+          // review never reached the forge.
+          this.settleOperatorCancellation(jobId, current, now);
+        }
+        this.save();
+        return;
+      }
       // Prefer the superseder stamped at enqueue time (the enqueue
       // for the trailing generation sets `supersededByJobId` on the
       // prior active record so the supersession attribution
@@ -999,6 +1115,38 @@ export class ReviewQueueController {
       );
     }
     this.save();
+  }
+
+  /** Settle a record the OPERATOR cancelled (#1772): `cancelled` with
+   *  the operator attribution, the lease released.
+   *
+   *  The ONE place a cancelled-by-operator record is written, so the
+   *  queue's snapshot, the control plane's run mirror, and the admin
+   *  surface can never disagree about why the generation ended. The
+   *  transition is the settled state machine's own (`withState`): a
+   *  `queued`/`starting`/`running`/`publishing` record all admit
+   *  `cancelled`.
+   *
+   *  `cancelRequested` stays TRUE: the cancellation WAS requested, and
+   *  with no superseder beside it the SETTLED record still classifies
+   *  as an operator cancellation (`isOperatorCancellation`) — so the
+   *  control plane's run mirror reports the operator's reason and not a
+   *  generic cancellation. */
+  private settleOperatorCancellation(
+    jobId: string,
+    record: JobRecord,
+    now: number,
+  ): void {
+    this.records.set(
+      jobId,
+      Object.freeze({
+        ...withState(record, "cancelled", now),
+        cancelRequested: true,
+        failureReason: OPERATOR_CANCELLATION_REASON,
+        leaseOwner: "",
+        leaseExpiresAtMs: 0,
+      }),
+    );
   }
 
   /** The supersession gate: a record may attempt to publish only when
