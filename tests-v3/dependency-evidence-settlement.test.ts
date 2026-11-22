@@ -1350,7 +1350,12 @@ test("#1782 (independent review): provenance settles only from a catalog documen
   assert.equal(canonicalRegistryCatalogImageIdentity("https://ghcr.io/sirkirby/unifi-network-mcp"), "ghcr.io/sirkirby/unifi-network-mcp");
 });
 
-test("#1782: the forge-read channel binds the release delta through the established mapping (#1726 carries over)", () => {
+test("#1782: a forge read carries ONLY the generic slug token — never the mapping (its receipt records no forge host)", () => {
+  // The mapping names github.com/sirkirby/unifi-mcp; a gh_api compare on
+  // the review's forge spells the same owner/repo, but the receipt cannot
+  // prove WHICH host it read, so the mapping binds nothing — the #1726
+  // channel keeps the generic full-slug carry only, and an image run
+  // whose registry host was refused fails provenance closed anyway.
   const folded = foldDependencyRows(
     [
       { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
@@ -1358,13 +1363,51 @@ test("#1782: the forge-read channel binds the release delta through the establis
     ],
     [
       { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
-      { status: "ok", result: { response: '{"commits":[…]}' } },
+      { status: "ok", result: { response: "9 commits" } },
     ],
+    imageRows(IMAGE_SCOPE),
+  );
+  const delta = byId(folded, "obligation-4");
+  assert.equal(delta.status, "unresolved");
+  assert.equal(delta.evidence?.state, "receipt-absent");
+});
+
+test("#1782: the generic FULL-slug carry remains the shared accepted residual for image cells (a page spelling the exact artifact identity, not one segment)", () => {
+  // The carry every npm version-asserting cell has always accepted
+  // (`evil/webpack` beside the slug `webpack`): a fetched surface that
+  // spells the COMPLETE artifact slug plus both captured versions — even
+  // smuggled into a query on an attacker-chosen page — is a candidate and
+  // settles. This is deliberately NOT replaced by the #1782 mapping rule
+  // (third-party release/advisory surfaces legitimately spell the full
+  // registry identity); what the mapping rule killed is the OWNER-segment
+  // carry, where the surface spelled one segment and nothing else.
+  const folded = foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://evil.example/compare?dep=ghcr.io/sirkirby/unifi-network-mcp&base=0.49.2&head=0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "spelled identity" } }],
     imageRows(IMAGE_SCOPE),
   );
   const delta = byId(folded, "obligation-4");
   assert.equal(delta.status, "satisfied");
   assert.equal(delta.evidence?.state, "receipt-backed");
+});
+
+test("#1782: the retained mapping round-trips the persisted ledger and a hand-shaped claim refuses the whole artifact", async () => {
+  const { evidenceLedgerToArtifact, evidenceLedgerFromArtifact } = await import("../src/enforcement/evidence-receipts.js");
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } }],
+    certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [], ciEvidence: null, reviewedHeadSha: HEAD,
+  });
+  const artifact = evidenceLedgerToArtifact(ledger);
+  const readBack = evidenceLedgerFromArtifact(artifact);
+  assert.ok(readBack !== null);
+  assert.equal(readBack.receipts[0]?.subject.sourceRepo, "github.com/sirkirby/unifi-mcp");
+  // The strict reader re-enforces the canonical grammar on reload.
+  const tampered = JSON.parse(JSON.stringify(artifact));
+  tampered.receipts[0].subject.source_repo = "https://github.com/sirkirby/unifi-mcp";
+  assert.equal(evidenceLedgerFromArtifact(tampered), null);
+  tampered.receipts[0].subject.source_repo = "github.com/evil%2fsirkirby/unifi-mcp";
+  assert.equal(evidenceLedgerFromArtifact(tampered), null);
 });
 
 test("#1782: registryDocumentSourceRepo / sourceRepoSurfaceIdentity — the lexical mapping rules fail closed", () => {

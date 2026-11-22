@@ -443,7 +443,10 @@ export function canonicalRegistryCatalogImageIdentity(url: string): string | nul
  */
 function normalizeSourceRepoClaim(raw: string): string | null {
   const value = raw.trim().toLowerCase();
-  if (value === "" || /\s/.test(value)) return null;
+  // Printable ASCII only: zero-width and other invisible code points (JS
+  // `\s` does not cover U+200B) must never ride a retained identity into
+  // the artifact or render spoofably in diagnostics.
+  if (value === "" || !/^[\x21-\x7e]+$/.test(value)) return null;
   const schemeAt = value.indexOf("://");
   let rest: string;
   if (schemeAt === -1) {
@@ -512,6 +515,14 @@ export function registryDocumentSourceRepo(content: string): string | null {
     mapping = claim;
   }
   return mapping;
+}
+
+/** Whether a persisted `source_repo` claim is exactly the canonical
+ * normalized form `normalizeSourceRepoClaim` produces — the strict ledger
+ * reader re-enforces the grammar on reload instead of trusting the shape
+ * it wrote. Lexical, total. */
+export function isCanonicalSourceRepoIdentity(value: string): boolean {
+  return normalizeSourceRepoClaim(value) === value;
 }
 
 /**

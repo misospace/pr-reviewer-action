@@ -396,15 +396,19 @@ The rules this buys, and their limits:
   stripped) and carry changed `sha256` digests when pinned. A receipt backs
    the row only when, per obligation kind, the validated receipts JOINTLY
    cover EVERY entry — identity per the entry's kind: an npm entry's exact
-   slug, and #1763's image/chart identity via the exact slug token, the
-   canonical registry-catalog page, the SOURCE mapping the artifact's
-   canonical registry document established (#1782: a FETCHED surface —
-   `web_fetch` or a forge read — counts only when the repository IT
-   addresses equals the mapped `host/owner/repo` exactly; owner-token
-   spelling, a same-owner unrelated repository, a lookalike name, or the
-   same owner/repo on another forge carries nothing), or an advisory
-   `web_search` QUERY naming the artifact or owner (a query is not an
-   attacker-registerable surface) — and, for every kind
+   slug, and #1763's image/chart identity via the exact slug token (the
+   generic any-position carry the npm cells have always accepted — a page
+   spelling the FULL artifact identity is the documented residual, never
+   a single OWNER/artifact segment), the canonical registry-catalog page,
+   the SOURCE mapping the artifact's canonical registry document
+   established (#1782: a fetched `web_fetch` surface counts through the
+   mapping only when the repository IT addresses equals the mapped
+   `host/owner/repo` exactly — owner-token spelling, a same-owner
+   unrelated repository, a lookalike name, or the same `owner/repo` on a
+   different host carries nothing through the mapping; a forge read keeps
+   only the generic slug carry, as its receipt records no forge host), or
+   an advisory `web_search` QUERY naming the artifact or owner (a query is
+   not an attacker-registerable surface) — and, for every kind
   that asserts the update itself (release delta
   AND advisory), the COMPLETE captured changed-version identity: an advisory
   check naming only one endpoint of a captured `old → new` range never

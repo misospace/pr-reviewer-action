@@ -78,7 +78,7 @@
 import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { FORGE_READ_TOOL } from "../platform/endpoint.js";
-import { authoritativeRegistryPackageSlug, canonicalRegistryCatalogImageIdentity, dependencyEvidenceObligationsForCall, registryDocumentSourceRepo, sourceRepoSurfaceIdentity, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+import { authoritativeRegistryPackageSlug, canonicalRegistryCatalogImageIdentity, dependencyEvidenceObligationsForCall, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, sourceRepoSurfaceIdentity, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
 
 export type { DependencyEvidenceObligation };
 
@@ -1016,13 +1016,19 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
  * - `image`/`chart` additionally bind through the SOURCE/BUILD mapping the
  *   artifact's canonical registry document established (#1782, replacing
  *   the owner-segment carry): an image's release delta lives on the mapped
- *   source repository, whose URL never spells the registry-host-prefixed
- *   slug — a FETCHED surface counts when the repository IT addresses
- *   (`sourceRepoSurfaceIdentity`, `gh_api`: the endpoint's repo identity)
- *   equals that mapping exactly, so settlement follows the canonical
- *   artifact→source relationship #1763 requires instead of any surface
- *   that merely spells the owner segment (`acme/<unrelated>` never
- *   settles `ghcr.io/acme/<image>`); and
+ *   source repository, whose URL never spells the registry-host-
+ *   prefixed slug — a FETCHED `web_fetch` surface counts when the
+ *   repository IT addresses (`sourceRepoSurfaceIdentity`) equals that
+ *   mapping exactly, so settlement follows the canonical artifact→source
+ *   relationship #1763 requires instead of any surface that merely spells
+ *   the owner segment (`acme/<unrelated>` never settles
+ *   `ghcr.io/acme/<image>`). What the mapping carry does NOT replace is
+ *   the FIRST clause: a surface that spells the FULL slug token plus
+ *   every captured version is the generic any-position token carry the
+ *   npm version-asserting cells have always accepted (a page
+ *   `evil.example/compare?dep=<slug>&…` settles — accepted residual,
+ *   pinned by test; the identity it spells is the exact artifact, not one
+ *   segment of it); and
  * - on the SEARCH channel only, the registry identity's artifact-NAME or
  *   OWNER segment (`imageSearchQueryCarry`): a query is not an
  *   attacker-registerable surface, and an advisory lookup legitimately
@@ -1069,25 +1075,20 @@ function imageSearchQueryCarry(query: string, slug: string): boolean {
  * addresses the source/build repository the entry's canonical registry
  * document established — a `web_fetch` whose target URL canonicalizes to
  * exactly the mapped `host/owner/repo` (a compare/release/commit page OF
- * that repository), or a forge-read whose endpoint addresses exactly the
- * mapped `owner/repo` on the platform seam's own validated API (#1726: the
- * forge-read channel serves the review's own forge, so the repository
- * identity is the whole binding available there, and an attacker cannot
- * register the mapped owner's namespace on it). A surface that merely
- * SPELLS the owner or artifact segment — `evil/<owner>`, `<owner>-alt/x`,
+ * that repository). A forge-read carries through the endpoint's own repo
+ * identity NOTHING here: the receipt records no forge HOST, so the
+ * mapped `owner/repo` spelling on the review's forge could be satisfied
+ * by a same-name mirror registered there while the mapping names another
+ * forge — the #1726 forge channel keeps only the generic full-slug carry,
+ * and an image run whose registry host was refused fails provenance
+ * closed anyway (the mapping is only ever established by a web-fetch of
+ * the canonical registry document). A surface that merely SPELLS the
+ * owner or artifact segment — `evil/<owner>`, `<owner>-alt/x`,
  * `acme/<unrelated>` — addresses a different repository and carries
  * nothing. */
 function imageMappedSourceCarry(receipt: EvidenceReceipt, sourceMapping: string): boolean {
-  if (receipt.kind === "web-fetch") {
-    return sourceRepoSurfaceIdentity(receipt.subject.url ?? "") === sourceMapping;
-  }
-  if (receipt.kind === "source-read" && receipt.trust === "forge") {
-    const repo = receipt.subject.repo ?? "";
-    if (repo === "") return false;
-    const hostEnd = sourceMapping.indexOf("/");
-    return hostEnd !== -1 && sourceMapping.slice(hostEnd + 1) === repo;
-  }
-  return false;
+  return receipt.kind === "web-fetch"
+    && sourceRepoSurfaceIdentity(receipt.subject.url ?? "") === sourceMapping;
 }
 
 /** #1782 (independent review blocker 1): the artifact→source/build mapping
@@ -1269,8 +1270,7 @@ function dependencyReceiptCoverage(
   // mapping additionally feeds the unverified-fill REASON-CODING pass — a
   // cell that would close beside an incomplete document reads
   // `receipt-unverified`, never `receipt-backed` or a silent mismatch.
-  const trustworthy = ledger.receipts.filter((receipt) => receipt.acquired && receipt.complete
-    && (receipt.trust === "web" || receipt.trust === "forge"));
+  const trustworthy = ledger.receipts.filter((receipt) => receipt.acquired && receipt.complete && receipt.trust === "web");
   const mappings = scope.map((entry) => establishImageSourceMapping(trustworthy, entry));
   const fullMappings = scope.map((entry) => establishImageSourceMapping(ledger.receipts, entry));
   for (const receipt of ledger.receipts) {
@@ -1617,7 +1617,10 @@ export function evidenceLedgerFromArtifact(value: unknown): EvidenceLedger | nul
       subject.obligations = subjectRecord.obligations as DependencyEvidenceObligation[];
     }
     if (subjectRecord.source_repo !== undefined) {
-      if (typeof subjectRecord.source_repo !== "string" || subjectRecord.source_repo === "") return null;
+      // #1782: the one subject field with a canonical grammar re-enforces
+      // it on reload — a ledger artifact this runtime did not write binds
+      // nothing through a hand-shaped claim.
+      if (typeof subjectRecord.source_repo !== "string" || !isCanonicalSourceRepoIdentity(subjectRecord.source_repo)) return null;
       subject.sourceRepo = subjectRecord.source_repo;
     }
     receipts.push({
