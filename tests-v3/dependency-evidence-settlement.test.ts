@@ -53,7 +53,7 @@ import {
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
-import { canonicalRegistryCatalogImageIdentity } from "../src/tools/dependency-evidence.js";
+import { canonicalRegistryCatalogImageIdentity, registryDocumentSourceRepo, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
 import { Conversation } from "../src/model/conversation.js";
@@ -887,13 +887,27 @@ test("#1721 loop replay counterpart: attributed upstream evidence stops the same
 // #1763: container-image / OCI-chart dependency updates. The trusted scope
 // now names canonical registry identities (`kind: "image"|"chart"`, digests),
 // and the cells bind per kind: provenance settles from the canonical
-// registry CATALOG page — the image/chart analogue of the #1748 canonical-
-// source rule — while the version-asserting cells carry dotted tag tokens
-// under the version boundary. Organic replays of the two false-INCOMPLETE
-// reports (#12359 ghcr image, #12375 OCI chart), the Docker Hub spelling
-// normalization, and the negative controls. The npm fixtures above are the
-// untouched #1748 regression suite.
+// registry CATALOG DOCUMENT that also CLAIMS the artifact→source/build
+// mapping (#1782: the URL alone proves the registry serves the artifact,
+// never which repository builds it — #1763 requires the image/source
+// relationship, and a bare index body stays fail-closed) — the image/chart
+// analogue of the #1748 canonical-source rule — while the version-asserting
+// cells bind FETCHED surfaces through that retained mapping (the mapped
+// repository's own surfaces, never any surface spelling the owner segment)
+// and carry dotted tag tokens under the version boundary. Organic replays
+// of the two false-INCOMPLETE reports (#12359 ghcr image, #12375 OCI chart),
+// the Docker Hub spelling normalization, and the negative controls. The npm
+// fixtures above are the untouched #1748 regression suite.
 // ---------------------------------------------------------------------------
+
+/** A canonical ghcr catalog document that CLAIMS its source repository —
+ * the OCI source annotation GitHub's build-push action stamps into the
+ * artifact the publisher's registry serves (#1782: provenance must prove
+ * the image/source relationship, and settlement binds the version-asserting
+ * rows through this claim). */
+function catalogDocumentWithSource(source: string): string {
+  return `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","annotations":{"org.opencontainers.image.source":"${source}","org.opencontainers.image.revision":"7c4b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e"}}`;
+}
 
 const IMAGE_DIGEST_A = "0123456789abcdef".repeat(4);
 const IMAGE_DIGEST_B = "fedcba9876543210".repeat(4);
@@ -992,7 +1006,10 @@ test("#1763 organic #12359 (image): the ghcr catalog + source-repo compare + ver
     { tool: "web_search", args: { query: "unifi-network-mcp 0.49.2 0.50.0 advisory" }, status: "ok" },
   ];
   const toolResults = [
-    { status: "ok", result: { content: "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\"}" } },
+    // #1782: the fetched catalog DOCUMENT claims its source repository via
+    // the OCI source annotation — the artifact→source mapping provenance
+    // must establish, and the mapping the delta row binds through.
+    { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
     { status: "ok", result: { content: "9 commits between the two tags" } },
     { status: "ok", result: { results: "no advisories published for the 0.49.x/0.50.x line" } },
   ];
@@ -1048,7 +1065,7 @@ test("#1763 organic #12375 (OCI chart): the ghcr chart catalog + helm-charts com
       { tool: "web_search", args: { query: "prometheus-blackbox-exporter 11.21.3 11.22.0 advisory" }, status: "ok" },
     ],
     [
-      { status: "ok", result: { content: "{\"mediaType\":\"application/vnd.cncf.helm.config.v1+json\"}" } },
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/prometheus-community/helm-charts") } },
       { status: "ok", result: { content: "3 commits" } },
       { status: "ok", result: { results: "no CVEs in the chart's pinned images" } },
     ],
@@ -1063,9 +1080,11 @@ test("#1763 organic #12375 (OCI chart): the ghcr chart catalog + helm-charts com
 
 test("#1763: Docker Hub spellings normalize to the docker.io/<name> identity — official spellings settle, an unrelated owner does not", () => {
   const rows = imageRows([{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
+  // The Docker Hub repository metadata shape: the `source`/`repository`
+  // fields name the build repository (#1782's registry-metadata claim).
   const provenanceStateFor = (url: string): string | undefined => byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url }, status: "ok" }],
-    [{ status: "ok", result: { content: "alpine — minimal rootfs images" } }],
+    [{ status: "ok", result: { content: '{"name":"alpine","source":"https://github.com/alpinelinux/docker-alpine","repository":"https://github.com/alpinelinux/docker-alpine"}' } }],
     rows,
   ), "obligation-3").evidence?.state;
   // Both official spellings canonicalize to docker.io/alpine…
@@ -1094,12 +1113,19 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   assert.equal(attacker.status, "unresolved");
   assert.equal(attacker.evidence?.state, "receipt-absent");
 
-  // (b) release_delta with the WRONG old endpoint: the candidate carries
-  // the namespace identity and the new version, but not the captured old
-  // endpoint — joint coverage of EVERY captured version fails.
+  // (b) release_delta with the WRONG old endpoint: the mapped source repo
+  // IS a candidate (the catalog document established the mapping), it
+  // carries the new version, but not the captured old endpoint — joint
+  // coverage of EVERY captured version fails.
   const wrongDelta = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.1...0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "40 commits" } }],
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.1...0.50.0" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
+      { status: "ok", result: { content: "40 commits" } },
+    ],
     imageRows(IMAGE_SCOPE),
   ), "obligation-4");
   assert.equal(wrongDelta.status, "unresolved");
@@ -1143,14 +1169,20 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   }]);
   const digestProvenance = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
-    [{ status: "ok", result: { content: "multi-arch manifest index" } }],
+    [{ status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } }],
     digestRows,
   ), "obligation-3");
   assert.equal(digestProvenance.status, "satisfied");
   assert.equal(digestProvenance.evidence?.state, "receipt-backed");
   const digestDelta = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "9 commits" } }],
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
+      { status: "ok", result: { content: "9 commits" } },
+    ],
     digestRows,
   ), "obligation-4");
   assert.equal(digestDelta.status, "unresolved");
@@ -1164,73 +1196,223 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   assert.equal(digestAdvisory.evidence?.state, "receipt-mismatch");
 });
 
-test("#1763 (review): a FETCHED surface binds an image entry only through its OWNER segment — attacker same-name artifacts are no candidate", () => {
-  // (1) The exact attack the carry must refuse: an attacker-registered
-  // same-named repo whose compare URL spells BOTH captured versions. The
-  // fetched name token carries nothing without the owner, so the delta row
-  // never even sees a candidate — `receipt-absent`, not a settle.
+test("#1782 (independent review): a FETCHED surface binds an image entry only through the ESTABLISHED artifact→source mapping — owner-token spelling settles nothing", () => {
+  const catalogCall = { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" };
+  const catalogResult = { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } };
+
+  // (1) The exact attack the old owner carry accepted: an attacker-
+  // registered same-named repo whose compare URL spells BOTH captured
+  // versions. Even beside a perfectly-established mapping, the surface
+  // addresses `evil/unifi-network-mcp`, not the mapped repository — no
+  // candidate, `receipt-absent`.
   const attackerDelta = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/evil/unifi-network-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "2 commits between attacker tags" } }],
+    [catalogCall, { tool: "web_fetch", args: { url: "https://github.com/evil/unifi-network-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [catalogResult, { status: "ok", result: { content: "2 commits between attacker tags" } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-4");
   assert.equal(attackerDelta.status, "unresolved");
   assert.equal(attackerDelta.evidence?.state, "receipt-absent");
 
-  // (2) The same-named IMAGE on the registry under another owner: a real
-  // canonical catalog page OF A DIFFERENT artifact — it attributes
-  // provenance and carries the name, but names no identity for THIS entry.
-  const attackerImage = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://ghcr.io/evil/unifi-network-mcp" }, status: "ok" }],
-    [{ status: "ok", result: { content: "{\"schemaVersion\":2}" } }],
-    imageRows(IMAGE_SCOPE),
-  ), "obligation-3");
-  assert.equal(attackerImage.status, "unresolved");
-  assert.equal(attackerImage.evidence?.state, "receipt-absent");
+  // (2) The reviewer's exact example: an SAME-OWNER, entirely UNRELATED
+  // repository whose compare URL happens to spell both captured versions
+  // (`github.com/acme/completely-unrelated` settling `ghcr.io/acme/widget`
+  // in the review's wording). The mapping names the artifact's build repo;
+  // any other repository of the same owner addresses nothing for the entry.
+  const unrelatedSameOwner = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/acme/widget" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/acme/completely-unrelated/compare/1.2.3...1.2.4" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/acme/widget") } },
+      { status: "ok", result: { content: "spurious tag pair" } },
+    ],
+    imageRows([{ slug: "ghcr.io/acme/widget", versions: ["1.2.3", "1.2.4"], kind: "image" }]),
+  );
+  const unrelatedDelta = byId(unrelatedSameOwner, "obligation-4");
+  assert.equal(unrelatedDelta.status, "unresolved");
+  assert.equal(unrelatedDelta.evidence?.state, "receipt-absent");
 
-  // (3) Hostile boundary tokens (#252): the owner segment must appear as
-  // an exact slug token — a lookalike namespace embeds it inside a longer
-  // identity and carries nothing, even though the name and versions fit.
+  // (3) The pinned residual the review demanded be CLOSED: spelling the
+  // owner string as a repository name the attacker controls
+  // (`github.com/evil/sirkirby/compare/…`) no longer settles the delta. It
+  // addresses `evil/sirkirby`, not the mapped `sirkirby/unifi-mcp`.
+  const ownerAsRepoName = byId(foldDependencyRows(
+    [catalogCall, { tool: "web_fetch", args: { url: "https://github.com/evil/sirkirby/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [catalogResult, { status: "ok", result: { content: "repo named after the owner, attacker-controlled" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(ownerAsRepoName.status, "unresolved");
+  assert.equal(ownerAsRepoName.evidence?.state, "receipt-absent");
+
+  // (4) Hostile boundary tokens (#252): a LOOKALIKE source repo (an added
+  // character) addresses a different repository even though the name and
+  // versions fit, even beside the real mapping.
   const lookalike = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirbyy/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "lookalike owner namespace" } }],
+    [catalogCall, { tool: "web_fetch", args: { url: "https://github.com/sirkirbyy/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [catalogResult, { status: "ok", result: { content: "lookalike owner namespace" } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-4");
   assert.equal(lookalike.status, "unresolved");
   assert.equal(lookalike.evidence?.state, "receipt-absent");
 
-  // (4) The intentional counterpart of (1): the organic #12359 shape —
-  // the owner's source repo spells a DIFFERENT name than the image
-  // artifact — still settles through the owner carry, and a same-owner
-  // source read beside no canonical catalog is the provenance MISMATCH
-  // case (a relevant acquisition that covers nothing).
+  // (5) The cross-host carry-over: the mapping names `github.com/…`; the
+  // same owner/repo spelling on ANOTHER forge addresses a different
+  // repository and settles nothing.
+  const crossHost = byId(foldDependencyRows(
+    [catalogCall, { tool: "web_fetch", args: { url: "https://gitlab.com/sirkirby/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [catalogResult, { status: "ok", result: { content: "same-name fork on another forge" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(crossHost.status, "unresolved");
+  assert.equal(crossHost.evidence?.state, "receipt-absent");
+
+  // (6) The intentional counterpart: the organic #12359 shape — the mapped
+  // source repo spells a DIFFERENT name than the image artifact — settles
+  // the delta through the mapping, and a source-repo read beside NO
+  // canonical catalog names no identity at all for the entry (#1782:
+  // without the registry document there is no established mapping — the
+  // old owner-carry `receipt-mismatch` becomes the stricter `absent`).
   const ownerDelta = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "9 commits" } }],
+    [catalogCall, { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" }],
+    [catalogResult, { status: "ok", result: { content: "9 commits" } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-4");
   assert.equal(ownerDelta.status, "satisfied");
-  const ownerRead = byId(foldDependencyRows(
+  const bareOwnerRead = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp" }, status: "ok" }],
     [{ status: "ok", result: { content: "source repository root" } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-3");
-  assert.equal(ownerRead.status, "unresolved");
-  assert.equal(ownerRead.evidence?.state, "receipt-mismatch");
+  assert.equal(bareOwnerRead.status, "unresolved");
+  assert.equal(bareOwnerRead.evidence?.state, "receipt-absent");
+});
 
-  // (5) The pinned accepted residual: SPELLING the owner string as a
-  // repository name the attacker controls (`evil/sirkirby`) is the generic
-  // any-position token carry the npm version-asserting cells have always
-  // accepted (a repo `evil/webpack` beside the npm slug `webpack`). The
-  // security this rule buys is that the attacker cannot BE the owner whose
-  // surfaces a genuine delta lives on — not that they can never spell its
-  // name from a surface they control.
-  const ownerAsRepoName = byId(foldDependencyRows(
-    [{ tool: "web_fetch", args: { url: "https://github.com/evil/sirkirby/compare/0.49.2...0.50.0" }, status: "ok" }],
-    [{ status: "ok", result: { content: "repo named after the owner, attacker-controlled" } }],
+test("#1782 (independent review): provenance settles only from a catalog document that CLAIMS the source mapping — a bare index body stays fail-closed", () => {
+  const catalogCall = { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" };
+  const deltaCall = { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.2...0.50.0" }, status: "ok" };
+
+  // (a) The organic repro WITHOUT the mapping: a real, successful fetch of
+  // the canonical catalog URL returning a bare OCI index body proves the
+  // registry SERVES the artifact, never which repository builds it (#1763:
+  // a pullable identity is insufficient). Provenance refuses it
+  // (`receipt-mismatch` beside the verified same-slug acquisition), and
+  // WITHOUT the mapping even the genuine source-repo compare is no
+  // candidate — the whole row set stays unresolved, fail-closed.
+  const bare = foldDependencyRows(
+    [catalogCall, deltaCall],
+    [
+      { status: "ok", result: { content: "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\"}" } },
+      { status: "ok", result: { content: "9 commits" } },
+    ],
     imageRows(IMAGE_SCOPE),
-  ), "obligation-4");
-  assert.equal(ownerAsRepoName.status, "satisfied");
+  );
+  assert.equal(byId(bare, "obligation-3").evidence?.state, "receipt-mismatch");
+  assert.equal(byId(bare, "obligation-4").evidence?.state, "receipt-absent");
+
+  // (b) An UNATTRIBUTABLE claim — the source field values this runtime
+  // cannot represent as one clean repository identity (a schemeless
+  // display name, a host with a port, an escaped segment, a shallower
+  // org page) — yields no mapping, same fail-closed reading as no claim.
+  for (const claim of [
+    "unifi-mcp on GitHub",
+    "https://github.com:8443/sirkirby/unifi-mcp",
+    "https://github.com/sirkirby%2Funifi-mcp/x",
+    "https://github.com/sirkirby",
+    "ftp://github.com/sirkirby/unifi-mcp",
+  ]) {
+    const folded = byId(foldDependencyRows(
+      [catalogCall],
+      [{ status: "ok", result: { content: `{"annotations":{"org.opencontainers.image.source":"${claim}"}}` } }],
+      imageRows(IMAGE_SCOPE),
+    ), "obligation-3");
+    assert.equal(folded.evidence?.state, "receipt-mismatch", claim);
+  }
+
+  // (c) CONFLICTING claims across the artifact's catalog documents (a
+  // repacked or ambiguous artifact) name no canonical mapping — provenance
+  // refuses, and nothing binds through the ambiguity.
+  const conflicting = foldDependencyRows(
+    [catalogCall, { ...catalogCall, args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp/" } }, deltaCall],
+    [
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
+      { status: "ok", result: { content: catalogDocumentWithSource("https://gitlab.com/other-maintainer/unifi-mcp") } },
+      { status: "ok", result: { content: "9 commits" } },
+    ],
+    imageRows(IMAGE_SCOPE),
+  );
+  assert.equal(byId(conflicting, "obligation-3").evidence?.state, "receipt-mismatch");
+  assert.equal(byId(conflicting, "obligation-4").evidence?.state, "receipt-absent");
+
+  // (d) The CLAIM is not a generic carry: the document's claimed owner/
+  // repo tokens never make some OTHER surface speak for the entry — the
+  // mapping flows only through the establishment rule.
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://ghcr.io/sirkirby/unifi-network-mcp"), "ghcr.io/sirkirby/unifi-network-mcp");
+});
+
+test("#1782: the forge-read channel binds the release delta through the established mapping (#1726 carries over)", () => {
+  const folded = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+      { tool: "gh_api", args: { endpoint: "repos/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/sirkirby/unifi-mcp") } },
+      { status: "ok", result: { response: '{"commits":[…]}' } },
+    ],
+    imageRows(IMAGE_SCOPE),
+  );
+  const delta = byId(folded, "obligation-4");
+  assert.equal(delta.status, "satisfied");
+  assert.equal(delta.evidence?.state, "receipt-backed");
+});
+
+test("#1782: registryDocumentSourceRepo / sourceRepoSurfaceIdentity — the lexical mapping rules fail closed", () => {
+  // Publisher spellings that establish the mapping.
+  const cases: Array<[string, string]> = [
+    ['{"annotations":{"org.opencontainers.image.source":"https://github.com/o/r"}}', "github.com/o/r"],
+    ['LABEL org.opencontainers.image.source=https://github.com/o/r', "github.com/o/r"],
+    ['{"source":"https://www.GitHub.com/O/R.git"}', "github.com/o/r"],
+    ['{"source":"https://github.com/o/r/tree/main"}', "github.com/o/r"],
+    ['{"repository":"https://gitlab.example.org/team/component","x":1}', "gitlab.example.org/team/component"],
+    ['"source": "https://github.com/o/r", "other": "https://github.com/o/r"', "github.com/o/r"],
+  ];
+  for (const [content, expected] of cases) {
+    assert.equal(registryDocumentSourceRepo(content), expected, content);
+  }
+  // No claim, malformed claims, and CONFLICTING claims all yield nothing.
+  for (const content of [
+    "",
+    "a prose page mentioning the word source",
+    '{"source":"https://github.com/o"}',
+    '{"source":"https://github.com"}',
+    '{"source":"https://localhost/o/r"}',
+    '{"source":"https://user@github.com/o/r"}',
+    '{"source":"https://github.com:443/o/r"}',
+    '{"source":"https://github.com/%6f/r"}',
+    '{"source":"http://github.com/o/r","repository":"https://gitlab.com/x/y"}',
+    '{"source":"git@github.com:o/r"}',
+    '{"org.opencontainers.image.source":"https://github.com/a/b","source":"https://github.com/c/d"}',
+  ]) {
+    assert.equal(registryDocumentSourceRepo(content), null, content);
+  }
+  // The surface side: repository-addressing URLs canonicalize, everything
+  // else names no repository.
+  assert.equal(sourceRepoSurfaceIdentity("https://github.com/sirkirby/unifi-mcp/compare/1...2"), "github.com/sirkirby/unifi-mcp");
+  assert.equal(sourceRepoSurfaceIdentity("https://www.github.com/o/r"), "github.com/o/r");
+  assert.equal(sourceRepoSurfaceIdentity("https://github.com/o/r.git"), "github.com/o/r");
+  for (const url of [
+    "",
+    "github.com/o/r",
+    "https://github.com/o",
+    "https://github.com",
+    "https://user@github.com/o/r",
+    "https://github.com:8443/o/r",
+    "https://github.com/o/%72/releases",
+    "ftp://github.com/o/r",
+  ]) {
+    assert.equal(sourceRepoSurfaceIdentity(url), null, url);
+  }
 });
 
 test("#1763 (review): two-segment official-Hub identities settle advisories through the search NAME carry, never a fetched name", () => {

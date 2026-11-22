@@ -394,23 +394,34 @@ The rules this buys, and their limits:
   byte-identical semantics); `image`/`chart` entries name the canonical
   registry identity (Docker Hub canonicalized to `docker.io/…`, `library/`
   stripped) and carry changed `sha256` digests when pinned. A receipt backs
-  the row only when, per obligation kind, the validated receipts JOINTLY
-  cover EVERY entry — identity per the entry's kind: an npm entry's exact
-  slug, and #1763's image/chart identity via the exact slug token, the
-  canonical registry-catalog page, or the OWNER-segment source carry (the
-  bare artifact name never carries a fetched surface — a same-named
-  artifact under another owner is attacker-registrable — and only an
-  advisory `web_search` query may name the artifact) — and, for every kind
+   the row only when, per obligation kind, the validated receipts JOINTLY
+   cover EVERY entry — identity per the entry's kind: an npm entry's exact
+   slug, and #1763's image/chart identity via the exact slug token, the
+   canonical registry-catalog page, the SOURCE mapping the artifact's
+   canonical registry document established (#1782: a FETCHED surface —
+   `web_fetch` or a forge read — counts only when the repository IT
+   addresses equals the mapped `host/owner/repo` exactly; owner-token
+   spelling, a same-owner unrelated repository, a lookalike name, or the
+   same owner/repo on another forge carries nothing), or an advisory
+   `web_search` QUERY naming the artifact or owner (a query is not an
+   attacker-registerable surface) — and, for every kind
   that asserts the update itself (release delta
   AND advisory), the COMPLETE captured changed-version identity: an advisory
   check naming only one endpoint of a captured `old → new` range never
   certifies the updated range (acquisition provenance bound to the captured
-  range — never semantic vulnerability proof). Provenance settles by ONE
-  canonical-source rule per ecosystem (#1748 → #1763): an npm entry only
-  from the canonical npm registry document, an image/chart entry only from
-  the canonical registry-catalog page for the exact artifact path — a
-  same-named repository/image under another owner, a forge read, or a search
-  query proves nothing about who publishes the artifact. A versionless entry
+   range — never semantic vulnerability proof). Provenance settles by ONE
+   canonical-source rule per ecosystem (#1748 → #1763 → #1782): an npm entry
+   only from the canonical npm registry document, an image/chart entry only
+   from the canonical registry-catalog page for the exact artifact path
+   WHOSE FETCHED DOCUMENT CLAIMS the artifact→source/build mapping
+   (`org.opencontainers.image.source` annotation or registry metadata
+   `source`/`repository` field, normalized to one `host/owner/repo`
+   identity; a bare index body, an unattributable claim, or conflicting
+   claims settle nothing — a pullable identity proves the registry serves
+   the artifact, never which repository builds it, and this retained
+   mapping is what the version-asserting rows then bind through). A
+   same-named repository/image under another owner, a forge read, or a
+   search query proves nothing about who publishes the artifact. A versionless entry
   (the parser emits one for re-resolution-only changes) certifies
   `provenance` only — the identity proves WHO the dependency is, never an
   exact delta or an updated version range — and a one-sided entry certifies

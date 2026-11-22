@@ -431,6 +431,125 @@ export function canonicalRegistryCatalogImageIdentity(url: string): string | nul
 }
 
 /**
+ * #1782 (independent review blocker 1): normalize one claimed source/build
+ * repository value into the canonical `host/owner/repo` identity, or `null`
+ * when the claim is not one clean repository identity. Accepted spellings:
+ * an `http(s)://` URL or a bare `host/owner/repo`, each optionally deeper
+ * (`/tree/<ref>`, `/releases`, …) and with a trailing `.git`; the `www.`
+ * prefix is spelling, not identity. A host carrying user-info, a port, or
+ * any percent-escape, a scheme other than http(s), or fewer than three
+ * clean segments names no repository — fail closed, never a decoded-guessed
+ * identity. Lexical and total: never throws.
+ */
+function normalizeSourceRepoClaim(raw: string): string | null {
+  const value = raw.trim().toLowerCase();
+  if (value === "" || /\s/.test(value)) return null;
+  const schemeAt = value.indexOf("://");
+  let rest: string;
+  if (schemeAt === -1) {
+    if (value.includes(":")) return null;
+    rest = value;
+  } else {
+    const scheme = value.slice(0, schemeAt);
+    if (scheme !== "https" && scheme !== "http") return null;
+    rest = value.slice(schemeAt + 3);
+  }
+  const path = rest.split(/[?#]/, 1)[0] ?? "";
+  const segments = path.split("/").filter((segment) => segment !== "");
+  if (segments.length < 3) return null;
+  const host = segments[0]!.replace(/^www\./, "");
+  const owner = segments[1]!;
+  let repo = segments[2]!;
+  if (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  for (const segment of [host, owner, repo]) {
+    if (segment === "" || segment.includes("@") || segment.includes(":") || segment.includes("%")) return null;
+  }
+  if (!host.includes(".")) return null;
+  return `${host}/${owner}/${repo}`;
+}
+
+/** `org.opencontainers.image.source` in any publisher spelling: the JSON
+ * annotation form of an OCI manifest/config document (`"key":"value"`), and
+ * the Dockerfile `LABEL key=value` build-metadata form. */
+const OCI_SOURCE_ANNOTATION_RE = /org\.opencontainers\.image\.source["']?\s*[:=]\s*["']?([^\s"',;}\]]+)/gi;
+
+/** Registry-metadata JSON fields whose value IS the artifact's source/build
+ * repository: Docker Hub's repository API `source`, Quay's application API
+ * `repository`. Matched only as a strict quoted JSON key with a quoted
+ * string value — prose that merely spells the word binds nothing. */
+const REGISTRY_SOURCE_METADATA_RE = /"(?:source|repository)"\s*:\s*"([^"\r\n]+)"/gi;
+
+/**
+ * #1782 (independent review blocker 1): the bounded registry-artifact →
+ * source/build-repository mapping a canonical registry document CLAIMS, as
+ * the canonical `host/owner/repo` identity, or `null` when the document
+ * carries no attributable mapping. #1763 requires image provenance to prove
+ * the image/source relationship, not just a pullable artifact identity: a
+ * successful fetch of the catalog URL proves the registry serves the slug,
+ * never WHICH repository builds it — the claim must come from the document's
+ * own content (verified OCI `org.opencontainers.image.source` annotations,
+ * registry metadata `source`/`repository` fields, or the Dockerfile `LABEL`
+ * spelling of the same annotation, read ONLY from a document fetched at the
+ * canonical catalog identity for the exact artifact path, which the caller
+ * enforces — the registry host enforces path uniqueness under its
+ * namespaces, so the publisher's own document is the authority for its
+ * source mapping). Every claim in the document must normalize to ONE
+ * identity: a malformed/irrepresentable claim, or several claims naming
+ * different repositories (a repacked or ambiguous document), yields `null`
+ * — fail closed, never pick a convenient mapping. Lexical and total: never
+ * throws, never touches the network.
+ */
+export function registryDocumentSourceRepo(content: string): string | null {
+  let mapping: string | null = null;
+  const claims = [
+    ...content.matchAll(OCI_SOURCE_ANNOTATION_RE),
+    ...content.matchAll(REGISTRY_SOURCE_METADATA_RE),
+  ];
+  for (const match of claims) {
+    const claim = normalizeSourceRepoClaim(match[1] ?? "");
+    if (claim === null) return null;
+    if (mapping !== null && mapping !== claim) return null;
+    mapping = claim;
+  }
+  return mapping;
+}
+
+/**
+ * #1782 (independent review blocker 2): the canonical source-repository
+ * identity a FETCHED web surface addresses — `host/owner/repo` from the
+ * target's host and first two path segments (deeper paths are pages OF that
+ * repository: `/compare/…`, `/releases`, `/commit/…`), or `null` when the
+ * target is not a clean repository surface (no path, user-info or port on
+ * the host, any percent-escape, a non-http scheme). This is the surface-side
+ * counterpart of `registryDocumentSourceRepo`: an upstream release/advisory
+ * fetch speaks for the dependency exactly when the repository IT addresses
+ * equals the source/build mapping the artifact's canonical registry document
+ * established — never when it merely spells one segment of it. Lexical and
+ * total: never throws, never touches the network.
+ */
+export function sourceRepoSurfaceIdentity(url: string): string | null {
+  const value = url.trim().toLowerCase();
+  const schemeAt = value.indexOf("://");
+  if (schemeAt === -1) return null;
+  const scheme = value.slice(0, schemeAt);
+  if (scheme !== "https" && scheme !== "http") return null;
+  const rest = value.slice(schemeAt + 3);
+  const pathStart = rest.indexOf("/");
+  const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  if (rawHost.includes("@") || rawHost.includes(":")) return null;
+  const host = rawHost.replace(/^www\./, "");
+  if (host === "" || host.includes("%") || !host.includes(".")) return null;
+  const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
+  const segments = rawPath.split("/").filter((segment) => segment !== "");
+  if (segments.length < 2) return null;
+  const owner = segments[0]!;
+  let repo = segments[1]!;
+  if (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  if (owner === "" || repo === "" || owner.includes("%") || repo.includes("%")) return null;
+  return `${host}/${owner}/${repo}`;
+}
+
+/**
  * #1396: the obligation a deterministic dependency-evidence `must_check`
  * checklist text names (the DEPENDENCY_EVIDENCE_CHECKS family templates), or
  * null for any other check. The harness uses it to map a shown obligation row
