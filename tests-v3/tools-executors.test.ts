@@ -6,7 +6,7 @@ import path from "node:path";
 import {
   ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, encodeEndpointSegment, executeToolRequest, findFiles, ghApi, gitBlame, gitGrep,
   listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
-  webFetch, webSearch, type ToolContext,
+  webFetch, webSearch, type NetworkResponse, type ToolContext,
 } from "../src/tools/executors.js";
 import { defaultMcpPost, McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
 import { startMockServer, sseResponse } from "./helpers.js";
@@ -966,7 +966,10 @@ test("web_fetch preserves success across an allowed redirect and fail-closes on 
       },
     },
   });
-  assert.deepEqual(await webFetch("https://github.com/start", allowed), { content: "final body", truncated: false });
+  // #1782: a redirected fetch reports the executor-attested terminal URL.
+  assert.deepEqual(await webFetch("https://github.com/start", allowed), {
+    content: "final body", truncated: false, finalUrl: "https://api.github.com/real",
+  });
   const disallowed = ctx("/tmp", {
     allowedHosts: ["github.com"],
     deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }), resolver: async () => ["93.184.216.34"] },
@@ -1050,8 +1053,36 @@ test("web_fetch still succeeds end-to-end when every hop resolves public", async
       },
     },
   }));
-  assert.deepEqual(res, { content: "final body", truncated: false });
+  assert.deepEqual(res, { content: "final body", truncated: false, finalUrl: "https://api.github.com/real" });
   assert.equal(called, 2);
+});
+
+test("#1782: web_fetch reports the terminal URL of an organic GHCR package redirect chain", async () => {
+  // The REAL chain captured against ghcr.io 2026-11-22: the registry 303s
+  // the package path to GitHub's repository-independent package URL, which
+  // resolves to the pkgs page OF the associated repository. The executor
+  // re-validates every hop against the allowlist and reports the terminal
+  // URL — the fact `registryRedirectSourceMapping` reads the artifact→
+  // source mapping off. A direct fetch (no hop) stays byte-identical to the
+  // pre-#1782 payload: NO `finalUrl` key.
+  const html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Package unifi-network-mcp · GitHub</title>";
+  const hops = new Map<string, NetworkResponse>([
+    ["https://ghcr.io/sirkirby/unifi-network-mcp", { status: 303, headers: { location: "https://github.com/-/sirkirby/packages/container/package/unifi-network-mcp" }, body: "" }],
+    ["https://github.com/-/sirkirby/packages/container/package/unifi-network-mcp", { status: 302, headers: { location: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp" }, body: "" }],
+    ["https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp", { status: 200, body: html }],
+  ]);
+  const res = await webFetch("https://ghcr.io/sirkirby/unifi-network-mcp", ctx("/tmp", {
+    allowedHosts: ["ghcr.io", "github.com"],
+    deps: {
+      ...deps(),
+      resolver: async () => ["140.82.112.22"],
+      fetch: async (url: string) => hops.get(url) ?? { status: 404, body: "" },
+    },
+  }));
+  assert.equal(res.error, undefined);
+  assert.equal(res.content, html);
+  assert.equal(res.truncated, false);
+  assert.equal(res.finalUrl, "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp");
 });
 
 test("web_search treats non-2xx as errors even when the body is a valid JSON error object", async () => {

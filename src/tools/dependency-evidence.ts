@@ -372,8 +372,10 @@ const PLAIN_IMAGE_CATALOG_HOSTS: ReadonlySet<string> = new Set([
  * identity the trusted scope parse records:
  * - `hub.docker.com` / `docker.io`: `r/<owner>/<name>` →
  *   `docker.io/<owner>/<name>`, with the official-image `library` namespace
- *   collapsing to `docker.io/<name>`, and the `/_/<name>` official-image
- *   spelling → `docker.io/<name>`; every other Docker Hub path shape
+ *   collapsing to `docker.io/<name>`, the `/_/<name>` official-image
+ *   spelling → `docker.io/<name>`, and the repository-API document
+ *   `v2/repositories/<owner>/<name>[/<rest>]` (the publisher-metadata JSON
+ *   surface, #1782) → the same identity; every other Docker Hub path shape
  *   (search, profile, deeper listing) binds nothing;
  * - `ghcr.io`: at least two path segments → `ghcr.io/<joined path>` (OCI
  *   charts live at deeper paths such as `prometheus-community/charts/<chart>`);
@@ -414,6 +416,19 @@ export function canonicalRegistryCatalogImageIdentity(url: string): string | nul
       return owner === "library" ? `docker.io/${name}` : `docker.io/${owner}/${name}`;
     }
     if (segments.length === 2 && segments[0] === "_") return `docker.io/${segments[1]}`;
+    // The repository API document (`/v2/repositories/<owner>/<name>`, the
+    // shape a reviewer actually reaches for when it wants the repository
+    // METADATA — the publisher-owned `source`/`repository` fields): the
+    // exact repository path under the namespace-owning host, deeper
+    // sub-resources (`/tags`, `/images`) are pages OF that same document's
+    // repository. #1782: without this spelling the organic Hub JSON surface
+    // was invisible to the mapping rule even when the publisher HAD set
+    // `source`.
+    if (segments.length >= 4 && segments[0] === "v2" && segments[1] === "repositories") {
+      const owner = segments[2]!;
+      const name = segments[3]!;
+      return owner === "library" ? `docker.io/${name}` : `docker.io/${owner}/${name}`;
+    }
     return null;
   }
   if (host === "ghcr.io") {
@@ -563,6 +578,63 @@ export function sourceRepoSurfaceIdentity(url: string): string | null {
   while (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
   if (owner === "" || repo === "" || owner.includes("%") || repo.includes("%")) return null;
   return `${host}/${owner}/${repo}`;
+}
+
+/**
+ * #1782 (independent review round 2, blocker 1): the artifact→source/build
+ * mapping the REGISTRY HOST ITSELF asserts through a validated redirect
+ * chain. `ghcr.io` answers a fetch of a package path NOT with a document at
+ * that path: the registry 303s to GitHub's package page for the exact
+ * artifact, and GitHub's own Location chain lands on
+ * `github.com/<owner>/<repo>/pkgs/container/<artifact>` — the page OF the
+ * repository the registry's operator associates with the package. That
+ * terminal URL is executor-attested (the web_fetch hop loop re-validates
+ * every Location against the source-host allowlist and reports the chain's
+ * terminal URL as `finalUrl`); it is the registry operator's statement of
+ * the image/source relationship — namespace-uniqueness-bound, reachable on
+ * the organic surface, and readable WITHOUT trusting any fetched body.
+ * Returns the mapped `github.com/<owner>/<repo>` identity, or `null`:
+ * - `null` unless the REQUESTED URL canonicalizes (via
+ *   `canonicalRegistryCatalogImageIdentity`) to a `ghcr.io/…` slug — no
+ *   other accepted registry host redirects to a repository-addressing
+ *   package page, so no other host asserts a mapping this way;
+ * - `null` unless the terminal URL is a clean repository surface
+ *   (`sourceRepoSurfaceIdentity`) ON `github.com`, its FIRST two path
+ *   segments, immediately followed by the exact `pkgs/container/<artifact>`
+ *   marker — a lookalike that merely spells the marker deeper in the path,
+ *   a `github.com/-/<owner>/packages/…` hop that never resolved to a
+ *   repository, or any other page shape asserts nothing;
+ * - `null` unless the marker's artifact segment decodes (the registry's own
+ *   `%2f`-only spelling) to exactly the slug's path below the ghcr.io
+ *   namespace — the redirect must speak about THIS artifact, not some other
+ *   package on the same host. Any other percent-escape fails closed.
+ * Lexical and total: never throws, never touches the network.
+ */
+export function registryRedirectSourceMapping(requestedUrl: string, finalUrl: string): string | null {
+  const slug = canonicalRegistryCatalogImageIdentity(requestedUrl);
+  if (slug === null || !slug.startsWith("ghcr.io/")) return null;
+  const repo = sourceRepoSurfaceIdentity(finalUrl);
+  if (repo === null || !repo.startsWith("github.com/")) return null;
+  const lower = finalUrl.trim().toLowerCase();
+  const rest = lower.slice(lower.indexOf("://") + 3);
+  const pathStart = rest.indexOf("/");
+  if (pathStart === -1) return null;
+  const rawPath = rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "";
+  const segments = rawPath.split("/").filter((segment) => segment !== "");
+  if (segments.length !== 5 || segments[2] !== "pkgs" || segments[3] !== "container") return null;
+  // The reserved `-` namespace (the repository-INDEPENDENT package hop) is
+  // not an owner: a five-segment lookalike of it asserts no repository.
+  if (segments[0] === "-") return null;
+  const encoded = segments[4]!;
+  // The registry's own spelling of a nested artifact path is `%2f`-joined;
+  // any OTHER percent-escape is not a clean identity character.
+  if (encoded.replace(/%2f/g, "").includes("%")) return null;
+  // The pkgs marker names the artifact BELOW the ghcr.io namespace; the
+  // namespace itself is the slug's first path segment and is not part of
+  // the encoded page spelling.
+  const artifact = slug.split("/").slice(2).join("/");
+  if (artifact === "" || encoded.replace(/%2f/g, "/") !== artifact) return null;
+  return repo;
 }
 
 /**

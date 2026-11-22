@@ -1125,7 +1125,18 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
     // fetched bytes when the body is longer: report it so the executor
     // envelope's payload carries the incomplete state (#1657 round 10).
     const sliced = pyCodepointSlice(res.body, 10000);
-    return { content: sliced, truncated: sliced !== res.body };
+    // #1782: when the chain moved, report the TERMINAL URL the validated
+    // hop loop actually landed on. The chain is executor-attested (every
+    // Location was re-validated against the source-host allowlist above),
+    // so the terminal surface is a fact about the acquisition, not about
+    // any fetched body — the evidence ledger reads registry redirect
+    // assertions off it. Absent when nothing redirected (the requested URL
+    // is already the terminal surface).
+    return {
+      content: sliced,
+      truncated: sliced !== res.body,
+      ...(hop > 0 ? { finalUrl: current.slice(0, 1024) } : {}),
+    };
   }
   return { error: "Too many redirects" };
 }

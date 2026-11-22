@@ -53,7 +53,7 @@ import {
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
-import { canonicalRegistryCatalogImageIdentity, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
+import { canonicalRegistryCatalogImageIdentity, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, registryRedirectSourceMapping, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
 import { Conversation } from "../src/model/conversation.js";
@@ -886,18 +886,22 @@ test("#1721 loop replay counterpart: attributed upstream evidence stops the same
 // ---------------------------------------------------------------------------
 // #1763: container-image / OCI-chart dependency updates. The trusted scope
 // now names canonical registry identities (`kind: "image"|"chart"`, digests),
-// and the cells bind per kind: provenance settles from the canonical
-// registry CATALOG DOCUMENT that also CLAIMS the artifact→source/build
-// mapping (#1782: the URL alone proves the registry serves the artifact,
-// never which repository builds it — #1763 requires the image/source
-// relationship, and a bare index body stays fail-closed) — the image/chart
-// analogue of the #1748 canonical-source rule — while the version-asserting
-// cells bind FETCHED surfaces through that retained mapping (the mapped
-// repository's own surfaces, never any surface spelling the owner segment)
-// and carry dotted tag tokens under the version boundary. Organic replays
-// of the two false-INCOMPLETE reports (#12359 ghcr image, #12375 OCI chart),
-// the Docker Hub spelling normalization, and the negative controls. The npm
-// fixtures above are the untouched #1748 regression suite.
+// and the cells bind per kind: provenance settles from the canonical registry
+// acquisition that ESTABLISHES the artifact→source/build mapping (#1782) —
+// either the claim the canonical document's body makes (OCI source
+// annotation / registry metadata field) or, since #1782 round 2, the registry
+// host's OWN validated redirect chain to the repository-addressing GitHub
+// package page for exactly this artifact (ghcr.io 303s there organically,
+// and its real HTML carries no annotation and is ALWAYS clipped by the
+// executor's fetch slice) — the image/chart analogue of the #1748
+// canonical-source rule. The version-asserting cells bind FETCHED surfaces
+// through that retained mapping or the exact canonical catalog URL ONLY:
+// #1782 round 2 removed even the generic full-slug token carry for
+// image/chart entries (npm keeps it), so no attacker-chosen page that merely
+// SPELLS the identity settles anything. Organic replays of the two
+// false-INCOMPLETE reports (#12359 ghcr image, #12375 OCI chart), the Docker
+// Hub spelling normalization, and the negative controls. The npm fixtures
+// above are the untouched #1748 regression suite.
 // ---------------------------------------------------------------------------
 
 /** A canonical ghcr catalog document that CLAIMS its source repository —
@@ -918,6 +922,25 @@ const IMAGE_SCOPE = [{
   kind: "image",
   digests: [IMAGE_DIGEST_A, IMAGE_DIGEST_B],
 }];
+
+/** The REAL HTML head captured live from the reachable ghcr.io redirect
+ * surface on 2026-11-22 (`curl -L https://ghcr.io/sirkirby/unifi-network-mcp`
+ * landing on GitHub's pkgs page; first 15 non-blank lines). The GitHub pkgs
+ * document head is generic — byte-identical between the unifi-network-mcp
+ * and prometheus-blackbox-exporter package pages: a pkgs page's artifact
+ * identity lives in the URL the redirect CHAIN asserts, never in this body,
+ * which carries NO OCI source annotation and no registry metadata field
+ * (#1782 round 2: the organic mapping must come off the executor-attested
+ * finalUrl, because the real page is always larger than the 10k-codepoint
+ * fetch slice). */
+const GITHUB_PKGS_HTML_HEAD =
+  "\n\n<!DOCTYPE html>\n<html\n  lang=\"en\"\n  \n  data-color-mode=\"auto\" data-light-theme=\"light\" data-dark-theme=\"dark\"\n  data-a11y-animated-images=\"system\" data-a11y-link-underlines=\"true\"\n  data-css-features=\"site_disable_smooth_scrolling\"\n  >\n\n\n\n\n  <head>\n    <meta charset=\"utf-8\">\n  <link rel=\"dns-prefetch\" href=\"https://github.githubassets.com\">\n  <link rel=\"dns-prefetch\" href=\"https://avatars.githubusercontent.com\">\n  <link rel=\"dns-prefetch\" href=\"https://github-cloud.s3.amazonaws.com\">\n  <link rel=\"dns-prefetch\" href=\"https://user-images.githubusercontent.com/\">\n  <link rel=\"preconnect\" href=\"https://github.githubassets.com\" crossorigin>\n  <link rel=\"preconnect\" href=\"https://avatars.githubusercontent.com\">";
+
+/** The captured GitHub compare-page head shape (same generic document-head
+ * family as the pkgs page, clipped by the executor's fetch slice — the
+ * delta row's evidence is the acquisition target, never this body). */
+const GITHUB_COMPARE_HTML_HEAD =
+  "<!DOCTYPE html>\n<html\n  lang=\"en\"\n  data-color-mode=\"auto\" data-light-theme=\"light\" data-dark-theme=\"dark\"\n>\n  <head>\n    <meta charset=\"utf-8\">\n  <link rel=\"dns-prefetch\" href=\"https://github.githubassets.com\">\n  <link rel=\"dns-prefetch\" href=\"https://avatars.githubusercontent.com\">\n";
 
 /** The three obligation rows over one trusted scope entry (the replay's
  * obligation-3/4/5 shapes with the image scope substituted). */
@@ -963,6 +986,13 @@ test("#1763: canonicalRegistryCatalogImageIdentity recognizes only canonical cat
   assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/r/library/alpine/"), "docker.io/alpine");
   assert.equal(canonicalRegistryCatalogImageIdentity("https://www.hub.docker.com/r/library/nginx"), "docker.io/nginx");
   assert.equal(canonicalRegistryCatalogImageIdentity("https://docker.io/r/library/alpine"), "docker.io/alpine");
+  // The Docker Hub repository-API document (#1782 round 2 — the publisher
+  // METADATA JSON surface with the `source`/`repository` fields): the exact
+  // repository path under the namespace-owning host, with deeper
+  // sub-resources (`/tags`, `/images`) pages OF that same repository.
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/v2/repositories/library/alpine/"), "docker.io/alpine");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/v2/repositories/prom/prometheus"), "docker.io/prom/prometheus");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/v2/repositories/alpinelinux/docker-alpine/tags"), "docker.io/alpinelinux/docker-alpine");
   assert.equal(canonicalRegistryCatalogImageIdentity("https://quay.io/repository/prometheus/prometheus"), "quay.io/prometheus/prometheus");
   assert.equal(canonicalRegistryCatalogImageIdentity("https://quay.io/coreos/etcd"), "quay.io/coreos/etcd");
   assert.equal(canonicalRegistryCatalogImageIdentity("https://mcr.microsoft.com/dotnet/runtime"), "mcr.microsoft.com/dotnet/runtime");
@@ -981,6 +1011,12 @@ test("#1763: canonicalRegistryCatalogImageIdentity recognizes only canonical cat
     "https://hub.docker.com/r/o",
     "https://hub.docker.com/search?q=alpine",
     "https://hub.docker.com/u/sirkirby",
+    // Wrong repository-API shapes: the collection root, a namespace without
+    // a repository, and the search endpoint all name no artifact
+    // (#1782 round 2 — only `/v2/repositories/<owner>/<name>[/<sub>]`).
+    "https://hub.docker.com/v2/repositories",
+    "https://hub.docker.com/v2/repositories/onlyone",
+    "https://hub.docker.com/v2/search",
     "https://hub.docker.com",
     "https://ghcr.io",
     "https://ghcr.io/",
@@ -1052,6 +1088,40 @@ test("#1763 organic #12359 (image): the ghcr catalog + source-repo compare + ver
   }
 });
 
+test("#1782 round 2 organic GHCR replay: the registry host's OWN redirect chain settles all three rows — the real surface carries no OCI annotation and is always clipped", () => {
+  // The provider-free regression the independent review asked for, replaying
+  // the REAL captured acquisition shape (ghcr.io surface, 2026-11-22):
+  // `https://ghcr.io/sirkirby/unifi-network-mcp` answers the fetch NOT with
+  // a document at that path but with a 303 chain terminating at
+  // `github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp` — the
+  // executor reports that terminal URL (`finalUrl`, every Location
+  // re-validated against the source-host allowlist), and
+  // `registryRedirectSourceMapping` reads the artifact→source mapping off it
+  // with NO body authority at all. The captured pkgs HTML carries no OCI
+  // annotation anywhere and arrives truncated (GitHub's page exceeds the
+  // 10k-codepoint slice every single time — the exact false-INCOMPLETE #1763
+  // exists to stop); the delta/advisory rows ride the mapped repository's
+  // compare and the artifact-name advisory query, both clipped or advisory.
+  const folded = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" },
+      { tool: "web_search", args: { query: "unifi-network-mcp 0.49.2 0.50.0 advisory" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: GITHUB_PKGS_HTML_HEAD, truncated: true, finalUrl: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp" } },
+      { status: "ok", result: { content: GITHUB_COMPARE_HTML_HEAD, truncated: true } },
+      { status: "ok", result: { results: "no advisories published for the 0.49.x/0.50.x line" } },
+    ],
+    imageRows(IMAGE_SCOPE),
+  );
+  for (const id of ["obligation-3", "obligation-4", "obligation-5"]) {
+    const row = byId(folded, id);
+    assert.equal(row.status, "satisfied", `${id}: ${JSON.stringify(row.evidence)}`);
+    assert.equal(row.evidence?.state, "receipt-backed", id);
+  }
+});
+
 test("#1763 organic #12375 (OCI chart): the ghcr chart catalog + helm-charts compare + version advisory settle all three rows", () => {
   const rows = imageRows([{
     slug: "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
@@ -1078,6 +1148,40 @@ test("#1763 organic #12375 (OCI chart): the ghcr chart catalog + helm-charts com
   }
 });
 
+test("#1782 round 2 organic OCI-chart replay: the %2f-joined nested-artifact redirect chain settles all three rows", () => {
+  // The chart sibling of the organic GHCR replay above (real capture,
+  // ghcr.io surface, 2026-11-22): `ghcr.io/prometheus-community/charts/…`
+  // 303s to `github.com/prometheus-community/helm-charts/pkgs/container/charts%2F…`
+  // — the registry's OWN spelling of a nested artifact path joins it with
+  // `%2f` inside the pkgs marker, and the rule decodes it back to the slug's
+  // path below the ghcr.io namespace (the marker never names the namespace
+  // itself). Same clipped, annotation-free GitHub body; the mapping is the
+  // chain's, and the version-asserting rows ride the mapped helm-charts
+  // compare and the artifact-name advisory query.
+  const folded = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/prometheus-community/helm-charts/compare/prometheus-blackbox-exporter-11.21.3...prometheus-blackbox-exporter-11.22.0" }, status: "ok" },
+      { tool: "web_search", args: { query: "prometheus-blackbox-exporter 11.21.3 11.22.0 advisory" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: GITHUB_PKGS_HTML_HEAD, truncated: true, finalUrl: "https://github.com/prometheus-community/helm-charts/pkgs/container/charts%2Fprometheus-blackbox-exporter" } },
+      { status: "ok", result: { content: GITHUB_COMPARE_HTML_HEAD, truncated: true } },
+      { status: "ok", result: { results: "no CVEs in the chart's pinned images" } },
+    ],
+    imageRows([{
+      slug: "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
+      versions: ["11.21.3", "11.22.0"],
+      kind: "chart",
+    }]),
+  );
+  for (const id of ["obligation-3", "obligation-4", "obligation-5"]) {
+    const row = byId(folded, id);
+    assert.equal(row.status, "satisfied", `${id}: ${JSON.stringify(row.evidence)}`);
+    assert.equal(row.evidence?.state, "receipt-backed", id);
+  }
+});
+
 test("#1763: Docker Hub spellings normalize to the docker.io/<name> identity — official spellings settle, an unrelated owner does not", () => {
   const rows = imageRows([{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
   // The Docker Hub repository metadata shape: the `source`/`repository`
@@ -1091,11 +1195,28 @@ test("#1763: Docker Hub spellings normalize to the docker.io/<name> identity —
   assert.equal(provenanceStateFor("https://hub.docker.com/_/alpine"), "receipt-backed");
   assert.equal(provenanceStateFor("https://hub.docker.com/r/library/alpine"), "receipt-backed");
   // …a same-named image under another owner normalizes to docker.io/evil/
-  // alpine — a DIFFERENT artifact that carries no binding identity token
-  // for the official entry (the generic carry needs the full slug, and a
-  // two-segment identity has no namespace/name pair to carry) — not even a
-  // candidate, never a settle.
+  // alpine — a DIFFERENT artifact the fetched surface binds nothing for:
+  // an image entry binds a fetched surface only through the exact canonical
+  // catalog identity (#1782 round 2 removed even the generic full-slug
+  // token carry, and a two-segment identity has no owner-segment search
+  // carry on a fetched surface anyway) — not even a candidate, never a
+  // settle.
   assert.equal(provenanceStateFor("https://hub.docker.com/r/evil/alpine"), "receipt-absent");
+  // #1782 round 2: the repository-API document is a canonical catalog
+  // surface too — the publisher's own `source` field settles provenance
+  // for the exact repository path…
+  const apiRows = imageRows([{ slug: "docker.io/alpinelinux/docker-alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
+  const apiProvenanceStateFor = (body: string): string | undefined => byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://hub.docker.com/v2/repositories/alpinelinux/docker-alpine/" }, status: "ok" }],
+    [{ status: "ok", result: { content: body } }],
+    apiRows,
+  ), "obligation-3").evidence?.state;
+  assert.equal(apiProvenanceStateFor('{"name":"docker-alpine","source":"https://github.com/alpinelinux/docker-alpine"}'), "receipt-backed");
+  // …and its absence settles NOTHING (fail closed): a verified canonical
+  // candidate establishing no mapping reads receipt-mismatch, never a
+  // silent settle and never receipt-absent beside it.
+  assert.equal(apiProvenanceStateFor('{"name":"docker-alpine"}'), "receipt-mismatch");
+  assert.equal(apiProvenanceStateFor('{"name":"docker-alpine","source":null}'), "receipt-mismatch");
 });
 
 test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisories, and unverified acquisitions never settle image rows", () => {
@@ -1141,8 +1262,8 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   assert.equal(staleAdvisory.status, "unresolved");
   assert.equal(staleAdvisory.evidence?.state, "receipt-mismatch");
 
-  // (d) A FAILED or TRUNCATED acquisition of an otherwise-covering target is
-  // recorded and reason-coded, never credited.
+  // (d) A FAILED acquisition of an otherwise-covering target is recorded and
+  // reason-coded, never credited — it fetched nothing.
   const failed = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "error" }],
     [{ status: "error", result: { error: "fetch failed" } }],
@@ -1150,13 +1271,21 @@ test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisor
   ), "obligation-3");
   assert.equal(failed.status, "unresolved");
   assert.equal(failed.evidence?.state, "receipt-unverified");
+  // #1782 (round 2): a TRUNCATED catalog fetch is a different animal — the
+  // acquisition itself succeeded (2xx on the canonical URL, an executor-
+  // attested fact the clip cannot invalidate), so it sits in the VERIFIED
+  // pool. But the one place the fetched body IS evidence — a document-
+  // claimed source mapping — keeps its completeness gate, and this clipped
+  // body claims none: a verified canonical candidate establishing no mapping
+  // reads `receipt-mismatch` (fail closed, never settle), not the old
+  // `receipt-unverified` split.
   const truncated = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
     [{ status: "ok", result: { content: "{\"schemaVersion\":", truncated: true } }],
     imageRows(IMAGE_SCOPE),
   ), "obligation-3");
   assert.equal(truncated.status, "unresolved");
-  assert.equal(truncated.evidence?.state, "receipt-unverified");
+  assert.equal(truncated.evidence?.state, "receipt-mismatch");
 
   // (e) A digest-only image entry (no captured version identity): provenance
   // still settles from the canonical catalog, while the version-asserting
@@ -1350,12 +1479,15 @@ test("#1782 (independent review): provenance settles only from a catalog documen
   assert.equal(canonicalRegistryCatalogImageIdentity("https://ghcr.io/sirkirby/unifi-network-mcp"), "ghcr.io/sirkirby/unifi-network-mcp");
 });
 
-test("#1782: a forge read carries ONLY the generic slug token — never the mapping (its receipt records no forge host)", () => {
+test("#1782 round 2: a forge read carries NOTHING for an image entry — never the mapping (its receipt records no forge host), and no generic token remains", () => {
   // The mapping names github.com/sirkirby/unifi-mcp; a gh_api compare on
   // the review's forge spells the same owner/repo, but the receipt cannot
-  // prove WHICH host it read, so the mapping binds nothing — the #1726
-  // channel keeps the generic full-slug carry only, and an image run
-  // whose registry host was refused fails provenance closed anyway.
+  // prove WHICH host it read, so the mapping binds nothing — and since
+  // #1782 round 2 there is no generic full-slug token carry left for an
+  // image/chart entry to fall back to either (the clause npm cells keep):
+  // the forge channel carries NOTHING for an image entry, the delta row
+  // has not even a candidate, and an image run whose registry host was
+  // refused fails provenance closed anyway.
   const folded = foldDependencyRows(
     [
       { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
@@ -1372,23 +1504,27 @@ test("#1782: a forge read carries ONLY the generic slug token — never the mapp
   assert.equal(delta.evidence?.state, "receipt-absent");
 });
 
-test("#1782: the generic FULL-slug carry remains the shared accepted residual for image cells (a page spelling the exact artifact identity, not one segment)", () => {
-  // The carry every npm version-asserting cell has always accepted
-  // (`evil/webpack` beside the slug `webpack`): a fetched surface that
-  // spells the COMPLETE artifact slug plus both captured versions — even
-  // smuggled into a query on an attacker-chosen page — is a candidate and
-  // settles. This is deliberately NOT replaced by the #1782 mapping rule
-  // (third-party release/advisory surfaces legitimately spell the full
-  // registry identity); what the mapping rule killed is the OWNER-segment
-  // carry, where the surface spelled one segment and nothing else.
+test("#1782 round 2: image/chart entries have NO generic full-slug carry — an attacker page spelling the exact slug and versions settles nothing", () => {
+  // The generic full-slug token carry survives on the npm cells only (a
+  // page `evil/webpack` beside the slug `webpack`). For an image/chart
+  // entry #1782 round 2 REMOVED it: once a mapping strong enough to
+  // establish provenance exists, #1763's negative control ("unrelated
+  // image/repository evidence does not settle any row") means a page an
+  // attacker chose that merely SPELLS the complete slug plus both captured
+  // versions (`evil.example/compare?dep=<slug>&…`) settles nothing either —
+  // spelling strings is not the established artifact→source relationship.
+  // A fetched image/chart surface binds the exact canonical registry URL or
+  // the mapped repository, nothing else: not even a candidate, never a
+  // settle (npm keeps its residual, pinned by the #1726/#1748 fixtures
+  // above).
   const folded = foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://evil.example/compare?dep=ghcr.io/sirkirby/unifi-network-mcp&base=0.49.2&head=0.50.0" }, status: "ok" }],
     [{ status: "ok", result: { content: "spelled identity" } }],
     imageRows(IMAGE_SCOPE),
   );
   const delta = byId(folded, "obligation-4");
-  assert.equal(delta.status, "satisfied");
-  assert.equal(delta.evidence?.state, "receipt-backed");
+  assert.equal(delta.status, "unresolved");
+  assert.equal(delta.evidence?.state, "receipt-absent");
 });
 
 test("#1782: the retained mapping round-trips the persisted ledger and a hand-shaped claim refuses the whole artifact", async () => {
@@ -1402,12 +1538,41 @@ test("#1782: the retained mapping round-trips the persisted ledger and a hand-sh
   const readBack = evidenceLedgerFromArtifact(artifact);
   assert.ok(readBack !== null);
   assert.equal(readBack.receipts[0]?.subject.sourceRepo, "github.com/sirkirby/unifi-mcp");
+  // #1782 round 2: the mapping AUTHORITY persists beside the mapping — a
+  // body claim reads "document", the stricter authority.
+  assert.equal((JSON.parse(JSON.stringify(artifact)) as { receipts: Array<{ subject: Record<string, unknown> }> }).receipts[0]?.subject.source_repo_via, "document");
+  assert.equal(readBack.receipts[0]?.subject.sourceRepoVia, "document");
   // The strict reader re-enforces the canonical grammar on reload.
   const tampered = JSON.parse(JSON.stringify(artifact));
   tampered.receipts[0].subject.source_repo = "https://github.com/sirkirby/unifi-mcp";
   assert.equal(evidenceLedgerFromArtifact(tampered), null);
   tampered.receipts[0].subject.source_repo = "github.com/evil%2fsirkirby/unifi-mcp";
   assert.equal(evidenceLedgerFromArtifact(tampered), null);
+  // #1782 round 2: a redirect-style acquisition round-trips its chain
+  // attestation — `source_repo_via: "redirect"` is exactly what exempts the
+  // body-clipped organic catalog fetch from the document-completeness gate.
+  const redirectLedger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "page", truncated: true, finalUrl: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp" } }],
+    certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [], ciEvidence: null, reviewedHeadSha: HEAD,
+  });
+  const redirectArtifact = evidenceLedgerToArtifact(redirectLedger);
+  const redirectSubject = (JSON.parse(JSON.stringify(redirectArtifact)) as { receipts: Array<{ subject: Record<string, unknown> }> }).receipts[0]!.subject;
+  assert.equal(redirectSubject.source_repo, "github.com/sirkirby/unifi-mcp");
+  assert.equal(redirectSubject.source_repo_via, "redirect");
+  const redirectReadBack = evidenceLedgerFromArtifact(redirectArtifact);
+  assert.ok(redirectReadBack !== null);
+  assert.equal(redirectReadBack.receipts[0]?.subject.sourceRepo, "github.com/sirkirby/unifi-mcp");
+  assert.equal(redirectReadBack.receipts[0]?.subject.sourceRepoVia, "redirect");
+  // The authority is a closed vocabulary, and a dangling `via` (attesting no
+  // mapping) is exactly as hand-shaped as a bogus one — both refuse the
+  // whole artifact.
+  const bogusVia = JSON.parse(JSON.stringify(redirectArtifact));
+  bogusVia.receipts[0].subject.source_repo_via = "bogus";
+  assert.equal(evidenceLedgerFromArtifact(bogusVia), null);
+  const danglingVia = JSON.parse(JSON.stringify(redirectArtifact));
+  delete danglingVia.receipts[0].subject.source_repo;
+  assert.equal(evidenceLedgerFromArtifact(danglingVia), null);
 });
 
 test("#1782: registryDocumentSourceRepo / sourceRepoSurfaceIdentity — the lexical mapping rules fail closed", () => {
@@ -1463,6 +1628,136 @@ test("#1782: registryDocumentSourceRepo / sourceRepoSurfaceIdentity — the lexi
   }
 });
 
+test("#1782 round 2: registryRedirectSourceMapping — the lexical registry-host-asserted artifact→source rule fails closed", () => {
+  // The organic GHCR image chain (real capture, 2026-11-22): the registry's
+  // terminal page is the repository-addressing pkgs surface for exactly
+  // THIS artifact, so the chain asserts `github.com/sirkirby/unifi-mcp`.
+  assert.equal(
+    registryRedirectSourceMapping("https://ghcr.io/sirkirby/unifi-network-mcp", "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp"),
+    "github.com/sirkirby/unifi-mcp",
+  );
+  // The organic OCI-chart chain: the registry's OWN spelling of a nested
+  // artifact path is `%2f`-joined and decodes to the slug's path BELOW the
+  // ghcr.io namespace (the namespace itself is not part of the marker).
+  assert.equal(
+    registryRedirectSourceMapping("https://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter", "https://github.com/prometheus-community/helm-charts/pkgs/container/charts%2Fprometheus-blackbox-exporter"),
+    "github.com/prometheus-community/helm-charts",
+  );
+  for (const finalUrl of [
+    // Not github.com: a mirror spelling the whole marker asserts nothing —
+    // only the registry operator's own host chain does.
+    "https://mirror.example/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp",
+    // The marker misspelled, or not immediately after <owner>/<repo>.
+    "https://github.com/sirkirby/unifi-mcp/pkg/container/unifi-network-mcp",
+    "https://github.com/sirkirby/unifi-mcp/docs/pkgs/container/x",
+    // The marker spelled deeper than the repository's own five segments.
+    "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp/too-deep",
+    // The repository-INDEPENDENT GitHub package hop: it never resolved to
+    // a repository, so it asserts none. The reserved `-` namespace is not
+    // an owner — neither the 4-segment hop URL nor a five-segment
+    // `pkgs/container` lookalike under it maps to anything.
+    "https://github.com/-/sirkirby/packages/container/package/unifi-network-mcp",
+    "https://github.com/-/sirkirby/pkgs/container/unifi-network-mcp",
+    // Artifact mismatch: the redirect speaks about a different package.
+    "https://github.com/sirkirby/unifi-mcp/pkgs/container/other-artifact",
+    // The namespace-qualified spelling is not the registry's: the marker
+    // names the artifact below ghcr.io/<namespace>, never the full path.
+    "https://github.com/sirkirby/unifi-mcp/pkgs/container/sirkirby%2funifi-network-mcp",
+    // Any percent-escape OTHER than the registry's own `%2f` is not a
+    // clean identity character.
+    "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi%2enetwork-mcp",
+  ]) {
+    assert.equal(registryRedirectSourceMapping("https://ghcr.io/sirkirby/unifi-network-mcp", finalUrl), null, finalUrl);
+  }
+  // And the REQUESTED side must itself be the canonical ghcr catalog: the
+  // other accepted registry hosts answer no repository-addressing package
+  // redirect, and a non-canonical ghcr target names no artifact to speak
+  // about.
+  assert.equal(registryRedirectSourceMapping("https://hub.docker.com/r/sirkirby/unifi-mcp", "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-mcp"), null);
+  assert.equal(registryRedirectSourceMapping("https://ghcr.io/o", "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp"), null);
+  // A terminal URL carrying transport query/fragment noise canonicalizes
+  // EXACTLY like the clean chain (the shared repository-surface grammar
+  // strips `[?#]…` the same way it does for every other surface identity),
+  // while garbage smuggled into the artifact segment WITHOUT a `?` is a
+  // mismatch and asserts nothing.
+  assert.equal(registryRedirectSourceMapping("https://ghcr.io/sirkirby/unifi-network-mcp", "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp?tab=overview"), "github.com/sirkirby/unifi-mcp");
+  assert.equal(registryRedirectSourceMapping("https://ghcr.io/sirkirby/unifi-network-mcp", "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp&evil=1"), null);
+});
+
+test("#1782 round 2: a catalog fetch whose redirect chain asserts nothing establishes no mapping — and a redirected page's prose is never laundered into a source claim", () => {
+  const catalogCall = { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" };
+  const provenanceStateFor = (result: Record<string, unknown>) => byId(foldDependencyRows(
+    [catalogCall], [{ status: "ok", result }], imageRows(IMAGE_SCOPE),
+  ), "obligation-3").evidence?.state;
+
+  // (a) The pkgs artifact MISMATCHES the slug: the five-segment marker is
+  // about `some-other-pkg`, so no chain mapping is asserted; the verified
+  // canonical candidate establishes nothing → receipt-mismatch.
+  assert.equal(provenanceStateFor({ content: "html page", truncated: true, finalUrl: "https://github.com/sirkirby/unifi-mcp/pkgs/container/some-other-pkg" }), "receipt-mismatch");
+  // (b) Redirected to a github page that carries no pkgs marker at all:
+  // same fail-closed reading.
+  assert.equal(provenanceStateFor({ content: "html page", truncated: true, finalUrl: "https://github.com/sirkirby/unifi-mcp" }), "receipt-mismatch");
+  // (c) A redirect that lands on a DIFFERENT canonical registry identity
+  // would still be a canonical document — but a redirect to an unrelated
+  // surface is not: the landing page's injected source CLAIM never attaches
+  // to the receipt (bodyIsCanonical false), and the row fails closed.
+  const launderLedger = buildEvidenceLedger({
+    toolCalls: [catalogCall],
+    toolResults: [{ status: "ok", result: { content: '{"name":"x","source":"https://github.com/evil/mcp"}', truncated: true, finalUrl: "https://github.com/somebody/unrelated" } }],
+    certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [], ciEvidence: null, reviewedHeadSha: HEAD,
+  });
+  assert.equal(launderLedger.receipts[0]?.subject.sourceRepo, undefined);
+  assert.equal(provenanceStateFor({ content: '{"name":"x","source":"https://github.com/evil/mcp"}', truncated: true, finalUrl: "https://github.com/somebody/unrelated" }), "receipt-mismatch");
+  // (d) The repository-independent `github.com/-/<owner>/packages/…` hop:
+  // the chain never resolved to a repository — nothing retained, same
+  // fail-closed reading.
+  assert.equal(provenanceStateFor({ content: "html page", truncated: true, finalUrl: "https://github.com/-/sirkirby/packages/container/package/unifi-network-mcp" }), "receipt-mismatch");
+});
+
+test("#1782 round 2: body clipping settles URL-attested cells but gates the ONE place body content is evidence — the document-claimed mapping", () => {
+  // The redirect-mapped organic catalog fetch above (truncated by the very
+  // real GitHub page size) ESTABLISHES the mapping and settles provenance —
+  // pinned by the two organic replays. The document claim is the one place
+  // the fetched content IS evidence, and completeness still gates it: a
+  // clipped canonical document's claim may hide a conflicting claim below
+  // the slice, so it never settles — but it does enter the full-ledger
+  // mapping the unverified-fill REASON-CODING pass consults, so the row
+  // reads `receipt-unverified`, never a silent mismatch.
+  const hubRows = imageRows([{ slug: "docker.io/alpinelinux/docker-alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
+  const hubCall = { tool: "web_fetch", args: { url: "https://hub.docker.com/v2/repositories/alpinelinux/docker-alpine" }, status: "ok" };
+  const hubBody = '{"name":"docker-alpine","source":"https://github.com/alpinelinux/docker-alpine"}';
+  const provenanceStateFor = (result: Record<string, unknown>) => byId(foldDependencyRows(
+    [hubCall], [{ status: "ok", result }], hubRows,
+  ), "obligation-3").evidence?.state;
+  assert.equal(provenanceStateFor({ content: hubBody }), "receipt-backed");
+  // The clip lands AFTER the publisher's claim (the real Hub JSON continues
+  // with images/tags below the fetch slice): the claim is present in the
+  // clipped body — and precisely BECAUSE the body is clipped (a conflicting
+  // claim may follow below the slice) it establishes nothing, while the
+  // full-ledger mapping the unverified-fill pass consults still carries it.
+  assert.equal(provenanceStateFor({ content: `${hubBody.slice(0, -1)},`, truncated: true }), "receipt-unverified");
+  // CONFLICTING authorities are fail-closed the same way as conflicting
+  // documents: a redirect chain asserting the true source beside a COMPLETE
+  // catalog document claiming a different repository (a repacked/re-tagged
+  // artifact) establishes NO single mapping — the settle pool refuses the
+  // ambiguity, the verified canonical candidates cover nothing, and the
+  // row reads receipt-mismatch (never the convenient mapping).
+  const conflicting = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp/" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: "html page", truncated: true, finalUrl: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp" } },
+      { status: "ok", result: { content: catalogDocumentWithSource("https://github.com/repacked/unifi-mcp") } },
+    ],
+    imageRows(IMAGE_SCOPE),
+  );
+  const provenance = byId(conflicting, "obligation-3");
+  assert.equal(provenance.status, "unresolved");
+  assert.equal(provenance.evidence?.state, "receipt-mismatch");
+});
+
 test("#1763 (review): two-segment official-Hub identities settle advisories through the search NAME carry, never a fetched name", () => {
   const rows = imageRows([{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
   // The base-image advisory shape names the ARTIFACT, not any owner: the
@@ -1475,8 +1770,10 @@ test("#1763 (review): two-segment official-Hub identities settle advisories thro
   assert.equal(advisory.status, "satisfied");
   assert.equal(advisory.evidence?.state, "receipt-backed");
   // A fetched surface still needs more than the bare official-image name:
-  // the generic full-slug token or the exact catalog document binds, an
-  // `example.com/alpine/…` page is no candidate for `docker.io/alpine`.
+  // an image entry binds a fetched surface only through the exact canonical
+  // catalog document or the established mapping (#1782 round 2 removed even
+  // the generic full-slug carry, so there is no token to carry at all), and
+  // an `example.com/alpine/…` page is no candidate for `docker.io/alpine`.
   const fetchedName = byId(foldDependencyRows(
     [{ tool: "web_fetch", args: { url: "https://example.com/alpine/releases/3.20.1-to-3.21.0" }, status: "ok" }],
     [{ status: "ok", result: { content: "release notes" } }],
