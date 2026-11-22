@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildEvidenceLedger,
   checkEvidenceTagsFromArtifact,
+  dependencyScopeEntriesFromArtifact,
   evaluateRowEvidence,
   evidenceLedgerFromArtifact,
   evidenceLedgerToArtifact,
@@ -1113,4 +1114,75 @@ test("#1753 (review): the trace receipt vocabulary credits only ACQUIRED HEAD-BO
   // (no acquisition record) credit nothing — fail closed.
   assert.deepEqual(receiptVocabularyForTrace({ state: "refused", receipts: ledger.receipts }).tokens, []);
   assert.deepEqual(receiptVocabularyForTrace({ state: "unavailable", receipts: [] }).tokens, []);
+});
+
+// ── #1763: the strict scope parser accepts the extended `image`/`chart`
+// entry shape (kind + digests + short dotted tags) and refuses everything
+// off the closed vocabularies — a refused entry drops the ROW to legacy,
+// exactly like every other hostile shape. ───────────────────────────────────
+
+test("#1763: the strict scope parser accepts kind/digests and the image short-tag grammar", () => {
+  const digestA = "0".repeat(64);
+  const digestB = "abc123".padEnd(64, "0");
+  // Absent kind = npm: the pre-#1763 shape parses byte-for-byte unchanged.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]),
+    [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }],
+  );
+  // An image entry with both extension keys.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([
+      { slug: "ghcr.io/sirkirby/unifi-network-mcp", versions: ["0.49.2", "0.50.0"], kind: "image", digests: [digestA, digestB] },
+    ]),
+    [{ slug: "ghcr.io/sirkirby/unifi-network-mcp", versions: ["0.49.2", "0.50.0"], kind: "image", digests: [digestA, digestB] }],
+  );
+  // Explicit npm kind keeps the exact x.y.z rule; short tags stay refused there.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "lodash", versions: ["4.17.21"], kind: "npm" }]),
+    [{ slug: "lodash", versions: ["4.17.21"], kind: "npm" }],
+  );
+  // chart kind + short dotted tag + suffix spellings the tag grammar allows.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([
+      { slug: "ghcr.io/prometheus-community/charts/kube-prometheus-stack", versions: ["7.2", "7.2.0-rc.1", "65.1.2+build.9"], kind: "chart" },
+    ]),
+    [{ slug: "ghcr.io/prometheus-community/charts/kube-prometheus-stack", versions: ["7.2", "7.2.0-rc.1", "65.1.2+build.9"], kind: "chart" }],
+  );
+  // Digests-only image entry (empty versions is legitimate).
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "docker.io/alpine", versions: [], kind: "image", digests: [digestA] }]),
+    [{ slug: "docker.io/alpine", versions: [], kind: "image", digests: [digestA] }],
+  );
+});
+
+test("#1763: the strict scope parser refuses kind/digest/version shapes off the closed vocabularies — the row drops to legacy", () => {
+  const digestA = "0".repeat(64);
+  for (const bad of [
+    // Unknown key (unchanged rule, now alongside the extension keys).
+    [{ slug: "lodash", versions: ["4.17.21"], extra: true }],
+    // kind outside the closed vocabulary / wrong-typed.
+    [{ slug: "lodash", versions: ["4.17.21"], kind: "oci" }],
+    [{ slug: "lodash", versions: ["4.17.21"], kind: 1 }],
+    // digests: uppercase hex, too short, non-string, too many, non-array.
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: ["A".repeat(64)] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: ["0".repeat(63)] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: [7] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: Array.from({ length: 17 }, () => digestA) }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: digestA }],
+    // Short dotted tag on an npm/absent-kind entry — the exact rule stays (#1748).
+    [{ slug: "lodash", versions: ["7.2"] }],
+    [{ slug: "lodash", versions: ["7.2"], kind: "npm" }],
+    // Non-numeric junk on an image entry's short-tag channel.
+    [{ slug: "ghcr.io/o/n", versions: ["v7.2"], kind: "image" }],
+    [{ slug: "ghcr.io/o/n", versions: ["7.x"], kind: "image" }],
+    [{ slug: "ghcr.io/o/n", versions: ["7"], kind: "image" }],
+  ]) {
+    assert.equal(dependencyScopeEntriesFromArtifact(bad), null, JSON.stringify(bad));
+    // And through the tag parser: the whole ROW drops (legacy/fail closed).
+    assert.deepEqual(
+      checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: bad }]),
+      [],
+      JSON.stringify(bad),
+    );
+  }
 });

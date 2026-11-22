@@ -337,6 +337,99 @@ export function authoritativeRegistryPackageSlug(url: string): string | null {
   return registrySpecSlug(after[0] ?? "", after.slice(1));
 }
 
+// Container/OCI registries whose CATALOG page for the exact repository path
+// is the publisher-authoritative identity surface for the artifact (the
+// image/chart analogue of NPM_REGISTRY_HOSTS above): the host enforces path
+// uniqueness under its namespaces, so only the exact catalog/manifest page
+// binds the identity. `hub.docker.com`/`docker.io`, `ghcr.io`, and `quay.io`
+// have their own path spellings and are handled separately; these accept the
+// plain `<host>/<path…>` shape with at least two path segments.
+const PLAIN_IMAGE_CATALOG_HOSTS: ReadonlySet<string> = new Set([
+  "gcr.io",
+  "us.gcr.io",
+  "eu.gcr.io",
+  "asia.gcr.io",
+  "registry.k8s.io",
+  "k8s.gcr.io",
+  "mcr.microsoft.com",
+  "public.ecr.aws",
+  "gallery.ecr.aws",
+]);
+
+/**
+ * #1763 (canonical-registry-catalog rule): the AUTHORITATIVE container-registry
+ * catalog identity a web target is the catalog/manifest surface FOR, or `null`
+ * when the target is not a canonical registry catalog page. This is the
+ * image/chart analogue of `authoritativeRegistryPackageSlug` beside it: the
+ * registry host enforces path uniqueness under its namespaces, so the catalog
+ * page for the EXACT image path is the publisher-authoritative identity for
+ * that artifact — the provenance obligation for an `image`/`chart` scope entry
+ * SETTLES only from this shape (see `dependencyCellCovered`). A same-named
+ * image under a different namespace, a source-repository read on a forge, or
+ * a search query proves nothing about who publishes the artifact.
+ *
+ * The accepted spellings canonicalize every surface to the ONE lowercase
+ * identity the trusted scope parse records:
+ * - `hub.docker.com` / `docker.io`: `r/<owner>/<name>` →
+ *   `docker.io/<owner>/<name>`, with the official-image `library` namespace
+ *   collapsing to `docker.io/<name>`, and the `/_/<name>` official-image
+ *   spelling → `docker.io/<name>`; every other Docker Hub path shape
+ *   (search, profile, deeper listing) binds nothing;
+ * - `ghcr.io`: at least two path segments → `ghcr.io/<joined path>` (OCI
+ *   charts live at deeper paths such as `prometheus-community/charts/<chart>`);
+ * - `quay.io`: `repository/<a>/<b>` (the app-catalog surface) strips its
+ *   `repository` marker → `quay.io/<a>/<b>`; plain `<a>/<b>` →
+ *   `quay.io/<a>/<b>`; anything else nothing;
+ * - `gcr.io` (plus the `us.`/`eu.`/`asia.` regional hosts), `registry.k8s.io`,
+ *   `k8s.gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`, `gallery.ecr.aws`:
+ *   at least two path segments → `<host>/<joined path>`.
+ * An off-vocabulary host, a shallower page (registry root, search page,
+ * publisher profile), and any percent-escape anywhere in the path bind
+ * NOTHING — fail closed, never a decoded-guessed identity. A host carrying
+ * user-info or a port is not a clean registry origin. Lexical and total:
+ * never throws, never touches the network.
+ */
+export function canonicalRegistryCatalogImageIdentity(url: string): string | null {
+  const lower = url.trim().toLowerCase();
+  const schemeAt = lower.indexOf("://");
+  if (schemeAt === -1) return null;
+  const rest = lower.slice(schemeAt + 3);
+  const pathStart = rest.indexOf("/");
+  const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  // A host carrying credentials or a port is not a clean registry origin.
+  if (rawHost.includes("@") || rawHost.includes(":")) return null;
+  const host = rawHost.replace(/^www\./, "");
+  const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
+  const segments = rawPath.replace(/\/$/, "").split("/").filter((segment) => segment !== "");
+  if (segments.length === 0) return null;
+  // The scope grammar carries bare path names; an escaped segment is never
+  // decoded-guessed into one.
+  if (segments.some((segment) => segment.includes("%"))) return null;
+  if (host === "hub.docker.com" || host === "docker.io") {
+    if (segments.length === 3 && segments[0] === "r") {
+      const owner = segments[1]!;
+      const name = segments[2]!;
+      // Docker Hub canonicalizes an official image to `docker.io/<name>` —
+      // the `library/` namespace is spelling, not identity.
+      return owner === "library" ? `docker.io/${name}` : `docker.io/${owner}/${name}`;
+    }
+    if (segments.length === 2 && segments[0] === "_") return `docker.io/${segments[1]}`;
+    return null;
+  }
+  if (host === "ghcr.io") {
+    return segments.length >= 2 ? `${host}/${segments.join("/")}` : null;
+  }
+  if (host === "quay.io") {
+    if (segments.length === 3 && segments[0] === "repository") return `quay.io/${segments[1]}/${segments[2]}`;
+    if (segments.length === 2) return `quay.io/${segments[0]}/${segments[1]}`;
+    return null;
+  }
+  if (PLAIN_IMAGE_CATALOG_HOSTS.has(host)) {
+    return segments.length >= 2 ? `${host}/${segments.join("/")}` : null;
+  }
+  return null;
+}
+
 /**
  * #1396: the obligation a deterministic dependency-evidence `must_check`
  * checklist text names (the DEPENDENCY_EVIDENCE_CHECKS family templates), or

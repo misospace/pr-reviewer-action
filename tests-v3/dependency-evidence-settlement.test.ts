@@ -53,6 +53,7 @@ import {
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
 import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
+import { canonicalRegistryCatalogImageIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
 import { Conversation } from "../src/model/conversation.js";
@@ -88,7 +89,7 @@ type FoldCandidateRow = {
   row_class: string;
   gate?: string;
   obligations?: string[];
-  dependency_scope?: Array<{ slug: string; versions: string[] }>;
+  dependency_scope?: Array<{ slug: string; versions: string[]; kind?: string; digests?: string[] }>;
 };
 
 const CANDIDATE_ROWS: FoldCandidateRow[] = [
@@ -880,4 +881,284 @@ test("#1721 loop replay counterpart: attributed upstream evidence stops the same
   assert.equal(outcome.requiredEvidenceSettledStop, true);
   assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
   assert.equal(outcome.requestsRemaining, 37);
+});
+
+// ---------------------------------------------------------------------------
+// #1763: container-image / OCI-chart dependency updates. The trusted scope
+// now names canonical registry identities (`kind: "image"|"chart"`, digests),
+// and the cells bind per kind: provenance settles from the canonical
+// registry CATALOG page — the image/chart analogue of the #1748 canonical-
+// source rule — while the version-asserting cells carry dotted tag tokens
+// under the version boundary. Organic replays of the two false-INCOMPLETE
+// reports (#12359 ghcr image, #12375 OCI chart), the Docker Hub spelling
+// normalization, and the negative controls. The npm fixtures above are the
+// untouched #1748 regression suite.
+// ---------------------------------------------------------------------------
+
+const IMAGE_DIGEST_A = "0123456789abcdef".repeat(4);
+const IMAGE_DIGEST_B = "fedcba9876543210".repeat(4);
+
+const IMAGE_SCOPE = [{
+  slug: "ghcr.io/sirkirby/unifi-network-mcp",
+  versions: ["0.49.2", "0.50.0"],
+  kind: "image",
+  digests: [IMAGE_DIGEST_A, IMAGE_DIGEST_B],
+}];
+
+/** The three obligation rows over one trusted scope entry (the replay's
+ * obligation-3/4/5 shapes with the image scope substituted). */
+function imageRows(scope: NonNullable<FoldCandidateRow["dependency_scope"]>): FoldCandidateRow[] {
+  return [
+    {
+      id: "obligation-3", source: "must_check",
+      text: "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+      row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: scope,
+    },
+    {
+      id: "obligation-4", source: "must_check",
+      text: "inspect the exact old→new upstream release delta for the updated dependency",
+      row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: scope,
+    },
+    {
+      id: "obligation-5", source: "must_check",
+      text: "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+      row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: scope,
+    },
+  ];
+}
+
+function tagsForRows(rows: readonly FoldCandidateRow[]) {
+  return checkEvidenceTagsFromArtifact(rows.map((row) => ({
+    text: row.text,
+    row_class: row.row_class,
+    ...(row.gate !== undefined ? { gate: row.gate } : {}),
+    ...(row.obligations !== undefined ? { obligations: row.obligations } : {}),
+    ...(row.dependency_scope !== undefined ? { dependency_scope: row.dependency_scope } : {}),
+  })));
+}
+
+test("#1763: canonicalRegistryCatalogImageIdentity recognizes only canonical catalog surfaces — everything else fails closed", () => {
+  // The accepted catalog surfaces, canonicalized to the scope identity.
+  assert.equal(
+    canonicalRegistryCatalogImageIdentity("https://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter"),
+    "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
+  );
+  assert.equal(canonicalRegistryCatalogImageIdentity("HTTPS://GHCR.IO/SirKirby/Unifi-Network-MCP"), "ghcr.io/sirkirby/unifi-network-mcp");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/r/open-telemetry/opentelemetry-collector"), "docker.io/open-telemetry/opentelemetry-collector");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/_/alpine"), "docker.io/alpine");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://hub.docker.com/r/library/alpine/"), "docker.io/alpine");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://www.hub.docker.com/r/library/nginx"), "docker.io/nginx");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://docker.io/r/library/alpine"), "docker.io/alpine");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://quay.io/repository/prometheus/prometheus"), "quay.io/prometheus/prometheus");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://quay.io/coreos/etcd"), "quay.io/coreos/etcd");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://mcr.microsoft.com/dotnet/runtime"), "mcr.microsoft.com/dotnet/runtime");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://public.ecr.aws/nginx/nginx"), "public.ecr.aws/nginx/nginx");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://gallery.ecr.aws/nginx/nginx"), "gallery.ecr.aws/nginx/nginx");
+  assert.equal(canonicalRegistryCatalogImageIdentity("https://registry.k8s.io/ingress-nginx/controller"), "registry.k8s.io/ingress-nginx/controller");
+  // Off-vocabulary hosts, dirty hosts, escapes, shallower/deeper pages, and
+  // non-URLs name nothing (fail closed).
+  for (const negative of [
+    "https://docker.limited/library/alpine",
+    "https://ghcr.io:443/o/n",
+    "https://token@ghcr.io/o/n",
+    "https://ghcr.io/o/r%2Fx",
+    "https://quay.io/repository/%41/b",
+    "https://hub.docker.com/r/o/n/extra",
+    "https://hub.docker.com/r/o",
+    "https://hub.docker.com/search?q=alpine",
+    "https://hub.docker.com/u/sirkirby",
+    "https://hub.docker.com",
+    "https://ghcr.io",
+    "https://ghcr.io/",
+    "https://ghcr.io/o",
+    "https://gcr.io/single",
+    "alpine",
+    "",
+  ]) {
+    assert.equal(canonicalRegistryCatalogImageIdentity(negative), null, negative);
+  }
+});
+
+test("#1763 organic #12359 (image): the ghcr catalog + source-repo compare + version advisory settle all three rows", () => {
+  const rows = imageRows(IMAGE_SCOPE);
+  const toolCalls = [
+    // ghcr.io is an exact publisher-registry host → provenance attribution;
+    // the canonical catalog identity binds the scope entry exactly.
+    { tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" },
+    // The image's releases live on the SOURCE repo under its own tag scheme
+    // ("network-…"): the release token attributes the delta, the version
+    // boundary carries both captured endpoints through the `network-` prefix.
+    { tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" },
+    { tool: "web_search", args: { query: "unifi-network-mcp 0.49.2 0.50.0 advisory" }, status: "ok" },
+  ];
+  const toolResults = [
+    { status: "ok", result: { content: "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\"}" } },
+    { status: "ok", result: { content: "9 commits between the two tags" } },
+    { status: "ok", result: { results: "no advisories published for the 0.49.x/0.50.x line" } },
+  ];
+  const folded = foldDependencyRows(toolCalls, toolResults, rows);
+  const provenance = byId(folded, "obligation-3");
+  assert.equal(provenance.status, "satisfied");
+  assert.equal(provenance.reason, "dependency-evidence");
+  assert.equal(provenance.evidence?.state, "receipt-backed");
+  assert.deepEqual(provenance.evidence?.receipts, ["call-1"]);
+  const delta = byId(folded, "obligation-4");
+  assert.equal(delta.status, "satisfied");
+  assert.equal(delta.reason, "dependency-evidence");
+  assert.deepEqual(delta.evidence?.receipts, ["call-2"]);
+  const advisories = byId(folded, "obligation-5");
+  assert.equal(advisories.status, "satisfied");
+  assert.equal(advisories.reason, "dependency-evidence");
+
+  // The #750 coverage fold agrees row-for-row on the SAME ledger and tags.
+  const ledger = buildEvidenceLedger({
+    toolCalls, toolResults,
+    certifiedDiffPayloads: [], rawDiff: null, candidatePaths: [],
+    ciEvidence: null, reviewedHeadSha: HEAD,
+  });
+  const tags = tagsForRows(rows);
+  const coverage = evaluateRequiredCheckCoverage(rows.map((row) => row.text), VERDICT_DISPOSITIONS, ledger, tags);
+  for (const row of coverage.checks) {
+    const obligation = folded.find((entry) => entry.text === row.check)!;
+    assert.equal(row.status, obligation.status, `coverage/obligation disagreement on: ${row.check}`);
+  }
+  assert.deepEqual(
+    coverage.checks.filter((row) => isMergeAffectingRowClass(row.rowClass)).map((row) => row.status),
+    ["satisfied", "satisfied", "satisfied"],
+  );
+
+  // The reason-coded rows survive the strict obligation artifact round-trip.
+  const readBack = reviewObligationsFromArtifact(reviewObligationsToArtifact(folded, null));
+  assert.ok(readBack !== null);
+  for (const id of ["obligation-3", "obligation-4", "obligation-5"]) {
+    assert.equal(readBack.find((row) => row.id === id)?.evidence?.state, "receipt-backed", id);
+  }
+});
+
+test("#1763 organic #12375 (OCI chart): the ghcr chart catalog + helm-charts compare + version advisory settle all three rows", () => {
+  const rows = imageRows([{
+    slug: "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
+    versions: ["11.21.3", "11.22.0"],
+    kind: "chart",
+  }]);
+  const folded = foldDependencyRows(
+    [
+      { tool: "web_fetch", args: { url: "https://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter" }, status: "ok" },
+      { tool: "web_fetch", args: { url: "https://github.com/prometheus-community/helm-charts/compare/prometheus-blackbox-exporter-11.21.3...prometheus-blackbox-exporter-11.22.0" }, status: "ok" },
+      { tool: "web_search", args: { query: "prometheus-blackbox-exporter 11.21.3 11.22.0 advisory" }, status: "ok" },
+    ],
+    [
+      { status: "ok", result: { content: "{\"mediaType\":\"application/vnd.cncf.helm.config.v1+json\"}" } },
+      { status: "ok", result: { content: "3 commits" } },
+      { status: "ok", result: { results: "no CVEs in the chart's pinned images" } },
+    ],
+    rows,
+  );
+  for (const id of ["obligation-3", "obligation-4", "obligation-5"]) {
+    const row = byId(folded, id);
+    assert.equal(row.status, "satisfied", `${id}: ${JSON.stringify(row.evidence)}`);
+    assert.equal(row.evidence?.state, "receipt-backed", id);
+  }
+});
+
+test("#1763: Docker Hub spellings normalize to the docker.io/<name> identity — official spellings settle, an unrelated owner does not", () => {
+  const rows = imageRows([{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }]);
+  const provenanceStateFor = (url: string): string | undefined => byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url }, status: "ok" }],
+    [{ status: "ok", result: { content: "alpine — minimal rootfs images" } }],
+    rows,
+  ), "obligation-3").evidence?.state;
+  // Both official spellings canonicalize to docker.io/alpine…
+  assert.equal(provenanceStateFor("https://hub.docker.com/_/alpine"), "receipt-backed");
+  assert.equal(provenanceStateFor("https://hub.docker.com/r/library/alpine"), "receipt-backed");
+  // …a same-named image under another owner normalizes to docker.io/evil/
+  // alpine — a DIFFERENT artifact that carries no binding identity token
+  // for the official entry (the generic carry needs the full slug, and a
+  // two-segment identity has no namespace/name pair to carry) — not even a
+  // candidate, never a settle.
+  assert.equal(provenanceStateFor("https://hub.docker.com/r/evil/alpine"), "receipt-absent");
+});
+
+test("#1763 negative controls: attacker catalogs, wrong endpoints, stale advisories, and unverified acquisitions never settle image rows", () => {
+  // (a) A same-named repository under an UNRELATED owner: attributed
+  // provenance and it carries the artifact-name identity — but it is not
+  // the canonical ghcr catalog, so the cell is a mismatch beside a verified
+  // relevant acquisition, fail closed exactly like the #1748 attacker-repo
+  // rule on the npm side.
+  const attacker = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/evil/unifi-network-mcp" }, status: "ok" }],
+    [{ status: "ok", result: { content: "same-named repository, different owner" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-3");
+  assert.equal(attacker.status, "unresolved");
+  assert.equal(attacker.evidence?.state, "receipt-mismatch");
+
+  // (b) release_delta with the WRONG old endpoint: the candidate carries
+  // the namespace identity and the new version, but not the captured old
+  // endpoint — joint coverage of EVERY captured version fails.
+  const wrongDelta = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/0.49.1...0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "40 commits" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-4");
+  assert.equal(wrongDelta.status, "unresolved");
+  assert.equal(wrongDelta.evidence?.state, "receipt-mismatch");
+
+  // (c) A security_advisory naming only the OLD version proves nothing
+  // about the updated one.
+  const staleAdvisory = byId(foldDependencyRows(
+    [{ tool: "web_search", args: { query: "unifi-network-mcp 0.49.2 advisory" }, status: "ok" }],
+    [{ status: "ok", result: { results: "GHSA-xxxx fixed in 0.49.2" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-5");
+  assert.equal(staleAdvisory.status, "unresolved");
+  assert.equal(staleAdvisory.evidence?.state, "receipt-mismatch");
+
+  // (d) A FAILED or TRUNCATED acquisition of an otherwise-covering target is
+  // recorded and reason-coded, never credited.
+  const failed = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "error" }],
+    [{ status: "error", result: { error: "fetch failed" } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-3");
+  assert.equal(failed.status, "unresolved");
+  assert.equal(failed.evidence?.state, "receipt-unverified");
+  const truncated = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
+    [{ status: "ok", result: { content: "{\"schemaVersion\":", truncated: true } }],
+    imageRows(IMAGE_SCOPE),
+  ), "obligation-3");
+  assert.equal(truncated.status, "unresolved");
+  assert.equal(truncated.evidence?.state, "receipt-unverified");
+
+  // (e) A digest-only image entry (no captured version identity): provenance
+  // still settles from the canonical catalog, while the version-asserting
+  // rows stay uncovered — nothing was captured to assert (round 9 rule).
+  const digestRows = imageRows([{
+    slug: "ghcr.io/sirkirby/unifi-network-mcp",
+    versions: [],
+    kind: "image",
+    digests: [IMAGE_DIGEST_A],
+  }]);
+  const digestProvenance = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, status: "ok" }],
+    [{ status: "ok", result: { content: "multi-arch manifest index" } }],
+    digestRows,
+  ), "obligation-3");
+  assert.equal(digestProvenance.status, "satisfied");
+  assert.equal(digestProvenance.evidence?.state, "receipt-backed");
+  const digestDelta = byId(foldDependencyRows(
+    [{ tool: "web_fetch", args: { url: "https://github.com/sirkirby/unifi-mcp/compare/network-0.49.2...network-0.50.0" }, status: "ok" }],
+    [{ status: "ok", result: { content: "9 commits" } }],
+    digestRows,
+  ), "obligation-4");
+  assert.equal(digestDelta.status, "unresolved");
+  assert.equal(digestDelta.evidence?.state, "receipt-mismatch");
+  const digestAdvisory = byId(foldDependencyRows(
+    [{ tool: "web_search", args: { query: "unifi-network-mcp 0.49.2 0.50.0 advisory" }, status: "ok" }],
+    [{ status: "ok", result: { results: "none" } }],
+    digestRows,
+  ), "obligation-5");
+  assert.equal(digestAdvisory.status, "unresolved");
+  assert.equal(digestAdvisory.evidence?.state, "receipt-mismatch");
 });

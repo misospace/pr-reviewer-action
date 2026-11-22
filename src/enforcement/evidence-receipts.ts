@@ -72,7 +72,7 @@
 import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { FORGE_READ_TOOL } from "../platform/endpoint.js";
-import { authoritativeRegistryPackageSlug, dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+import { authoritativeRegistryPackageSlug, canonicalRegistryCatalogImageIdentity, dependencyEvidenceObligationsForCall, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
 
 export type { DependencyEvidenceObligation };
 
@@ -320,20 +320,26 @@ function versionBoundaryHolds(text: string, start: number, end: number): boolean
  * longer identity is NOT carried. */
 function identityCarriesToken(identity: string, token: string): boolean {
   if (identity === "" || token === "") return false;
+  const asVersion = VERSION_TOKEN_SHAPE_RE.test(token.toLowerCase());
+  const asSha = HEAD_SHA_TOKEN_SHAPE_RE.test(token.toLowerCase());
+  const boundary = asVersion ? versionBoundaryHolds : asSha ? shaBoundaryHolds : segmentBoundaryHolds;
+  return identityCarriesTokenUnderBoundary(identity, token, boundary);
+}
+
+/** The ONE occurrence walk over `identity` every exact-token carry shares:
+ * `token` is carried at some occurrence iff the identity-kind's boundary
+ * predicate holds there (never at a position inside a longer identity). */
+function identityCarriesTokenUnderBoundary(
+  identity: string,
+  token: string,
+  boundary: (text: string, start: number, end: number) => boolean,
+): boolean {
+  if (identity === "" || token === "") return false;
   const haystack = identity.toLowerCase();
   const needle = token.toLowerCase();
-  const asVersion = VERSION_TOKEN_SHAPE_RE.test(needle);
-  const asSha = HEAD_SHA_TOKEN_SHAPE_RE.test(needle);
   let at = haystack.indexOf(needle);
   while (at !== -1) {
-    const end = at + needle.length;
-    if (asVersion) {
-      if (versionBoundaryHolds(haystack, at, end)) return true;
-    } else if (asSha) {
-      if (shaBoundaryHolds(haystack, at, end)) return true;
-    } else if (segmentBoundaryHolds(haystack, at, end)) {
-      return true;
-    }
+    if (boundary(haystack, at, at + needle.length)) return true;
     at = haystack.indexOf(needle, at + 1);
   }
   return false;
@@ -400,28 +406,64 @@ const DEPENDENCY_SCOPE_SLUG_RE = /^[a-z0-9@/._-]{1,214}$/;
  * recorded version is checkable against receipts and a partial numeric
  * run never stands in for one. */
 const DEPENDENCY_SCOPE_VERSION_RE = /^\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?$/;
+/** #1763: the SHORT dotted tag grammar container images/charts legitimately
+ * pin (e.g. `7.2`) — accepted for `image`/`chart` entries ONLY (npm keeps
+ * the exact rule above, #1748 semantics unchanged); on the receipt side
+ * these match under the version-boundary rules (see
+ * `dependencyVersionCarries`). */
+const DEPENDENCY_SCOPE_IMAGE_VERSION_RE = /^\d+(?:\.\d+){1,}(?:[-+][0-9a-z.-]+)?$/;
+/** #1763: the closed ecosystem-kind vocabulary (absent `kind` is `npm`). */
+const DEPENDENCY_SCOPE_KINDS: ReadonlySet<string> = new Set(["npm", "image", "chart"]);
+/** #1763: bare lowercase `sha256` manifest digests (prefix stripped). */
+const DEPENDENCY_SCOPE_DIGEST_RE = /^[0-9a-f]{64}$/;
+const DEPENDENCY_SCOPE_MAX_ENTRY_DIGESTS = 16;
 
 /** Strict shape check for one persisted dependency-scope entry
- * (`{slug, versions}`); hostile slug shapes (traversal dots, option-like
- * leads) and non-exact version tokens are refused, never half-trusted. */
+ * (`{slug, versions[, kind][, digests]}`); hostile slug shapes (traversal
+ * dots, option-like leads), non-exact version tokens, a kind outside the
+ * closed vocabulary, and malformed digests are refused, never half-trusted.
+ * The short dotted version grammar is accepted for `image`/`chart` kinds
+ * only — an absent/`npm` entry keeps the exact x.y.z rule (#1748). */
 function dependencyScopeEntryFromArtifact(value: unknown): DependencyScopeEntry | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "slug" && key !== "versions") return null;
+    if (key !== "slug" && key !== "versions" && key !== "kind" && key !== "digests") return null;
   }
   const slug = record.slug;
   if (typeof slug !== "string" || !DEPENDENCY_SCOPE_SLUG_RE.test(slug)
     || slug.includes("..") || slug.startsWith(".") || slug.startsWith("-")) return null;
+  let kind: DependencyScopeKind | undefined;
+  if (record.kind !== undefined) {
+    if (typeof record.kind !== "string" || !DEPENDENCY_SCOPE_KINDS.has(record.kind)) return null;
+    kind = record.kind as DependencyScopeKind;
+  }
   const versions: string[] = [];
   if (record.versions !== undefined) {
     if (!Array.isArray(record.versions) || record.versions.length > DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) return null;
+    const versionRe = kind === "image" || kind === "chart"
+      ? DEPENDENCY_SCOPE_IMAGE_VERSION_RE
+      : DEPENDENCY_SCOPE_VERSION_RE;
     for (const version of record.versions) {
-      if (typeof version !== "string" || !DEPENDENCY_SCOPE_VERSION_RE.test(version)) return null;
+      if (typeof version !== "string" || !versionRe.test(version)) return null;
       versions.push(version);
     }
   }
-  return { slug, versions };
+  let digests: string[] | undefined;
+  if (record.digests !== undefined) {
+    if (!Array.isArray(record.digests) || record.digests.length > DEPENDENCY_SCOPE_MAX_ENTRY_DIGESTS) return null;
+    digests = [];
+    for (const digest of record.digests) {
+      if (typeof digest !== "string" || !DEPENDENCY_SCOPE_DIGEST_RE.test(digest)) return null;
+      digests.push(digest);
+    }
+  }
+  return {
+    slug,
+    versions,
+    ...(kind !== undefined ? { kind } : {}),
+    ...(digests !== undefined ? { digests } : {}),
+  };
 }
 
 /** Strict parser for a tag's persisted `dependency_scope` — the COMPLETE
@@ -448,17 +490,20 @@ export interface CheckEvidenceTag {
   /** #1657 (review round 3): the TRUSTED dependency update identity scope
    * the producer parsed for this row — the COMPLETE set of dependency
    * updates the PR's diff actually changes (exact slugs, plus the exact
-   * old→new version identity where the diff shape carries one), extracted
+   * old→new version identity where the diff shape carries one; #1763: plus
+   * the ecosystem kind and changed image digests when present), extracted
    * ONLY from producer-recognized dependency surfaces. A receipt backs the
    * row only when, for every obligation kind the row demands, the
-   * validated receipts JOINTLY cover EVERY entry — slug as an EXACT
-   * identity (never a substring), and the changed version identity for the
-   * kinds that assert the update itself. An acquisition about dependency B
-   * can never back dependency A's row, and evidence for one package can
-   * never satisfy an aggregate row naming several. ABSENT/EMPTY means the
-   * producer could not establish the identity set completely: the row
-   * FAILS CLOSED — no kind-only or partial-scope evidence ever credits
-   * it. */
+   * validated receipts JOINTLY cover EVERY entry — identity per the entry's
+   * kind (npm: the exact slug, settled as provenance ONLY from the npm
+   * registry document; image/chart: the registry identity, settled as
+   * provenance ONLY from the canonical registry-catalog page), and the
+   * changed version identity for the kinds that assert the update itself.
+   * An acquisition about dependency B can never back dependency A's row,
+   * and evidence for one package can never satisfy an aggregate row naming
+   * several. ABSENT/EMPTY means the producer could not establish the
+   * identity set completely: the row FAILS CLOSED — no kind-only or
+   * partial-scope evidence ever credits it. */
   dependencyScope: DependencyScopeEntry[];
 }
 
@@ -927,41 +972,112 @@ function receiptIdentityString(receipt: EvidenceReceipt): string {
   ].filter((value): value is string => typeof value === "string" && value !== "").join(" ");
 }
 
-/** #1748: whether one receipt carries a dependency slug as its EXACT
- * identity — the generic segment-boundary token carry over the receipt's
- * identity string, or the receipt's target being the canonical npm registry
- * document naming the slug (`authoritativeRegistryPackageSlug`: the
- * registry's own authoritative spelling, including the encoded scoped form
- * `@scope%2Fpkg`, which carries no literal token). Shared by the row-level
- * identity gate and the per-cell candidate derivation, so both stages agree
- * on what counts as speaking about THIS dependency. */
-function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, slug: string): boolean {
-  return identityCarriesToken(receiptIdentityString(receipt), slug)
-    || authoritativeRegistryPackageSlug(receipt.subject.url ?? "") === slug;
+/** #1748/#1763: whether one receipt speaks about one trusted scope entry —
+ * the generic segment-boundary token carry over the receipt's identity
+ * string, OR the receipt's target being the entry's CANONICAL registry
+ * document/catalog under the entry's ecosystem kind:
+ * - `npm` (absent `kind`): `authoritativeRegistryPackageSlug` — the npm
+ *   registry's own authoritative spelling, including the encoded scoped
+ *   form `@scope%2Fpkg`, which carries no literal token (#1748);
+ * - `image`/`chart` (#1763): `canonicalRegistryCatalogImageIdentity` — the
+ *   registry's canonical catalog identity for the exact repository path,
+ *   which binds even when the URL spells the artifact differently (Docker
+ *   Hub's `/r/library/<name>` and `/_/<name>` surfaces canonicalize to
+ *   `docker.io/<name>`);
+ * - `image`/`chart` additionally carry through the registry identity's
+ *   NAMESPACE or artifact-NAME segment (`imageScopeSegmentCarry`): an
+ *   image's release delta and advisories live on the upstream surface
+ *   (source-repo compare, advisory search), which never spells the
+ *   registry-host-prefixed slug — this widens only the CANDIDATE gate for
+ *   the version-asserting cells (whose settlement still requires the joint
+ *   carry of every captured version, the same standard under which an
+ *   attacker-repo compare could cover an npm delta pre-#1748); the
+ *   provenance cell stays registry-catalog-bound.
+ * Shared by the row-level identity gate and the per-cell candidate
+ * derivation, so both stages agree on what counts as speaking about THIS
+ * dependency. */
+function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, entry: DependencyScopeEntry): boolean {
+  if (identityCarriesToken(receiptIdentityString(receipt), entry.slug)) return true;
+  const url = receipt.subject.url ?? "";
+  if (entry.kind === "image" || entry.kind === "chart") {
+    return canonicalRegistryCatalogImageIdentity(url) === entry.slug
+      || imageScopeSegmentCarry(receiptIdentityString(receipt), entry.slug);
+  }
+  return authoritativeRegistryPackageSlug(url) === entry.slug;
+}
+
+/** #1763: the source-surface carry for an `image`/`chart` entry: the
+ * normalized registry identity `<host>/<path…>` binds an identity string
+ * that carries its namespace (first path segment) or its artifact name
+ * (final path segment) under the exact slug-token boundary rule — the shape
+ * a genuine upstream release/advisory lookup of that artifact names. A
+ * slug with no namespace+name pair (shorter than `<host>/<ns>/<name>`)
+ * carries nothing through this clause; #1748's canonical-source hardening
+ * is untouched for npm entries. */
+function imageScopeSegmentCarry(identity: string, slug: string): boolean {
+  const segments = slug.split("/").filter((segment) => segment !== "");
+  if (segments.length < 3) return false;
+  const namespace = segments[1]!;
+  const name = segments[segments.length - 1]!;
+  return identityCarriesToken(identity, name) || identityCarriesToken(identity, namespace);
+}
+
+/** Every dotted-numeric token (any length: `7.2`, `11.21.3`) — the tag
+ * grammar an `image`/`chart` scope entry records. */
+const DOTTED_NUMERIC_TOKEN_RE = /^\d+(?:\.\d+){1,}$/;
+
+/** Whether a receipt's identity string carries one captured dependency
+ * VERSION token. npm (absent-kind) entries keep exactly
+ * `identityCarriesToken` (#1748). For an `image`/`chart` entry every
+ * dotted-numeric token — the short tags the parser accepts (#1763) just
+ * like full runs — matches under the VERSION boundary rules (the same
+ * `versionBoundaryHolds` walk `identityCarriesToken` uses for versions):
+ * the tag surface is a compare/release URL whose endpoints may be `v`
+ * -prefixed (`…/compare/1.21.3...1.22.0`), and the version boundary
+ * tolerates exactly that leading `v` while still refusing a token that
+ * appears only inside a longer dotted run. Any other token shape (and any
+ * full version/SHA-shaped token, both kinds) keeps the generic matcher. */
+function dependencyVersionCarries(identity: string, token: string, entryKind: DependencyScopeKind): boolean {
+  if (entryKind !== "image" && entryKind !== "chart") return identityCarriesToken(identity, token);
+  if (VERSION_TOKEN_SHAPE_RE.test(token) || HEAD_SHA_TOKEN_SHAPE_RE.test(token) || !DOTTED_NUMERIC_TOKEN_RE.test(token)) {
+    return identityCarriesToken(identity, token);
+  }
+  return identityCarriesTokenUnderBoundary(identity, token, versionBoundaryHolds);
 }
 
 /** Whether the given receipts cover one trusted scope entry under one
- * obligation kind. Every candidate receipt must carry the dependency slug
- * as an EXACT identity (kind-appropriate boundaries, never a substring);
- * beyond that the kind decides:
- * - `provenance` asserts WHO publishes the dependency. #1748 (canonical-
- *   source rule): slug identity alone never proves it — any repo on a
- *   forge under ANY owner, and any same-named artifact on a different
- *   registry, is registrable by an attacker and carries the slug identity
- *   without being the canonical publisher/source (native review 5979924243:
- *   with a wildcard forge-read allowlist, an attacker-created same-named
- *   repository satisfied the row). Provenance settles only from a receipt
- *   whose own acquisition target IS the dependency's authoritative registry
- *   document — `authoritativeRegistryPackageSlug` (the shared lexical rule)
- *   must name exactly this slug. The rule is channel-neutral: it inspects
- *   the receipt's target identity, so a forge-read receipt (`gh_api`) and a
- *   forge-facing web fetch can never satisfy it (a forge serves no registry
- *   document for a dependency slug), and a search query is not a document —
- *   both stay attributed acquisitions that credit nothing here. When no
- *   receipt presents the registry document, the cell stays uncovered
+ * obligation kind. Every candidate receipt must speak about the dependency
+ * as an EXACT identity (kind-appropriate boundaries, never a substring —
+ * `receiptCarriesDependencyIdentity`); beyond that the kind decides:
+ * - `provenance` asserts WHO publishes the dependency. The canonical-source
+ *   rule settles it, ONE rule per ecosystem:
+ *   - `npm` (absent kind, #1748): slug identity alone never proves it — any
+ *     repo on a forge under ANY owner, and any same-named artifact on a
+ *     different registry, is registrable by an attacker and carries the
+ *     slug identity without being the canonical publisher/source (native
+ *     review 5979924243: with a wildcard forge-read allowlist, an
+ *     attacker-created same-named repository satisfied the row).
+ *     Provenance settles only from a receipt whose own acquisition target
+ *     IS the dependency's authoritative registry document —
+ *     `authoritativeRegistryPackageSlug` (the shared lexical rule) must
+ *     name exactly this slug.
+ *   - `image`/`chart` (#1763, the same rule on the container side): a
+ *     same-named repository/image under any OTHER owner, a forge read, or
+ *     a search query is exactly as registrable — provenance settles only
+ *     from a `web-fetch` receipt whose target IS the canonical
+ *     registry-catalog page for the exact artifact path —
+ *     `canonicalRegistryCatalogImageIdentity` (the shared lexical rule)
+ *     must name exactly this slug.
+ *   The rule is channel-neutral either way: it inspects the receipt's
+ *   target identity, so a forge-read receipt (`gh_api`) and a forge-facing
+ *   web fetch can never satisfy it (a forge serves no registry document
+ *   for a dependency slug), and a search query is not a document — both
+ *   stay attributed acquisitions that credit nothing here. When no receipt
+ *   presents the canonical surface, the cell stays uncovered
  *   (`receipt-mismatch` beside verified same-slug acquisitions,
- *   `receipt-absent`/`receipt-unverified` otherwise) — missing or unprovable
- *   canonical identity is fail-closed, never inferred from model prose.
+ *   `receipt-absent`/`receipt-unverified` otherwise) — missing or
+ *   unprovable canonical identity is fail-closed, never inferred from
+ *   model prose.
  * - `release_delta` asserts the old→new pair — the candidates must JOINTLY
  *   carry EVERY captured changed version, so one side alone (e.g. the old
  *   end of a wrong-range compare link) never covers;
@@ -970,6 +1086,9 @@ function receiptCarriesDependencyIdentity(receipt: EvidenceReceipt, slug: string
  *   version too: an advisory check naming only the old version proves
  *   nothing about the updated one. This binds ACQUISITION provenance to the
  *   captured range only; it is never semantic vulnerability proof.
+ * Version carries match per kind (`dependencyVersionCarries`): npm entries
+ * keep the generic exact-identity matcher, image/chart entries match every
+ * dotted-numeric tag token under the version boundary.
  * A VERSIONLESS entry (no captured changed-version identity — the parser
  * emits one for re-resolution-only changes) backs `provenance` alone: the
  * registry document proves WHO the dependency is, never an exact old→new
@@ -984,14 +1103,19 @@ function dependencyCellCovered(
   entry: DependencyScopeEntry,
 ): boolean {
   const candidates = receipts.filter((receipt) => (receipt.subject.obligations ?? []).includes(kind)
-    && receiptCarriesDependencyIdentity(receipt, entry.slug));
+    && receiptCarriesDependencyIdentity(receipt, entry));
   if (candidates.length === 0) return false;
   if (kind === "provenance") {
-    // #1748: canonical-source rule — see the kind doc above. A web-fetch
-    // receipt whose target is the authoritative npm registry document FOR
-    // this exact slug is the binding evidence; every other attributed
-    // acquisition (forge reads, source-repo fetches, searches) stays a
-    // candidate that covers nothing.
+    // The canonical-source rule — see the kind doc above. A web-fetch
+    // receipt whose target is the authoritative npm registry document (npm
+    // entries) or the canonical registry-catalog page (image/chart
+    // entries) FOR this exact identity is the binding evidence; every
+    // other attributed acquisition (forge reads, source-repo fetches,
+    // searches) stays a candidate that covers nothing.
+    if (entry.kind === "image" || entry.kind === "chart") {
+      return candidates.some((receipt) => receipt.kind === "web-fetch"
+        && canonicalRegistryCatalogImageIdentity(receipt.subject.url ?? "") === entry.slug);
+    }
     return candidates.some((receipt) => receipt.kind === "web-fetch"
       && authoritativeRegistryPackageSlug(receipt.subject.url ?? "") === entry.slug);
   }
@@ -1012,7 +1136,7 @@ function dependencyCellCovered(
   // several; several receipts may jointly cover). Advisory provenance names
   // the range the changed update actually covers — never one arbitrary
   // endpoint.
-  return entry.versions.every((version) => candidates.some((receipt) => identityCarriesToken(receiptIdentityString(receipt), version)));
+  return entry.versions.every((version) => candidates.some((receipt) => dependencyVersionCarries(receiptIdentityString(receipt), version, entry.kind ?? "npm")));
 }
 
 /** Settle a dependency-evidence row: for EVERY obligation kind the row
@@ -1032,15 +1156,19 @@ function dependencyReceiptCoverage(
   for (const receipt of ledger.receipts) {
     const attribution = receipt.subject.obligations ?? [];
     if (!kinds.some((kind) => attribution.includes(kind))) continue;
-    // #1748: the identity gate is `receiptCarriesDependencyIdentity` — the
-    // generic token carry, OR the receipt's target being the canonical npm
-    // registry document for the slug (a strictly STRONGER identity proof:
-    // the canonical scoped spelling `@scope%2Fpkg` carries the slug as
-    // npm's own encoding, not as a literal substring). The canonical clause
-    // returns non-null only for npm-registry-host package documents naming
-    // the slug exactly, so it cannot widen the gate to any other channel or
-    // target.
-    if (!scope.some((entry) => receiptCarriesDependencyIdentity(receipt, entry.slug))) continue;
+    // #1748/#1763: the identity gate is `receiptCarriesDependencyIdentity` —
+    // the generic token carry, OR the receipt's target being the canonical
+    // registry surface for the entry's kind (the npm registry document for
+    // an npm entry, the canonical registry-catalog identity for an
+    // image/chart entry; each a strictly STRONGER identity proof than the
+    // literal carry, e.g. the scoped spelling `@scope%2Fpkg` or the Docker
+    // Hub `/r/library/<name>` surface, which carry no literal slug token).
+    // Each canonical clause returns non-null only for its own registry
+    // vocabulary naming the identity exactly, so neither widens the gate to
+    // another channel or target; image/chart entries also pass through the
+    // namespace/name source-surface carry, which only ever feeds the
+    // version-asserting cells' candidate set.
+    if (!scope.some((entry) => receiptCarriesDependencyIdentity(receipt, entry))) continue;
     // #1726: an upstream acquisition is trustworthy whether it came through
     // the open web or through the forge API's validated read seam (`gh_api` —
     // the channel the #1721 run actually re-routed to when its registry host
