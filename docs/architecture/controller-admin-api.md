@@ -60,14 +60,11 @@ independent of admin authentication configuration.
 
 ## Authentication
 
-- Every `/admin/*` route — reads AND mutations — requires
-  `Authorization: Bearer <token>`. The token is compared in constant
+- Every `/admin/*` route — reads AND mutations — requires a valid bearer token OR a valid OIDC session. Bearer tokens are compared in constant
   time (`timingSafeEqual` over SHA-256 digests of both sides, so token
   length never leaks).
-- **Fail closed:** a host constructed without a token refuses every
-  admin request with a fixed `503` — an unconfigured admin surface is
-  unavailable, never open. An empty or whitespace-only token is a
-  construction error.
+- **Fail closed:** a host without either bearer auth or OIDC sessions refuses every admin request with a fixed `503`; an unconfigured surface is unavailable, never open. Empty configured tokens are refused.
+- Cookie-authenticated POST requests require a matching `X-CSRF-Token` header and return `403` when absent or invalid. Bearer-authenticated POST behavior does not change.
 - `/healthz`, `/readyz`, and `/metrics` deliberately require no auth:
   they expose only synthetic or bounded-aggregate data (see metrics) —
   component identifiers and flags, never free-form configuration, secrets,
@@ -77,6 +74,19 @@ independent of admin authentication configuration.
   delegated to the injected mutation seams; the admin layer enforces
   authentication, request shape, and bounds only. No request field is
   trusted merely because it arrived authenticated.
+
+## Browser authentication endpoints and environment
+
+`GET /auth/config` exposes only the selected mode. OIDC mode additionally serves `GET /auth/login`, `GET /auth/callback`, `GET /auth/session`, and `POST /auth/logout`. Login uses Authorization Code + PKCE; sessions are opaque, in-memory, fixed-expiry, and cookie-backed. Cookie attributes are HttpOnly, Path=/, SameSite=Lax, and Secure for an HTTPS redirect base. `/auth/session` returns identity plus a CSRF token only for a valid session; logout clears both cookies and destroys the session. Missing or invalid provider metadata, signatures, claims, or allowlist matches fail closed.
+
+Authorization policy facts an operator relies on:
+
+- The subject, email, and group lists combine as OR: a claim that satisfies any configured list authorizes the session. Keep each list as tight as the policy needs.
+- An email list entry matches only when the provider attests `email_verified: true`; a bare `email` claim is self-asserted and never authorizes on its own. The same rule governs the displayed identity: the session stores and `/auth/session` returns the email only when attested, so with an unverified or absent claim the dashboard shows the signed subject instead. The group list trusts the provider's `groups` claim, so use it only with a provider whose group membership is operator-controlled.
+- Issuer comparison tolerates a trailing-slash difference on either side; configure the issuer exactly as the provider publishes it.
+- ID tokens must be RS256 signed by a key from the provider's JWKS; the key set is cached for at most 15 minutes. `iss`, `aud`, `azp` (when present), `exp`, `iat`, and the login `nonce` are all validated.
+
+`PR_REVIEWER_ADMIN_AUTH_MODE` is `token` by default or `oidc`. Token mode requires `PR_REVIEWER_ADMIN_TOKEN`. OIDC requires `PR_REVIEWER_ADMIN_OIDC_ISSUER`, `PR_REVIEWER_ADMIN_OIDC_CLIENT_ID`, `PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET`, `PR_REVIEWER_ADMIN_OIDC_REDIRECT_BASE`, and at least one of `PR_REVIEWER_ADMIN_OIDC_ALLOWED_SUBJECTS`, `PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS`, or `PR_REVIEWER_ADMIN_OIDC_ALLOWED_GROUPS`. `PR_REVIEWER_ADMIN_OIDC_SESSION_TTL_MS` defaults to 28800000 and accepts 300000–86400000. The token is optional in OIDC mode and continues to support automation and break-glass.
 
 ## Routes
 

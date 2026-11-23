@@ -161,6 +161,7 @@ test("no direct db, cluster, or forge access from dashboard", () => {
   assert.match(CSP, /connect-src 'self'/);
   assert.match(CSP, /frame-ancestors 'none'/);
   assert.equal([...DASHBOARD_JS.matchAll(/fetch\(/g)].length, 1);
+  for (const source of [DASHBOARD_HTML, DASHBOARD_JS]) assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB/i);
   for (const m of DASHBOARD_JS.matchAll(/[\"'](\/[^\"']*)[\"']/g)) {
     assert.ok(!m[1]!.startsWith("//"));
     assert.ok(!m[1]!.includes("://"));
@@ -233,9 +234,11 @@ function harness(options: HarnessOptions = {}) {
   const listeners: Record<string, Array<(event?: any) => unknown>> = {};
   const paths: string[] = [];
   const elements = new Map<string, { proxy: any; raw: any }>();
+  const created: any[] = [];
   function make(name: string) {
-    const raw: any = { children: [] as unknown[], dataset: {}, addEventListener(type: string, fn: (event?: any) => unknown) {
+    const raw: any = { children: [] as unknown[], dataset: {}, own: {} as Record<string, Array<(event?: any) => unknown>>, addEventListener(type: string, fn: (event?: any) => unknown) {
       (listeners[name + ":" + type] ??= []).push(fn);
+      (raw.own[type] ??= []).push(fn);
     }, appendChild(child: unknown) {
       raw.children.push(child);
       return child;
@@ -249,7 +252,20 @@ function harness(options: HarnessOptions = {}) {
       target[prop] = value;
       return true;
     } });
+    // Elements the page creates carry a label, so a test can name the
+    // button it drives: the shell renders its own buttons too, and "the
+    // last button listener" no longer identifies one of them.
+    if (!name.startsWith("#")) created.push(raw);
     return { proxy, raw };
+  }
+  function handlerForLabel(label: string, type = "click"): ((event?: any) => unknown) | undefined {
+    for (const raw of created) {
+      const text = raw.children.map((child: any) => (typeof child?.data === "string" ? child.data : "")).join("");
+      if (text !== label) continue;
+      const handlers = raw.own[type] ?? [];
+      if (handlers.length) return handlers[handlers.length - 1];
+    }
+    return undefined;
   }
   const document: any = { documentElement: { dataset: {} }, createElement: (tag: string) => make(tag).proxy, createTextNode: (v: unknown) => {
     const s = String(v);
@@ -278,8 +294,10 @@ function harness(options: HarnessOptions = {}) {
     const status = forced?.status ?? 200;
     return { ok: status >= 200 && status < 300, status, text: async () => body };
   } });
+  sandbox.window = { location: { href: "", search: "" } };
+  sandbox.URLSearchParams = URLSearchParams;
   vm.runInContext(DASHBOARD_JS, sandbox);
-  elements.get("token")!.raw.value = "token-user-input";
+  if (elements.has("token")) elements.get("token")!.raw.value = "token-user-input";
   // The rereview form's field values: the client's own gate reads them.
   const formValue = (id: string, value: string): void => {
     document.getElementById(id);
@@ -297,7 +315,7 @@ function harness(options: HarnessOptions = {}) {
     walk(elements.get(id)?.raw);
     return out;
   }
-  return { textData, attributeCalls, propertyWrites, listeners, paths, elements, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled };
+  return { textData, attributeCalls, propertyWrites, listeners, paths, elements, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled, handlerForLabel };
 }
 test("execution fence: hostile API values appear verbatim in text nodes only", async () => {
   const h = harness({
@@ -357,8 +375,10 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
       "/admin/runs/active": { runId: "active", state: "running", usage: [], publication: { state: "none" } },
     },
     responses: {
+      "/auth/config": { status: 200, body: '{"mode":"token"}' },
       "/admin/rereview": { status: 202, body: '{"jobId":"accepted-rereview-sentinel"}' },
       "/admin/runs/active/cancel": { status: 200, body: '{"cancelled":true}' },
+      "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' }
     },
   });
   vm.runInContext("loadAll(); undefined", h.sandbox);
@@ -378,11 +398,13 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   vm.runInContext("loadAll(); undefined", offline.sandbox);
   await offline.untilSettled(() => offline.textData.includes("Can't reach the controller"), "offline");
   assert.ok(offline.textData.includes("Can't reach the controller"));
+  const existingButtonHandlers = h.listeners["button:click"]?.length ?? 0;
   vm.runInContext("loadRunDetail('active'); undefined", h.sandbox);
-  await h.untilSettled(() => Boolean(h.listeners["button:click"]?.length), "cancel registration");
+  await h.untilSettled(() => (h.listeners["button:click"]?.length ?? 0) > existingButtonHandlers, "cancel registration");
   const cancelHandlers = h.listeners["button:click"]!;
   await cancelHandlers[cancelHandlers.length - 1]!();
-  await h.untilSettled(() => h.textData.includes("Cancellation accepted."), "cancel success");
+  await h.untilSettled(() => h.paths.includes("/admin/runs/active/cancel"), "cancel request");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(h.textData.includes("Cancellation accepted."));
   const rereview = h.listeners["#rereview:click"]![0]!;
   await rereview();
@@ -396,9 +418,10 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   assert.ok(refused.textData.some((x) => x.includes("HTTP 409")));
   // The controller's own reason reaches the operator, not a bare status.
   assert.ok(refused.textData.some((x) => x.includes("refused-rereview-sentinel")));
-  const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
+  const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/auth/config": { status: 200, body: '{"mode":"token"}' }, "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
   vm.runInContext("loadRunDetail('refused'); undefined", cancelRefused.sandbox);
-  await cancelRefused.untilSettled(() => Boolean(cancelRefused.listeners["button:click"]?.length), "cancel refusal button");
+  await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused"), "cancel refusal detail");
+  await cancelRefused.untilSettled(() => (cancelRefused.listeners["button:click"]?.length ?? 0) >= 2, "cancel refusal button");
   const refusalButton = cancelRefused.listeners["button:click"]!;
   await refusalButton[refusalButton.length - 1]!();
   await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
@@ -410,8 +433,7 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   const theme = h.listeners["#theme:click"]![0]!;
   await theme({ currentTarget: h.elements.get("theme")!.proxy });
   assert.equal(h.documentElement?.dataset.theme, "dark");
-  const back = h.listeners["button:click"]!;
-  await back[back.length - 2]!();
+  await h.handlerForLabel("Back to runs")!();
   assert.equal(h.elements.get("view-runs")!.raw.className, "view view-active", "back must re-activate the runs view");
   assert.equal(h.elements.get("view-run")!.raw.className, "view", "back must deactivate the run view");
   const beforeRefresh = h.paths.filter((path) => path === "/admin/runs?limit=50").length;
@@ -419,8 +441,8 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await h.untilSettled(() => h.paths.filter((path) => path === "/admin/runs?limit=50").length > beforeRefresh, "refresh runs");
   const denied = harness({ confirm: () => false, payloads: { "/admin/runs/active": { runId: "active", state: "running", usage: [], publication: {} } } });
   vm.runInContext("loadRunDetail('active'); undefined", denied.sandbox);
-  await denied.untilSettled(() => Boolean(denied.listeners["button:click"]?.length), "confirm-refused cancel button");
-  await denied.listeners["button:click"]![denied.listeners["button:click"]!.length - 1]!();
+  await denied.untilSettled(() => denied.handlerForLabel("Cancel run") !== undefined, "confirm-refused cancel button");
+  await denied.handlerForLabel("Cancel run")!();
   await denied.listeners["#rereview:click"]![0]!();
   assert.ok(!denied.paths.some((path) => path.endsWith("/cancel") || path === "/admin/rereview"));
   assert.ok(!denied.textData.some((text) => ["Cancellation accepted.", "Rereview accepted.", "was not accepted", "was refused"].some((value) => text.includes(value))));
@@ -443,9 +465,8 @@ test("a refused cancellation shows the controller's reason (409)", async () => {
     responses: { "/admin/runs/refused/cancel": { status: 409, body: JSON.stringify({ error: "cancellation refused", detail: "the run has no queued generation" }) } },
   });
   vm.runInContext("loadRunDetail('refused'); undefined", h.sandbox);
-  await h.untilSettled(() => Boolean(h.listeners["button:click"]?.length), "cancel refusal button");
-  const buttons = h.listeners["button:click"]!;
-  await buttons[buttons.length - 1]!();
+  await h.untilSettled(() => h.handlerForLabel("Cancel run") !== undefined, "cancel refusal button");
+  await h.handlerForLabel("Cancel run")!();
   await h.untilSettled(() => h.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
   await h.untilSettled(() => h.textData.includes("Cancellation was refused."), "cancel refusal headline");
   assert.ok(h.textData.some((x) => x.includes("the run has no queued generation")));
@@ -499,4 +520,25 @@ test("auth and redaction are covered", async (t) => {
   }
   assert.equal((await fetch(f.base + "/admin/diagnostics")).status, 401);
   assert.equal((await fetch(f.base + "/dashboard")).status, 200);
+});
+test("OIDC logout: a refused logout keeps the signed-in identity; a 401 signs out", async () => {
+  const responses = (logout: { status: number; body: string }) => ({
+    "/auth/config": { status: 200, body: '{"mode":"oidc"}' },
+    "/auth/session": { status: 200, body: '{"authenticated":true,"subject":"sub-1","csrfToken":"csrf-1"}' },
+    "/auth/logout": logout,
+  });
+  // Server-side refusal (e.g. store error): the UI stays signed in and says so.
+  const refused = harness({ responses: responses({ status: 500, body: '{"error":"logout-refused"}' }) });
+  await refused.untilSettled(() => refused.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const refusedClicks = refused.listeners["button:click"]!;
+  await refusedClicks[refusedClicks.length - 1]!();
+  await refused.untilSettled(() => refused.containerText("auth").includes("Sign out failed"), "refusal note renders");
+  assert.ok(refused.containerText("auth").includes("sub-1"));
+  // A 401 means the session is already gone: the UI returns to sign-in.
+  const expired = harness({ responses: responses({ status: 401, body: '{"error":"unauthorized"}' }) });
+  await expired.untilSettled(() => expired.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const expiredClicks = expired.listeners["button:click"]!;
+  await expiredClicks[expiredClicks.length - 1]!();
+  await expired.untilSettled(() => expired.containerText("auth").includes("Sign in"), "sign-in state renders");
+  assert.ok(!expired.containerText("auth").includes("sub-1"));
 });

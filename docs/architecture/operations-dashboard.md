@@ -35,6 +35,16 @@ that listener. A typo like `ture` on a deployment that serves the admin
 listener can never silently disable the flag. The startup summary reports
 `dashboard=on|off`.
 
+## Browser authentication
+
+`PR_REVIEWER_ADMIN_AUTH_MODE` selects `token` (the default) or `oidc`. Token mode keeps the existing in-memory bearer-token control. OIDC mode uses Authorization Code with PKCE: `/auth/login` creates a short-lived server-side transaction, the provider returns to `/auth/callback`, and the server verifies the ID token and configured allowlists before issuing an opaque session cookie. `/auth/session` reports the current identity and CSRF token; `/auth/logout` destroys the session. Sessions have fixed expiry and live only in memory. Discovery or provider failures fail closed.
+
+The session and transaction cookies are HttpOnly, Path=/, SameSite=Lax, and Secure when the configured redirect base is HTTPS. The transaction cookie contains only an opaque identifier. Cookie-authenticated POSTs under `/admin/*` require the session CSRF token in `X-CSRF-Token`; bearer-authenticated automation requests are unchanged. Static bearer authentication remains available in OIDC mode when configured.
+
+The dashboard reads the public `/auth/config` mode. In OIDC mode the browser uses same-origin cookies and never receives a credential for storage. In both modes no credential is written to browser-accessible persistence; the bearer token, where used, stays in memory only.
+
+Authorization policy: the subject, email, and group allowlists combine as OR, and an email entry matches only with `email_verified: true`. See the admin API document for the full claim-validation rules. The displayed identity follows the same rule: `/auth/session` carries the email only when the provider attested it, and an unverified or absent claim renders the signed subject instead. An expired or revoked session answers `401`, and the shell returns to the sign-in state on the next request instead of showing stale authenticated data.
+
 ## Why the shell is unauthenticated but carries no data
 
 The dashboard paths sit OUTSIDE the `/admin/` namespace. This is what
