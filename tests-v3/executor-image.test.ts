@@ -161,7 +161,7 @@ test("validateImageContractForProfile builds a contract for a kubernetes profile
   assert.equal(contract.resultVar, EXECUTION_RESULT_ENV_KEY);
 });
 
-test("validateImageContractForProfile fails closed on a malformed kubernetes profile", () => {
+test("validateImageContractForProfile fails closed on a malformed or unresolved kubernetes profile", () => {
   assert.throws(
     () => validateImageContractForProfile({ kind: "kubernetes", oci: null }),
     /must carry its spec/,
@@ -169,6 +169,12 @@ test("validateImageContractForProfile fails closed on a malformed kubernetes pro
   assert.throws(
     () => validateImageContractForProfile({ kind: "kubernetes", oci: null, kubernetes: null }),
     /must carry its spec/,
+  );
+  assert.throws(
+    () => validateImageContractForProfile({ kind: "kubernetes", oci: null, kubernetes: {
+      image: null, args: [], namespace: "workers", serviceAccount: "worker", ttlSecondsAfterFinished: null, resources: null, volumes: [],
+    } }),
+    /requires a resolved image/,
   );
 });
 

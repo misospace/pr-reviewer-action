@@ -353,7 +353,7 @@ jobs:
             fi
             echo
             echo "Pin the Helm controller image with the controller reference and the"
-            echo "instance-config \`kubernetes.image\` with the worker reference; see"
+            echo "worker image with \`workerExecutor.image.digest\` (profile \`image\` is an explicit override); see"
             echo "\`deploy/images/README.md\` and \`docs/self-hosted-deployment.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
           # Surface the exact references in the job log as well.

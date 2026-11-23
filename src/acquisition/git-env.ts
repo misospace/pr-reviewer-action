@@ -96,6 +96,30 @@ export function gitCredentialEnv(
   };
 }
 
+/** The exact known-secret set for one fetch credential's diagnostics: the
+ * full `Authorization` header value the child env carries, PLUS the bare
+ * credential payload derived from it when the header is a `Basic <payload>`
+ * pair (#1786 review). `maskKnownSecrets` masks only the literal it is given
+ * (plus its URL/base64 variants) and never a representation EMBEDDED in it,
+ * and `redactText`'s heuristic needs the `Basic ` scheme still present; a
+ * hostile or echoing child that prints just the payload would therefore put
+ * credential material into a durable failure reason. The derived payload
+ * rides the same variant expansion, so its encoded forms are covered too.
+ * Documented residual (same class as base64-of-base64): the mask matches
+ * whole literals only, so a TRANSFORMED echo (padding stripped, re-encoded)
+ * is not derived and evades — closing it would need decoding arbitrary
+ * child output, which no masking pass does. Returns [] when there is no
+ * credential. */
+export function credentialDiagnosticSecrets(
+  credentials: FetchCredentials | undefined,
+): string[] {
+  if (credentials === undefined) return [];
+  const secrets = [credentials.authorization];
+  const basic = /^Basic[ \t]+(\S+)/i.exec(credentials.authorization);
+  if (basic !== null) secrets.push(basic[1]!);
+  return secrets;
+}
+
 /** Compose the full child env for one git invocation. */
 export function gitInvocationEnv(
   ambient: NodeJS.ProcessEnv,

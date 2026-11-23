@@ -215,9 +215,8 @@ controller:
 
 # ── worker-executor provisioning (#734/#738) ──────────────────────────
 # The worker Jobs themselves are created by the controller's Kubernetes
-# executor from the instance config's `kubernetes` profile; this section
-# provisions the surrounding Kubernetes objects and documents the
-# instance-config values the executor expects.
+# executor. This section provisions surrounding objects and owns deployment
+# defaults passed to the controller as typed defaults.
 workerExecutor:
   # disabled: nothing is provisioned. kubernetes: create the worker
   # service account, the namespace-scoped Role/RoleBinding the
@@ -232,12 +231,16 @@ workerExecutor:
     name: pr-reviewer-worker
   rbac:
     create: true
-  # Reference mirror of the instance config's `kubernetes` profile values
-  # (the executor builds the Job manifest from the instance config; these
-  # fields document the deployment facts the profile must repeat):
+  # Authoritative worker deployment defaults. The default repository is the
+  # upstream published worker image; operators building a private worker must
+  # override it. In Kubernetes mode these are consumed by the controller as
+  # typed defaults via
+  # PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS. The profile may omit image,
+  # resources, and TTL to inherit; explicit profile values win.
   image:
-    repository: ""
-    tag: ""
+    repository: ghcr.io/misospace/pr-reviewer-worker
+    tag: "" # defaults to the chart appVersion (the release coordinate)
+    digest: "" # optional exact-byte operator pin (sha256:...)
   resources:
     requests:
       cpu: 500m

@@ -401,6 +401,46 @@ test("the selector refuses a kubernetes profile without a cluster binding", () =
   assert.throws(() => selector.forProfile("k8s"), /no cluster executor binding/);
 });
 
+test("the selector resolves inherited Kubernetes deployment defaults and profile overrides", () => {
+  const factories: KubernetesExecutorSpec[] = [];
+  const selector = createExecutorSelector({
+    instance: instanceWith([{
+      name: "k8s",
+      kind: "kubernetes",
+      maxReviews: null,
+      local: null,
+      oci: null,
+      kubernetes: {
+        image: null,
+        args: [],
+        namespace: "review-workers",
+        serviceAccount: "worker",
+        ttlSecondsAfterFinished: null,
+        resources: null,
+        volumes: [],
+      },
+    }]),
+    kubernetesDeploymentDefaults: {
+      image: "ghcr.io/acme/worker:1",
+      ttlSecondsAfterFinished: 1200,
+      resources: { requests: { cpu: "100m", memory: "128Mi" }, limits: { cpu: "500m", memory: "512Mi" } },
+    },
+    kubernetes: (spec) => {
+      factories.push(spec);
+      return { start: async () => { throw new Error("unreachable"); }, reconcile: async () => ({ kind: "none" }), cancel: async () => ({ kind: "terminated" }) };
+    },
+  });
+  selector.forProfile("k8s");
+  assert.equal(factories[0]!.image, "ghcr.io/acme/worker:1");
+  assert.equal(factories[0]!.ttlSecondsAfterFinished, 1200);
+  assert.throws(() => createExecutorSelector({
+    instance: instanceWith([{ name: "missing", kind: "kubernetes", maxReviews: null, local: null, oci: null, kubernetes: {
+      image: null, args: [], namespace: "workers", serviceAccount: "worker", ttlSecondsAfterFinished: null, resources: null, volumes: [],
+    } }]),
+    kubernetes: () => { throw new Error("must not reach factory"); },
+  }).forProfile("missing"), /neither the profile nor the deployment defaults provide it/);
+});
+
 test("the selector binds a kubernetes profile through the injected factory", () => {
   const fake: Executor = {
     start: async () => {

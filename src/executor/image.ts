@@ -12,7 +12,7 @@
  */
 
 import { hasControlCharacters } from "../config/instance-config.js";
-import type { KubernetesExecutorSpec, OciImageSpec } from "../config/instance-config.js";
+import type { KubernetesExecutorProfileSpec, OciImageSpec } from "../config/instance-config.js";
 import { EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY } from "./local.js";
 import type { ExecutionRequest } from "./types.js";
 
@@ -203,12 +203,14 @@ export function parseWorkerImageContract(value: unknown): WorkerImageContract {
 /** Build the worker-image contract for an instance-config executor
  * profile: the contract for an `oci` profile (built from its validated
  * image reference and re-parsed fail-closed), the contract for a
- * `kubernetes` profile (#734 — built from its validated image reference
- * and fixed argv, re-parsed fail-closed; a kubernetes profile without its
- * spec is malformed), and `null` for every other kind (local executors
- * carry their own argv). Fail closed rather than degrade. */
+ * `kubernetes` profile (#734 — requires a RESOLVED image, profile override
+ * or deployment default, plus its fixed argv, re-parsed fail-closed. Callers
+ * must pass the resolved spec when the profile inherits deployment defaults;
+ * the null-image refusal guards callers that do not), and `null` for every
+ * other kind (local executors carry their own argv). Fail closed rather
+ * than degrade. */
 export function validateImageContractForProfile(
-  profile: { kind: string; oci: OciImageSpec | null; kubernetes?: KubernetesExecutorSpec | null },
+  profile: { kind: string; oci: OciImageSpec | null; kubernetes?: KubernetesExecutorProfileSpec | null },
 ): WorkerImageContract | null {
   if (profile.kind === "oci") {
     if (profile.oci === null) {
@@ -225,6 +227,9 @@ export function validateImageContractForProfile(
   if (profile.kind === "kubernetes") {
     if (profile.kubernetes === undefined || profile.kubernetes === null) {
       throw new WorkerImageContractError("a 'kubernetes' executor profile must carry its spec");
+    }
+    if (profile.kubernetes.image === null) {
+      throw new WorkerImageContractError("a 'kubernetes' executor profile requires a resolved image (profile or deployment defaults)");
     }
     return parseWorkerImageContract({
       contractVersion: WORKER_IMAGE_CONTRACT_VERSION,

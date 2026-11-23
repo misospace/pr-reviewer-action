@@ -89,6 +89,36 @@ export interface JobRecord {
   readonly updatedAtMs: number;
 }
 
+/** The failure reason a record carries when the OPERATOR cancelled the
+ * generation (#1772).
+ *
+ * ONE definition: the queue's own settle path and the control plane's
+ * run mirror must never disagree about why a generation ended — the
+ * admin surface reads that reason, and a false attribution ("superseded")
+ * would send the operator after the wrong cause. */
+export const OPERATOR_CANCELLATION_REASON = "cancelled-by-operator";
+
+/** Whether a record carries the OPERATOR's cancellation (#1772) rather
+ * than a supersession.
+ *
+ * WHY the flag alone cannot answer it: the durable snapshot format must
+ * not change (an old snapshot must still load), so no new field may be
+ * added to `JobRecord`. The supersession path, however, ALWAYS stamps
+ * the superseding job id BESIDE the `cancelRequested` flag — the id is
+ * what lets the eventual `superseded` transition attribute the
+ * supersession even after the superseder itself settled. An operator
+ * cancellation carries NO superseder, and that absence is therefore the
+ * one unambiguous discriminator.
+ *
+ * The rule lives here (one definition) because two seams must agree on
+ * it: the queue's settle path (which settles the record) and the
+ * control plane's run mirror (which reports the reason). */
+export function isOperatorCancellation(
+  record: Pick<JobRecord, "cancelRequested" | "supersededByJobId">,
+): boolean {
+  return record.cancelRequested && record.supersededByJobId === "";
+}
+
 /** PR/MR + kind identity for at-most-one-active-generation:
  * `${platform}/${installationId}/${repoFullName}#${prNumber}/${kind}`.
  * `kind` is part of the scope (see `ReviewJobKind`): a `follow_up` and a
@@ -217,6 +247,28 @@ export function newJobRecord(
     updatedAtMs: nowMs,
   });
   return record;
+}
+
+/** Bound for a durable terminal failure reason (#1786 review). The
+ * control plane's `RunRecord` validator (`src/state/types.ts`,
+ * `REASON_MAX_CHARS`) REFUSES a reason above this length — a writer that
+ * skips the bound fails closed instead of recording — and the queue's own
+ * snapshot reader accepts any string, so the queue-side writers apply this
+ * SAME bound rather than persisting attacker-influenced text unbounded. */
+export const FAILURE_REASON_MAX_CHARS = 256;
+
+/** A bounded, single-line terminal failure reason for a durable record:
+ * collapses control characters, trims, and truncates to
+ * `FAILURE_REASON_MAX_CHARS` with a visible `…`, falling back when nothing
+ * survives. Both terminal writers share this ONE rule — the control-plane
+ * run mirror (`src/controller/run-lifecycle.ts`, re-exported there) and the
+ * queue scheduler's settle path — because an executor-supplied message is
+ * sanitized here, never trusted verbatim. */
+export function runFailureReason(raw: string, fallback: string): string {
+  const singleLine = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (singleLine === "") return fallback;
+  if (singleLine.length <= FAILURE_REASON_MAX_CHARS) return singleLine;
+  return `${singleLine.slice(0, FAILURE_REASON_MAX_CHARS - 1)}…`;
 }
 
 /** Validate and perform a state transition: throws RangeError when

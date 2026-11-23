@@ -34,14 +34,20 @@ COPY tsconfig.json tsconfig.build.json ./
 RUN npm run build
 
 # ── shared runtime base ────────────────────────────────────────────────
-# Both targets need git and procps: runProcess refuses EVERY
-# subprocess unless pgrep is available to prove tree-cleanup capability.
-# Assert that the binaries exist while building the shared runtime layer.
+# Both targets need git, procps, and ca-certificates: runProcess refuses
+# EVERY subprocess unless pgrep is available to prove tree-cleanup
+# capability, and git's https transport has NO trust store without
+# ca-certificates (#1775: every acquisition fetch died "exited 128"
+# because the package is only a Recommends, so --no-install-recommends
+# dropped it). Node is immune (compiled-in Mozilla store), which is why
+# only the git subprocess path fails. Assert the binaries AND the trust
+# store file exist while building the shared runtime layer.
 # Recommendations are dropped; the base image digest stays pinned.
 FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git procps \
+    && apt-get install -y --no-install-recommends git procps ca-certificates \
     && command -v git && command -v pgrep && command -v pkill \
+    && test -f /etc/ssl/certs/ca-certificates.crt \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production

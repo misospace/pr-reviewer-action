@@ -39,7 +39,7 @@ import { pullHeadRefspec, type AcquisitionPlatform } from "../platform/head-ref.
 import { isForgeId } from "../platform/resolve.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { maskDiagnostic } from "../context/redact.js";
-import { gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
+import { credentialDiagnosticSecrets, gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
 import { AcquisitionError, type AcquisitionFailureCode, type FetchCredentials, type MirrorInfo } from "./types.js";
 
 const DEFAULT_FETCH_TIMEOUT_MS = 600_000;
@@ -168,12 +168,73 @@ interface GitRunOptions {
   signal?: AbortSignal | undefined;
   extraEnv?: NodeJS.ProcessEnv | undefined;
   failureCode?: AcquisitionFailureCode | undefined;
+  /** Exact secrets handed to this invocation (e.g. the fetch credential),
+   * nuked unconditionally from any surfaced stderr. */
+  diagnosticSecrets?: readonly (string | null | undefined)[] | undefined;
 }
 
 interface GitRunResult {
   stdout: Buffer;
   status: string;
   exitCode: number | null;
+}
+
+/** Cap for the git stderr class surfaced in a failure reason (#1775). */
+const GIT_STDERR_CONTEXT_MAX_CHARS = 300;
+
+/** Prepended to the class when the captured stderr hit the subprocess
+ * capture cap: the capture keeps the HEAD of the stream, so the last-line
+ * heuristic may then surface progress padding rather than git's terminal
+ * error line. The marker tells the operator never to read the class as
+ * the whole story (#1786 review). A hostile child can print the literal
+ * to fake truncation, but the marker only ever DEGRADES trust in the
+ * class, never elevates it, so forging it gains nothing. */
+const GIT_STDERR_TRUNCATED_NOTE = "[stderr truncated]";
+
+/** Compose the failure class from a failed git run's stderr: normalize to
+ * NFC and strip invisible Unicode FIRST — format characters (Cf: bidi
+ * overrides/isolates, zero-width marks, BOM) and leftover combining marks
+ * (Mn after NFC recomposition: grapheme joiners, variation selectors).
+ * They are text-spoofing material in an operator-visible record, and
+ * removing them before the URL and secret passes reassembles remotes and
+ * echoed credentials that were split across them to evade those passes.
+ * Then drop remote material (scheme URLs and
+ * `user@host:path` scp-style remotes are argv/env material and never
+ * belong in a durable failure reason; the stripping over-approximates,
+ * which is safe), keep the LAST line (git ends with its terminal error;
+ * progress noise rides carriage-return segments), replace remaining
+ * whitespace and C0/C1 control characters (ANSI escapes must never reach
+ * a terminal that later prints the record) with single spaces, prepend
+ * the truncation note when the capture was capped, then apply the shared
+ * secret redaction — including the exact credential of THIS invocation,
+ * which a hostile or echoing child could otherwise return verbatim — and
+ * the cap (the note leads, so it always survives the cap). Residual local
+ * paths git echoes (cache root, cwd) are operator-internal material in an
+ * operator-visible record and accepted. Returns "" when nothing survives,
+ * so the caller keeps the bare exit-code message. */
+function describeGitStderr(
+  stderr: Buffer,
+  secrets: readonly (string | null | undefined)[],
+  truncated: boolean,
+): string {
+  if (stderr.length === 0) {
+    return "";
+  }
+  const withoutRemotes = stderr
+    .toString("utf8")
+    .normalize("NFC")
+    .replace(/[\p{Cf}\p{Mn}]/gu, "")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, "<url>")
+    .replace(/\b[\w.+-]+@(?:\[[^\]]*\]|[\w.-]+):[^\s]*/g, "<url>");
+  let last = "";
+  for (const segment of withoutRemotes.split(/[\r\n]+/)) {
+    const collapsed = segment.replace(/[\p{Cc}\s]+/gu, " ").trim();
+    if (collapsed.length > 0) {
+      last = collapsed;
+    }
+  }
+  const surfaced = truncated ? `${GIT_STDERR_TRUNCATED_NOTE} ${last}`.trimEnd() : last;
+  return maskDiagnostic(surfaced, secrets, GIT_STDERR_CONTEXT_MAX_CHARS);
 }
 
 async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunResult> {
@@ -189,8 +250,12 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
     terminateGraceMs: GIT_TERMINATE_GRACE_MS,
   });
   const result = await handle.result;
-  // Diagnostics carry the subcommand label and the outcome only — never
-  // argv content or stderr, so credential/URL material cannot leak.
+  // Diagnostics carry the subcommand label and the outcome; a failed
+  // non-zero run additionally carries the bounded, URL-stripped, masked
+  // stderr class (#1775 — `exited 128` alone hid the SSL trust-store
+  // failure in the pilot), marked as truncated when the capture was
+  // capped and therefore head-only. Never argv content, clone URLs, or
+  // tokens.
   if (result.status === "timeout") {
     throw new AcquisitionError("fetch_timeout", `git ${opts.label}: timed out after ${opts.timeoutMs}ms`);
   }
@@ -206,9 +271,11 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
     );
   }
   if (result.status !== "exited" || result.exitCode !== 0) {
+    const stderrClass = describeGitStderr(result.stderr, opts.diagnosticSecrets ?? [], result.stderrTruncated);
     throw new AcquisitionError(
       failureCode,
-      `git ${opts.label}: exited ${result.exitCode ?? result.signal ?? "unknown"}`,
+      `git ${opts.label}: exited ${result.exitCode ?? result.signal ?? "unknown"}` +
+        (stderrClass === "" ? "" : `: ${stderrClass}`),
     );
   }
   return { stdout: result.stdout, status: result.status, exitCode: result.exitCode };
@@ -420,6 +487,11 @@ export class MirrorCache {
       timeoutMs: this.fetchTimeoutMs,
       signal: this.signal,
       extraEnv: gitCredentialEnv(this.credentials, this.cloneUrl),
+      // The header AND its derived Basic payload: an echoing child that
+      // prints only the bare base64 payload (no `Basic ` framing left for
+      // the heuristic redactor) must not put credential material into the
+      // durable reason (#1786 review).
+      diagnosticSecrets: credentialDiagnosticSecrets(this.credentials),
     });
   }
 

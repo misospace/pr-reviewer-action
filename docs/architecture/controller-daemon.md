@@ -13,7 +13,7 @@ a forge-specific CLI.
 
 | module | owns |
 |---|---|
-| `daemon.ts` | startup composition: options validation (fail closed), the #736 migration hook (work is accepted only after durable state is proven), queue-store binding, recovered-worker reconciliation (it runs before `recover()`), `recover()`, intake (`ingest`), tick loop, lease renewal, adopted-worker reconciliation and termination, graceful stop |
+| `daemon.ts` | startup composition: options validation (fail closed), the #736 migration hook (work is accepted only after durable state is proven), queue-store binding, recovered-worker reconciliation (it runs before `recover()`), `recover()`, intake (`ingest`), the operator's forced rereview (`forceRereview`) and run cancellation (`cancelRun`), tick loop, lease renewal, adopted-worker reconciliation and termination, graceful stop |
 | `run-lifecycle.ts` | the control-plane run mirror: the `RunRecord` lifecycle (`queued` → `starting` → `running` → `publishing` → `completed`/`failed`/`cancelled`/`superseded`) over the queue's own transition table, and the attempt bookkeeping (create + lease under the daemon's instance id) |
 | `snapshot-adapter.ts` | the sync-over-async bridge the #736 doc named: `QueueStore` (sync, #731) over `QueueSnapshotStore` (async, PostgreSQL). Cache == durable truth: a failed persist rolls the cache back to the last snapshot the backend accepted; failures latch and are reported (`persistenceError`/`flush`) until the next successful save clears them |
 | `execution.ts` | the host-side `QueueRequestBuilder` (#733's division of labor): deterministic per-attempt run-dir layout (`<runsRoot>/<jobId>/<attempt>/request.json` + `result.json` — the layout the publisher re-derives, so it is a contract), workspace extraction (#732), operator-approved profile names, opaque credential references (#735); plus the profile→`Executor` selector (local + #734 Kubernetes; `oci` refuses until an implementation ships) |
@@ -184,6 +184,19 @@ a forge-specific CLI.
   reason when it refused it, and which releases the durable reservation
   on a refusal, so a refused handoff is re-discovered on the next pass
   instead of staying suppressed.
+- **The operator's two seams reuse the intake's own path (#1772).** A
+  forced rereview (`forceRereview`) reads the pull request's current
+  identity through the forge capability, applies the SAME adoption gate
+  the intake applies, and dispatches with a FRESH nonce — so the forced
+  generation is never deduped against the head's previous generation, and
+  a repository the policy did not grant still schedules nothing. A
+  cancellation (`cancelRun`) is the QUEUE's own seam: the queue aborts the
+  live attempt and settles the record `cancelled` with the operator's
+  attribution (`cancelled-by-operator`), never `superseded` — the
+  operator's intent must never be reported as "a newer head replaced it".
+  Both refuse with a bounded reason, and neither guesses: an unreadable
+  pull request, an ambiguous platform, or a missing App installation
+  refuses instead of minting.
 - **The poll mints the same generation the intake mints.** The daemon
   hands the poll its `ReconcileContext`: the ledger it must dedupe
   against, the PER-REPOSITORY identity resolver (`resolveBuildOptions`),
@@ -243,7 +256,8 @@ a forge-specific CLI.
   identity; graceful shutdown; fail-closed startup; the DURABLE
   generation claim (restart dedupe, failed-enqueue release) and the
   mirrored run lifecycle; the current adoption policy re-gating a stored
-  record; the platform-aware GitHub App intake.
+  record; the platform-aware GitHub App intake; the operator's forced
+  rereview and run cancellation (#1772).
 
 ## Out of scope (per #1348)
 

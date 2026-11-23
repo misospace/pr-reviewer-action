@@ -45,6 +45,7 @@ import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
 import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
 import type { ReconcileReport } from "../src/ingress/reconcile.js";
+import type { CanonicalForgeEvent } from "../src/events/types.js";
 import {
   controllerMain,
   createGitHubPublishMintingBroker,
@@ -343,6 +344,110 @@ test("an invalid instance config: exit 2 with the validator's bounded reason", a
   }
 });
 
+const KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS = MIN_INSTANCE_CONFIG.replace(
+  `executor-profiles:
+  - name: local-dev
+    kind: local
+    local:
+      command: /bin/true
+      args: []
+default-executor-profile: local-dev`,
+  `executor-profiles:
+  - name: k8s
+    kind: kubernetes
+    kubernetes:
+      args: []
+      namespace: review
+      service-account: worker
+      volumes:
+        - claim: runs
+          controller-root: /srv/runs
+default-executor-profile: k8s`,
+);
+
+const CHART_SHAPED_KUBERNETES_DEFAULTS = JSON.stringify({
+  image: "ghcr.io/misospace/pr-reviewer-worker:3.10.0",
+  ttlSecondsAfterFinished: 1800,
+  resources: {
+    requests: { cpu: "500m", memory: "512Mi" },
+    limits: { cpu: "2", memory: "2Gi" },
+  },
+});
+
+test("Kubernetes profile without deployment defaults refuses before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-no-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS, "utf8");
+  const env = baseEnv(configPath);
+  let ready = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { ready = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /neither the profile nor the deployment defaults provide it/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(ready, false, "pre-flight refusal must happen before composition");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("chart-shaped Kubernetes defaults pass profile pre-flight", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-valid-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS = CHART_SHAPED_KUBERNETES_DEFAULTS;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2);
+      const text = stderr.lines().join("");
+      // The refusal names the LATER forge stage, proving the deployment
+      // defaults parsed and the kubernetes pre-flight loop passed: the
+      // inheriting profile resolved against the chart-shaped defaults.
+      assert.match(text, /must declare forges for exactly one platform/);
+      assert.doesNotMatch(text, /neither the profile nor the deployment defaults provide it/);
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("invalid Kubernetes deployment defaults refuse startup before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, MIN_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS = '{"unknown":true}';
+  let composed = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { composed = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(composed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
 test("missing required environment: exit 2 naming every missing variable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ctl-env-"));
   const configPath = join(dir, "instance.yaml");
@@ -421,6 +526,7 @@ test("a gitea-kind instance starts with FORGEJO_TOKEN (#1682)", async (t) => {
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async () => ({ publicationId: "forgejo-comment:1" }),
     },
     followUpAdapter: followUpAdapter(),
@@ -460,6 +566,7 @@ test("an instance config with no evidence profiles composes: 'no providers' is e
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async () => ({ publicationId: "forgejo-comment:1" }),
     },
     followUpAdapter: followUpAdapter(),
@@ -696,6 +803,7 @@ async function bootWithAdmin(env: NodeJS.ProcessEnv, t: { after: (fn: () => Prom
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
     followUpAdapter: followUpAdapter(),
@@ -785,6 +893,7 @@ test("the dashboard flag without an admin listener boots and serves nothing", as
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
     followUpAdapter: followUpAdapter(),
@@ -1097,6 +1206,7 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
     forge: {
       mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
+      readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
       publish: async (input) => {
         publishes.push({ job: input.job, resultPayload: input.resultPayload });
         return { publicationId: "github-comment:1" };
@@ -1215,6 +1325,7 @@ default-executor-profile: k8s`,
       forge: {
         mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
         currentHeadSha: async () => HEAD,
+        readPrIdentity: async (_input) => ({ headSha: HEAD, prId: 4242, baseSha: BASE, fork: false }),
         publish: async () => ({ publicationId: "x" }),
       },
       onReady: (ready) => {
@@ -2633,4 +2744,460 @@ test("the reconciliation report renderer carries each refusal's reason (#1718)",
     } as unknown as ReconcileReport).length,
     1,
   );
+});
+
+// ── the operator's admin mutations over the REAL composition (#1772) ──────
+
+/** A local-profile executor that holds its attempt OPEN until the daemon
+ * aborts it: the cancel seam's live-run precondition (#1772). The attempt
+ * settles `cancelled` when the abort lands, exactly like a real worker. */
+class HangingExecution implements Executor {
+  readonly started: ExecutionRequest[] = [];
+
+  async start(request: ExecutionRequest, signal: AbortSignal) {
+    this.started.push(request);
+    mkdirSync(request.runDir, { recursive: true });
+    writeFileSync(request.requestPath, JSON.stringify(request), "utf8");
+    const settled = new Promise<ExecutionResult>((resolve) => {
+      const onAbort = (): void => {
+        resolve({
+          status: "cancelled",
+          runId: request.runId,
+          jobId: request.jobId,
+          resultHeadSha: "",
+          failureCategory: "",
+          failureMessage: "",
+          resultArtifactPath: "",
+          diagnostics: "",
+          artifactPaths: [],
+          resourceMs: 0,
+          observedAtMs: Date.now(),
+        });
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return {
+      observe: async () => ({ phase: "running" as const, status: "" as const, observedAtMs: Date.now() }),
+      cancel: async () => undefined,
+      collect: async () => settled,
+    };
+  }
+
+  async reconcile(): Promise<{ kind: "none" }> {
+    return { kind: "none" };
+  }
+
+  async cancel(): Promise<{ kind: "terminated" }> {
+    return { kind: "terminated" };
+  }
+}
+
+test("#1772: the admin surface drives the REAL composition (a forced rereview mints a generation; a cancel settles the run)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-mut-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  // The App installation identity: the forced rereview reads the pull request
+  // AS this installation, and a daemon without one refuses before it reads.
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const fake = new HangingExecution();
+  const prReads: Array<{ repoFullName: string; prNumber: number; installationId: string }> = [];
+  const controlPlane = new InMemoryControlPlaneStore();
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane,
+    executors: { local: () => fake },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber, installationId: input.installationId });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+  const started = handle!;
+  const admin = (path: string, init?: RequestInit): Promise<Response> =>
+    fetch(`http://127.0.0.1:${adminPort}${path}`, {
+      ...init,
+      headers: { authorization: "Bearer admin-token", ...(init?.headers ?? {}) },
+    });
+
+  // 1. The forced rereview: the operator's key reaches the daemon, the forge
+  //    read happens AS the daemon's installation, and a generation is minted.
+  const rereview = await admin("/admin/rereview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prKey: "owner/repo#7", reason: "manual" }),
+  });
+  assert.equal(rereview.status, 202);
+  const accepted = await rereview.json() as { jobId?: string };
+  assert.equal(typeof accepted.jobId, "string");
+  assert.notEqual(accepted.jobId, "");
+  assert.deepEqual(
+    prReads,
+    [{ repoFullName: "owner/repo", prNumber: 7, installationId: "12345" }],
+    "the forced rereview read the pull request AS the daemon's installation",
+  );
+  await waitFor(() => fake.started.length >= 1);
+  const snapshot = JSON.parse(readFileSync(join(env.PR_REVIEWER_DURABLE_STATE_DIR!, "queue-snapshot.json"), "utf8")) as {
+    records: Array<{ job: { jobId: string } }>;
+  };
+  assert.ok(
+    snapshot.records.some((record) => record.job.jobId === accepted.jobId),
+    "the forced generation is in the daemon's own queue",
+  );
+
+  // 2. The cancellation: a LIVE run, discovered through the admin surface
+  //    and cancelled through it.
+  const ingestHead = "cc33dd44ee55ff6677889900aabbccddeeff0011";
+  const event: CanonicalForgeEvent = {
+    platform: "github",
+    source: "webhook",
+    kind: "synchronize",
+    installationId: "12345",
+    repoFullName: "owner/repo",
+    prNumber: 9,
+    prId: 4243,
+    headSha: ingestHead,
+    baseSha: BASE,
+    draft: false,
+    fork: false,
+    labelName: "",
+    actor: "contributor",
+    eventReference: "",
+  };
+  assert.equal(await started.daemon.ingest(event), "scheduled");
+  await waitFor(() => fake.started.length >= 2);
+  const listed = await admin("/admin/runs?limit=50");
+  assert.equal(listed.status, 200);
+  const runs = await listed.json() as { runs: Array<{ runId: string; headSha: string; state: string }> };
+  const target = runs.runs.find((run) => run.headSha === ingestHead);
+  assert.ok(target !== undefined, "the live run is listed for the operator");
+  assert.ok(!["completed", "failed", "cancelled", "superseded"].includes(target.state), "the run is live");
+
+  const cancelled = await admin(`/admin/runs/${encodeURIComponent(target.runId)}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(await cancelled.json(), { cancelled: true });
+
+  // The durable run settles `cancelled` with the operator's attribution.
+  const settled = await (async () => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const run = await controlPlane.getRun(target.runId);
+      if (run !== null && run.state === "cancelled") return run;
+      if (Date.now() > deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  })();
+  assert.notEqual(settled, null, "the run settles cancelled");
+  assert.equal(settled!.state, "cancelled");
+  assert.equal(settled!.failureReason, "cancelled-by-operator");
+  assert.equal(settled!.supersededByJobId, "", "the run was never superseded");
+
+  // 3. The operator's WHY reaches the DURABLE audit ledger: the rereview row
+  //    carries the stated reason, the cancel row carries none.
+  const ledger = readFileSync(join(env.PR_REVIEWER_DURABLE_STATE_DIR!, "admin-audit.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const rereviewRow = ledger.find((row) => row["action"] === "rereview");
+  assert.equal(rereviewRow?.["reason"], "manual", "the rereview row records WHY the operator forced it");
+  const cancelRow = ledger.find((row) => row["action"] === "cancel");
+  assert.ok(cancelRow !== undefined, "the cancel was audited");
+  assert.ok(!("reason" in cancelRow!), "the cancel row carries no reason field at all");
+});
+
+test("#1772: a mixed-case operator key carries the intake's canonical identity (#1781 review)", async (t) => {
+  // The adoption records, the allow/denylist matching, and the generation
+  // identity all key on the LOWERCASED form the intake's forge normalizer
+  // produces. A forced rereview keyed with the operator's mixed-case spelling
+  // must reach the forge and the queue as that same canonical identity: never
+  // miss the adoption record, never mint a generation whose identity diverges
+  // from the intake's for the same head.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-case-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+
+  const rereview = await fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+    method: "POST",
+    headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+    body: JSON.stringify({ prKey: "Owner/Repo#7", reason: "manual" }),
+  });
+  assert.equal(rereview.status, 202);
+  const accepted = await rereview.json() as { jobId?: string };
+  assert.equal(typeof accepted.jobId, "string");
+  assert.deepEqual(
+    prReads,
+    [{ repoFullName: "owner/repo", prNumber: 7 }],
+    "the forge read used the canonical (lowercased) identity, not the operator's spelling",
+  );
+
+  await waitFor(() => {
+    try {
+      const snapshot = JSON.parse(readFileSync(join(env.PR_REVIEWER_DURABLE_STATE_DIR!, "queue-snapshot.json"), "utf8")) as {
+        records: Array<{ job: { jobId: string; repoFullName: string; prNumber: number } }>;
+      };
+      return snapshot.records.some(
+        (record) => record.job.jobId === accepted.jobId && record.job.repoFullName === "owner/repo" && record.job.prNumber === 7,
+      );
+    } catch {
+      return false;
+    }
+  });
+});
+
+test("#1781 review: the adoption gate sees the operator's key in the canonical case", async (t) => {
+  // The adoption gate's allow/denylist matching keys on the canonical
+  // (lowercased) identity. A mixed-case operator key must therefore neither
+  // miss its allowlist entry (a false refusal of an adopted repository) nor
+  // slip past a denylist entry (the hard-off layer bypassed by spelling).
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-gate-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(
+    configPath,
+    GITHUB_INSTANCE_CONFIG.replace(
+      "adoption:\n  mode: all_allowed\n  discovered-default: adopt",
+      "adoption:\n  mode: allowlist\n  allowlist:\n    - owner/repo\n  denylist:\n    - denied/repo\n  discovered-default: adopt",
+    ),
+    "utf8",
+  );
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+  const admin = (body: Record<string, string>): Promise<Response> =>
+    fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+      method: "POST",
+      headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  // The allowlisted repository: the mixed-case key reaches the gate as the
+  // canonical identity, hits the allowlist entry, and schedules.
+  const allowed = await admin({ prKey: "Owner/Repo#7", reason: "manual" });
+  assert.equal(allowed.status, 202, "the mixed-case key hits the allowlist through the canonical identity");
+  const accepted = await allowed.json() as { jobId?: string };
+  assert.equal(typeof accepted.jobId, "string");
+
+  // The denylisted repository: the mixed-case key reaches the gate as the
+  // canonical identity too, so the hard-off layer refuses it.
+  const refused = await admin({ prKey: "Denied/Repo#8", reason: "manual" });
+  assert.equal(refused.status, 409, "the denylist beats the operator's spelling");
+  assert.equal(
+    (await refused.json() as { detail?: string }).detail,
+    "the repository is not adopted for review",
+  );
+
+  assert.deepEqual(
+    prReads,
+    [
+      { repoFullName: "owner/repo", prNumber: 7 },
+      { repoFullName: "denied/repo", prNumber: 8 },
+    ],
+    "both reads reached the forge under the canonical identity",
+  );
+});
+
+test("#1781 review: the shape gate refuses traversal-shaped keys before any forge read", async (t) => {
+  // A dot-only segment (`.`/`..`) passes the admin layer's wide identifier
+  // vocabulary but is no repository identity: the platform's repo-ref
+  // validator refuses exactly those segments. The controller's shape gate
+  // must therefore refuse `../..#7` with the grammar as its reason — never
+  // reach the forge, where the same key surfaces as the opaque "could not
+  // be read". A valid key through the same gate still schedules.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-admin-shape-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "12345";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+
+  const prReads: Array<{ repoFullName: string; prNumber: number }> = [];
+  let handle: ControllerMainHandle | null = null;
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new HangingExecution() },
+    forge: {
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      readPrIdentity: async (input) => {
+        prReads.push({ repoFullName: input.repoFullName, prNumber: input.prNumber });
+        return { headSha: HEAD, prId: 4242, baseSha: BASE, fork: false };
+      },
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    createWorkspace: async (): Promise<WorkspaceHandle> => ({
+      info: {
+        rootPath: "/srv/workspace-fake",
+        headSha: HEAD,
+        mergeBaseSha: BASE,
+        platform: "github",
+        repoFullName: "owner/repo",
+        createdAtMs: 1000,
+      },
+      close: async () => undefined,
+    }),
+    onReady: (ready) => {
+      handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handle !== null) await handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handle !== null);
+
+  const admin = (prKey: string): Promise<Response> =>
+    fetch(`http://127.0.0.1:${adminPort}/admin/rereview`, {
+      method: "POST",
+      headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+      body: JSON.stringify({ prKey, reason: "manual" }),
+    });
+
+  for (const traversalKey of ["../..#7", "./repo#7", "owner/..#7", "owner/.#7"]) {
+    const refused = await admin(traversalKey);
+    assert.equal(refused.status, 409, `${traversalKey} is refused at the shape gate`);
+    assert.equal(
+      (await refused.json() as { detail?: string }).detail,
+      "the PR key must be owner/repo#123",
+      `${traversalKey} gets the grammar as its reason, not a forge-read failure`,
+    );
+  }
+  assert.deepEqual(prReads, [], "a traversal-shaped key never reaches the forge");
+
+  // The gate is not widened by accident: the valid key still schedules,
+  // and a dot-CONTAINING identity (`.`/`..` only being the refusal) is a
+  // valid key — a future over-tightened rule breaks here, not in production.
+  const accepted = await admin("owner/repo#7");
+  assert.equal(accepted.status, 202);
+  const acceptedDotted = await admin("owner.io/sub.name#7");
+  assert.equal(acceptedDotted.status, 202, "a dotted repository identity is a valid key");
+  assert.deepEqual(prReads, [
+    { repoFullName: "owner/repo", prNumber: 7 },
+    { repoFullName: "owner.io/sub.name", prNumber: 7 },
+  ]);
 });

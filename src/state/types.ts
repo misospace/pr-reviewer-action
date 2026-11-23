@@ -32,6 +32,7 @@
 import { INSTALLATION_ID_PATTERN } from "../events/normalize.js";
 import { containsSecretShapedContent, isCanonicalJsonEncoding } from "../context/redact.js";
 import type { JobLifecycleState } from "../queue/types.js";
+import { FAILURE_REASON_MAX_CHARS } from "../queue/types.js";
 import { isPlainObject } from "../platform/object.js";
 
 /** The platforms the controller knows (mirrors `ReviewJob`). */
@@ -68,8 +69,11 @@ const CONFIG_FINGERPRINT_PATTERN = /^[0-9a-f]{8,64}$/;
  * `[A-Za-z0-9._-]` (the queue store's form). */
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
-/** Maximum length of a free-text-but-single-line persisted field. */
-const REASON_MAX_CHARS = 256;
+/** Maximum length of a free-text-but-single-line persisted field. ONE
+ * number with the queue's terminal-reason writer bound
+ * (`FAILURE_REASON_MAX_CHARS`, src/queue/types.ts): the writers bound to
+ * it, this validator enforces it (#1786 review). */
+const REASON_MAX_CHARS = FAILURE_REASON_MAX_CHARS;
 
 /** Maximum length of a publication error / history detail. */
 const DETAIL_MAX_CHARS = 2000;
