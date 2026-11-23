@@ -4149,10 +4149,10 @@ test("cancelRun: a generation whose publication is in flight is NOT reported as 
   });
 
   const result = await h.daemon.cancelRun(request.runId);
-  assert.equal(result.status, "publish-in-flight", "an in-flight publication cannot promise a cancelled run");
+  assert.equal(result.status, "publish-undetermined", "an in-flight publication cannot promise a cancelled run");
   assert.equal(
-    result.status === "publish-in-flight" ? result.reason : "",
-    "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
+    result.status === "publish-undetermined" ? result.reason : "",
+    "the publication was already attempted and its outcome is not determined here: a publication that already succeeded cannot be undone",
   );
 
   // The publication succeeds: the review is on the forge, so the

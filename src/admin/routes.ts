@@ -332,7 +332,7 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
           // answers "accepted, undetermined" instead of the 200
           // `cancelled: true` that promises an operator-cancelled run.
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
-          return fixed(202, { status: "cancellation-registered", detail: boundedRefusalReason(result.undetermined) });
+          return fixed(202, { status: "cancellation-registered", cancelled: false, detail: boundedRefusalReason(result.undetermined) });
         }
         if ("refused" in result) {
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });

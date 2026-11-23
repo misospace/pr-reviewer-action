@@ -658,6 +658,78 @@ test("crash during pending publish: durable result persists before await, restar
   }
 });
 
+test("crash during pending publish: the operator's cancel after the restart is UNDETERMINED, never applied (#1772)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "queue-crash-cancel-"));
+  const file = path.join(dir, "queue.json");
+  try {
+    // The first publisher hangs: the publication attempt is fired and
+    // the process "dies" before its outcome is known.
+    const firstDeferredRef: { current: ((b: boolean) => void) | null } = { current: null };
+    const firstPublisher: JobPublisher = {
+      async publish(_record: JobRecord): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+          firstDeferredRef.current = resolve;
+        });
+      },
+    };
+    const clock: Clock = { t: 1_000_000 };
+    const firstStore = new JsonFileQueueStore(file);
+    const firstExecutor = new ControllableExecutor();
+    const firstController = new ReviewQueueController(
+      firstStore,
+      { ...baseOptions(firstExecutor), publisher: firstPublisher },
+      () => clock.t,
+    );
+    firstController.recover();
+    firstController.enqueue(makeJob("job-a"));
+    await firstController.tick();
+    firstExecutor.last().settle(DONE);
+    await flush();
+    assert.notEqual(firstDeferredRef.current, null, "the publish call was fired");
+
+    // The durable marker: the attempt was FIRED (no pending publish
+    // backoff), so a restart reads the publication as undetermined
+    // instead of assuming it never happened.
+    const onDisk = new JsonFileQueueStore(file).load();
+    assert.equal(onDisk.records[0]!.state, "publishing");
+    assert.equal(onDisk.records[0]!.nextRetryAtMs, 0, "the fired attempt leaves no pending backoff");
+
+    // The crash: the first controller is discarded with its publish
+    // promise unresolved — this process never learns the outcome.
+    const secondCalls: JobRecord[] = [];
+    const secondPublisher: JobPublisher = {
+      async publish(record: JobRecord): Promise<boolean> {
+        secondCalls.push(record);
+        return true;
+      },
+    };
+    const secondStore = new JsonFileQueueStore(file);
+    const secondController = new ReviewQueueController(
+      secondStore,
+      { ...baseOptions(new ControllableExecutor()), publisher: secondPublisher },
+      () => clock.t,
+    );
+    secondController.recover();
+
+    // The operator cancels: the publication's outcome is NOT determined
+    // here (it may already have landed on the forge), so the seam must
+    // not report an applied cancellation.
+    assert.equal(secondController.cancel("job-a"), "publish-undetermined");
+    assert.equal(secondController.recordFor("job-a")!.cancelRequested, true, "the operator's intent is registered");
+
+    // The pending retry never publishes: the generation ends with the
+    // operator's attribution.
+    await secondController.tick();
+    await flush();
+    assert.equal(secondCalls.length, 0, "the cancelled generation is never published");
+    const settled = secondController.recordFor("job-a")!;
+    assert.equal(settled.state, "cancelled");
+    assert.equal(settled.failureReason, "cancelled-by-operator");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("crash durability: idempotent publish — restart with a completed record never re-publishes", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "queue-crash-after-"));
   const file = path.join(dir, "queue.json");
@@ -1463,6 +1535,27 @@ test("cancel: a failed attempt of an operator-cancelled generation settles cance
   assert.equal(executor.invocations.length, 1, "the cancelled generation is never redispatched");
 });
 
+test("cancel: a shutdown never overwrites an operator cancellation's attribution (#1772)", async () => {
+  // The operator cancelled the generation and the route acknowledged it;
+  // the daemon then stops before the aborted attempt settles. The
+  // generation still ends with the OPERATOR's attribution — the run
+  // mirror reports `cancelled-by-operator` for the same record, so a
+  // "shutdown" attribution here would make the two durable views
+  // disagree.
+  const { executor, controller } = setup();
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  assert.equal(controller.cancel("job-a"), "cancel-requested");
+  assert.equal(executor.last().signal.aborted, true, "the live attempt is aborted");
+
+  await controller.shutdown(0);
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled");
+  assert.equal(settled.failureReason, "cancelled-by-operator", "the operator's attribution survives the shutdown");
+  assert.equal(settled.cancelRequested, true);
+  assert.equal(settled.supersededByJobId, "");
+});
+
 test("enqueue: a newer generation never overwrites an operator cancellation's attribution (#1772)", async () => {
   const { executor, controller } = setup();
   controller.enqueue(makeJob("job-a"));
@@ -1602,7 +1695,7 @@ test("publish: a publish that already succeeded settles completed, not cancelled
   // operator-cancelled run: the forge side effect may already have
   // landed. The seam says so instead of reporting an applied
   // cancellation (#1772).
-  assert.equal(controller.cancel("job-a"), "publish-in-flight");
+  assert.equal(controller.cancel("job-a"), "publish-undetermined");
   assert.equal(controller.recordFor("job-a")!.cancelRequested, true, "the operator's intent is still registered");
 
   deferred.current!(true);
@@ -1634,7 +1727,7 @@ test("publish: an in-flight publication that fails settles cancelled-by-operator
   await flush();
   assert.equal(controller.recordFor("job-a")!.state, "publishing");
 
-  assert.equal(controller.cancel("job-a"), "publish-in-flight");
+  assert.equal(controller.cancel("job-a"), "publish-undetermined");
   deferred.current!(false);
   await flush();
   const settled = controller.recordFor("job-a")!;

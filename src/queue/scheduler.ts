@@ -329,9 +329,10 @@ export class ReviewQueueController {
    *  - `cancel-requested` — an active record was stamped and its
    *    executor aborted; the attempt settles `cancelled` when it
    *    observes the abort;
-   *  - `publish-in-flight` — the generation is `publishing` and its
-   *    publication is ALREADY in flight: the forge side effect cannot
-   *    be undone, so the cancellation cannot guarantee an
+   *  - `publish-undetermined` — the generation is `publishing` and its
+   *    publication attempt was FIRED, so the outcome is not determined
+   *    here: the forge side effect may already have landed and it
+   *    cannot be undone, so the cancellation cannot guarantee an
    *    operator-cancelled terminal state (#1772). The operator's intent
    *    is still REGISTERED — the stamp stops a would-be retry and a
    *    publication that fails settles the generation
@@ -345,7 +346,7 @@ export class ReviewQueueController {
    *  active record is CONVERTED to the operator attribution here, so a
    *  cancellation acknowledgement is never contradicted by the durable
    *  record. */
-  cancel(jobId: string): "cancelled" | "cancel-requested" | "publish-in-flight" | "unknown" | "terminal" {
+  cancel(jobId: string): "cancelled" | "cancel-requested" | "publish-undetermined" | "unknown" | "terminal" {
     this.ensureLoaded();
     const record = this.records.get(jobId);
     if (record === undefined) return "unknown";
@@ -374,16 +375,20 @@ export class ReviewQueueController {
     // newer generation runs regardless: this only says why THIS
     // generation ended.
     //
-    // A generation whose PUBLICATION is already in flight is the one
-    // case the caller cannot report as an applied cancellation: the
-    // forge side effect may already have landed, and it cannot be
-    // undone. The stamp still registers the operator's intent (a
-    // publication that fails settles `cancelled-by-operator` and never
-    // retries), but the terminal state is the publication's outcome —
-    // so the seam says `publish-in-flight` and the caller answers
-    // "accepted, undetermined" instead of the applied-cancellation 200
-    // contract (#1772).
-    const publicationInFlight = record.state === "publishing" && this.publishInFlight.has(jobId);
+    // A generation whose PUBLICATION outcome is not determined here is
+    // the one case the caller cannot report as an applied cancellation:
+    // the forge side effect may already have landed, and it cannot be
+    // undone. The record's publication attempt is FIRED (no pending
+    // publish backoff) — the attempt is in flight, or it was and this
+    // process lost the answer (the marker survives a crash). The
+    // operator's intent is still REGISTERED (the stamp stops a
+    // would-be retry and a publication that fails settles
+    // `cancelled-by-operator`), but the terminal state is the
+    // publication's outcome — so the seam says `publish-undetermined`
+    // and the caller answers "accepted, undetermined" instead of the
+    // applied-cancellation 200 contract (#1772).
+    const publicationUndetermined =
+      record.state === "publishing" && record.resultHeadSha !== "" && record.nextRetryAtMs === 0;
     this.records.set(
       jobId,
       Object.freeze({
@@ -395,7 +400,7 @@ export class ReviewQueueController {
     const entry = this.controllers.get(jobId);
     if (entry !== undefined) entry.controller.abort();
     this.save();
-    return publicationInFlight ? "publish-in-flight" : "cancel-requested";
+    return publicationUndetermined ? "publish-undetermined" : "cancel-requested";
   }
 
   /** One scheduling pass: lease expiry, deadline expiry, publish
@@ -497,12 +502,14 @@ export class ReviewQueueController {
   }
 
   /** Stop intake, drain active work for up to `drainMs` of the injected
-   * clock (driving `tick` + microtask flushes — NO real sleeping; the
-   * drain is bounded at 128 passes and stops early once a pass makes no
-   * observable progress), then abort the remaining executors, cancel
-   * their records (`failureReason` "shutdown"), and persist. A
-   * `publishing` record holding its durable result is never cancelled:
-   * it stays `publishing` for the next boot / a later tick to retry. */
+   *  clock (driving `tick` + microtask flushes — NO real sleeping; the
+   *  drain is bounded at 128 passes and stops early once a pass makes no
+   *  observable progress), then abort the remaining executors, cancel
+   *  their records (`failureReason` "shutdown" — an OPERATOR-cancelled
+   *  record keeps the operator's attribution instead, #1772), and
+   *  persist. A `publishing` record holding its durable result is never
+   *  cancelled: it stays `publishing` for the next boot / a later tick
+   *  to retry. */
   async shutdown(drainMs: number): Promise<void> {
     this.closed = true;
     const budget =
@@ -530,6 +537,16 @@ export class ReviewQueueController {
     for (const [jobId, record] of [...this.records.entries()]) {
       if (!isActiveState(record.state)) continue;
       if (record.state === "publishing" && record.resultHeadSha !== "") {
+        continue;
+      }
+      // An operator-cancelled generation keeps the OPERATOR's attribution:
+      // the cancellation the admin route already acknowledged is the
+      // proximate cause of the end, and the control plane's run mirror
+      // reports `cancelled-by-operator` for the same record. A "shutdown"
+      // attribution here would contradict the acknowledgement the route
+      // gave and make the two durable views disagree (#1772).
+      if (isOperatorCancellation(record)) {
+        this.settleOperatorCancellation(jobId, record, now);
         continue;
       }
       this.records.set(
@@ -769,13 +786,22 @@ export class ReviewQueueController {
         );
         continue;
       }
+      // The retry attempt is FIRED: the publication's outcome is now
+      // unknown until it resolves, so the record carries the attempt
+      // marker (no pending backoff) BEFORE the call is fired. A crash
+      // between the write and its outcome leaves the same marker in the
+      // durable snapshot, so a later process reads the publication as
+      // undetermined instead of assuming it never happened (#1772).
+      const firing = Object.freeze({ ...record, nextRetryAtMs: 0, updatedAtMs: now });
+      this.records.set(jobId, firing);
+      this.save();
       // Fire-and-forget: a hung publisher must not block `tick()`,
       // dispatch of unrelated prKeys, or `shutdown(drainMs)`'s drain
       // loop. The background promise eventually settles, mutates the
       // record, and `save()`s; the next `tick()` that finds
       // `publishInFlight.has(jobId) === false` will re-fire if the
       // backoff has elapsed.
-      this.firePublishRetry(jobId, record, now);
+      this.firePublishRetry(jobId, firing, now);
     }
   }
 
@@ -946,6 +972,12 @@ export class ReviewQueueController {
     const publishing: JobRecord = Object.freeze({
       ...withState(record, "publishing", now),
       resultHeadSha: outcome.resultHeadSha,
+      // The publication attempt is FIRED from here: no pending backoff
+      // (the attempt marker). A crash between the forge write and its
+      // outcome leaves this marker in the durable snapshot, so a later
+      // process reads the publication as UNDETERMINED instead of
+      // assuming it never happened (#1772).
+      nextRetryAtMs: 0,
     });
     this.records.set(jobId, publishing);
     // Supersession gate BEFORE publish: never publish a result that is

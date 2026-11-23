@@ -317,6 +317,7 @@ test("a cancellation whose publication is in flight answers 202, never the appli
   assert.equal(response.status, 202);
   assert.deepEqual(response.body, {
     status: "cancellation-registered",
+    cancelled: false,
     detail: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
   });
   assert.deepEqual(events.map((event) => event.outcome), ["accepted"]);

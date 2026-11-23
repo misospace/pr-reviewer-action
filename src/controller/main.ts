@@ -841,7 +841,7 @@ function createAdminDeps(deps: {
       // registered, but the terminal state is the publication's outcome
       // — NOT the operator's click. The admin layer answers "accepted,
       // undetermined" here, never the applied-cancellation contract.
-      if (result.status === "publish-in-flight") return { undetermined: result.reason };
+      if (result.status === "publish-undetermined") return { undetermined: result.reason };
       return { refused: result.reason };
     },
     audit: (event) => {
