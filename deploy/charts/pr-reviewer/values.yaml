@@ -177,25 +177,30 @@ controller:
         webhook:
           port: 8080
 
+  # runs and workspace-cache are the standard shared worker/controller
+  # claims. Their mount roots come from controller.paths (single source)
+  # and Kubernetes-executor mappings are derived from these entries. Use
+  # existingClaim for operator-provided claims; the chart renders
+  # chart-created ones as <fullname>-runs / <fullname>-workspace-cache.
+  # Every standard entry must keep a writable mount at its paths root;
+  # extra mounts (including advancedMounts) are additive.
   persistence:
     durable-state:
       type: persistentVolumeClaim
       accessMode: ReadWriteOnce
       size: 1Gi
-      globalMounts:
-        - path: /var/lib/pr-reviewer/state
+      # Controller-internal state survives uninstalls and chart renames
+      # (#1767 pins the claim name deterministically; retain keeps the
+      # PVC when the chart no longer renders it).
+      retain: true
     runs:
       type: persistentVolumeClaim
       accessMode: ReadWriteOnce
       size: 5Gi
-      globalMounts:
-        - path: /var/lib/pr-reviewer/runs
     workspace-cache:
       type: persistentVolumeClaim
       accessMode: ReadWriteOnce
       size: 5Gi
-      globalMounts:
-        - path: /var/lib/pr-reviewer/cache
     tmp:
       type: emptyDir
       globalMounts:
@@ -244,9 +249,10 @@ workerExecutor:
       cpu: "2"
       memory: 2Gi
   ttlSecondsAfterFinished: 1800
-  # Shared controller/worker PVCs (mounted at the SAME absolute path in
-  # both pods — the instance config's volume mappings reference these
-  # claim names by `controllerRoot`).
+  # Additional, non-standard PVCs for worker Jobs. The standard shared
+  # runs and workspace-cache claims derive from controller.persistence;
+  # Kubernetes mode passes their claim/root mappings to the controller for
+  # profiles without explicit volumes to inherit.
   volumeClaims: []
 
 # ── network policy ─────────────────────────────────────────────────────

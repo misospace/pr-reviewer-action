@@ -30,10 +30,10 @@ jobs:
         run: helm dependency build deploy/charts/pr-reviewer
 
       - name: Lint (controller-only example)
-        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+        run: helm lint --namespace pr-reviewer deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
 
       - name: Lint (kubernetes-executor example)
-        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+        run: helm lint --namespace pr-reviewer deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
 
       - name: Render (controller-only example)
         run: |
@@ -51,6 +51,10 @@ jobs:
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
           if grep -q 'name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS' /var/tmp/render-controller-only.yaml; then
             echo "Kubernetes deployment defaults must be absent outside Kubernetes mode" >&2
+            exit 1
+          fi
+          if grep -q 'name: PR_REVIEWER_KUBERNETES_SHARED_VOLUMES' /var/tmp/render-controller-only.yaml; then
+            echo "shared volume mappings must be absent outside Kubernetes mode" >&2
             exit 1
           fi
           # #1712: controller-only mode keeps the default-deny token posture
@@ -78,6 +82,10 @@ jobs:
             > /var/tmp/render-controller-only-init-section.yaml
           grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: runs'
           grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: workspace-cache'
+          # #1767: controller-only defaults render three chart-created PVCs,
+          # so the count-based resolution keeps the <fullname>-durable-state
+          # name the pre-#1767 chart rendered for this exact topology.
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer-durable-state\n") {found=1} END{exit !found}' /var/tmp/render-controller-only.yaml
           # Policies are opt-in; verify default renders none, opt-in renders one.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
             echo "unexpected default NetworkPolicy in controller-only chart" >&2
@@ -199,12 +207,12 @@ jobs:
             exit 1
           fi
           # A configured GitHub target must carry an exact App installation ID.
-          if helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          if helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set 'controller.reconcile.repos[0]=owner/name' >/dev/null 2>&1; then
             echo "GitHub polling must require a pinned installation identity" >&2
             exit 1
           fi
-          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set 'controller.reconcile.repos[0]=owner/name' \
             --set-string controller.reconcile.githubInstallationId=4242 \
             --set controller.webhook.enabled=false > /var/tmp/render-github-poll.yaml
@@ -214,7 +222,7 @@ jobs:
           # intake's fallback for a delivery that omitted `installation.id`,
           # so a configured id is emitted with polling explicitly disabled.
           # The poll env must stay absent in that render.
-          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set controller.reconcile.enabled=false \
             --set-string controller.reconcile.githubInstallationId=4242 \
             > /var/tmp/render-github-no-poll.yaml
@@ -240,19 +248,26 @@ jobs:
           set -euo pipefail
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             > /var/tmp/render-kubernetes-executor.yaml
           # Chart-owned worker deployment defaults: image follows the
           # release coordinate, and the bounded JSON reaches controller startup.
           app_version="$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}' deploy/charts/pr-reviewer/Chart.yaml)"
           grep -q 'name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS' /var/tmp/render-kubernetes-executor.yaml
           grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version" /var/tmp/render-kubernetes-executor.yaml
+          # Both digest renders pin --namespace: without it helm renders in
+          # "default", and the #1767 namespace guard refuses the standard
+          # example (its inline config names the pr-reviewer release
+          # namespace), so the pin would fail for the wrong reason.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-string workerExecutor.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             > /var/tmp/render-kubernetes-executor-digest.yaml
           grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" /var/tmp/render-kubernetes-executor-digest.yaml
           if helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-string workerExecutor.image.digest=sha256:INVALID >/dev/null 2>&1; then
             echo "invalid worker image digest must fail chart rendering" >&2
             exit 1
@@ -272,7 +287,297 @@ jobs:
           # overrides from controllers.<name>.pod — the v1 `podOptions`
           # key is silently ignored, leaving the default-deny false).
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "automountServiceAccountToken: true"
-          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          # #1767: the standard shared storage is declared once under
+          # controller.persistence and renders exactly three chart-created
+          # PVCs (durable-state, runs, workspace-cache) from the
+          # controller component; worker-rbac renders no PVC at all.
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-executor.yaml)" -eq 3 ]
+          grep -q 'name: pr-reviewer-runs$' /var/tmp/render-kubernetes-executor.yaml
+          grep -q 'name: pr-reviewer-workspace-cache$' /var/tmp/render-kubernetes-executor.yaml
+          # #1767: the chart resolves chart-created claim names with the
+          # common library's own count-based rule, so the three-claim
+          # standard topology renders <fullname>-<key> for every claim —
+          # exactly the name the pre-#1767 chart rendered for this
+          # topology, and the durable-state claim is retained across
+          # uninstalls.
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer-durable-state\n") {found=1} END{exit !found}' /var/tmp/render-kubernetes-executor.yaml
+          grep -q 'helm.sh/resource-policy: keep' /var/tmp/render-kubernetes-executor.yaml
+          if ! awk '/^# Source: pr-reviewer\/templates\/worker-rbac.yaml/{inrbac=1; next} /^# Source:/{inrbac=0} inrbac && /^kind: PersistentVolumeClaim$/{bad=1} END{exit bad?1:0}' /var/tmp/render-kubernetes-executor.yaml; then
+            echo "worker-rbac must not render PVCs in the standard topology" >&2
+            exit 1
+          fi
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-runs'
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-workspace-cache'
+          # #1767: chart-derived {claim,controllerRoot} mappings reach the controller;
+          # the example profile omits raw volumes, so runtime inheritance owns them.
+          grep -A1 -- '- name: PR_REVIEWER_KUBERNETES_SHARED_VOLUMES' /var/tmp/render-kubernetes-executor.yaml \
+            | grep -q 'value:.*pr-reviewer-runs.*controllerRoot.*\/var\/lib\/pr-reviewer\/runs.*pr-reviewer-workspace-cache'
+          if grep -q 'controllerRoot.*durable-state' /var/tmp/render-kubernetes-executor.yaml; then
+            echo "durable-state must not be exposed as worker shared volume" >&2
+            exit 1
+          fi
+          if grep -q 'volumes:' deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml; then
+            echo "standard Kubernetes example must inherit shared volumes, not declare them" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=operator-runs \
+            > /var/tmp/render-kubernetes-existing-claim.yaml
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-existing-claim.yaml)" -eq 2 ]
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-existing-claim.yaml | grep -q 'claimName: operator-runs'
+          if grep -q 'name: pr-reviewer-runs$' /var/tmp/render-kubernetes-existing-claim.yaml; then
+            echo "existing standard claim must not render a pr-reviewer-runs PVC" >&2
+            exit 1
+          fi
+          # #1767 upgrade continuity, both count postures: the chart
+          # resolves chart-created claim names with the same count rule the
+          # pre-#1767 chart named claims from, so an upgrade that keeps the
+          # storage topology keeps every claim name. The documented
+          # pre-#1767 example posture (both standard claims
+          # operator-provided, durable-state the only chart-created PVC)
+          # rendered the claim as the bare fullname and must keep doing so,
+          # with the retain annotation it gains.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            > /var/tmp/render-legacy-single-pvc.yaml
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-legacy-single-pvc.yaml)" -eq 1 ]
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") && index($0,"helm.sh/resource-policy: keep") {found=1} END{exit !found}' /var/tmp/render-legacy-single-pvc.yaml
+          if grep -q 'name: pr-reviewer-durable-state$' /var/tmp/render-legacy-single-pvc.yaml; then
+            echo "the legacy single-chart-created-PVC posture must keep the bare-fullname durable-state claim" >&2
+            exit 1
+          fi
+          # The chart-created shared-claims topology (the standard example)
+          # must keep the <fullname>-durable-state name the pre-#1767 chart
+          # rendered for it — asserted above — and the documented adoption
+          # path (old single-PVC posture moving to chart-created claims)
+          # keeps the old claim with an explicit operator forceRename pin.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.durable-state.forceRename=pr-reviewer \
+            > /var/tmp/render-durable-state-adoption-pin.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") && index($0,"helm.sh/resource-policy: keep") {found=1} END{exit !found}' /var/tmp/render-durable-state-adoption-pin.yaml
+          # The naming reproduction extends to the entry-level renames and
+          # the fullname overrides the pre-#1767 library naming read: an
+          # install using any of them keeps its claim names across the
+          # upgrade (rendered against the legacy single-PVC posture, where
+          # the bare-resolution path applies).
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set controller.persistence.durable-state.prefix=alt- \
+            > /var/tmp/render-naming-prefix.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: alt--pr-reviewer\n") {found=1} END{exit !found}' /var/tmp/render-naming-prefix.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set controller.persistence.durable-state.suffix=-old \
+            > /var/tmp/render-naming-suffix.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer--old\n") {found=1} END{exit !found}' /var/tmp/render-naming-suffix.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set global.fullnameOverride=renamed-release \
+            > /var/tmp/render-naming-override.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: renamed-release\n") {found=1} END{exit !found}' /var/tmp/render-naming-override.yaml
+          # Relocation stays single-source, but the single source now spans
+          # the operator's inline config too: relocating the chart side
+          # renders only when the instance config's repetition agrees. The
+          # relocated config renames the runs controller-root to match.
+          sed 's|controller-root: /var/lib/pr-reviewer/runs|controller-root: /data/runs|' \
+            deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/values-relocated-runs.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f /var/tmp/values-relocated-runs.yaml \
+            --namespace pr-reviewer \
+            --set controller.paths.runsRoot=/data/runs > /var/tmp/render-relocated-runs.yaml
+          grep -A1 'name: PR_REVIEWER_RUNS_ROOT' /var/tmp/render-relocated-runs.yaml | grep -q 'value: /data/runs'
+          awk '/initContainers:/,/containers:/' /var/tmp/render-relocated-runs.yaml > /var/tmp/render-relocated-init-section.yaml
+          grep -A1 'mountPath: /data/runs' /var/tmp/render-relocated-init-section.yaml | grep -q 'name: runs'
+          # Fail closed: duplicate standard claim declarations (shared or
+          # durable-state), non-claim standard storage, disabled standard
+          # storage, a mount/path conflict, a readOnly standard root, and
+          # a mismatched worker or instance-config namespace each refuse
+          # the render with the guard's own message. A relocated
+          # controller.paths root is NOT here: the example profile
+          # inherits the derived mappings, so relocation renders by design
+          # (pinned below); a DECLARED derived claim at a stale root is
+          # what refuses, pinned by the set-file cases further down.
+          for spec in \
+            'workerExecutor.volumeClaims[0].name=pr-reviewer-runs|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created standard claim' \
+            'workerExecutor.volumeClaims[0].name=pr-reviewer-durable-state|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created durable-state claim' \
+            'controller.persistence.runs.type=hostPath|controller.persistence.runs.hostPath=/tmp/x|must be an operator-provided existingClaim or a chart-created persistentVolumeClaim' \
+            'controller.persistence.runs.enabled=false||is required as the standard shared storage' \
+            'controller.persistence.durable-state=null||is required (the standard storage is single-source' \
+            'controller.paths.runsRoot=data/runs||must be a non-empty absolute path starting with /' \
+            'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
+            'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
+            'workerExecutor.namespace=other-ns||requires workerExecutor.namespace' \
+            'controller.enabled=false||requires controller.enabled'; do
+            IFS='|' read -r first second message <<< "$spec"
+            args=(--set "$first")
+            if [ -n "$second" ]; then args+=(--set "$second"); fi
+            if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml "${args[@]}" 2>&1 >/dev/null)"; then
+              echo "invalid shared-storage configuration rendered: $first" >&2
+              exit 1
+            fi
+            printf '%s' "$error" | grep -q "$message"
+          done
+          # The instance config is authoritative for the worker Jobs'
+          # namespace: an inline config naming another namespace refuses.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: other-ns' \
+            > /var/tmp/mismatched-ns-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/mismatched-ns-config.yaml 2>&1 >/dev/null)"; then
+            echo "an instance config whose kubernetes namespace differs from the release namespace must refuse the render" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must equal the release namespace"
+          # #1767: the derived mapping artifact's worker-profile consumer at
+          # render time — an inline kubernetes profile that repeats a derived
+          # standard claim at any other controller root refuses the render.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /old/stale/root' \
+            > /var/tmp/divergent-root-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/divergent-root-config.yaml 2>&1 >/dev/null)"; then
+            echo "an inline instance config repeating a derived claim at a stale root must refuse the render" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
+          # The guard's permissive side stays pinned: an inline profile's
+          # mapping on a NON-standard claim (here provisioned through
+          # workerExecutor.volumeClaims) must keep rendering, as must a
+          # profile that omits a standard claim entirely.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            '        - claim: extra-advanced' \
+            '          controller-root: /srv/extra' \
+            > /var/tmp/advanced-mapping-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-file controller.instanceConfig=/var/tmp/advanced-mapping-config.yaml \
+            --set 'workerExecutor.volumeClaims[0].name=extra-advanced' \
+            --set 'workerExecutor.volumeClaims[0].size=1Gi' \
+            > /var/tmp/render-advanced-mapping.yaml
+          grep -q 'name: extra-advanced$' /var/tmp/render-advanced-mapping.yaml
+          # The guards are conditioned on the chart deriving shared claims:
+          # the legacy all-existingClaim posture keeps rendering — including
+          # a dedicated worker namespace, the pre-#1767 shape — because the
+          # operator provisions identical claims in every named namespace.
+          # The claim names are the old documented example's exactly
+          # (pr-reviewer-runs / pr-reviewer-workspace as existingClaims): an
+          # operator-provided claim may coincide with the chart-created name
+          # spelling, and the provisioning fact, not the name, must decide.
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: workers' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            > /var/tmp/legacy-namespace-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set workerExecutor.namespace=workers \
+            --set 'workerExecutor.volumeClaims[0].name=pr-reviewer-runs' \
+            --set 'workerExecutor.volumeClaims[0].size=20Gi' \
+            --set 'workerExecutor.volumeClaims[1].name=pr-reviewer-workspace' \
+            --set 'workerExecutor.volumeClaims[1].size=20Gi' \
+            --set-file controller.instanceConfig=/var/tmp/legacy-namespace-config.yaml \
+            > /var/tmp/render-legacy-namespace.yaml
+          grep -q 'name: pr-reviewer-runs$' /var/tmp/render-legacy-namespace.yaml
+          # The root check applies to the default executor profile only:
+          # a non-default profile's raw advanced mapping may mount a
+          # derived claim at any root, while the named default still
+          # refuses a stale root.
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            '  - name: adv' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /elsewhere/stale' \
+            > /var/tmp/non-default-divergent-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-file controller.instanceConfig=/var/tmp/non-default-divergent-config.yaml \
+            > /var/tmp/render-non-default-divergent.yaml
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /stale/root' \
+            > /var/tmp/default-divergent-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/default-divergent-config.yaml 2>&1 >/dev/null)"; then
+            echo "the default executor profile must still refuse a stale derived claim root" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
+          # A declared default that names a missing profile must not
+          # silently uncheck the kubernetes profiles: the root check falls
+          # back to every kubernetes profile, so the stale root refuses.
+          sed 's|default-executor-profile: k|default-executor-profile: nope|' \
+            /var/tmp/default-divergent-config.yaml > /var/tmp/unknown-default-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/unknown-default-config.yaml 2>&1 >/dev/null)"; then
+            echo "an untrusted default-executor-profile must not uncheck the kubernetes profiles" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
           # #1725: Kubernetes-executor mode must render the chart-owned
           # fix-roots init container — kubelet provisions claim roots as
           # group-writable 0775 uid 0, which the runtime's cache-root trust
@@ -299,6 +604,7 @@ jobs:
           # keyed by name) alongside the chart-owned one.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set controller.controllers.main.initContainers.operator-init.image.repository=busybox \
             --set controller.controllers.main.initContainers.operator-init.image.tag=latest \
             --set-json 'controller.controllers.main.initContainers.operator-init.command=["echo","ready"]' \
@@ -311,6 +617,7 @@ jobs:
           # not an opaque sprig merge type error.
           if list_err="$(helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-json 'controller.controllers.main.initContainers=[{"name":"operator-init","image":"busybox:latest"}]' 2>&1 >/dev/null)"; then
             echo "a raw list under controller.controllers.main.initContainers must refuse the render" >&2
             exit 1
@@ -325,6 +632,7 @@ jobs:
           fi
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
           # The worker selector is only present when the policy is opted in.
           grep -q 'app.kubernetes.io/managed-by: pr-reviewer-action' /var/tmp/render-kubernetes-executor-netpol.yaml
@@ -349,6 +657,7 @@ jobs:
           # PR_REVIEWER_CREDENTIAL_A_B.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set 'controller.credentials.a-b.value=x' \
             --set 'controller.credentials.a\.b.value=y' \
             --set 'controller.credentials.a_b.value=z' \
@@ -378,6 +687,7 @@ jobs:
           }
           # Default opt-in posture: worker keeps DNS + TLS only, no 4000.
           helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=true > /var/tmp/netpol-default.yaml
           worker_default="$(worker_doc /var/tmp/netpol-default.yaml)"
@@ -391,6 +701,7 @@ jobs:
           # the WORKER policy only; the controller keeps its own
           # additionalEgress and never sees the worker rule.
           helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=true \
             --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" \
@@ -432,6 +743,7 @@ jobs:
             exit 1
           fi
           refusal="$(helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=false \
             --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" 2>&1 >/dev/null || true)"

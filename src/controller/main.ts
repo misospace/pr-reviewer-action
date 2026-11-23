@@ -24,6 +24,9 @@
  *   object carrying chart/deployment-owned worker image, TTL, and resources;
  *   absent means no deployment defaults; Kubernetes profiles must declare
  *   any missing deployment facts explicitly.
+ * - `PR_REVIEWER_KUBERNETES_SHARED_VOLUMES`: optional bounded JSON array of
+ *   chart-derived standard shared volume mappings; absent means Kubernetes
+ *   profiles must declare volumes explicitly.
  * - `PR_REVIEWER_CONTROL_PLANE_URL`: the PostgreSQL DSN (required).
  * - `PR_REVIEWER_DURABLE_STATE_DIR`, `PR_REVIEWER_RUNS_ROOT`,
  *   `PR_REVIEWER_WORKSPACE_CACHE_ROOT`: the controller-owned roots
@@ -73,12 +76,14 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import {
   parseInstanceConfigText,
   parseKubernetesDeploymentDefaults,
+  parseKubernetesSharedVolumes,
   emptyKubernetesDeploymentDefaults,
   resolveKubernetesExecutorSpec,
   forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   type InstanceConfig,
   type ModelProfile,
+  type KubernetesVolumeMapping,
 } from "../config/instance-config.js";
 import type { ApiFormat } from "../config/types.js";
 import { forgeProductLabel, forgeTokenFromEnv } from "../platform/forge-identity.js";
@@ -305,6 +310,7 @@ export class StartupRefusal extends Error {
 interface StartupConfig {
   readonly instance: InstanceConfig;
   readonly kubernetesDeploymentDefaults: ReturnType<typeof emptyKubernetesDeploymentDefaults>;
+  readonly kubernetesSharedVolumes: readonly KubernetesVolumeMapping[] | null;
   /** The configured identity platform (#1682: `gitea` is a Gitea-family
    * identity served by the Forgejo-compatible stack). Canonical jobs,
    * events, and credential scopes stay in the `forgeFamily` of this value. */
@@ -403,10 +409,19 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
       throw new StartupRefusal(`PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid: ${errorMessage(error)}`, 2);
     }
   }
+  let kubernetesSharedVolumes: readonly KubernetesVolumeMapping[] | null = null;
+  const sharedVolumesText = env.PR_REVIEWER_KUBERNETES_SHARED_VOLUMES;
+  if (typeof sharedVolumesText === "string" && sharedVolumesText.trim() !== "") {
+    try {
+      kubernetesSharedVolumes = parseKubernetesSharedVolumes(sharedVolumesText);
+    } catch (error) {
+      throw new StartupRefusal(`PR_REVIEWER_KUBERNETES_SHARED_VOLUMES is invalid: ${errorMessage(error)}`, 2);
+    }
+  }
   for (const profile of instance.executorProfiles) {
     if (profile.kind !== "kubernetes" || profile.kubernetes === null) continue;
     try {
-      resolveKubernetesExecutorSpec(profile.kubernetes, kubernetesDeploymentDefaults, profile.name);
+      resolveKubernetesExecutorSpec(profile.kubernetes, kubernetesDeploymentDefaults, profile.name, kubernetesSharedVolumes);
     } catch (error) {
       throw new StartupRefusal(errorMessage(error), 2);
     }
@@ -636,6 +651,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   return {
     instance,
     kubernetesDeploymentDefaults,
+    kubernetesSharedVolumes,
     platform,
     forgeEndpoint,
     controlPlaneDsn,
@@ -1634,6 +1650,7 @@ export async function controllerMain(
       credentialRefs: credentialBinding.credentialRefs,
       executors,
       kubernetesDeploymentDefaults: startup.kubernetesDeploymentDefaults,
+      kubernetesSharedVolumes: startup.kubernetesSharedVolumes,
       ...(deps.createWorkspace !== undefined ? { createWorkspace: deps.createWorkspace } : {}),
       // #1723: the App installation identity repairs a webhook delivery that
       // omitted `installation.id` — the same identity the poll mints with.

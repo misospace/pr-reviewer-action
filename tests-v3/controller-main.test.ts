@@ -359,9 +359,6 @@ default-executor-profile: local-dev`,
       args: []
       namespace: review
       service-account: worker
-      volumes:
-        - claim: runs
-          controller-root: /srv/runs
 default-executor-profile: k8s`,
 );
 
@@ -386,7 +383,7 @@ test("Kubernetes profile without deployment defaults refuses before composition"
     try {
       const code = await controllerMain([], env, { onReady: () => { ready = true; } });
       assert.equal(code, 2);
-      assert.match(stderr.lines().join(""), /neither the profile nor the deployment defaults provide it/);
+      assert.match(stderr.lines().join(""), /neither the profile nor the chart-derived shared volumes provide them/);
     } finally {
       stderr.detach();
     }
@@ -397,12 +394,18 @@ test("Kubernetes profile without deployment defaults refuses before composition"
   }
 });
 
-test("chart-shaped Kubernetes defaults pass profile pre-flight", async () => {
+const CHART_SHARED_VOLUMES = JSON.stringify([
+  { claim: "pr-reviewer-runs", controllerRoot: "/var/lib/pr-reviewer/runs" },
+  { claim: "pr-reviewer-workspace-cache", controllerRoot: "/var/lib/pr-reviewer/cache" },
+]);
+
+test("chart-shaped Kubernetes defaults and shared volumes pass profile pre-flight", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-valid-defaults-"));
   const configPath = join(dir, "instance.yaml");
   writeFileSync(configPath, KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS, "utf8");
   const env = baseEnv(configPath);
   env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS = CHART_SHAPED_KUBERNETES_DEFAULTS;
+  env.PR_REVIEWER_KUBERNETES_SHARED_VOLUMES = CHART_SHARED_VOLUMES;
   try {
     const stderr = captureStderr();
     stderr.attach();
@@ -414,7 +417,7 @@ test("chart-shaped Kubernetes defaults pass profile pre-flight", async () => {
       // defaults parsed and the kubernetes pre-flight loop passed: the
       // inheriting profile resolved against the chart-shaped defaults.
       assert.match(text, /must declare forges for exactly one platform/);
-      assert.doesNotMatch(text, /neither the profile nor the deployment defaults provide it/);
+      assert.doesNotMatch(text, /neither the profile nor the chart-derived shared volumes provide them/);
     } finally {
       stderr.detach();
     }
@@ -438,6 +441,30 @@ test("invalid Kubernetes deployment defaults refuse startup before composition",
       const code = await controllerMain([], env, { onReady: () => { composed = true; } });
       assert.equal(code, 2);
       assert.match(stderr.lines().join(""), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(composed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("invalid Kubernetes shared volume mappings refuse startup before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-shared-volumes-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, MIN_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_SHARED_VOLUMES = '{"claim":"runs"}';
+  let composed = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { composed = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /PR_REVIEWER_KUBERNETES_SHARED_VOLUMES is invalid/);
     } finally {
       stderr.detach();
     }

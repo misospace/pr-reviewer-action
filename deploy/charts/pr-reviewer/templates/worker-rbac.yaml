@@ -16,6 +16,9 @@ is not guarded by this Role; `deploy/admission/worker-secret-policy.yaml`
 is the cluster-side guardrail on it.
 */}}
 {{- if eq (dig "mode" "disabled" (.Values.workerExecutor | default dict)) "kubernetes" }}
+{{- if not (.Values.controller | default dict).enabled -}}
+{{- fail "workerExecutor.mode kubernetes requires controller.enabled (the controller is the principal that creates and settles the worker Jobs)" -}}
+{{- end -}}
 {{- $executor := .Values.workerExecutor }}
 {{- $namespace := default .Release.Namespace $executor.namespace }}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict
@@ -28,6 +31,8 @@ is the cluster-side guardrail on it.
 {{- $chartName := .Chart.Name }}
 {{- $releaseName := .Release.Name }}
 {{- $releaseService := .Release.Service }}
+{{- /* Standard shared PVCs render through the controller component so claim
+      names and mounts have one chart-owned source. */ -}}
 {{- range $claim := $executor.volumeClaims }}
 ---
 apiVersion: v1

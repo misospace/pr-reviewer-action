@@ -10,7 +10,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { parseKubernetesDeploymentDefaults } from "../src/config/instance-config.js";
+import { parseKubernetesDeploymentDefaults, parseKubernetesSharedVolumes } from "../src/config/instance-config.js";
 
 function read(path: string): string {
   return readFileSync(path, "utf8");
@@ -345,6 +345,314 @@ test("#1725/#1737: every executor mode injects the fix-roots claim-root init con
   assert.match(deployment, /`0750 1000 65532` \(controller-only\)/, "deployment doc must state the controller-only stat contract");
 });
 
+test("#1767: standard shared storage is declared once and derived; ambiguous topologies fail closed", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The single derivation artifact: one entry per standard key, resolving
+  // the claim from existingClaim or the chart-created <fullname>-<key>,
+  // with the controller root taken from controller.paths.
+  assert.match(
+    helpers,
+    /\{\{- define "pr-reviewer\.shared-volume-mappings" -\}\}/,
+    "the shared-volume-mappings derivation define must exist",
+  );
+  assert.match(
+    helpers,
+    /\{\{- define "pr-reviewer\.chart-created-claim-name" -\}\}/,
+    "the chart-created claim-name resolution define must exist",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$claim = include "pr-reviewer\.chart-created-claim-name" \(dict "values" \$v "fullname" \$fullname "key" \$key "entry" \$entry\) -\}\}/,
+    "a chart-created standard claim must resolve through the common library's naming rules",
+  );
+  assert.match(
+    helpers,
+    /is required as the standard shared storage/,
+    "a missing or disabled standard entry must fail closed",
+  );
+  assert.match(
+    helpers,
+    /must be an operator-provided existingClaim or a chart-created persistentVolumeClaim/,
+    "a non-claim standard storage type (hostPath and friends) must fail closed",
+  );
+  // The standard mount path derives from controller.paths (the same
+  // source as the env contract and fix-roots); an agreeing explicit
+  // globalMounts wins, a conflicting one fails closed.
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$entry "globalMounts" \(list \(dict "path" \$mapping\.controllerRoot\)\) -\}\}/,
+    "the standard globalMounts must derive from controller.paths",
+  );
+  assert.match(
+    helpers,
+    /globalMounts must include the writable controller\.paths root/,
+    "an explicit globalMounts without the writable standard root must fail closed",
+  );
+  // Chart-created standard claims are pinned with forceRename to the name
+  // the chart's own resolution derived (the common library's rules,
+  // reproduced below), so the rendered PVC and every derived reference
+  // stay in lockstep even if the library's naming changes upstream.
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$entry "forceRename" \$mapping\.claim -\}\}/,
+    "the derived claim name must be pinned with forceRename",
+  );
+  // Upgrade continuity: chart-created standard claim names (runs,
+  // workspace-cache, durable-state) resolve with the common library's own
+  // naming rules, reproduced by the chart in the library's order, because
+  // the pre-#1767 chart let that same chain name its claims — an upgrade
+  // that keeps the storage topology therefore keeps every claim name
+  // exactly (forceRename first; then prefix, the enabled-PVC-count
+  // identifier rule, and suffix; lowercased). A per-mode pin would
+  // silently rename the posture whose count the mode guess misses, and
+  // Helm would delete the renamed-off claim with the durable state on it.
+  assert.match(
+    helpers,
+    /\{\{- if not \(empty \$entry\.forceRename\) -\}\}/,
+    "an operator-set forceRename must win before any other naming rule",
+  );
+  assert.match(
+    helpers,
+    /\(eq \(\$persistenceItem\.type \| default "persistentVolumeClaim"\) "persistentVolumeClaim"\) \(empty \$persistenceItem\.existingClaim\)/,
+    "the naming rule must count chart-created PVC entries exactly like bjw-s common's enabledPVCs",
+  );
+  assert.match(
+    helpers,
+    /"alwaysAppendIdentifierToResourceName"/,
+    "the naming rule must honor the library's global always-append flag",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$name = printf "%s-%s" \$entry\.prefix \$name -\}\}/,
+    "the naming rule must reproduce the library's prefix prepend",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$name = printf "%s-%s" \$name \$entry\.suffix -\}\}/,
+    "the naming rule must reproduce the library's suffix append",
+  );
+  // The fullname the claim names resolve from is the library's own chain
+  // (global overrides win over the component ones, then release
+  // containment), not the chart's mirror: an override install's claims
+  // were named from that chain pre-#1767, and following the mirror would
+  // rename them on upgrade.
+  assert.match(
+    helpers,
+    /\{\{- \$claimName := dig "nameOverride" "" \(\$v\.global \| default dict\) \| default \(\$v\.nameOverride \| default \$ctx\.Chart\.Name\) -\}\}/,
+    "the claim fullname must follow the library's name chain (global override, component override, chart name)",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$claimFullname := dig "fullnameOverride" "" \(\$v\.global \| default dict\) \| default \$v\.fullnameOverride -\}\}/,
+    "the claim fullname must follow the library's fullname chain (global override, then component override)",
+  );
+  // The mappings include must receive the library-chain fullname (not the
+  // chart's mirror): reverting that to the mirror renames exactly the
+  // shared claims of an override install, the regression the chain exists
+  // to prevent.
+  assert.match(
+    helpers,
+    /\{\{- \$mappings := include "pr-reviewer\.shared-volume-mappings" \(dict "values" \$v "fullname" \$claimFullname\) \| fromYamlArray -\}\}/,
+    "the shared-volume-mappings derivation must resolve claims from the library-chain fullname",
+  );
+  assert.match(
+    helpers,
+    /must be a literal name \(the derived claim resolution does not evaluate templates\)/,
+    "a template string in a derived rename field must fail closed with guidance instead of corrupting the name",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$durableState "forceRename" \(include "pr-reviewer\.chart-created-claim-name" \(dict "values" \$v "fullname" \$claimFullname "key" "durable-state" "entry" \$durableState\)\) -\}\}/,
+    "durable-state must resolve its name with the rule the pre-#1767 chart named claims from",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$durableState "retain" true -\}\}/,
+    "durable-state must be retained across uninstalls and chart renames",
+  );
+  // Duplicated declarations and mismatched namespaces fail closed.
+  assert.match(
+    helpers,
+    /workerExecutor\.volumeClaims must not redeclare the chart-created standard claim/,
+    "redeclaring a chart-created standard claim in volumeClaims must fail closed",
+  );
+  assert.match(
+    helpers,
+    /workerExecutor\.volumeClaims must not redeclare the chart-created durable-state claim/,
+    "redeclaring the chart-created durable-state claim in volumeClaims must fail closed",
+  );
+  assert.match(
+    helpers,
+    /standard topology requires workerExecutor\.namespace/,
+    "a worker namespace other than the release namespace must fail closed",
+  );
+  assert.match(
+    helpers,
+    /instance config executor-profiles\.kubernetes\.namespace %q must equal the release namespace/,
+    "an inline instance config whose kubernetes namespace differs from the release namespace must fail closed",
+  );
+  // The standard root mount must exist and be writable.
+  assert.match(
+    helpers,
+    /is mounted readOnly at the controller\.paths root/,
+    "a readOnly standard root mount must fail closed",
+  );
+  assert.match(
+    helpers,
+    /globalMounts must include the writable controller\.paths root/,
+    "an explicit globalMounts without the writable standard root must fail closed",
+  );
+  // controller.paths is the single source for the three standard roots.
+  assert.match(
+    helpers,
+    /controller\.paths\.%s must be a non-empty absolute path starting with \//,
+    "an empty or relative standard root path must fail closed",
+  );
+  // A removed standard entry must fail closed, not silently unmount.
+  assert.match(
+    helpers,
+    /\{\{- if not \(hasKey \$persistenceValues \$mapping\.key\) -\}\}/,
+    "a missing standard persistence entry must fail closed before the mount derivation",
+  );
+  // The derived artifact's worker-profile consumer at render time: an
+  // inline kubernetes profile that repeats a derived standard claim at
+  // any other controller root diverges from the single source and fails
+  // closed, while mappings on non-standard claims stay untouched.
+  assert.match(
+    helpers,
+    /\$rootByClaim/,
+    "the inline instance-config check must resolve the derived claim-to-root mapping",
+  );
+  assert.match(
+    helpers,
+    /instance config executor-profiles\.kubernetes volumes claim %q must mount at the derived controller root %q/,
+    "a divergent manual volume mapping for a derived claim must fail closed",
+  );
+  assert.match(
+    helpers,
+    /\$declaredRoot := index \$volume "controller-root"/,
+    "the declared controller root must be read with index (hyphenated key)",
+  );
+  // Both guards are scoped, not unconditional: the namespace guards fire
+  // only when the chart actually derives a shared claim (the legacy
+  // all-existingClaim posture — including a dedicated worker namespace —
+  // must keep rendering), and the root check applies to the default
+  // executor profile only (non-default profiles keep raw advanced
+  // mappings supported unchecked).
+  assert.match(
+    helpers,
+    /\$chartCreatesShared := false/,
+    "the namespace guards must be conditioned on chart-created shared claims",
+  );
+  assert.match(
+    helpers,
+    /"chartCreated" \(empty \$entry\.existingClaim\)/,
+    "the derived artifact must carry the provisioning fact, not a name shape",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if \$mapping\.chartCreated -\}\}/,
+    "chartCreatesShared must key on the artifact's chartCreated flag, not claim-name equality",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if and \$chartCreatesShared \(kindIs "map" \$kubeProfile\)/,
+    "the instance-config namespace guard must be conditioned on chart-created shared claims",
+  );
+  assert.match(
+    helpers,
+    /\$defaultTrusted := and \(not \(empty \$defaultProfile\)\) \(has \$defaultProfile \$kubeProfileNames\)/,
+    "a declared default must be trusted only when it names a kubernetes profile",
+  );
+  assert.match(
+    helpers,
+    /\$enforceRoot := or \(not \$defaultTrusted\) \(eq \(index \$profile "name" \| default ""\) \$defaultProfile\)/,
+    "the root check must apply to the trusted default executor profile only",
+  );
+  // Worker provisioning without the controller fails closed.
+  const workerRbac = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");
+  assert.match(
+    workerRbac,
+    /workerExecutor\.mode kubernetes requires controller\.enabled/,
+    "worker provisioning with the controller disabled must fail closed",
+  );
+  // CI pins the rendered contract: three chart-created PVCs, no
+  // worker-rbac PVC, the durable-state name and retain policy, the
+  // existingClaim posture, the relocated-root single-source, and each
+  // fail-closed guard.
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes(`[ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-executor.yaml)" -eq 3 ]`),
+    "charts.yaml must pin exactly three chart-created PVCs in the standard topology",
+  );
+  assert.ok(
+    workflow.includes("worker-rbac must not render PVCs in the standard topology"),
+    "charts.yaml must pin that worker-rbac renders no PVC in the standard topology",
+  );
+  assert.ok(
+    workflow.includes(`index($0,"\\n  name: pr-reviewer-durable-state\\n")`),
+    "charts.yaml must pin the durable-state PVC metadata name in the chart-created shared-claims topology (not its labels)",
+  );
+  assert.ok(
+    workflow.includes(`index($0,"\\n  name: pr-reviewer\\n")`),
+    "charts.yaml must pin the legacy single-chart-created-PVC posture keeping the bare-fullname durable-state claim",
+  );
+  assert.ok(
+    workflow.includes("render-legacy-single-pvc.yaml"),
+    "charts.yaml must pin the pre-#1767 example posture's durable-state continuity render",
+  );
+  assert.ok(
+    workflow.includes("render-durable-state-adoption-pin.yaml"),
+    "charts.yaml must pin the adoption path's explicit operator forceRename render",
+  );
+  assert.ok(
+    workflow.includes("render-naming-prefix.yaml") &&
+      workflow.includes("render-naming-suffix.yaml") &&
+      workflow.includes("render-naming-override.yaml"),
+    "charts.yaml must pin the entry-rename (prefix/suffix) and fullname-override continuity renders",
+  );
+  assert.ok(
+    workflow.includes("helm.sh/resource-policy: keep"),
+    "charts.yaml must pin the durable-state retain policy",
+  );
+  for (const message of [
+    "must not redeclare the chart-created standard claim",
+    "must not redeclare the chart-created durable-state claim",
+    "must be an operator-provided existingClaim or a chart-created persistentVolumeClaim",
+    "is required as the standard shared storage",
+    "is required (the standard storage is single-source",
+    "must be a non-empty absolute path starting with /",
+    "must include the writable controller.paths root",
+    "mounted readOnly at the controller.paths root",
+    "requires workerExecutor.namespace",
+    "requires controller.enabled",
+    "must equal the release namespace",
+    "must mount at the derived controller root",
+  ]) {
+    assert.ok(workflow.includes(message), `charts.yaml must pin the fail-closed guard: ${message}`);
+  }
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /data/runs' /var/tmp/render-relocated-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the relocated-root single-source render",
+  );
+  assert.ok(
+    workflow.includes("render-advanced-mapping.yaml"),
+    "charts.yaml must pin the permissive side: a mapping on a non-standard claim keeps rendering",
+  );
+  assert.ok(
+    workflow.includes("render-legacy-namespace.yaml"),
+    "charts.yaml must pin the permissive side: the legacy all-existingClaim posture keeps rendering a dedicated worker namespace",
+  );
+  assert.ok(
+    workflow.includes("render-non-default-divergent.yaml"),
+    "charts.yaml must pin the permissive side: a non-default executor profile keeps raw advanced mappings supported",
+  );
+  // The operator-facing contract is documented.
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.match(chartReadme, /## Shared storage \(single source, #1767\)/);
+  assert.match(chartReadme, /`pr-reviewer\.shared-volume-mappings`/);
+});
+
 test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
   // Kubelet OnRootMismatch skips group application only when the volume
   // root mode is a superset of 0770 WITH setgid (requiresPermissionChange
@@ -388,6 +696,35 @@ test("worker deployment defaults are chart-owned and emitted only in Kubernetes 
   const emittedKeys = [...dictBody.matchAll(/"([A-Za-z]+)"\s+(?:\(|\$worker\.)/g)].map((m) => m[1]).sort();
   assert.deepEqual(emittedKeys, ["image", "resources", "ttlSecondsAfterFinished"]);
   assert.match(read("src/controller/main.ts"), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS/);
+  assert.match(helpers, /PR_REVIEWER_KUBERNETES_SHARED_VOLUMES/);
+  assert.match(helpers, /"controllerRoot" \$mapping\.controllerRoot/);
+  assert.match(helpers, /"sharedVolumesJson" \$sharedVolumesJson/);
+  assert.match(read("src/controller/main.ts"), /parseKubernetesSharedVolumes\(sharedVolumesText\)/);
+  const example = parse(read("deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml")) as {
+    controller: { instanceConfig: string };
+  };
+  assert.doesNotMatch(example.controller.instanceConfig, /volumes:/, "standard example must inherit chart-derived shared volumes");
+});
+
+test("chart shared-volume JSON matches the runtime grammar", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    controller: { paths: { durableStateDir: string; runsRoot: string; workspaceCacheRoot: string } };
+  };
+  // The chart projects each standard mapping to exactly {claim,
+  // controllerRoot} (the runtime's closed key set) in the fixed
+  // runs → workspace-cache order; for the default values the three
+  // chart-created PVCs render <fullname>-<key>, release name
+  // `pr-reviewer` included. Build the same JSON from the values source
+  // of truth and require the runtime parser to accept it.
+  const paths = values.controller.paths;
+  const sharedJson = JSON.stringify([
+    { claim: "pr-reviewer-runs", controllerRoot: paths.runsRoot },
+    { claim: "pr-reviewer-workspace-cache", controllerRoot: paths.workspaceCacheRoot },
+  ]);
+  const parsed = parseKubernetesSharedVolumes(sharedJson);
+  assert.deepEqual(parsed, JSON.parse(sharedJson));
+  assert.equal(parsed[0]?.controllerRoot, paths.runsRoot);
+  assert.equal(parsed[1]?.controllerRoot, paths.workspaceCacheRoot);
 });
 
 test("chart deployment-default JSON matches the runtime grammar, including digest pins", () => {
