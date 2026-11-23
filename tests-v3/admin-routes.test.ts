@@ -26,6 +26,11 @@ function fixture(state: JobLifecycleState = "running", nowMs?: () => number) {
   return { calls, events, context };
 }
 const req = (method: string, pathname: string, extra: Record<string, unknown> = {}) => ({ method, pathname, search: "", requestId: "req-1", ...extra });
+/** The rendered value of a zero-label counter; absent from the exposition means zero. */
+const counter = (metrics: AdminMetricsRegistry, name: string): number => {
+  const line = metrics.renderPrometheus().split("\n").find((entry) => entry.startsWith(`${name} `));
+  return line === undefined ? 0 : Number(line.slice(name.length + 1));
+};
 
 test("all admin reads and writes require auth; public endpoints do not", async () => {
   const { context } = fixture();
@@ -294,6 +299,9 @@ test("cancellation refuses unknown and terminal runs, accepts active once", asyn
     { action: "cancel", target: { kind: "run", id: "run-1" }, outcome: "refused" },
     { action: "cancel", target: { kind: "run", id: "run-9" }, outcome: "refused" },
   ]);
+  // Only the applied 200 counts as a cancellation; refusals never do.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 1);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
 });
 
 test("a refused cancellation carries the seam's reason to the operator", async () => {
@@ -303,6 +311,9 @@ test("a refused cancellation carries the seam's reason to the operator", async (
   assert.equal(response.status, 409);
   assert.deepEqual(response.body, { error: "cancellation refused", detail: "the run has no queued generation" });
   assert.deepEqual(events.map((event) => event.outcome), ["refused"]);
+  // A refused cancellation is counted by neither counter.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
 });
 
 test("a cancellation whose publication is in flight answers 202, never the applied 200 (#1772)", async () => {
@@ -321,6 +332,10 @@ test("a cancellation whose publication is in flight answers 202, never the appli
     detail: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
   });
   assert.deepEqual(events.map((event) => event.outcome), ["accepted"]);
+  // The registration is visible in the metrics seam, but never as an
+  // applied cancellation: its terminal state is the publication's.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 1);
 });
 
 test("every attempted mutation outcome writes exactly one audit row", async () => {

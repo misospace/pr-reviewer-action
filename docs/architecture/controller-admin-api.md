@@ -300,7 +300,11 @@ feeds in), tool-loop budget counters — request and round counters
 `pr_reviewer_admin_tool_loop_rounds_total`, zero-label amounts fed from the
 loop telemetry) plus the stop-reason counter —, specialist usage, publication
 retry/failure, webhook verification outcomes, and
-cancellation/supersession counters.
+cancellation/supersession counters. The two accepted cancel answers count
+apart (#1772): `pr_reviewer_admin_cancellations_total` only follows the
+applied `200`, and a publication-in-flight `202` registration bumps
+`pr_reviewer_admin_cancellation_registrations_total`, so a registered
+cancellation that ended `completed` is never counted as a cancelled run.
 
 ## Diagnostics redaction (defense in depth)
 

@@ -50,6 +50,7 @@ const DEFINITIONS: readonly AdminMetricDefinition[] = [
   { name: "pr_reviewer_admin_publication_events_total", help: "Publication retries and failures", kind: "counter", labelNames: ["outcome"] },
   { name: "pr_reviewer_admin_webhook_verifications_total", help: "Webhook verification outcomes", kind: "counter", labelNames: ["outcome"] },
   { name: "pr_reviewer_admin_cancellations_total", help: "Run cancellations", kind: "counter", labelNames: [] },
+  { name: "pr_reviewer_admin_cancellation_registrations_total", help: "Registered run cancellations whose publication outcome is undetermined", kind: "counter", labelNames: [] },
   { name: "pr_reviewer_admin_supersessions_total", help: "Run supersessions", kind: "counter", labelNames: [] },
   { name: "pr_reviewer_admin_mcp_requests_total", help: "Operator MCP tool calls by bounded outcome", kind: "counter", labelNames: ["outcome"] },
   { name: "pr_reviewer_admin_mcp_auth_failures_total", help: "Operator MCP authentication failures", kind: "counter", labelNames: [] },
@@ -165,6 +166,10 @@ export class AdminMetricsRegistry {
   recordPublication(outcome: AdminPublicationOutcome): void { this.increment("pr_reviewer_admin_publication_events_total", { outcome }); }
   recordWebhook(outcome: AdminWebhookOutcome): void { this.increment("pr_reviewer_admin_webhook_verifications_total", { outcome }); }
   recordCancellation(): void { this.increment("pr_reviewer_admin_cancellations_total"); }
+  /** #1772: the publication-in-flight answer registers the cancellation
+   * without promising an operator-cancelled run, so it is counted apart
+   * from the applied cancellations in `cancellations_total`. */
+  recordCancellationRegistration(): void { this.increment("pr_reviewer_admin_cancellation_registrations_total"); }
   recordSupersession(): void { this.increment("pr_reviewer_admin_supersessions_total"); }
   /** #1349 operator MCP observability: tool-call outcomes through the fixed
    * enum (cardinality cannot grow from identifiers) and authentication

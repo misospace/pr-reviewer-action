@@ -309,7 +309,8 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
     }
     if (method === "POST" && match[2] === "cancel") {
       if (request.contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return fixed(415, { error: "content type required" });
-      let cancelled: { cancelled: true };
+      let response: AdminRouteResponse;
+      let registered = false;
       try {
         const before = await context.deps.getRun(runId);
         // Admin-layer refusals settle too: the operator attempted a mutation
@@ -332,23 +333,29 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
           // answers "accepted, undetermined" instead of the 200
           // `cancelled: true` that promises an operator-cancelled run.
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
-          return fixed(202, { status: "cancellation-registered", cancelled: false, detail: boundedRefusalReason(result.undetermined) });
-        }
-        if ("refused" in result) {
+          registered = true;
+          response = fixed(202, { status: "cancellation-registered", cancelled: false, detail: boundedRefusalReason(result.undetermined) });
+        } else if ("refused" in result) {
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });
           // The seam's refusal reason reaches the operator, bounded and
           // redacted: the operator learns WHY the cancellation did not happen.
           return fixed(409, { error: "cancellation refused", detail: boundedRefusalReason(result.refused) });
+        } else {
+          await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
+          response = fixed(200, result);
         }
-        await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
-        cancelled = result;
       } catch {
         await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "error" });
         return fixed(500, { error: "request failed" });
       }
       // Outside the try: a metrics failure must not produce a second audit
-      // record for a mutation that already settled.
-      context.metrics.recordCancellation();
+      // record for a mutation that already settled. Every ACCEPTED cancel is
+      // counted: the applied 200 in `cancellations_total`, the registered
+      // 202 in its own counter — the two answers mean different things
+      // (#1772), and a registration that ended `completed` must never be
+      // counted as a run that was cancelled.
+      if (registered) context.metrics.recordCancellationRegistration();
+      else context.metrics.recordCancellation();
       // The cancellation is APPLIED when the route answers (#1772): the
       // effect seam stamped the generation and aborted its attempt, so the
       // operator gets an acknowledgement, not an acceptance promise. The
@@ -358,7 +365,7 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
       // `cancelled-by-operator`. The publication-in-flight case answers
       // 202 above, because its terminal state is the publication's
       // outcome and not the operator's click.
-      return fixed(200, cancelled);
+      return response;
     }
   }
   return fixed(404, { error: "not found" });
