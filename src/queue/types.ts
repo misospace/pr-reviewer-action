@@ -219,6 +219,28 @@ export function newJobRecord(
   return record;
 }
 
+/** Bound for a durable terminal failure reason (#1786 review). The
+ * control plane's `RunRecord` validator (`src/state/types.ts`,
+ * `REASON_MAX_CHARS`) REFUSES a reason above this length — a writer that
+ * skips the bound fails closed instead of recording — and the queue's own
+ * snapshot reader accepts any string, so the queue-side writers apply this
+ * SAME bound rather than persisting attacker-influenced text unbounded. */
+export const FAILURE_REASON_MAX_CHARS = 256;
+
+/** A bounded, single-line terminal failure reason for a durable record:
+ * collapses control characters, trims, and truncates to
+ * `FAILURE_REASON_MAX_CHARS` with a visible `…`, falling back when nothing
+ * survives. Both terminal writers share this ONE rule — the control-plane
+ * run mirror (`src/controller/run-lifecycle.ts`, re-exported there) and the
+ * queue scheduler's settle path — because an executor-supplied message is
+ * sanitized here, never trusted verbatim. */
+export function runFailureReason(raw: string, fallback: string): string {
+  const singleLine = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (singleLine === "") return fallback;
+  if (singleLine.length <= FAILURE_REASON_MAX_CHARS) return singleLine;
+  return `${singleLine.slice(0, FAILURE_REASON_MAX_CHARS - 1)}…`;
+}
+
 /** Validate and perform a state transition: throws RangeError when
  * `canTransition(record.state, next)` is false or nowMs is non-finite.
  * Returns a NEW frozen record (the input is never mutated) with the new

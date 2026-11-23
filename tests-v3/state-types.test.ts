@@ -20,6 +20,8 @@ import {
   type RunRecord,
   type UsageRecord,
 } from "../src/state/index.js";
+import { validateRunPatch } from "../src/state/types.js";
+import { runFailureReason } from "../src/controller/run-lifecycle.js";
 
 function validInstallation(): Record<string, unknown> {
   return {
@@ -550,4 +552,33 @@ test("record surfaces carry no secret-bearing fields", () => {
       }
     }    assert.equal(survived, false, "a smuggled secret field must never survive a rebuild");
   }
+});
+
+test("an oversized executor failure reason is bounded before the durable record, not rejected by it (#1786 review)", () => {
+  // The worst-case #1775 git-stderr message (~337 chars: exit prefix +
+  // 300-char capped class + truncation marker) exceeds REASON_MAX_CHARS.
+  // The pair below is
+  // the writer's guarantee: an unbounded reason is REFUSED fail-closed
+  // (never half-written), and the one sanitizer on the daemon's terminal
+  // path truncates it into the range the reader accepts — so a verbose
+  // git-failure class can never make the terminal transition poisonous.
+  const raw = `git fetch: exited 128: ${"A".repeat(313)}`;
+  assert.equal(raw.length, 336);
+  assert.equal(
+    validateRunPatch({ failureReason: raw }),
+    null,
+    "an over-length raw reason is refused by the record rule",
+  );
+  const bounded = runFailureReason(raw, "execution-failed");
+  assert.ok(bounded.length <= 256, `bounded reason must fit the durable bound: ${bounded.length}`);
+  assert.match(bounded, /^git fetch: exited 128: /, "the leading class survives the bound");
+  assert.ok(bounded.endsWith("…"), "the truncation is visible");
+  assert.notEqual(
+    validateRunPatch({ failureReason: bounded }),
+    null,
+    "the bounded reason is accepted by the same write-path validator",
+  );
+  // Same sanitizer keeps the reader's C0 contract for ANSI-bearing input.
+  const dirty = runFailureReason("git fetch: exited 128: \u001b[31mfatal\u001b[0m", "execution-failed");
+  assert.notEqual(validateRunPatch({ failureReason: dirty }), null);
 });

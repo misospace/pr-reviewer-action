@@ -15,6 +15,8 @@ export {
   canTransition,
   transitionPath,
   newJobRecord,
+  runFailureReason,
+  FAILURE_REASON_MAX_CHARS,
   withState,
 } from "./types.js";
 
