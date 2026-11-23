@@ -840,6 +840,14 @@ jobs:
           expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/dashboard/
           expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin/api
           expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=//admin
+          # The root spellings exercise the normalization's all-slash
+          # fallback ("/" must never normalize into acceptance), and the
+          # degenerate-segment spellings must refuse outright (an intake
+          # rule that never matches is silently dead deliveries).
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=//
+          expect_refusal 'must not contain empty path segments' -f "$standard" --set webhook.path=//hook
+          expect_refusal 'must not contain dot segments' -f "$standard" --set webhook.path=/foo/../admin
           expect_refusal 'conflicts with the standard dashboard (standard mode derives token auth)' -f "$standard" --set controller.admin.auth.oidc.clientSecret=leftover
           # A listener-port override stays first-class: the derived Service
           # port follows it (the chart's own default Service port must not

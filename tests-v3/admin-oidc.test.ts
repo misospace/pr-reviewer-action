@@ -262,6 +262,16 @@ test("OIDC session identity never displays an unverified email claim", async (t)
   const callback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(login.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: txCookie }, redirect: "manual" });
   assert.equal(callback.status, 302);
   assert.equal(callback.headers.get("location"), "/");
+  // #1768 composition pin: the bare-origin return target must actually
+  // serve the shell natively (this host enables the dashboard), not land
+  // on a dead compatibility alias.
+  const shellAtRoot = createAdminHost({ deps, auth: parsed, token: "break-glass", oidcFetch: providerFetch, dashboard: {} });
+  const shellServer = createServer(shellAtRoot.handler);
+  await new Promise<void>((resolve) => shellServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => shellServer.close());
+  const shellBase = `http://127.0.0.1:${(shellServer.address() as AddressInfo).port}`;
+  assert.equal((await fetch(`${shellBase}/`)).status, 200);
+  assert.equal((await fetch(`${shellBase}/?login=failed`)).status, 200);
   const sessionCookie = callback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
   const session = await fetch(`${base}/auth/session`, { headers: { cookie: sessionCookie } });
   assert.equal(session.status, 200);

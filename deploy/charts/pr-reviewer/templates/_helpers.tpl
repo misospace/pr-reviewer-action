@@ -344,12 +344,16 @@ readiness:
         same rule on slash-normalizing infrastructure, and any deeper
         path under a reserved prefix (/admin/api) matches that rule
         too — the intake rule is emitted FIRST and would capture the
-        traffic. Trailing and duplicate slashes carry no match
-        semantics, so they normalize away before comparing. */ -}}
+        traffic. Trailing slashes carry no match semantics, so they
+        normalize away before comparing; duplicate slashes and dot
+        segments would render an intake rule that never matches its
+        intent (silently dead deliveries), so they refuse outright. */ -}}
 {{- if and $std.enabled (or (empty $intakePath) (not (hasPrefix "/" $intakePath))) -}}{{ fail "webhook.path must be an absolute request path starting with / (forge deliveries POST there; Gitea/GitLab instances need their canonical /webhooks/<forge> route)" }}{{- end -}}
 {{- if and $std.enabled (regexMatch "[[:space:]?#]" $intakePath) -}}{{ fail "webhook.path must not contain whitespace, ?, or # (it becomes an HTTPRoute path match verbatim)" }}{{- end -}}
 {{- $normalizedPath := regexReplaceAll "/{2,}" (regexReplaceAll "/+$" $intakePath "" | default "/") "/" -}}
 {{- if and $std.enabled (or (eq $normalizedPath "/") (regexMatch "^/(admin|auth|dashboard)(/|$)" $normalizedPath)) -}}{{ fail (printf "webhook.path %s collides with the reserved admin surface (PathPrefix matching is element-based and ignores trailing slashes, so /admin/, /admin/api, and //admin resolve to the reserved admin rules)" $intakePath) }}{{- end -}}
+{{- if and $std.enabled (regexMatch "//" $intakePath) -}}{{ fail "webhook.path must not contain empty path segments (//): PathPrefix matching splits on '/', so //hook never matches /hook and the rendered intake rule would be silently dead" }}{{- end -}}
+{{- if and $std.enabled (regexMatch "(^|/)\\.\\.?(/|$)" $intakePath) -}}{{ fail "webhook.path must not contain dot segments (. or ..): normalizing infrastructure rewrites such request paths before matching, so the rendered intake rule would be silently dead" }}{{- end -}}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
 {{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "path" $intakePath "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname | lower) | toYaml -}}
 {{- end -}}

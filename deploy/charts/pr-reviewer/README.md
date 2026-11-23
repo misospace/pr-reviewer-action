@@ -576,10 +576,14 @@ controller:
   port). The dashboard script only calls `/admin/*` and `/auth/*` on the
   origin that served the shell, so splitting them across hostnames breaks
   every data request and the sign-in flow.
-- **Never choose `/dashboard*` or `/admin*` as the forge intake path.** The
-  GitHub intake ignores the path and the Forgejo/Gitea intake mounts a fixed
-  canonical route; either way those two prefixes belong to the admin listener
-  and must not collide with delivery.
+- **Never choose `/dashboard*`, `/admin*`, or `/auth*` (or anything under them)
+  as the forge intake path.** The GitHub intake ignores the path and the
+  Forgejo/Gitea intake mounts a fixed canonical route; either way those
+  prefixes belong to the admin listener and must not collide with delivery.
+  The chart refuses any value whose `PathPrefix` semantics overlap them —
+  matching is element-based and ignores a trailing `/`, so `/admin/` collides
+  exactly like `/admin` — and refuses degenerate spellings (`//`, dot
+  segments) whose rendered rule would never match.
 - **With `networkPolicy.enabled: true`, open the admin port to the gateway.**
   In advanced mode the chart's default-deny ingress allows only the webhook
   port, plus the admin port for Prometheus scrapes from the release namespace
