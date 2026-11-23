@@ -7,6 +7,7 @@ import { commentBodyTriggersCommentCommand, eventLabelName, type PrecheckEvent }
 import { resolvePlatform } from "../platform/resolve.js";
 import { bindForgejoToken } from "../platform/forgejo-auth.js";
 import { forgejoAncillaryWrite, forgejoApiBase } from "../platform/forgejo-ancillary.js";
+import { githubAncillaryWrite, githubApiBase } from "../platform/github-ancillary.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
@@ -711,18 +712,14 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
   if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
-    : (stage.GITHUB_API_URL || "https://api.github.com");
+    : githubApiBase(stage);
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/labels`, `/${encodeURIComponent(label)}`);
   if (url === null) return;
   if (platform === "forgejo") {
     await forgejoAncillaryWrite(stage, url, "DELETE");
     return;
   }
-  await fetch(url, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`, Accept: "application/json" },
-    signal: AbortSignal.timeout(15000),
-  });
+  await githubAncillaryWrite(stage, url, "DELETE");
 }
 
 /** #914: "this run was accepted via the comment command" — a `created`
@@ -766,10 +763,9 @@ function isUsableCommentId(id: number | string | undefined): id is number | stri
 }
 
 /** #914: best-effort 👀 (ack) reaction on the comment that triggered an
- * accepted re-review. Same seam as `clearRereviewLabel` (resolvePlatform +
- * requireImplementedBackend, repoScopedUrl, Bearer/token Authorization,
- * 15 s timeout); the fetch failure is swallowed — the ack must never fail
- * the run. */
+ * accepted re-review. Same shared ancillary-write seam as `clearRereviewLabel`
+ * (`githubAncillaryWrite`/`forgejoAncillaryWrite` over the typed transport);
+ * the fetch failure is swallowed — the ack must never fail the run. */
 async function postCommentAckReaction(stage: Env, commentId: number | string): Promise<void> {
   const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
@@ -778,23 +774,14 @@ async function postCommentAckReaction(stage: Env, commentId: number | string): P
   if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
-    : (stage.GITHUB_API_URL || "https://api.github.com");
+    : githubApiBase(stage);
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/comments/${encodeURIComponent(String(commentId))}/reactions`);
   if (url === null) return;
   if (platform === "forgejo") {
     await forgejoAncillaryWrite(stage, url, "POST", { content: "eyes" });
     return;
   }
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ content: "eyes" }),
-    signal: AbortSignal.timeout(15000),
-  }).catch(() => undefined);
+  await githubAncillaryWrite(stage, url, "POST", { content: "eyes" });
 }
 
 /** #914: best-effort reply to a re-review command comment on a fork PR,
@@ -803,9 +790,10 @@ async function postCommentAckReaction(stage: Env, commentId: number | string): P
  * in backticks only when it is a non-empty run of printable ASCII (no
  * whitespace, ≤ 80 chars) carrying no backtick of its own (a backtick in
  * the command would close the code span early); any other value falls back
- * to backtick-free wording that names no command at all. Same seam as the
- * ack reaction; the fetch failure is swallowed — a failed reply must never
- * fail the run. */
+ * to backtick-free wording that names no command at all. Same shared
+ * ancillary-write seam (`githubAncillaryWrite`/`forgejoAncillaryWrite` over
+ * the typed transport) as the ack reaction; the fetch failure is swallowed —
+ * a failed reply must never fail the run. */
 async function postForkPrCommentReply(stage: Env): Promise<void> {
   const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
@@ -816,7 +804,7 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
   if (platform === "gitlab") return;
   const base = platform === "forgejo"
     ? forgejoApiBase(stage)
-    : (stage.GITHUB_API_URL || "https://api.github.com");
+    : githubApiBase(stage);
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/comments`);
   if (url === null) return;
   const command = (stage.REREVIEW_COMMAND ?? "").trim();
@@ -829,14 +817,5 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
     await forgejoAncillaryWrite(stage, url, "POST", { body: replyBody });
     return;
   }
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ body: replyBody }),
-    signal: AbortSignal.timeout(15000),
-  }).catch(() => undefined);
+  await githubAncillaryWrite(stage, url, "POST", { body: replyBody });
 }
