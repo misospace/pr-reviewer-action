@@ -426,6 +426,9 @@ test("refused and failed mutations still audit the target identity", async () =>
     { action: "rereview", target: { kind: "pr", id: "github/9/repo#2/review" }, outcome: "refused", atMs: 42 },
     { action: "cancel", target: { kind: "run", id: "run-7" }, outcome: "error", atMs: 42 },
   ]);
+  // A failed cancel is counted by neither counter: nothing settled.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
 });
 
 test("audit events fall back to a wall-clock timestamp when no clock is injected", async () => {
