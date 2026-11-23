@@ -7,6 +7,8 @@ import {
   forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   parseInstanceConfigText,
+  parseKubernetesDeploymentDefaults,
+  resolveKubernetesExecutorSpec,
   validateInstanceConfig,
   type InstanceConfig,
 } from "../src/config/instance-config.js";
@@ -246,8 +248,8 @@ test("executor profiles carry exactly one kind-matching backend spec (#733)", ()
     { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image: "ghcr.io/acme/worker:1" }, local: { command: "worker", args: [] } }] },
     "must be absent for kind 'oci'",
   );
-  // Kubernetes carries its own versioned spec since #734 — deployment
-  // facts only, never raw pod infrastructure.
+  // Kubernetes carries its per-profile facts since #734 — no raw pod
+  // infrastructure; deployment facts may inherit from a trusted producer.
   const kubernetesSpec = {
     image: "ghcr.io/acme/pr-reviewer-worker:1.2.3",
     args: ["--worker"],
@@ -286,6 +288,16 @@ test("executor profiles carry exactly one kind-matching backend spec (#733)", ()
   });
   assert.ok(Object.isFrozen(kubernetesOk.executorProfiles[0]!.kubernetes));
   assert.ok(Object.isFrozen(kubernetesOk.executorProfiles[0]!.kubernetes!.volumes));
+  const inheritedProfile = validate({
+    ...baseInstance(),
+    "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: {
+      args: [], namespace: "review-workers", "service-account": "pr-reviewer-worker",
+      volumes: [{ claim: "data", "controller-root": "/var/lib/data" }],
+    } }],
+  }).executorProfiles[0]!.kubernetes!;
+  assert.equal(inheritedProfile.image, null);
+  assert.equal(inheritedProfile.ttlSecondsAfterFinished, null);
+  assert.equal(inheritedProfile.resources, null);
   // A kubernetes kind without its spec fails closed — the executor has
   // nothing to build a Job from.
   expectError(
@@ -381,7 +393,7 @@ test("the kubernetes executor spec's fields are grammar-bounded (#734)", () => {
   broken("ttl", (spec) => ({ ...spec, "ttl-seconds-after-finished": 0 }), "must be between 1 and 604800");
   broken("ttl", (spec) => ({ ...spec, "ttl-seconds-after-finished": 604_801 }), "must be between 1 and 604800");
   // resources: required, quantity grammar.
-  broken("resources", (spec) => ({ ...spec, resources: undefined }), "must be a mapping");
+  broken("resources", (spec) => ({ ...spec, resources: null }), "must be a mapping");
   broken("cpu", (spec) => ({
     ...spec,
     resources: { requests: { cpu: "fast", memory: "512Mi" }, limits: { cpu: "2", memory: "2Gi" } },
@@ -414,6 +426,61 @@ test("the kubernetes executor spec's fields are grammar-bounded (#734)", () => {
     volumes: [{ ...spec.volumes[0], "controller-root": "/" }],
   }), "must not be the filesystem root");
   broken("volumes-none", (spec) => ({ ...spec, volumes: undefined }), "must be a list of volume mappings");
+});
+
+test("deployment defaults parse bounded image, TTL, and resources and resolve as explicit profile overrides", () => {
+  const defaults = parseKubernetesDeploymentDefaults(JSON.stringify({
+    image: "ghcr.io/acme/worker:1",
+    ttlSecondsAfterFinished: 1800,
+    resources: { requests: { cpu: "500m", memory: "512Mi" }, limits: { cpu: "2", memory: "2Gi" } },
+  }));
+  assert.equal(parseKubernetesDeploymentDefaults("{}").image, null);
+  assert.deepEqual(defaults.resources?.requests, { cpu: "500m", memory: "512Mi" });
+  for (const text of ["[]", "not json", '{"extra":1}', '{"image":"Bad Image"}', '{"resources":{"requests":{"cpu":"fast","memory":"1Gi"},"limits":{"cpu":"1","memory":"1Gi"}}}']) {
+    assert.throws(() => parseKubernetesDeploymentDefaults(text), /Kubernetes deployment defaults/);
+  }
+  const profile = validate({ ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: {
+    namespace: "review-workers", "service-account": "worker", volumes: [{ claim: "data", "controller-root": "/data" }],
+  } }] }).executorProfiles[0]!.kubernetes!;
+  const resolved = resolveKubernetesExecutorSpec(profile, defaults, "k8s");
+  assert.equal(resolved.image, defaults.image);
+  assert.equal(resolved.ttlSecondsAfterFinished, 1800);
+  assert.throws(() => resolveKubernetesExecutorSpec(profile, parseKubernetesDeploymentDefaults("{}"), "k8s-jobs"), /executor profile 'k8s-jobs'.*image/);
+  const override = {
+    ...profile,
+    image: "ghcr.io/acme/override:2",
+    ttlSecondsAfterFinished: 2400,
+    resources: { requests: { cpu: "1", memory: "1Gi" }, limits: { cpu: "3", memory: "3Gi" } },
+  };
+  const resolvedOverride = resolveKubernetesExecutorSpec(override, defaults, "k8s");
+  assert.equal(resolvedOverride.image, override.image);
+  assert.equal(resolvedOverride.ttlSecondsAfterFinished, override.ttlSecondsAfterFinished);
+  assert.deepEqual(resolvedOverride.resources, override.resources);
+
+  const independentlyResolved = validate({
+    ...baseInstance(),
+    "executor-profiles": [
+      { name: "explicit", kind: "kubernetes", kubernetes: {
+        image: "ghcr.io/acme/explicit:1",
+        args: [], namespace: "review-workers", "service-account": "worker",
+        "ttl-seconds-after-finished": 900,
+        resources: { requests: { cpu: "1", memory: "1Gi" }, limits: { cpu: "2", memory: "2Gi" } },
+        volumes: [{ claim: "explicit-data", "controller-root": "/var/lib/explicit" }],
+      } },
+      { name: "inherited", kind: "kubernetes", kubernetes: {
+        args: [], namespace: "review-workers", "service-account": "worker",
+        volumes: [{ claim: "inherited-data", "controller-root": "/var/lib/inherited" }],
+      } },
+    ],
+  }).executorProfiles;
+  const explicitResolved = resolveKubernetesExecutorSpec(independentlyResolved[0]!.kubernetes!, defaults, "explicit");
+  const inheritedResolved = resolveKubernetesExecutorSpec(independentlyResolved[1]!.kubernetes!, defaults, "inherited");
+  assert.equal(explicitResolved.image, "ghcr.io/acme/explicit:1");
+  assert.equal(explicitResolved.ttlSecondsAfterFinished, 900);
+  assert.deepEqual(explicitResolved.resources?.requests, { cpu: "1", memory: "1Gi" });
+  assert.equal(inheritedResolved.image, defaults.image);
+  assert.equal(inheritedResolved.ttlSecondsAfterFinished, defaults.ttlSecondsAfterFinished);
+  assert.deepEqual(inheritedResolved.resources, defaults.resources);
 });
 
 test("the kubernetes spec's optional runtime-class-name is a DNS-1123 label pin (#1422)", () => {

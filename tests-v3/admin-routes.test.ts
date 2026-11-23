@@ -26,6 +26,11 @@ function fixture(state: JobLifecycleState = "running", nowMs?: () => number) {
   return { calls, events, context };
 }
 const req = (method: string, pathname: string, extra: Record<string, unknown> = {}) => ({ method, pathname, search: "", requestId: "req-1", ...extra });
+/** The rendered value of a zero-label counter; absent from the exposition means zero. */
+const counter = (metrics: AdminMetricsRegistry, name: string): number => {
+  const line = metrics.renderPrometheus().split("\n").find((entry) => entry.startsWith(`${name} `));
+  return line === undefined ? 0 : Number(line.slice(name.length + 1));
+};
 
 test("all admin reads and writes require auth; public endpoints do not", async () => {
   const { context } = fixture();
@@ -200,6 +205,51 @@ test("rereview validates first, invokes effect once, and audits after it settles
   assert.deepEqual(calls, ["rereview", "audit"]);
 });
 
+test("an invalid rereview request names the offending field and why", async () => {
+  const { context, calls } = fixture();
+  const headers = { authorization: "Bearer secret-value", contentType: "application/json" };
+  const notAnObject = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: "not an object" }));
+  assert.equal(notAnObject.status, 400);
+  assert.deepEqual(notAnObject.body, { error: "invalid request", detail: "the request body must be a JSON object" });
+  const badKey = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "bad key", reason: "manual" } }));
+  assert.equal(badKey.status, 400);
+  assert.equal((badKey.body as { detail: string }).detail, "the PR key must be a trimmed identifier of letters, digits, and . _ / @ # : -");
+  const badReason = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "  " } }));
+  assert.equal(badReason.status, 400);
+  assert.equal((badReason.body as { detail: string }).detail, "the reason must be a trimmed, non-empty single line");
+  // A malformed request never reaches the effect seam.
+  assert.deepEqual(calls, []);
+});
+
+test("a refused rereview carries the seam's reason to the operator", async () => {
+  const { context, events } = fixture();
+  context.deps.forceRereview = async () => ({ refused: "the repository is not adopted for review" });
+  const response = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { authorization: "Bearer secret-value", contentType: "application/json", body: { prKey: "owner/repo#7", reason: "manual" } }));
+  assert.equal(response.status, 409);
+  // The reason reaches the operator verbatim: the bounded projection does
+  // not rewrite a benign reason.
+  assert.deepEqual(response.body, { error: "request refused", detail: "the repository is not adopted for review" });
+  assert.deepEqual(events.map((event) => event.outcome), ["refused"]);
+});
+
+test("a hostile or oversized refusal reason is bounded and redacted", async () => {
+  const { context } = fixture();
+  const headers = { authorization: "Bearer secret-value", contentType: "application/json" };
+  const hostile = `api_key=sk-12345678901234567890 ${"x".repeat(5000)} \u202E tail`;
+  context.deps.forceRereview = async () => ({ refused: hostile });
+  const response = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "manual" } }));
+  assert.equal(response.status, 409);
+  const detail = (response.body as { detail: string }).detail;
+  assert.ok(detail.length <= 200, "the refusal reason is capped");
+  assert.doesNotMatch(detail, /sk-12345678901234567890/);
+  assert.doesNotMatch(detail, /\u202E/);
+  assert.match(detail, /REDACTED/);
+  // A blank reason still answers with a reason.
+  context.deps.forceRereview = async () => ({ refused: "   " });
+  const blank = await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "manual" } }));
+  assert.equal((blank.body as { detail: string }).detail, "the request was refused");
+});
+
 test("diagnostics redact credential keys, secret shapes, and URL userinfo", async () => {
   const { context } = fixture();
   context.deps.diagnostics = async () => ({
@@ -231,17 +281,119 @@ test("unknown run reads 404 and refused rereview audits a 409", async () => {
 test("cancellation refuses unknown and terminal runs, accepts active once", async () => {
   const { context, calls, events } = fixture("running");
   const headers = { authorization: "Bearer secret-value", contentType: "application/json" };
-  assert.equal((await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", headers))).status, 202);
+  const accepted = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", headers));
+  // The cancellation is DONE when the route answers: the effect settled.
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(accepted.body, { cancelled: true });
   assert.deepEqual(calls, ["cancel", "audit"]);
   context.deps.getRun = async () => run("completed");
-  assert.equal((await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", headers))).status, 409);
+  const terminal = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", headers));
+  assert.equal(terminal.status, 409);
+  assert.deepEqual(terminal.body, { error: "run is terminal", detail: "the run already settled" });
   context.deps.getRun = async () => null;
-  assert.equal((await dispatchAdminRoute(context, req("POST", "/admin/runs/run-9/cancel", headers))).status, 404);
+  const absent = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-9/cancel", headers));
+  assert.equal(absent.status, 404);
+  assert.deepEqual(absent.body, { error: "run not found", detail: "no run with that id" });
   assert.deepEqual(events.map((event) => ({ action: event.action, target: event.target, outcome: event.outcome })), [
     { action: "cancel", target: { kind: "run", id: "run-1" }, outcome: "accepted" },
     { action: "cancel", target: { kind: "run", id: "run-1" }, outcome: "refused" },
     { action: "cancel", target: { kind: "run", id: "run-9" }, outcome: "refused" },
   ]);
+  // Only the applied 200 counts as a cancellation; refusals never do.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 1);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
+});
+
+test("a refused cancellation carries the seam's reason to the operator", async () => {
+  const { context, events } = fixture("running");
+  context.deps.cancelRun = async () => ({ refused: "the run has no queued generation" });
+  const response = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", { authorization: "Bearer secret-value", contentType: "application/json" }));
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body, { error: "cancellation refused", detail: "the run has no queued generation" });
+  assert.deepEqual(events.map((event) => event.outcome), ["refused"]);
+  // A refused cancellation is counted by neither counter.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
+});
+
+test("a cancellation whose publication is in flight answers 202, never the applied 200 (#1772)", async () => {
+  // The publication is already in flight: the forge side effect may
+  // already have landed, so the route must NOT answer the
+  // applied-cancellation contract (200 `cancelled: true`), which
+  // promises an operator-cancelled run. The cancellation is REGISTERED
+  // and the terminal state is undetermined.
+  const { context, events } = fixture("running");
+  context.deps.cancelRun = async () => ({ undetermined: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone" });
+  const response = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", { authorization: "Bearer secret-value", contentType: "application/json" }));
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body, {
+    status: "cancellation-registered",
+    cancelled: false,
+    detail: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
+  });
+  assert.deepEqual(events.map((event) => event.outcome), ["accepted"]);
+  // The registration is visible in the metrics seam, but never as an
+  // applied cancellation: its terminal state is the publication's.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 1);
+});
+
+test("every attempted mutation outcome writes exactly one audit row", async () => {
+  const { context, events } = fixture("running");
+  const headers = { authorization: "Bearer secret-value", contentType: "application/json" };
+  // accepted.
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "manual" } }));
+  // refused by the effect seam.
+  context.deps.forceRereview = async () => ({ refused: "the repository is not adopted for review" });
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "manual" } }));
+  // error: the effect seam threw.
+  context.deps.forceRereview = async () => { throw new Error("seam failure"); };
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "manual" } }));
+  // refused by the admin layer (an unknown run).
+  context.deps.getRun = async () => null;
+  await dispatchAdminRoute(context, req("POST", "/admin/runs/run-9/cancel", headers));
+  assert.deepEqual(events.map((event) => ({ action: event.action, target: event.target, outcome: event.outcome })), [
+    { action: "rereview", target: { kind: "pr", id: "owner/repo#7" }, outcome: "accepted" },
+    { action: "rereview", target: { kind: "pr", id: "owner/repo#7" }, outcome: "refused" },
+    { action: "rereview", target: { kind: "pr", id: "owner/repo#7" }, outcome: "error" },
+    { action: "cancel", target: { kind: "run", id: "run-9" }, outcome: "refused" },
+  ]);
+});
+
+test("the operator's reason rides the rereview audit row, redacted, and never on a cancel", async () => {
+  const { context, events } = fixture("running");
+  const headers = { authorization: "Bearer secret-value", contentType: "application/json" };
+  const stated = "the head moved again";
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: stated } }));
+  context.deps.forceRereview = async () => ({ refused: "the repository is not adopted for review" });
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: stated } }));
+  context.deps.forceRereview = async () => { throw new Error("seam failure"); };
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: stated } }));
+  // The cancel request carries no reason: the field is ABSENT, not empty.
+  await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", headers));
+  assert.deepEqual(events.map((event) => ({ action: event.action, outcome: event.outcome, reason: event.reason })), [
+    { action: "rereview", outcome: "accepted", reason: stated },
+    { action: "rereview", outcome: "refused", reason: stated },
+    { action: "rereview", outcome: "error", reason: stated },
+    { action: "cancel", outcome: "accepted", reason: undefined },
+  ]);
+  assert.ok(!("reason" in events[3]!), "the cancel row carries no reason field at all");
+  // A credential shape never reaches the durable row.
+  context.deps.forceRereview = async () => ({ jobId: "job-new" });
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: "api_key=sk-12345678901234567890" } }));
+  const audited = events[events.length - 1]!.reason ?? "";
+  assert.doesNotMatch(audited, /sk-12345678901234567890/);
+  assert.match(audited, /REDACTED/);
+  assert.ok(audited.length <= 256, "the audited reason keeps the request's own bound");
+  // Control/format/bidi characters never reach the durable row verbatim:
+  // `validateReason` gates only C0 and CR/LF, so a C1 control, a bidi
+  // override, a zero-width joiner, and a line separator all pass the request
+  // gate and must be stripped before the ledger write.
+  const hostile = "re\u200bview\u202ethis\u008f head\u2029 now\u200d";
+  await dispatchAdminRoute(context, req("POST", "/admin/rereview", { ...headers, body: { prKey: "owner/repo#7", reason: hostile } }));
+  const sanitized = events[events.length - 1]!.reason ?? "";
+  assert.doesNotMatch(sanitized, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, "no control or format character survives into the ledger");
+  assert.equal(sanitized, "re view this head now");
 });
 
 test("query and unknown routes fail closed", async () => {
@@ -274,6 +426,9 @@ test("refused and failed mutations still audit the target identity", async () =>
     { action: "rereview", target: { kind: "pr", id: "github/9/repo#2/review" }, outcome: "refused", atMs: 42 },
     { action: "cancel", target: { kind: "run", id: "run-7" }, outcome: "error", atMs: 42 },
   ]);
+  // A failed cancel is counted by neither counter: nothing settled.
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellations_total"), 0);
+  assert.equal(counter(context.metrics, "pr_reviewer_admin_cancellation_registrations_total"), 0);
 });
 
 test("audit events fall back to a wall-clock timestamp when no clock is injected", async () => {

@@ -37,10 +37,9 @@ Image properties:
   `resultPath` (which the executor also names in
   `PR_REVIEWER_EXECUTION_RESULT`), and it exits promptly on SIGTERM.
 - Worker image and controller protocol are coordinated by the same commit:
-  both targets are built from one tree. The chart pins the controller image;
-  the worker image is pinned in the instance config's `kubernetes` executor
-  profile (the example values pin both to the same tag). When you upgrade
-  one, upgrade both.
+  both targets are built from one tree. The chart pins the controller image
+  and owns the worker image default, whose tag follows `Chart.appVersion`;
+  the Kubernetes profile may override it. When you upgrade one, upgrade both.
 
 For release publishing, pin the base image digests as described in
 `deploy/images/README.md`, then push digest-pinned references.
@@ -118,23 +117,27 @@ How it runs:
   read access and attach it where the chart pulls (controller namespace and
   worker ServiceAccount) — see `deploy/images/README.md`.
 
-Pin the digests at the two consumption points (never a mutable tag):
+For immutable byte pins, set the digests at the chart layer. The worker
+image defaults to the upstream published repository and follows
+`Chart.appVersion`; set `workerExecutor.image.digest` to pin its exact bytes.
+An explicit Kubernetes profile `image` overrides that chart default.
 
 1. **Helm controller image** — `controller.controllers.main.containers.main.image`
    in your chart values. The `common` library chart accepts a `digest`
    field next to `repository` and `tag` and renders
    `repository[:tag]@digest`, so set `image.digest` to the value from the
    run summary; do not put the digest into `repository`.
-2. **Worker image** — the instance config's `kubernetes.image` field in the
-   Kubernetes executor profile. That field is one full reference string,
-   so include the digest in it:
-   `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest>`.
+2. **Worker image** — the chart's `workerExecutor.image.digest` optional
+   exact-byte pin. Its default repository is `ghcr.io/misospace/pr-reviewer-worker`
+   and its tag follows `Chart.appVersion`; an explicit Kubernetes profile
+   `image` overrides the chart default. The chart also supplies worker
+   resources and Job cleanup TTL unless the profile overrides them. Keep
+   the profile's namespace, service account, and shared-volume mappings in
+   instance config; those remain deployment-specific profile facts.
 
-The example values under `deploy/charts/pr-reviewer/examples/` show the
-shape; replace their placeholders with the digest references from the run
-summary. When you upgrade, upgrade both pins together: worker and
-controller protocol revisions are coordinated by building both images from
-the same commit.
+The chart example inherits the release-coupled image by default. When you
+upgrade, upgrade both images together: worker and controller protocol
+revisions are coordinated by building both from the same commit.
 
 ## The chart
 
@@ -192,8 +195,9 @@ How the chart artifact relates to the release:
   (see `deploy/images/README.md`).
 - **Digest overrides unchanged.** The chart still supports digest-pinned
   image overrides (`controller.controllers.main.containers.main.image.digest`
-  and the instance-config `kubernetes.image` reference) — those remain the
-  exact immutable production pin when desired.
+  and `workerExecutor.image.digest`) — those remain the exact immutable
+  production pins when desired. A profile-level Kubernetes image remains an
+  explicit override over the chart-owned worker default.
 - **Source checkout stays a development path.** Installing from
   `deploy/charts/pr-reviewer/` in a repository checkout (below) is for
   development and CI validation; the released OCI coordinate is the normal
@@ -527,9 +531,10 @@ wherever you route it:
 3. Restart recovery reconciles durable state before it requeues, so an
    in-flight review at upgrade time is never recomputed: a live worker is
    adopted, a settled worker publishes without a rerun.
-4. Update the worker image in the same upgrade: the executor runs the image
-   the instance config names, and worker/controller versions must stay
-   coordinated.
+4. The chart's default worker image follows `Chart.appVersion`, so it updates
+   with the chart. If the instance config explicitly overrides the profile
+   `image`, update that override in the same upgrade; worker/controller
+   versions must stay coordinated.
 
 Rollback follows the usual Helm path (`helm rollback`). Because migrations
 are forward-only, roll back the application only when the previous version

@@ -17,9 +17,13 @@
  * Environment contract (all secret material travels through the
  * environment or the projected service-account mount, never argv, never a
  * URL, never a log line):
- *
- * - `PR_REVIEWER_INSTANCE_CONFIG` (or `--config <path>`): the #727
- *   instance-config file (required).
+  *
+  * - `PR_REVIEWER_INSTANCE_CONFIG` (or `--config <path>`): the #727
+  *   instance-config file (required).
+ * - `PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS`: optional bounded JSON
+ *   object carrying chart/deployment-owned worker image, TTL, and resources;
+ *   absent means no deployment defaults; Kubernetes profiles must declare
+ *   any missing deployment facts explicitly.
  * - `PR_REVIEWER_CONTROL_PLANE_URL`: the PostgreSQL DSN (required).
  * - `PR_REVIEWER_DURABLE_STATE_DIR`, `PR_REVIEWER_RUNS_ROOT`,
  *   `PR_REVIEWER_WORKSPACE_CACHE_ROOT`: the controller-owned roots
@@ -68,6 +72,9 @@ import { validateContract } from "../config/contract.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import {
   parseInstanceConfigText,
+  parseKubernetesDeploymentDefaults,
+  emptyKubernetesDeploymentDefaults,
+  resolveKubernetesExecutorSpec,
   forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   type InstanceConfig,
@@ -76,6 +83,7 @@ import {
 import type { ApiFormat } from "../config/types.js";
 import { forgeProductLabel, forgeTokenFromEnv } from "../platform/forge-identity.js";
 import type { FetchLike } from "../platform/http.js";
+import { parseRepoRef } from "../platform/repo-ref.js";
 import {
   buildWorkerCredentialPlan,
   InMemorySecretVault,
@@ -116,6 +124,7 @@ import type {
   ControllerAdminDeps,
   ReadinessComponent,
 } from "../admin/types.js";
+import { normalizeRepoFullName } from "../events/normalize.js";
 import type { FollowUpForgeAdapter } from "../ingress/followup-host.js";
 import type { ReconcileReport } from "../ingress/reconcile.js";
 import {
@@ -295,6 +304,7 @@ export class StartupRefusal extends Error {
  * cheap and total). */
 interface StartupConfig {
   readonly instance: InstanceConfig;
+  readonly kubernetesDeploymentDefaults: ReturnType<typeof emptyKubernetesDeploymentDefaults>;
   /** The configured identity platform (#1682: `gitea` is a Gitea-family
    * identity served by the Forgejo-compatible stack). Canonical jobs,
    * events, and credential scopes stay in the `forgeFamily` of this value. */
@@ -383,6 +393,23 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     instance = parseInstanceConfigText(text, validateContract(V3_CONTRACT));
   } catch (error) {
     throw new StartupRefusal(`the instance config is invalid: ${errorMessage(error)}`, 2);
+  }
+  let kubernetesDeploymentDefaults = emptyKubernetesDeploymentDefaults();
+  const defaultsText = env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS;
+  if (typeof defaultsText === "string" && defaultsText.trim() !== "") {
+    try {
+      kubernetesDeploymentDefaults = parseKubernetesDeploymentDefaults(defaultsText);
+    } catch (error) {
+      throw new StartupRefusal(`PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid: ${errorMessage(error)}`, 2);
+    }
+  }
+  for (const profile of instance.executorProfiles) {
+    if (profile.kind !== "kubernetes" || profile.kubernetes === null) continue;
+    try {
+      resolveKubernetesExecutorSpec(profile.kubernetes, kubernetesDeploymentDefaults, profile.name);
+    } catch (error) {
+      throw new StartupRefusal(errorMessage(error), 2);
+    }
   }
 
   // ── ONE platform per instance: the daemon serves one forge platform.
@@ -608,6 +635,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
 
   return {
     instance,
+    kubernetesDeploymentDefaults,
     platform,
     forgeEndpoint,
     controlPlaneDsn,
@@ -628,6 +656,44 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
       .filter((entry) => entry !== ""),
     modelCredentialMaterial,
   };
+}
+
+/** The admin surface's PR key: `"<owner>/<repo>#<prNumber>"`.
+ *
+ * ONE strict grammar: an owner and a repository of `[A-Za-z0-9._-]`, a
+ * `#`, and a POSITIVE decimal PR number with no leading zero. A URL
+ * scheme, whitespace, a path, or a padded number is refused — the key
+ * names one pull request, and a key that could name several is never
+ * resolved by guessing. A DOT-ONLY segment (`.` or `..`) is no repository
+ * identity either: the parsed identity is validated through the platform's
+ * ONE repository-reference validator, so a traversal-shaped key like
+ * `../..#7` gets the shape refusal at this gate, never the opaque forge
+ * refusal it would later reach. The reason a refusal carries names the
+ * grammar, never the operator's input. */
+const PR_KEY_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
+
+function parsePrKey(prKey: string): { readonly repoFullName: string; readonly prNumber: number } | null {
+  if (typeof prKey !== "string") return null;
+  const match = PR_KEY_PATTERN.exec(prKey);
+  if (match === null) return null;
+  const prNumber = Number(match[3]);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  // The charset match is not a repository identity: a dot-only segment
+  // survives it and is exactly the shape the platform's repo-ref validator
+  // refuses (`parseRepoRef` rejects `.`/`..` for the URL-normalization hole
+  // it exists to close). Refuse the same shapes HERE, at the shape gate, so
+  // the operator reads the grammar, not a downstream "could not be read".
+  if (parseRepoRef(`${match[1]}/${match[2]}`) === null) return null;
+  // The identity carries the SAME canonical case the intake's forge
+  // normalizer produces (`normalizeRepoFullName`: trim + lowercase): the
+  // adoption records, the allow/denylist matching, and the generation
+  // identity all key on that canonical form, so a mixed-case operator key
+  // names the same repository the webhook event would — it can never miss
+  // the adoption record, and can never mint a generation whose identity
+  // diverges from the intake's for the same head.
+  const repoFullName = normalizeRepoFullName(`${match[1]}/${match[2]}`);
+  if (repoFullName === "") return null;
+  return { repoFullName, prNumber };
 }
 
 /** The admin surface's thin deps (#737): projections over the control
@@ -781,11 +847,28 @@ function createAdminDeps(deps: {
         intakeInstallationRefusals: intakeInstallation.refusals,
       };
     },
-    async forceRereview() {
-      return { refused: "forced rereview is not available in this composition" };
+    async forceRereview(input) {
+      // The PR key grammar: "<owner>/<repo>#<prNumber>". ONE definition,
+      // parsed strictly: a malformed key is refused, never guessed at.
+      const parsed = parsePrKey(input.prKey);
+      if (parsed === null) {
+        return { refused: "the PR key must be owner/repo#123" };
+      }
+      const result = await deps.daemon.forceRereview({
+        repoFullName: parsed.repoFullName,
+        prNumber: parsed.prNumber,
+      });
+      return result.status === "scheduled" ? { jobId: result.jobId } : { refused: result.reason };
     },
-    async cancelRun() {
-      return { refused: "run cancellation is not available in this composition" };
+    async cancelRun(input) {
+      const result = await deps.daemon.cancelRun(input.runId);
+      if (result.status === "cancelled") return { cancelled: true };
+      // The publication is already in flight: the cancellation is
+      // registered, but the terminal state is the publication's outcome
+      // — NOT the operator's click. The admin layer answers "accepted,
+      // undetermined" here, never the applied-cancellation contract.
+      if (result.status === "publish-undetermined") return { undetermined: result.reason };
+      return { refused: result.reason };
     },
     audit: (event) => {
       audit(JSON.stringify({
@@ -794,6 +877,12 @@ function createAdminDeps(deps: {
         requestId: event.requestId,
         target: event.target,
         outcome: event.outcome,
+        // The operator's stated reason rides the row when the mutation
+        // carries one (the rereview): the ledger must answer WHY the
+        // operator forced it. The key is OMITTED — never `undefined` — when
+        // there is no reason (the cancel), so the row's shape stays
+        // byte-compatible.
+        ...(event.reason === undefined ? {} : { reason: event.reason }),
       }));
     },
   };
@@ -1544,6 +1633,7 @@ export async function controllerMain(
       resolveProfiles,
       credentialRefs: credentialBinding.credentialRefs,
       executors,
+      kubernetesDeploymentDefaults: startup.kubernetesDeploymentDefaults,
       ...(deps.createWorkspace !== undefined ? { createWorkspace: deps.createWorkspace } : {}),
       // #1723: the App installation identity repairs a webhook delivery that
       // omitted `installation.id` — the same identity the poll mints with.

@@ -45,7 +45,7 @@ import { ForgejoIngressClient } from "../ingress/api-client.js";
 import { buildCloneCredential } from "../ingress/clone-credentials.js";
 import { toFetchCredentials } from "../acquisition/git-env.js";
 import { MirrorCache } from "../acquisition/mirror.js";
-import { derivePrStateReading, type PrStateReading } from "../platform/pr.js";
+import { deriveIsFork, derivePrStateReading, type PrStateReading } from "../platform/pr.js";
 import { FORGE_COMMENT_MAX_BYTES } from "../platform/comment-ceiling.js";
 import { DEFAULT_MANAGED_MARKER } from "../context/pr-thread.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
@@ -142,6 +142,38 @@ export function durableResultPayloadFitsCeiling(resultPayload: string): boolean 
   return Buffer
     .byteLength(assembleDurableResultBody(CONTROLLER_STICKY_MARKER, resultPayload), "utf8")
     <= FORGE_COMMENT_MAX_BYTES;
+}
+
+/** The PR identity projection the daemon's forced rereview reads (#1772):
+ * the head sha, the numeric PR id, the base sha, and the fork
+ * derivation — ONE derivation for both platform families.
+ *
+ * A field the forge did not report reads as its sentinel ("" / 0), and
+ * the FORK derivation is the platform seam's own (`deriveIsFork`): an
+ * unknown head repo fails closed AS a fork, exactly like every other
+ * reader of a PR payload. `null` when the payload is not a usable PR
+ * object at all. */
+function prIdentityFromPayload(pr: unknown): {
+  readonly headSha: string;
+  readonly prId: number;
+  readonly baseSha: string;
+  readonly fork: boolean;
+} | null {
+  if (typeof pr !== "object" || pr === null) return null;
+  const record = pr as Record<string, unknown>;
+  const head = typeof record.head === "object" && record.head !== null
+    ? (record.head as Record<string, unknown>)
+    : null;
+  const base = typeof record.base === "object" && record.base !== null
+    ? (record.base as Record<string, unknown>)
+    : null;
+  const id = record.id;
+  return {
+    headSha: head !== null && typeof head.sha === "string" ? head.sha : "",
+    prId: typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? id : 0,
+    baseSha: base !== null && typeof base.sha === "string" ? base.sha : "",
+    fork: deriveIsFork(pr),
+  };
 }
 
 /** Validate a repository full name for raw path composition (fail closed). */
@@ -314,6 +346,36 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
       if (typeof head !== "object" || head === null) return null;
       const sha = (head as Record<string, unknown>).sha;
       return typeof sha === "string" && sha !== "" ? sha : null;
+    },
+    async readPrIdentity(target: {
+      readonly repoFullName: string;
+      readonly prNumber: number;
+      readonly installationId: string;
+    }): Promise<{
+      readonly headSha: string;
+      readonly prId: number;
+      readonly baseSha: string;
+      readonly fork: boolean;
+    } | null> {
+      // The AUTHENTICATED capability client, exactly like the sibling
+      // `publish` write does: a private repository's pull request is
+      // invisible to an unauthenticated read, so the forced rereview
+      // must read with the App installation the daemon serves.
+      if (target.installationId === "") {
+        // No credential to read with: refuse rather than fall back to an
+        // unauthenticated read that could only see public repositories.
+        return null;
+      }
+      const client = new GitHubAppCapabilityClient({
+        apiBaseUrl,
+        appId: input.githubAppId!,
+        privateKeyPem: input.githubAppPrivateKeyPem!,
+        installationId: target.installationId,
+        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
+      });
+      const read = await client.getPullRequest(target.repoFullName, target.prNumber);
+      if (!read.ok) return null;
+      return prIdentityFromPayload(read.data);
     },
     async publish(input_: { readonly job: ReviewJob; readonly resultPayload: string }): Promise<{
       readonly publicationId: string;
@@ -559,6 +621,29 @@ function composeForgejo(input: ForgeCompositionInput): ComposedForge {
         ? (head as Record<string, unknown>).sha
         : undefined;
       return typeof sha === "string" && sha !== "" ? sha : null;
+    },
+    async readPrIdentity(target: {
+      readonly repoFullName: string;
+      readonly prNumber: number;
+      readonly installationId: string;
+    }): Promise<{
+      readonly headSha: string;
+      readonly prId: number;
+      readonly baseSha: string;
+      readonly fork: boolean;
+    } | null> {
+      // The Gitea family authenticates with its STATIC token, so the
+      // installation id is irrelevant here: the same adapter read the
+      // sibling methods use, one derivation.
+      const adapter = new ForgejoAdapter({
+        repo: target.repoFullName,
+        prNumber: String(target.prNumber),
+        baseUrl: endpoint,
+        token,
+        forge: identity,
+        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
+      });
+      return prIdentityFromPayload(await adapter.getPr());
     },
     async publish(input_: { readonly job: ReviewJob; readonly resultPayload: string }): Promise<{
       readonly publicationId: string;

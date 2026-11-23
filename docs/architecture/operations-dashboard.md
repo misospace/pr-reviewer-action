@@ -117,6 +117,22 @@ A non-terminal run detail calls `POST /admin/runs/{id}/cancel` only after a
 `confirm()`. Both render human feedback with technical failure detail. Control-
 plane logic remains in the controller.
 
+The rereview form's own gate runs BEFORE the request: the PR key must match
+the controller's grammar (`owner/repo#123` — an owner, a repository, a `#`,
+and a positive PR number with no leading zero) and the reason must be
+non-empty after trimming. An invalid form NEVER reaches the controller: the
+feedback element names the field that was wrong, and no request is made.
+
+A refused mutation renders the CONTROLLER's reason, not a bare status: the
+response body is read as JSON and its `detail` (or its `error`) becomes the
+feedback text. The headline separates the two failure classes, so the
+operator can tell "I typed it wrong" from "the controller said no" without
+reading the status code: a `400` is the request's own shape ("Rereview was
+not requested." / "The request was invalid."), a `409` is the controller's
+refusal ("Rereview was refused." / "Cancellation was refused."). Every
+dynamic value — the server's reason included — reaches the page as a text
+node, never as markup.
+
 ## Testing posture
 
 `tests-v3/admin-dashboard.test.ts` covers route/auth/CSP pins, method and raw
@@ -127,7 +143,10 @@ text nodes: readiness, adoption, queue workers key, runs rows, failures list,
 run-detail publication/usage, diagnostics, and mutation error bodies. UI-state
 coverage pins the `confirm()` refusal gate (no mutation request), asserts the
 cancel call, and exercises empty runs, auth/offline responses, pagination, and
-accepted/refused mutation feedback. A whitelist-completeness pin covers all
+accepted/refused mutation feedback. The mutation coverage pins the refusal
+REASON: a `409` carries the controller's `detail` into the feedback element,
+and an empty reason or a malformed PR key names the offending field and posts
+nothing. A whitelist-completeness pin covers all
 lifecycle chip states, while the CSP/style-hash test, served header, and this
 documentation line must agree exactly. Redaction coverage confirms sensitive
 diagnostics remain filtered by the API.

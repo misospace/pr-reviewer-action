@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { gitCredentialEnv, gitEnv, gitInvocationEnv, safeCloneUrl, toFetchCredentials } from "../src/acquisition/git-env.js";
+import { credentialDiagnosticSecrets, gitCredentialEnv, gitEnv, gitInvocationEnv, safeCloneUrl, toFetchCredentials } from "../src/acquisition/git-env.js";
 import { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from "../src/platform/head-ref.js";
 
 test("pullRequestHeadRef: canonical head ref per platform", () => {
@@ -73,6 +73,27 @@ test("gitCredentialEnv: empty without credentials or on refused URL", () => {
   assert.deepEqual(gitCredentialEnv({ cloneUrl: "https://user@host/repo.git", authorization: "Basic eA==" }, "https://user@host/repo.git"), {});
   // A credential bound to host A is refused for host B's invocation.
   assert.deepEqual(gitCredentialEnv({ cloneUrl: "https://a.example/repo.git", authorization: "Basic eA==" }, "https://b.example/repo.git"), {});
+});
+
+// #1786 review: the known-secret set for a fetch credential's diagnostics
+// must carry the BARE payload, not just the full header — an echoing child
+// can print either. The boundary spellings are fed directly.
+test("credentialDiagnosticSecrets: header AND derived bare payload; non-Basic carries only the literal", () => {
+  assert.deepEqual(credentialDiagnosticSecrets(undefined), []);
+  // Canonical `Basic <b64>` (the only shape clone-credentials produces).
+  assert.deepEqual(credentialDiagnosticSecrets({ cloneUrl: "https://h/r.git", authorization: "Basic dXNlcjpwYXNz" }), [
+    "Basic dXNlcjpwYXNz",
+    "dXNlcjpwYXNz",
+  ]);
+  // Case-insensitive scheme and tab separator are masked too.
+  assert.deepEqual(credentialDiagnosticSecrets({ cloneUrl: "https://h/r.git", authorization: "basic\tZm9v" }), [
+    "basic\tZm9v",
+    "Zm9v",
+  ]);
+  // A non-Basic header (e.g. a bare token) is only its own literal.
+  assert.deepEqual(credentialDiagnosticSecrets({ cloneUrl: "https://h/r.git", authorization: "opaque-canary-9f3a" }), [
+    "opaque-canary-9f3a",
+  ]);
 });
 
 test("toFetchCredentials: binds the #730 CloneCredential to its URL; refuses bad URLs", () => {

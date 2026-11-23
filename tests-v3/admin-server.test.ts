@@ -97,6 +97,52 @@ test("an unusable host clock keeps the request identity bounded", async (t) => {
   assert.ok(Number.isSafeInteger(events[0]!.atMs));
 });
 
+test("the cancel mutation answers 200 when the effect settles and 409 when it refuses", async (t) => {
+  const events: AdminAuditEvent[] = [];
+  const live = {
+    runId: "run-1",
+    jobId: "job-1",
+    kind: "review" as const,
+    state: "running" as const,
+    executorIdentity: "local",
+    attempt: 1,
+    headSha: "abcdef1234567",
+    failureReason: "",
+    supersededByJobId: "",
+    createdAtMs: 1,
+    updatedAtMs: 2,
+    startedAtMs: 1,
+    finishedAtMs: 0,
+    publication: { jobId: "job-1", state: "none" as const, attempt: 0, lastOutcome: "" },
+    usage: [],
+  };
+  const host = createAdminHost({
+    deps: { ...deps, getRun: async () => live, audit: (event) => { events.push(event); } },
+    token: "admin-secret",
+  });
+  const server = createHttpServer(host.handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const accepted = await fetch(`http://127.0.0.1:${address.port}/admin/runs/run-1/cancel`, { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: "{}" });
+  // The cancellation is DONE when the route answers (#1772).
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(await accepted.json(), { cancelled: true });
+  const refusedHost = createAdminHost({
+    deps: { ...deps, getRun: async () => live, cancelRun: async () => ({ refused: "the run has no queued generation" }) },
+    token: "admin-secret",
+  });
+  const refusedServer = createHttpServer(refusedHost.handler);
+  await new Promise<void>((resolve) => refusedServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => refusedServer.close());
+  const refusedAddress = refusedServer.address() as AddressInfo;
+  const refused = await fetch(`http://127.0.0.1:${refusedAddress.port}/admin/runs/run-1/cancel`, { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: "{}" });
+  assert.equal(refused.status, 409);
+  assert.deepEqual(await refused.json(), { error: "cancellation refused", detail: "the run has no queued generation" });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.outcome, "accepted");
+});
+
 test("public readiness over the wire never carries the seam's detail or a credential-shaped name", async (t) => {
   const hostile: ControllerAdminDeps = {
     ...deps,
