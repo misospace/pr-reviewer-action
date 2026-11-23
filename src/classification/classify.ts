@@ -4209,10 +4209,12 @@ type MustCheckEvidenceTag = {
   row_class: "attention" | "objective" | "review-prompt";
   gate?: "ci-evidence" | "dependency-evidence" | "source-identity";
   obligations?: ("provenance" | "release_delta" | "security_advisory")[];
-  /** #1657 (review round 2): the npm-dependency rows whose trusted scope
-   * comes from the producer's parse of the PR's own changed dependency
-   * surfaces. Image/chart/platform rows carry NO scope source yet — they
-   * fail closed (never kind-only credit) until a reliable parse exists. */
+  /** #1657 (review round 2): rows whose trusted scope comes from the
+   * producer's parse of the PR's own changed dependency surfaces. #1763:
+   * the image and chart rows now take the producer's parsed scope too —
+   * the parse reads container-image / OCI-chart surfaces. Platform rows
+   * still carry NO scope source — they fail closed (never kind-only
+   * credit) until a reliable parse exists. */
   takes_dependency_scope?: boolean;
   dependency_scope?: DependencyScopeEntry[];
 };
@@ -4230,11 +4232,13 @@ const MUST_CHECK_EVIDENCE_TAGS: Readonly<Record<string, MustCheckEvidenceTag>> =
   Object.fromEntries(
     [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS, DEPENDENCY_EVIDENCE_CHECKS, PLATFORM_EVIDENCE_CHECKS].flatMap(
       (family) => {
-        // #1657 (review round 2): ONLY the npm-dependency family carries a
-        // reliable producer scope parse today — image/chart/platform rows
-        // fail closed (no scope → no kind-only credit) until a reliable
-        // parse exists for their surfaces.
-        const takesScope = family === DEPENDENCY_EVIDENCE_CHECKS;
+        // #1763: the producer's scope parse now covers container-image and
+        // OCI-chart surfaces, so the image and chart families carry it like
+        // the npm family. Platform rows still fail closed (no scope → no
+        // kind-only credit) until a reliable parse exists for them.
+        const takesScope = family === DEPENDENCY_EVIDENCE_CHECKS
+          || family === IMAGE_EVIDENCE_CHECKS
+          || family === CHART_EVIDENCE_CHECKS;
         return ([
           [family[0], { text: family[0], row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"] }],
           [family[1], { text: family[1], row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"] }],
@@ -4337,13 +4341,169 @@ const NPM_STRUCTURAL_LINE_RE = /^[{}[\],]+$/;
 const NPM_ROOT_METADATA_KEYS: ReadonlySet<string> = new Set(["name", "version", "lockfileVersion", "requires", "packages"]);
 const CHART_NAME_LINE_RE = /^name:\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$/;
 const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][A-Za-z0-9._+-]*)\s*$/;
+/** #1763: container-image and OCI-Helm-chart surfaces — Kustomize files,
+ * Flux HelmReleases, Kubernetes workloads, compose files, Helm values files,
+ * and Dockerfiles: the surfaces Renovate's docker and helm-oci managers
+ * bump. Dependency-shaped text in any OTHER changed file still never
+ * enters trusted scope — the one content-recognized exception is the Flux
+ * OCIRepository manifest marker below. */
+const IMAGE_SURFACE_SHAPE_RES: readonly RegExp[] = [
+  /(^|\/)kustomization(\.ya?ml)?$/i,
+  /(^|\/)[^/]*(helmrelease|helm-release|helm_release)[^/]*\.ya?ml$/i,
+  /(^|\/)(deployment|statefulset|daemonset|cronjob)[^/]*\.ya?ml$/i,
+  /(^|\/)(docker-)?compose[^/]*\.ya?ml$/i,
+  /(^|\/)values[^/]*\.ya?ml$/i,
+  /(^|\/)Dockerfile(\..+)?$/i,
+  /\.dockerfile$/i,
+];
+/** #1763 (review finding on #1782): Flux OCIRepository manifests are named
+ * after the RELEASE (`prometheus-blackbox-exporter.yaml`), not after their
+ * kind, so no file-name shape above matches them and the `oci://` url +
+ * `ref.tag` bump this grammar already parses never reaches it. Recognition
+ * therefore also reads CONTENT: a YAML file whose own diff carries the
+ * Kubernetes document-marker PAIR at ROOT column — a `kind: OCIRepository`
+ * line and an `apiVersion: source.toolkit.fluxcd.io/…` line (context,
+ * added, or removed, in any hunk; the diff prefix char is the only leading
+ * byte allowed, so an indented mention in prose or a list item marks
+ * nothing) — is an image/chart surface for this diff. Stricter than the
+ * row-gate's `CHART_PR_MARKER_RE` because this feeds TRUSTED identity, not
+ * a classification lane: both markers belong to a genuine Flux source
+ * manifest, and a bare keyword mention must not open the grammar. The
+ * marker needs no hunk position: recognition is FILE-level, while
+ * attribution stays HUNK-LOCAL, so a bump whose hunk cannot anchor fails
+ * the scope CLOSED like every other unattributable identity. A marker in a
+ * non-YAML file (docs, test fixture) recognizes nothing; HelmRelease
+ * manifests keep their existing file-name arm (their `spec.chart.spec.version`
+ * has no anchor in this grammar, so content-recog for them would fail-close
+ * mixed diffs without ever parsing — deliberately left out). */
+const FLUX_OCI_REPOSITORY_KIND_RE = /^[-+ ]?kind\s*:\s*["']?OCIRepository["']?\s*$/;
+const FLUX_SOURCE_API_VERSION_RE = /^[-+ ]?apiVersion\s*:\s*["']?source\.toolkit\.fluxcd\.io\//;
+const FLUX_SURFACE_YAML_RE = /\.ya?ml$/i;
+
+/** The changed YAML files of this diff whose own region carries BOTH Flux
+ * source-manifest markers (file-scoped: a marker in one file's diff says
+ * nothing about another file, same rule as `diffFileRegions`). A
+ * `diff --git` header whose path this grammar cannot resolve claims no
+ * file, so the following lines attribute to nothing here. */
+function fluxOciRepositorySurfaceFiles(diffLines: readonly string[]): Set<string> {
+  const files = new Set<string>();
+  const kindFiles = new Set<string>();
+  const apiVersionFiles = new Set<string>();
+  let currentFile = "";
+  for (const line of diffLines) {
+    if (line.startsWith("diff --git ")) {
+      const fileHeader = DIFF_GIT_HEADER.exec(line);
+      currentFile = fileHeader === null ? "" : (fileHeader[1] ?? "");
+      continue;
+    }
+    if (currentFile === "" || !FLUX_SURFACE_YAML_RE.test(currentFile)) continue;
+    if (FLUX_OCI_REPOSITORY_KIND_RE.test(line)) kindFiles.add(currentFile);
+    else if (FLUX_SOURCE_API_VERSION_RE.test(line)) apiVersionFiles.add(currentFile);
+    if (kindFiles.has(currentFile) && apiVersionFiles.has(currentFile)) files.add(currentFile);
+  }
+  return files;
+}
+/** A `repository:` key line (bitnami-style values images): the repo part
+ * alone, tag carried separately on `tag:` lines, registry (when the chart
+ * splits it out) on a sibling `registry:` line. */
+const IMAGE_REPOSITORY_LINE_RE = /^\s*repository\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
+/** A split-key `registry:` KEY line (bitnami-style values images): the
+ * registry host that qualifies a same-indent host-less `repository:`/`image:`
+ * value is resolved in a per-hunk PRE-PASS (key order inside the hunk proves
+ * nothing), and a value this grammar cannot validate — a path suffix, a
+ * template, anything not one clean host — poisons the hunk CLOSED: the
+ * rendered pull target is then unknown, and an unknown identity must never
+ * default to Docker Hub. A CHANGED registry is a provenance switch, not a
+ * version refresh — it fails the scope closed on its own. */
+const IMAGE_REGISTRY_LINE_RE = /^\s*["']?registry["']?\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9.:-]*)["']?\s*$/;
+/** Any line spelling a `registry:` key, list-item marker or quoted-key
+ * spelling included — the pre-pass recognition shape (its value then faces
+ * IMAGE_REGISTRY_LINE_RE; a quoted `"registry":` provenance switch must not
+ * bypass the rule any more than a bare one). */
+const IMAGE_REGISTRY_KEY_RE = /^\s*(?:-\s+)*["']?registry["']?\s*:/i;
+/** One clean registry host (optionally `:port`): dotted, label-shaped. */
+const IMAGE_REGISTRY_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(?::\d{1,5})?$/;
+/** An OCI chart `url:` line (Flux OCIRepositories): the chart slug is the
+ * value after `oci://`. */
+const OCI_CHART_URL_LINE_RE = /^\s*url\s*:\s*["']?(oci:\/\/[A-Za-z0-9][A-Za-z0-9./_-]*)["']?\s*$/;
+/** The HelmRelease/OCI `version:` bump shape (and Chart-style `appVersion:`)
+ * inside an image/chart surface. */
+const IMAGE_VERSION_LINE_RE = /^\s*(?:version|appVersion)\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9._+-]*)["']?\s*$/;
+/** #1763: image-SHAPED changed lines this parser cannot read into a trusted
+ * identity — Renovate's post-processing keys, a `@sha256:`/`oci://` token
+ * that failed every grammar, and an image KEY line (`image`/`FROM`/
+ * `repository`/`registry`) no grammar consumed: at any leading marker depth
+ * (one list dash is stripped before the grammars run; a doubled dash, a
+ * `? key` explicit key, or a `!!tag` residue hides a reference that failed
+ * parsing — an identity this scope cannot represent, never a silent
+ * omission). These fail the WHOLE scope closed; every OTHER changed line in
+ * the surface (plain config keys, comments, a URL merely CONTAINING the
+ * word `image:`) is ignored — a values file legitimately carries non-image
+ * content. */
+const IMAGE_UNPARSEABLE_LINE_RES: readonly RegExp[] = [
+  /\b(?:newName|newTag)\s*:/i,
+  /(?:@sha256:|\boci:\/\/)/,
+  /^\s*(?:(?:-|\?)\s+|!![A-Za-z]+\s+)*(?:["']?(?:image|repository|registry|tag)["']?\s*:|\bFROM(?=\s|$))/i,
+];
+/** #1763: the short dotted image tag (`7.2`) alongside the full exact
+ * DEPENDENCY_SCOPE_EXACT_VERSION_RE — image tags are commonly two-segment.
+ * A value matching NEITHER (`latest`, `bookworm`, bare `7`) is not a
+ * checkable version identity and fails the scope closed. */
+const IMAGE_SHORT_VERSION_RE = /^\d+(?:\.\d+){1,}(?:[-+][0-9a-z.-]+)?$/;
+/** Per-entry cap for recorded manifest digests (#1763): overflow fails the
+ * scope closed like every other cap. */
+const DEPENDENCY_SCOPE_MAX_ENTRY_DIGESTS = 16;
+/** Docker Hub's registry aliases — all canonicalize to `docker.io`. */
+const DOCKER_HUB_HOSTS: ReadonlySet<string> = new Set(["index.docker.io", "registry-1.docker.io", "docker.io"]);
+
+/** #1763: canonicalize a container-image repository to its trusted slug:
+ * lowercased, `oci://` stripped, Docker Hub (and its aliases) canonicalized
+ * to `docker.io/…` with the implicit `library/` namespace stripped, an
+ * unprefixed Docker Hub name qualified (`alpine` → `docker.io/alpine`), and
+ * any other dotted registry host kept as written. A port, an empty path
+ * segment, or a result outside the scope slug grammar is UNUSABLE (null) —
+ * the caller fails the scope closed, never trusts an ambiguous identity. */
+function canonicalImageSlug(repo: string): string | null {
+  const trimmed = repo.trim().toLowerCase();
+  if (trimmed === "") return null;
+  const path = trimmed.startsWith("oci://") ? trimmed.slice("oci://".length) : trimmed;
+  if (path === "" || path.includes(":")) return null;
+  const segments = path.split("/");
+  if (segments.some((segment) => segment === "")) return null;
+  const host = segments[0] ?? "";
+  // `localhost` is Docker's local-registry convention, never a Docker Hub
+  // namespace — an identity this parser cannot map to any public catalog.
+  if (host === "localhost") return null;
+  if (host.includes(".")) {
+    if (!DOCKER_HUB_HOSTS.has(host)) {
+      return DEPENDENCY_SCOPE_SLUG_RE.test(path) ? path : null;
+    }
+    const rest = segments[1] === "library" ? segments.slice(2) : segments.slice(1);
+    if (rest.length === 0) return null;
+    const slug = `docker.io/${rest.join("/")}`;
+    return DEPENDENCY_SCOPE_SLUG_RE.test(slug) ? slug : null;
+  }
+  if (segments.length === 1) {
+    const slug = `docker.io/${host}`;
+    return DEPENDENCY_SCOPE_SLUG_RE.test(slug) ? slug : null;
+  }
+  const slug = segments.length === 2 && host === "library"
+    ? `docker.io/${segments[1]}`
+    : `docker.io/${segments.join("/")}`;
+  return DEPENDENCY_SCOPE_SLUG_RE.test(slug) ? slug : null;
+}
 
 /**
  * #1657 (review rounds 3+8): the TRUSTED dependency update identity scope —
  * the COMPLETE set of dependency updates this diff actually changes,
  * parsed only from producer-recognized dependency surfaces (npm lockfile
- * package blocks, npm manifest dependency sections, Helm chart
- * manifests). Each entry names the dependency exactly (lowercased,
+ * package blocks, npm manifest dependency sections, Helm chart manifests,
+ * and — #1763 — container-image / OCI-chart surfaces: Kustomize files,
+ * Flux HelmReleases, Kubernetes workloads, compose files, Helm values
+ * files, Dockerfiles, and (Flux names OCIRepository manifests after the
+ * release, not the kind) YAML files whose own diff carries the root-column
+ * `apiVersion: source.toolkit.fluxcd.io/…` + `kind: OCIRepository`
+ * document-marker pair). Each entry names the dependency exactly (lowercased,
  * `scope/pkg` normalized) and carries the exact version tokens from the
  * CHANGED lines that introduced it — the trustworthy old→new identity
  * where the diff shape carries one. A package enters scope only when THIS
@@ -4375,6 +4535,25 @@ const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][
  * object's own keys (lockfileVersion, name, version, requires, packages)
  * changed inside the attributed root at brace depth exactly 1.
  *
+ * #1763: image/chart entries carry `kind` and (when pinned) `digests`;
+ * npm-era entries keep exactly `{slug, versions}` so every pre-#1763
+ * consumer stays byte-compatible. Attribution in the image surface is
+ * HUNK-LOCAL like npm (image-surface lines are settled and replayed when
+ * their hunk ends): a full image reference (`image:`/`FROM`, or a
+ * `repository:` key) or an `oci://` chart `url:` — from CONTEXT or changed
+ * lines — anchors this hunk, qualified by the hunk's split-key `registry:`
+ * host at the SAME key column (order-independent; a `registry:` value that
+ * is not one clean host fails the scope CLOSED, a CHANGED one always does),
+ * and a changed `tag:`/`version:`/`appVersion:` line records against the
+ * anchor (no anchor → fail closed). Image repos canonicalize through
+ * `canonicalImageSlug` (Docker Hub → `docker.io/…`, `library/` stripped).
+ * Version tokens must be exact checkable identities
+ * (full x.y.z or short dotted like `7.2`, one optional leading `v`);
+ * `latest`/`bookworm` fails closed. Image-shaped-but-unparseable changed
+ * lines (`newName:`/`newTag:`, a failed `@sha256:`/`image:`/`FROM` line,
+ * a stray `oci://`) fail the WHOLE scope; other changed lines in a values
+ * file are plain config content and stay ignored.
+ *
  * `{ available: false }` is the fail-closed outcome: the producer could
  * not establish the COMPLETE trustworthy identity set — a recognized
  * dependency surface carried changed lines this parser cannot attribute
@@ -4386,25 +4565,53 @@ const CHART_IDENTITY_VERSION_LINE_RE = /^(?:version|appVersion):\s*([A-Za-z0-9][
  * attributed at all; the rows fail closed the same way at the receipt seam.
  */
 export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
-  const entries = new Map<string, Set<string>>();
+  const diffLines = fullDiffText.split("\n");
+  // #1763 (review finding on #1782): file-level content recognition of Flux
+  // OCIRepository manifests happens in a pre-pass over the WHOLE diff —
+  // attribution below stays hunk-local, but recognition must not depend on
+  // the marker line falling inside the bump hunk's context window.
+  const fluxOciSurfaceFiles = fluxOciRepositorySurfaceFiles(diffLines);
+  // #1763: entries accumulate kind and digests beside versions; first-seen
+  // order is preserved and the first writer's kind wins. npm-era entries
+  // leave kind undefined and never gain digests.
+  const entries = new Map<string, { versions: Set<string>; digests: Set<string>; kind?: "image" | "chart" }>();
   let scopeComplete = true;
   let lines = 0;
   let currentFile = "";
   // Per-file attribution state (reset at each diff file header AND at every
   // `@@` hunk header): the npm JSON brace depth, the `node_modules/<name>`
   // package block a line belongs to, the npm dependency-section nesting
-  // depth, and the Chart.yaml identity a changed line belongs to. Context
-  // lines KEEP the attribution state (they anchor changed lines to their
-  // package within this hunk) but NEVER create scope entries themselves.
+  // depth, the Chart.yaml identity a changed line belongs to, and (#1763)
+  // the image/chart identity an image-surface version line belongs to.
+  // Context lines KEEP the attribution state (they anchor changed lines to
+  // their package within this hunk) but NEVER create scope entries
+  // themselves.
   let braceDepth = 0;
   let currentBlockSlug: string | null = null;
   let npmSectionDepth = 0;
   let chartSlug: string | null = null;
+  let imageAnchor: { slug: string; kind: "image" | "chart" } | null = null;
+  // #1763: the split-key `registry:` hosts this hunk established, keyed by
+  // key column (bitnami-style values images spell `<registry>/<repository>`
+  // across two SIBLING keys — an exact-`registry:` line at another column
+  // belongs to a different structure and qualifies nothing). Resolved in a
+  // per-hunk pre-pass: key ORDER inside the hunk proves nothing. An
+  // exact-`registry:` value this grammar cannot validate (template, path
+  // suffix, junk) fails the hunk's scope CLOSED — the rendered pull target
+  // is then unknown, and an unknown identity must never default to Docker
+  // Hub; two DISTINCT valid hosts at one column are equally ambiguous and
+  // fail closed too (never a silent "last wins" swap).
+  const imageRegistry = new Map<number, string>();
+  // #1763: image-surface lines buffer until their hunk ends (the pre-pass
+  // needs the whole hunk before any line can be attributed).
+  const imageHunkBuffer: Array<{ raw: string; changed: boolean }> = [];
   const resetAttribution = (): void => {
     braceDepth = 0;
     currentBlockSlug = null;
     npmSectionDepth = 0;
     chartSlug = null;
+    imageAnchor = null;
+    imageRegistry.clear();
   };
   const normalizeSlug = (rawName: string): string =>
     rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "").toLowerCase();
@@ -4412,11 +4619,11 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     name !== "" && name.length <= 214 && !name.includes("..") && !name.startsWith(".") && !name.startsWith("-")
     && DEPENDENCY_SCOPE_SLUG_RE.test(name);
   const recordVersion = (slug: string, version: string): void => {
-    const versions = entries.get(slug);
-    if (versions === undefined) return;
-    if (!versions.has(version)) {
-      if (versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) { scopeComplete = false; return; }
-      versions.add(version);
+    const entry = entries.get(slug);
+    if (entry === undefined) return;
+    if (!entry.versions.has(version)) {
+      if (entry.versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) { scopeComplete = false; return; }
+      entry.versions.add(version);
     }
   };
   // Version tokens are extracted ONLY from an exact field VALUE this parser
@@ -4426,12 +4633,36 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (!entries.has(slug)) return;
     let taken = 0;
     for (const match of value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
-      if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS || entries.get(slug)!.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
+      if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS
+        || entries.get(slug)!.versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
         scopeComplete = false;
         return;
       }
       recordVersion(slug, match[0].toLowerCase());
     }
+  };
+  // #1763: a changed image reference's manifest digest (bare lowercase hex,
+  // `sha256:` already stripped by the caller). Capped like versions.
+  const recordDigest = (slug: string, digest: string): void => {
+    const entry = entries.get(slug);
+    if (entry === undefined) return;
+    if (!entry.digests.has(digest)) {
+      if (entry.digests.size >= DEPENDENCY_SCOPE_MAX_ENTRY_DIGESTS) { scopeComplete = false; return; }
+      entry.digests.add(digest);
+    }
+  };
+  // #1763: an image/chart version VALUE must be one exact checkable token:
+  // lowercased, ONE leading `v` stripped, then the full x.y.z exact grammar
+  // or the short dotted form. `latest`/`bookworm`/bare `7` is not a version
+  // identity a receipt could ever settle against — fail closed.
+  const recordImageVersion = (slug: string, rawValue: string): void => {
+    const lowered = rawValue.toLowerCase();
+    const token = lowered.startsWith("v") ? lowered.slice(1) : lowered;
+    if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(token) && !IMAGE_SHORT_VERSION_RE.test(token)) {
+      scopeComplete = false;
+      return;
+    }
+    recordVersion(slug, token);
   };
   // A lockfile package block's `"version"` field: the exact version token,
   // or a fail-closed malformed version. Any other changed line inside the
@@ -4443,12 +4674,12 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(value)) { scopeComplete = false; return null; }
     return value;
   };
-  const recordChangedEntry = (rawName: string, versionSource: string | null): void => {
+  const recordChangedEntry = (rawName: string, versionSource: string | null, kind?: "image" | "chart"): void => {
     const name = normalizeSlug(rawName);
     if (!usableSlug(name)) { scopeComplete = false; return; }
     if (!entries.has(name)) {
       if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
-      entries.set(name, new Set<string>());
+      entries.set(name, { versions: new Set<string>(), digests: new Set<string>(), ...(kind !== undefined ? { kind } : {}) });
     }
     if (versionSource !== null) recordVersions(name, versionSource);
   };
@@ -4471,10 +4702,146 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (field === null) return content.includes('"');
     return !(depthBeforeLine === 1 && NPM_ROOT_METADATA_KEYS.has(field[1] ?? ""));
   };
-  for (const line of fullDiffText.split("\n")) {
+  // #1763: an image/chart identity in the image surface becomes trusted
+  // scope only through its canonical slug; an unusable identity (a port, a
+  // hostile path, anything outside the slug grammar) fails the scope closed.
+  const imageScopeSlug = (raw: string): string | null => {
+    const slug = canonicalImageSlug(raw);
+    if (slug === null || !usableSlug(slug)) { scopeComplete = false; return null; }
+    return slug;
+  };
+  // #1763: qualify a host-less repo value with this hunk's split-key
+  // `registry:` host at the SAME key column before canonicalization (the
+  // `<registry>/<repository>` rendering) — a `registry:` line at another
+  // column belongs to a different structure and must not force a join (or
+  // a false split). Residual (base-resident only — a CHANGED registry
+  // always fails): column equality is not full mapping scope, so two
+  // same-column `registry:`/`repository:` pairs under different parents in
+  // ONE hunk window can still cross-join; ±3-line context bounds the
+  // exposure and the provenance binding stays catalog-exact. A value that
+  // carries its own dotted host ignores the qualifier — same precedence as
+  // the chart template.
+  const joinImageRegistry = (repo: string, keyColumn: number): string => {
+    const host = imageRegistry.get(keyColumn);
+    if (host === undefined) return repo;
+    const first = repo.split("/")[0] ?? "";
+    return first.includes(".") || first === "localhost" ? repo : `${host}/${repo}`;
+  };
+  // #1763: the key column of a raw line — leading indentation plus any
+  // list-item markers (a list of maps renders its first key on the dash:
+  // `- registry:` and `  repository:` are the same column).
+  const imageKeyColumn = (raw: string): number => {
+    const marker = /^\s*(?:-\s+)*/.exec(raw);
+    return marker === null ? 0 : marker[0].length;
+  };
+  // #1763: resolve this hunk's split-key registries over the WHOLE hunk
+  // before attributing any line (key order proves nothing), then replay.
+  // Resolution is PER KEY COLUMN: an exact-`registry:` value that is not
+  // one clean host, or two DISTINCT valid hosts at one column, fail the
+  // scope CLOSED — a qualifier is never silently overwritten and an
+  // unknown pull target never defaults to Docker Hub.
+  const flushImageHunk = (): void => {
+    if (imageHunkBuffer.length === 0) return;
+    const hunk = imageHunkBuffer.splice(0);
+    for (const entry of hunk) {
+      if (!IMAGE_REGISTRY_KEY_RE.test(entry.raw)) continue;
+      const field = IMAGE_REGISTRY_LINE_RE.exec(entry.raw.trim().replace(/^-\s+/, ""));
+      const host = field === null ? "" : (field[1] ?? "").toLowerCase();
+      const column = imageKeyColumn(entry.raw);
+      const previous = imageRegistry.get(column);
+      if (host === "" || !IMAGE_REGISTRY_HOST_RE.test(host)
+        || (previous !== undefined && previous !== host)) {
+        scopeComplete = false;
+        continue;
+      }
+      imageRegistry.set(column, host);
+    }
+    for (const entry of hunk) applyImageSurfaceLine(entry.raw, entry.changed);
+  };
+  // #1763: one line of an image/chart surface. ANCHORS come from context
+  // and changed lines (a full image ref, a `repository:` key, an `oci://`
+  // chart `url:`, qualified by this hunk's pre-passed split-key `registry:`
+  // host); scope ENTRIES and version/digest identity come from changed
+  // lines only — context never enters scope, same rule as npm block
+  // headers. A version line with no anchor in THIS hunk fails closed; a
+  // changed `registry:` (a provenance switch, not a version refresh) and
+  // every image-shaped-but-unparseable changed line fail the WHOLE scope;
+  // every other changed line is plain config content this surface
+  // legitimately carries and stays ignored.
+  const applyImageSurfaceLine = (rawLine: string, changed: boolean): void => {
+    // #1763: a YAML list-item marker ("  - image: …" in a k8s `images:`
+    // list) is spelling, not structure — strip ONE leading `- ` so the
+    // list-rendered reference reaches the same grammars as a mapping one.
+    // Any further marker residue matches no grammar and lands in the
+    // image-shaped-unparseable fail-closed arm.
+    const keyColumn = imageKeyColumn(rawLine);
+    const content = rawLine.trim().replace(/^-\s+/, "");
+    // A `registry:` key line is owned by the hunk pre-pass; here only the
+    // CHANGED side needs the local rule: a registry switch is a provenance
+    // change, not a version refresh — fail closed whatever the value.
+    if (IMAGE_REGISTRY_KEY_RE.test(content)) {
+      if (changed) scopeComplete = false;
+      return;
+    }
+    const ref = parseImageRefLine(content);
+    if (ref !== null && ref.repo !== "") {
+      const slug = imageScopeSlug(joinImageRegistry(ref.repo, keyColumn));
+      if (slug === null) return;
+      imageAnchor = { slug, kind: "image" };
+      if (!changed) return;
+      recordChangedEntry(slug, null, "image");
+      if (ref.tag !== null) recordImageVersion(slug, ref.tag);
+      if (ref.digest !== null) recordDigest(slug, ref.digest.replace(/^sha256:/, ""));
+      return;
+    }
+    if (ref === null) {
+      const repository = IMAGE_REPOSITORY_LINE_RE.exec(content);
+      if (repository !== null) {
+        const slug = imageScopeSlug(joinImageRegistry(repository[1] ?? "", keyColumn));
+        if (slug === null) return;
+        imageAnchor = { slug, kind: "image" };
+        if (changed) recordChangedEntry(slug, null, "image");
+        return;
+      }
+      const chartUrl = OCI_CHART_URL_LINE_RE.exec(content);
+      if (chartUrl !== null) {
+        const slug = imageScopeSlug(chartUrl[1] ?? "");
+        if (slug === null) return;
+        imageAnchor = { slug, kind: "chart" };
+        if (changed) recordChangedEntry(slug, null, "chart");
+        return;
+      }
+    }
+    // A version line: a bare `tag:` value (rule-1 tail) or a
+    // `version:`/`appVersion:` key bump, attributed to this hunk's anchor.
+    const versionValue = ref !== null
+      ? ref.tag
+      : (IMAGE_VERSION_LINE_RE.exec(content)?.[1] ?? null);
+    if (versionValue !== null) {
+      if (!changed) return;
+      if (imageAnchor === null) {
+        // A changed version with no image/chart identity established in
+        // THIS hunk: the version identity is unattributable — fail closed
+        // (mirrors the Chart.yaml rule).
+        scopeComplete = false;
+        return;
+      }
+      recordChangedEntry(imageAnchor.slug, null, imageAnchor.kind);
+      recordImageVersion(imageAnchor.slug, versionValue);
+      return;
+    }
+    if (!changed) return;
+    if (content.includes("oci://") || IMAGE_UNPARSEABLE_LINE_RES.some((pattern) => pattern.test(content))) {
+      scopeComplete = false;
+    }
+    // Any other changed line here is non-image content (a replicas count,
+    // a comment) — neither scope nor failure.
+  };
+  for (const line of diffLines) {
     if (++lines > DEPENDENCY_SCOPE_MAX_LINES) { scopeComplete = false; break; }
-    const fileHeader = /^diff --git a\/(\S+)/.exec(line);
+    const fileHeader = DIFF_GIT_HEADER.exec(line);
     if (fileHeader !== null) {
+      flushImageHunk();
       currentFile = fileHeader[1] ?? "";
       resetAttribution();
       // A changed dependency surface this parser does not read breaks the
@@ -4483,17 +4850,37 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       if (UNPARSED_DEPENDENCY_SURFACE_RES.some((pattern) => pattern.test(currentFile))) scopeComplete = false;
       continue;
     }
+    if (line.startsWith("diff --git ")) {
+      // A file header whose path the shared `DIFF_GIT_HEADER` grammar cannot
+      // resolve (git's octal-quoted form for non-ASCII paths; an unquoted
+      // path with an embedded space): its region cannot be attributed to a
+      // file name at all, so it must never leak into the PREVIOUS file's
+      // surface — attribute nothing to it, and fail the WHOLE scope closed:
+      // a changed file this parser cannot even name is the most complete
+      // kind of incompleteness.
+      flushImageHunk();
+      currentFile = "";
+      resetAttribution();
+      scopeComplete = false;
+      continue;
+    }
     // Trusted scope comes ONLY from recognized dependency surfaces.
     const inLockfile = NPM_LOCKFILE_SHAPE_RE.test(currentFile);
     const inManifest = NPM_MANIFEST_SHAPE_RE.test(currentFile);
     const inChartYaml = CHART_MANIFEST_SHAPE_RE.test(currentFile);
-    if (!inLockfile && !inManifest && !inChartYaml) continue;
+    // #1763: container-image / OCI-chart surfaces (file name OR, for Flux
+    // OCIRepository manifests, the file's own `kind:` content marker).
+    const inImageSurface = IMAGE_SURFACE_SHAPE_RES.some((pattern) => pattern.test(currentFile))
+      || fluxOciSurfaceFiles.has(currentFile);
+    if (!inLockfile && !inManifest && !inChartYaml && !inImageSurface) continue;
     if (line.startsWith("index ")) continue;
     if (line.startsWith("@@")) {
       // #1657 (review round 8): hunk-local attribution. A previous hunk's
-      // block header, dependency section, or chart identity proves nothing
-      // about the lines in THIS hunk — reset, and let this hunk's own
-      // context re-establish what it shows.
+      // block header, dependency section, chart identity, or split-key
+      // registry proves nothing about the lines in THIS hunk — settle and
+      // replay the buffer belonging to the previous hunk first, then reset,
+      // and let this hunk's own context re-establish what it shows.
+      flushImageHunk();
       resetAttribution();
       continue;
     }
@@ -4523,6 +4910,11 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
         // (context or changed); only the pairs themselves must change.
         if (NPM_SECTION_OPEN_RE.test(content)) npmSectionDepth = 1;
         else if (NPM_SECTION_CLOSE_RE.test(content)) npmSectionDepth = 0;
+      } else if (inImageSurface) {
+        // #1763: buffered until the hunk ends; an unchanged image ref /
+        // `repository:` / `oci://` url line anchors this hunk's version
+        // lines — without entering scope itself.
+        imageHunkBuffer.push({ raw: line.slice(1), changed: false });
       } else {
         // The chart's own unchanged identity line anchors this hunk's
         // version lines to the chart — without entering the scope itself.
@@ -4588,6 +4980,12 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       }
       continue;
     }
+    if (inImageSurface) {
+      // #1763: buffered until the hunk ends; the image/chart identity rules
+      // then run over the settled hunk (split-key registries included).
+      imageHunkBuffer.push({ raw: line.slice(1), changed: true });
+      continue;
+    }
     // Helm chart manifest: the chart's own identity on a changed line.
     const chartName = CHART_NAME_LINE_RE.exec(content);
     if (chartName !== null) {
@@ -4607,10 +5005,30 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       recordChangedEntry(chartSlug, chartVersion[1] ?? "");
     }
   }
+  flushImageHunk();
   if (!scopeComplete) return { available: false };
   return {
     available: true,
-    entries: [...entries].map(([slug, versions]) => ({ slug, versions: [...versions] })),
+    // #1763: npm-era entries stay exactly {slug, versions}; image/chart
+    // entries add kind, and digests only when the refs pinned any.
+    entries: [...entries].map(([slug, entry]) => ({
+      slug,
+      versions: [...entry.versions],
+      ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+      ...(entry.digests.size > 0 ? { digests: [...entry.digests] } : {}),
+    })),
+  };
+}
+
+/** #1763: copy one scope entry for a row/artifact, propagating #1763's
+ * `kind` and `digests` only when present — npm-era entries keep exactly
+ * `{slug, versions}` on the wire too. */
+function projectDependencyScopeEntry(entry: DependencyScopeEntry): DependencyScopeEntry {
+  return {
+    slug: entry.slug,
+    versions: [...entry.versions],
+    ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+    ...(entry.digests !== undefined && entry.digests.length > 0 ? { digests: [...entry.digests] } : {}),
   };
 }
 
@@ -4637,7 +5055,7 @@ export function mustCheckEvidenceTags(
     if (tag === undefined) continue;
     tags.push(
       tag.takes_dependency_scope === true && scopeEntries.length > 0
-        ? { ...tag, dependency_scope: scopeEntries.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+        ? { ...tag, dependency_scope: scopeEntries.map(projectDependencyScopeEntry) }
         : tag,
     );
   }
@@ -4656,7 +5074,7 @@ export function mustCheckEvidenceTagsToArtifact(tags: readonly MustCheckEvidence
     ...(tag.gate !== undefined ? { gate: tag.gate } : {}),
     ...(tag.obligations !== undefined && tag.obligations.length > 0 ? { obligations: [...tag.obligations] } : {}),
     ...(tag.dependency_scope !== undefined && tag.dependency_scope.length > 0
-      ? { dependency_scope: tag.dependency_scope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+      ? { dependency_scope: tag.dependency_scope.map(projectDependencyScopeEntry) }
       : {}),
   }));
 }

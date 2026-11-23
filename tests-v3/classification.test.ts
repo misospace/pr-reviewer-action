@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyPr, PR_KINDS, RISK_FLAGS, parseDependencyScope, mustCheckEvidenceTags } from "../src/classification/classify.js";
+import { classifyPr, PR_KINDS, RISK_FLAGS, parseDependencyScope, mustCheckEvidenceTags, mustCheckEvidenceTagsToArtifact } from "../src/classification/classify.js";
 import type { DependencyScopeResult } from "../src/enforcement/evidence-receipts.js";
 import { dependencyObligationForCheckText } from "../src/tools/loop.js";
 import {
@@ -4686,4 +4686,495 @@ test("#1657 (round 3): the persisted tag rows carry strictly the artifact shape 
   // exact shape the strict tag parser accepts back.
   const scoped = rows.filter((row) => Array.isArray(row.dependency_scope)) as Array<{ dependency_scope: Array<{ slug: string; versions: string[] }> }>;
   assert.deepEqual(scoped.map((row) => row.dependency_scope), [[{ slug: "ms", versions: ["2.1.2", "2.1.3"] }]]);
+});
+
+// ── #1763: container-image and OCI-chart surfaces enter the trusted scope ──
+// Image/chart identities parse from Kustomize/HelmRelease/workload/compose/
+// values/Dockerfile diffs with canonical registry slugs, hunk-local anchors,
+// exact version tokens, and pinned digests. Image-shaped-but-unparseable or
+// unattributable changed lines fail the WHOLE scope closed; plain non-image
+// config content in the same file is ignored. DIGEST_A/DIGEST_B are the
+// module's #909 64-hex fixtures.
+
+test("#1763: an organic workload image bump records the canonical slug, the old→new tags, and both pinned digests", () => {
+  const diff =
+    "diff --git a/apps/unifi/kustomization.yaml b/apps/unifi/kustomization.yaml\n" +
+    "@@ -30,7 +30,7 @@\n" +
+    "     containers:\n" +
+    `- image: ghcr.io/sirkirby/unifi-network-mcp:0.49.2@sha256:${DIGEST_A}\n` +
+    `+ image: ghcr.io/sirkirby/unifi-network-mcp:0.50.0@sha256:${DIGEST_B}\n` +
+    "       name: unifi-network-mcp\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{
+      slug: "ghcr.io/sirkirby/unifi-network-mcp",
+      versions: ["0.49.2", "0.50.0"],
+      kind: "image",
+      digests: [DIGEST_A, DIGEST_B],
+    }],
+  });
+});
+
+test("#1763: a YAML list-item image ref (the real k8s images: shape) parses like the mapping spelling", () => {
+  const diff =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "@@ -12,7 +12,7 @@\n" +
+    "       containers:\n" +
+`-      - image: ghcr.io/foo/bar:1.2.3@sha256:${DIGEST_A}\n` +
+`+      - image: ghcr.io/foo/bar:1.2.4@sha256:${DIGEST_B}\n` +
+    "         name: web\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{
+      slug: "ghcr.io/foo/bar",
+      versions: ["1.2.3", "1.2.4"],
+      kind: "image",
+      digests: [DIGEST_A, DIGEST_B],
+    }],
+  });
+});
+
+test("#1763: a split-key registry: context qualifies the host-less repository: anchor", () => {
+  const diff =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   registry: ghcr.io\n" +
+    "   repository: foo/bar\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // `docker.io` (or its absence) keeps the plain Docker Hub canonical.
+  const hub = diff.replace("registry: ghcr.io", "registry: docker.io");
+  assert.deepEqual(parseDependencyScope(hub), {
+    available: true,
+    entries: [{ slug: "docker.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A port-carrying registry makes the joined identity unmappable — fail closed.
+  const port = diff.replace("registry: ghcr.io", "registry: evil.example.com:5000");
+  assert.deepEqual(parseDependencyScope(port), { available: false });
+});
+
+test("#1763: the split-key registry resolves order-independently, poisons on unvalidatable values, and joins siblings only", () => {
+  // Key order proves nothing: the registry AFTER the repository still qualifies it.
+  const reversed =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   repository: foo/bar\n" +
+    "   registry: ghcr.io\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(reversed), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A templated or path-bearing registry value makes the rendered pull
+  // target unknown — fail CLOSED, never default to Docker Hub.
+  for (const value of ['"{{ .Values.global.registry }}"', "harbor.internal/team", "-evil.com", '""', ""]) {
+    const templated = reversed.replace("registry: ghcr.io", `registry: ${value}`);
+    assert.deepEqual(parseDependencyScope(templated), { available: false }, value);
+  }
+  // An exact `registry:` key at ANOTHER column belongs to a different
+  // structure and must not force a join.
+  const otherColumn =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " extras:\n" +
+    "   nested:\n" +
+    "     registry: evil.example.com\n" +
+    " image:\n" +
+    "   repository: nginx\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(otherColumn), {
+    available: true,
+    entries: [{ slug: "docker.io/nginx", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+  // A YAML explicit-key residue hides a reference that failed every grammar.
+  const explicitKey =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-    ? image: evil/foo:1.2.3\n" +
+    "+    ? image: evil/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(explicitKey), { available: false });
+});
+
+test("#1763: registries resolve per key column — a sibling at another column never strips the qualifier, two hosts at one column fail CLOSED", () => {
+  const qualified =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   registry: harbor.corp\n" +
+    "   repository: team/app\n" +
+    "-  tag: 1.0.0\n" +
+    "+  tag: 1.0.1\n" +
+    " extra:\n" +
+    "   nested:\n" +
+    "     registry: other.example.com\n";
+  assert.deepEqual(parseDependencyScope(qualified), {
+    available: true,
+    entries: [{ slug: "harbor.corp/team/app", versions: ["1.0.0", "1.0.1"], kind: "image" }],
+  });
+  const ambiguous = qualified.replace("   registry: harbor.corp", "   registry: docker.io").replace("     registry: other.example.com", "   registry: harbor.corp");
+  assert.deepEqual(parseDependencyScope(ambiguous), { available: false });
+});
+
+test("#1763: quoted-key spellings of image/repository/registry bypass no arm", () => {
+  const quotedRegistry =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    '-  "registry": docker.io\n' +
+    '+  "registry": evil.example.com\n' +
+    '   "repository": bitnami/postgresql\n';
+  assert.deepEqual(parseDependencyScope(quotedRegistry), { available: false });
+  const quotedImage =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    '-  "image": evil/foo:1.2.3\n' +
+    '+  "image": evil/foo:1.2.4\n';
+  assert.deepEqual(parseDependencyScope(quotedImage), { available: false });
+  const quotedTag =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    " image:\n" +
+    '   repository: bitnami/postgresql\n' +
+    '-  "tag": 1.2.3\n' +
+    '+  "tag": 1.2.4\n';
+  assert.deepEqual(parseDependencyScope(quotedTag), { available: false });
+});
+
+test("#1763: a changed registry: is a provenance switch and ungrammar-missing image keys are unattributable — both fail CLOSED", () => {
+  const registrySwitch =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "-  registry: docker.io\n" +
+    "+  registry: evil.example.com\n" +
+    "   repository: bitnami/postgresql\n" +
+    "   tag: 16.4.0-debian-13\n";
+  assert.deepEqual(parseDependencyScope(registrySwitch), { available: false });
+  // Space-less spelling reaches the same arm, never the reference grammar.
+  assert.deepEqual(parseDependencyScope(registrySwitch.replace("registry: docker.io", "registry:docker.io").replace("registry: evil.example.com", "registry:evil.example.com")), { available: false });
+  // A repository value the grammar cannot carry (port) is an identity this
+  // scope cannot represent — fail closed, never silently omit the new side.
+  const hostileRepository =
+    "diff --git a/apps/db/values.yaml b/apps/db/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "-  repository: bitnami/postgresql\n" +
+    "+  repository: evil:5000/postgresql\n" +
+    "   tag: 16.4.0-debian-13\n";
+  assert.deepEqual(parseDependencyScope(hostileRepository), { available: false });
+  // A doubled list marker hides an image line that failed every grammar.
+  const doubledDash =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-    - - image: evil/foo:1.2.3\n" +
+    "+    - - image: evil/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(doubledDash), { available: false });
+  // localhost is a local registry, never a Docker Hub namespace.
+  const local =
+    "diff --git a/apps/web/deployment.yaml b/apps/web/deployment.yaml\n" +
+    "-      image: localhost/foo:1.2.3\n" +
+    "+      image: localhost/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(local), { available: false });
+});
+
+test("#1763: an OCI chart url context anchors changed tag lines to the chart identity", () => {
+  const diff =
+    "diff --git a/apps/helm-release-sealed.yaml b/apps/helm-release-sealed.yaml\n" +
+    "@@ -4,7 +4,7 @@\n" +
+    "   url: oci://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter\n" +
+    " spec:\n" +
+    "-  tag: 11.21.3\n" +
+    "+  tag: 11.22.0\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{
+      slug: "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
+      versions: ["11.21.3", "11.22.0"],
+      kind: "chart",
+    }],
+  });
+});
+
+test("#1763: a Flux OCIRepository manifest named after the release is recognized by its own kind marker, not the file name", () => {
+  // Organic #12375 shape: `prometheus-blackbox-exporter.yaml` matches no
+  // image-surface file-name pattern — the file's OWN `kind: OCIRepository`
+  // marker brings it into the grammar (recognition reads content, the same
+  // per-file marker rule `isChartUpdate` applies to HelmRelease markers).
+  const fluxBump = (marker: string) =>
+    "diff --git a/clusters/observability/prometheus-blackbox-exporter.yaml b/clusters/observability/prometheus-blackbox-exporter.yaml\n" +
+    "@@ -1,9 +1,9 @@\n" +
+    " apiVersion: source.toolkit.fluxcd.io/v1\n" +
+    marker +
+    " metadata:\n" +
+    "   name: prometheus-blackbox-exporter\n" +
+    " spec:\n" +
+    "   interval: 30m\n" +
+    "   url: oci://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter\n" +
+    "   ref:\n" +
+    "-    tag: 11.21.3\n" +
+    "+    tag: 11.22.0\n";
+  const entries = [{
+    slug: "ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter",
+    versions: ["11.21.3", "11.22.0"],
+    kind: "chart",
+  }];
+  assert.deepEqual(parseDependencyScope(fluxBump(" kind: OCIRepository\n")), { available: true, entries });
+  // A quoted marker spelling reaches the same arm.
+  assert.deepEqual(parseDependencyScope(fluxBump(' kind: "OCIRepository"\n')), { available: true, entries });
+  // Recognition is FILE-level: a marker in hunk 1 recognizes the file, and
+  // hunk 2's own url context anchors the changed tag (attribution stays
+  // hunk-local).
+  const splitHunks =
+    "diff --git a/apps/flux/blackbox.yaml b/apps/flux/blackbox.yaml\n" +
+    "@@ -1,5 +1,5 @@\n" +
+    " apiVersion: source.toolkit.fluxcd.io/v1\n" +
+    " kind: OCIRepository\n" +
+    " metadata:\n" +
+    "   name: blackbox\n" +
+    " spec:\n" +
+    "@@ -20,3 +20,3 @@\n" +
+    "   url: oci://ghcr.io/foo/bar\n" +
+    "   ref:\n" +
+    "-    tag: 1.2.3\n" +
+    "+    tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(splitHunks), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "chart" }],
+  });
+  // Recognition FAILS CLOSED, never silently trusts: with the file in the
+  // grammar, a changed tag NO hunk can anchor is an unattributable identity
+  // — the whole scope fails, exactly like the values-file rule.
+  const noAnchor =
+    "diff --git a/apps/flux/blackbox.yaml b/apps/flux/blackbox.yaml\n" +
+    "@@ -1,5 +1,5 @@\n" +
+    " apiVersion: source.toolkit.fluxcd.io/v1\n" +
+    " kind: OCIRepository\n" +
+    " metadata:\n" +
+    "   name: blackbox\n" +
+    " spec:\n" +
+    "@@ -40,2 +40,2 @@\n" +
+    "-    tag: 1.2.3\n" +
+    "+    tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(noAnchor), { available: false });
+  // NO OCIRepository marker (an ordinary release-named YAML file): the bump
+  // stays exactly what it was — an ignored file, not a misparsed one.
+  assert.deepEqual(parseDependencyScope(fluxBump(" kind: HelmRelease\n")), { available: true, entries: [] });
+  // A marker in a NON-YAML file (a docs sample) recognizes nothing.
+  assert.deepEqual(parseDependencyScope(
+    "diff --git a/docs/flux.md b/docs/flux.md\n" +
+    "@@ -4,7 +4,7 @@\n" +
+    " ```yaml\n" +
+    " kind: OCIRepository\n" +
+    " spec:\n" +
+    "   url: oci://ghcr.io/foo/bar\n" +
+    "   ref:\n" +
+    "-    tag: 1.2.3\n" +
+    "+    tag: 1.2.4\n",
+  ), { available: true, entries: [] });
+  // The marker must be the genuine ROOT-column document pair: the kind
+  // without the Flux source apiVersion, an indented mention, or a trailing
+  // comment that takes the line out of the grammar recognizes nothing —
+  // the file stays the ignored file it was (a recognition miss is fail-open
+  // only at recognition: no entry, no credit, the pre-fix outcome).
+  assert.deepEqual(parseDependencyScope(fluxBump(" kind: OCIRepository\n").replace(
+    " apiVersion: source.toolkit.fluxcd.io/v1\n", " apiVersion: v1\n",
+  )), { available: true, entries: [] });
+  assert.deepEqual(parseDependencyScope(fluxBump("   kind: OCIRepository\n")), { available: true, entries: [] });
+  assert.deepEqual(parseDependencyScope(fluxBump(" kind: OCIRepository # chart source\n")), { available: true, entries: [] });
+  // A `.yml` spelling of the same manifest reaches the same arm.
+  assert.deepEqual(parseDependencyScope(fluxBump(" kind: OCIRepository\n").replaceAll(".yaml", ".yml")), { available: true, entries });
+  // File-scoped recognition: a sibling YAML WITHOUT the marker pair keeps
+  // its bump ignored even when a manifest in the same diff carries it.
+  const sibling =
+    "diff --git a/apps/flux/blackbox.yaml b/apps/flux/blackbox.yaml\n" +
+    "@@ -1,7 +1,7 @@\n" +
+    " apiVersion: source.toolkit.fluxcd.io/v1\n" +
+    " kind: OCIRepository\n" +
+    " spec:\n" +
+    "   url: oci://ghcr.io/foo/bar\n" +
+    "   ref:\n" +
+    "-    tag: 1.2.3\n" +
+    "+    tag: 1.2.4\n" +
+    "diff --git a/apps/other/plain.yaml b/apps/other/plain.yaml\n" +
+    "@@ -20,3 +20,3 @@\n" +
+    "   url: oci://ghcr.io/unmarked/chart\n" +
+    "   ref:\n" +
+    "-    tag: 9.9.9\n" +
+    "+    tag: 9.9.10\n";
+  assert.deepEqual(parseDependencyScope(sibling), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "chart" }],
+  });
+  // An unresolvable file header — git's quoted non-ASCII form, or a path
+  // with an embedded space — attributes its region to NO file (never to
+  // the previous file's surface) and fails the WHOLE scope closed.
+  const unresolvableHeader = (header: string) => fluxBump(" kind: OCIRepository\n").replace(
+    "diff --git a/clusters/observability/prometheus-blackbox-exporter.yaml b/clusters/observability/prometheus-blackbox-exporter.yaml\n",
+    `${header}\n`,
+  );
+  assert.deepEqual(parseDependencyScope(unresolvableHeader('diff --git "a/apps/\\303\\251/oci.yaml" "b/apps/\\303\\251/oci.yaml"')), { available: false });
+  assert.deepEqual(parseDependencyScope(unresolvableHeader("diff --git a/apps/flux/oci repo.yaml b/apps/flux/oci repo.yaml")), { available: false });
+});
+
+test("#1763: Dockerfile FROM lines canonicalize to docker.io slugs with library/ stripped", () => {
+  const alpine =
+    "diff --git a/Dockerfile b/Dockerfile\n" +
+    "@@ -1,4 +1,4 @@\n" +
+    "-FROM alpine:3.20.1\n" +
+    "+FROM alpine:3.21.0\n";
+  assert.deepEqual(parseDependencyScope(alpine), {
+    available: true,
+    entries: [{ slug: "docker.io/alpine", versions: ["3.20.1", "3.21.0"], kind: "image" }],
+  });
+  const library =
+    "diff --git a/Dockerfile.worker b/Dockerfile.worker\n" +
+    "-FROM library/foo:1.2.3\n" +
+    "+FROM library/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(library), {
+    available: true,
+    entries: [{ slug: "docker.io/foo", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+});
+
+test("#1763: a repository: context anchors bare tag bumps in a values file", () => {
+  const diff =
+    "diff --git a/apps/foo/values.yaml b/apps/foo/values.yaml\n" +
+    "@@ -3,7 +3,7 @@\n" +
+    " image:\n" +
+    "   repository: ghcr.io/foo/bar\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [{ slug: "ghcr.io/foo/bar", versions: ["1.2.3", "1.2.4"], kind: "image" }],
+  });
+});
+
+test("#1763: unattributable or uncheckable image/chart changed lines fail the scope CLOSED", () => {
+  const bareTagNoAnchor =
+    "diff --git a/apps/foo/values.yaml b/apps/foo/values.yaml\n" +
+    "@@ -10,2 +10,2 @@\n" +
+    "-  tag: 1.2.3\n" +
+    "+  tag: 1.2.4\n";
+  assert.deepEqual(parseDependencyScope(bareTagNoAnchor), { available: false });
+  const renovateNewTag =
+    "diff --git a/apps/mcp/kustomization.yaml b/apps/mcp/kustomization.yaml\n" +
+    "@@ -8,3 +8,3 @@\n" +
+    "-  newTag: 1.21.4\n" +
+    "+  newTag: 1.21.5\n";
+  assert.deepEqual(parseDependencyScope(renovateNewTag), { available: false });
+  const unparseableImage =
+    "diff --git a/apps/api/deployment.yaml b/apps/api/deployment.yaml\n" +
+    "-      image: ghcr.io/foo/bar:1.2.3  # pinned upstream\n" +
+    "+      image: ghcr.io/foo/bar:1.2.4  # pinned upstream\n";
+  assert.deepEqual(parseDependencyScope(unparseableImage), { available: false });
+  const uncheckableVersion =
+    "diff --git a/apps/foo/values.yaml b/apps/foo/values.yaml\n" +
+    "   image: ghcr.io/foo/bar:1.0.0\n" +
+    "-  tag: latest\n" +
+    "+  tag: newest\n";
+  assert.deepEqual(parseDependencyScope(uncheckableVersion), { available: false });
+  const strayOci =
+    "diff --git a/apps/helm-release-sealed.yaml b/apps/helm-release-sealed.yaml\n" +
+    "-  chartUrl: oci://ghcr.io/foo/charts ~1.0.0\n" +
+    "+  chartUrl: oci://ghcr.io/foo/charts ~2.0.0\n";
+  assert.deepEqual(parseDependencyScope(strayOci), { available: false });
+  const portHost =
+    "diff --git a/apps/api/deployment.yaml b/apps/api/deployment.yaml\n" +
+    "-      image: registry.example.com:5000/foo:1.2.3\n" +
+    "+      image: registry.example.com:5000/foo:1.2.4\n";
+  assert.deepEqual(parseDependencyScope(portHost), { available: false });
+  const overflow = Array.from({ length: 25 }, (_, i) =>
+    `- image: ghcr.io/acme/app-${i}:1.0.0\n+ image: ghcr.io/acme/app-${i}:1.0.1\n`).join("");
+  assert.deepEqual(
+    parseDependencyScope("diff --git a/apps/deployment.yaml b/apps/deployment.yaml\n" + overflow),
+    { available: false },
+  );
+});
+
+test("#1763: a mixed image + npm manifest diff carries both entries — the npm entry stays kind-less", () => {
+  const diff =
+    "diff --git a/apps/api/deployment.yaml b/apps/api/deployment.yaml\n" +
+    "@@ -12,3 +12,3 @@\n" +
+    "-      image: ghcr.io/acme/api:2.3.4\n" +
+    "+      image: ghcr.io/acme/api:2.4.0\n" +
+    "diff --git a/package.json b/package.json\n" +
+    "@@ -5,3 +5,3 @@\n" +
+    '   "dependencies": {\n' +
+    '-    "chalk": "^4.1.2",\n' +
+    '+    "chalk": "^5.3.0",\n' +
+    "   },\n";
+  assert.deepEqual(parseDependencyScope(diff), {
+    available: true,
+    entries: [
+      { slug: "ghcr.io/acme/api", versions: ["2.3.4", "2.4.0"], kind: "image" },
+      { slug: "chalk", versions: ["4.1.2", "5.3.0"] },
+    ],
+  });
+});
+
+test("#1763: non-image config content in a values file is ignored — no entries, scope stays available", () => {
+  const diff =
+    "diff --git a/apps/foo/values.yaml b/apps/foo/values.yaml\n" +
+    "@@ -2,3 +2,3 @@\n" +
+    "-  replicas: 2\n" +
+    "+  replicas: 3\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: true, entries: [] });
+});
+
+test("#1763: image/chart anchors are hunk-local — a url anchor in hunk 1 never attributes hunk 2's changed tag", () => {
+  const diff =
+    "diff --git a/apps/helm-release-sealed.yaml b/apps/helm-release-sealed.yaml\n" +
+    "@@ -4,4 +4,4 @@\n" +
+    "   url: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack\n" +
+    "-  tag: 11.21.3\n" +
+    "+  tag: 11.22.0\n" +
+    "@@ -40,2 +40,2 @@\n" +
+    "-  tag: 2.0.0\n" +
+    "+  tag: 2.1.0\n";
+  assert.deepEqual(parseDependencyScope(diff), { available: false });
+});
+
+test("#1763: image and chart evidence rows take the parsed scope; platform rows never do", () => {
+  const scope: DependencyScopeResult = {
+    available: true,
+    entries: [
+      { slug: "ghcr.io/o/app", versions: ["1.0.0", "1.1.0"], kind: "image", digests: [DIGEST_A] },
+      { slug: "chalk", versions: ["4.1.2"] },
+    ],
+  };
+  for (const family of [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS]) {
+    for (const row of mustCheckEvidenceTags(family, scope)) {
+      assert.deepEqual(row.dependency_scope, scope.entries);
+    }
+  }
+  for (const row of mustCheckEvidenceTags(PLATFORM_EVIDENCE_CHECKS, scope)) {
+    assert.ok(!("dependency_scope" in row), JSON.stringify(row));
+  }
+});
+
+test("#1763: persisted artifact rows preserve entry kind/digests inside the strict row key set", () => {
+  const scope: DependencyScopeResult = {
+    available: true,
+    entries: [
+      { slug: "ghcr.io/o/app", versions: ["1.0.0", "1.1.0"], kind: "image", digests: [DIGEST_A, DIGEST_B] },
+      { slug: "oci.example.com/charts/app", versions: ["0.1.0"], kind: "chart" },
+    ],
+  };
+  const rows: Array<Record<string, unknown>> = mustCheckEvidenceTagsToArtifact(mustCheckEvidenceTags(IMAGE_EVIDENCE_CHECKS, scope));
+  assert.equal(rows.length, IMAGE_EVIDENCE_CHECKS.length);
+  const allowed = new Set(["text", "row_class", "gate", "obligations", "dependency_scope"]);
+  const entryAllowed = new Set(["slug", "versions", "kind", "digests"]);
+  for (const row of rows) {
+    for (const key of Object.keys(row)) assert.ok(allowed.has(key), JSON.stringify(row));
+    const scoped = row.dependency_scope as Array<Record<string, unknown>>;
+    assert.deepEqual(scoped, scope.entries);
+    for (const entry of scoped) {
+      for (const key of Object.keys(entry)) assert.ok(entryAllowed.has(key), JSON.stringify(entry));
+    }
+  }
 });

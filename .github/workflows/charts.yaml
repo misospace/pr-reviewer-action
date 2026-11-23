@@ -110,6 +110,56 @@ jobs:
             exit 1
           fi
 
+      - name: Render (admin OIDC auth #1770)
+        run: |
+          set -euo pipefail
+          oidc_example=deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml
+          helm lint deploy/charts/pr-reviewer -f "$oidc_example"
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$oidc_example" \
+            > /var/tmp/render-admin-oidc.yaml
+          # OIDC mode renders the mode, issuer, client id, redirect base,
+          # the allowlist env, and the chart-computed session TTL. The env
+          # list round-trips through a YAML parse before re-serialization,
+          # so plain strings render unquoted (only bool/numeric-looking
+          # values carry quotes).
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_AUTH_MODE" /var/tmp/render-admin-oidc.yaml | grep -q 'value: oidc$'
+          grep -q 'name: PR_REVIEWER_ADMIN_OIDC_ISSUER' /var/tmp/render-admin-oidc.yaml
+          grep -q 'name: PR_REVIEWER_ADMIN_OIDC_CLIENT_ID' /var/tmp/render-admin-oidc.yaml
+          grep -q 'name: PR_REVIEWER_ADMIN_OIDC_REDIRECT_BASE' /var/tmp/render-admin-oidc.yaml
+          grep -A1 'name: PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS' /var/tmp/render-admin-oidc.yaml | grep -q 'operator@example.test'
+          grep -A1 'name: PR_REVIEWER_ADMIN_OIDC_SESSION_TTL_MS' /var/tmp/render-admin-oidc.yaml | grep -q 'value: "28800000"'
+          # The client secret travels only through a secretKeyRef naming the
+          # operator-provided existing secret, never inline.
+          grep -A3 'name: PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET' /var/tmp/render-admin-oidc.yaml | grep -q 'secretKeyRef:'
+          grep -A4 'name: PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET' /var/tmp/render-admin-oidc.yaml | grep -q 'name: oidc-client'
+          grep -A4 'name: PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET' /var/tmp/render-admin-oidc.yaml | grep -q 'key: client-secret'
+          # The example sets no break-glass token: the bearer env must stay
+          # absent rather than render an empty value.
+          if grep -q 'name: PR_REVIEWER_ADMIN_TOKEN' /var/tmp/render-admin-oidc.yaml; then
+            echo "PR_REVIEWER_ADMIN_TOKEN must stay unset when no break-glass token is configured" >&2
+            exit 1
+          fi
+          # Fail closed: OIDC mode without any allowlist, without client
+          # secret material, with BOTH secret shapes, or without the
+          # dashboard refuses the render.
+          for args in \
+            '--set-json controller.admin.auth.oidc.allowedEmails=[]' \
+            '--set controller.admin.auth.oidc.existingSecret.name=' \
+            '--set controller.admin.auth.oidc.clientSecret=inline-secret' \
+            '--set controller.admin.dashboard=false'; do
+            # Each case is a single flag string; split it into argv
+            # deliberately (shellcheck SC2086).
+            read -r -a argv <<< "$args"
+            if helm template pr-reviewer deploy/charts/pr-reviewer -f "$oidc_example" "${argv[@]}" >/dev/null 2>&1; then
+              echo "OIDC render must refuse: $args" >&2
+              exit 1
+            fi
+          done
+          # Break-glass: a token alongside OIDC mode renders the bearer env.
+          helm template pr-reviewer deploy/charts/pr-reviewer -f "$oidc_example" \
+            --set controller.admin.token=break-glass > /var/tmp/render-admin-oidc-token.yaml
+          grep -q 'name: PR_REVIEWER_ADMIN_TOKEN' /var/tmp/render-admin-oidc-token.yaml
+
       - name: Render (polling first, optional webhook)
         run: |
           set -euo pipefail

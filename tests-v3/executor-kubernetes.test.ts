@@ -2729,12 +2729,16 @@ test("a recovered cancellation in an unlistable cluster fails closed when no wor
   rmSync(second.root, { recursive: true, force: true });
 });
 
-test("the file-access suppressions stay standalone directly above their sinks", () => {
-  // CodeQL only recognizes a `codeql[...]` comment that starts its line,
-  // and it covers exactly the FOLLOWING line; a trailing comment or one
-  // placed above the enclosing statement suppresses nothing. Pin the
-  // placement so the in-source justification cannot silently decay.
-  const lines = readFileSync("src/executor/kubernetes-api.ts", "utf8").split("\n");
+test("the file-access justifications sit directly above their own request statements", () => {
+  // CodeQL only recognizes a `codeql[...]` comment that starts its line, and
+  // it covers exactly the FOLLOWING line; a trailing comment suppresses
+  // nothing. The two sinks keep the aliased named-import call form and each
+  // sink statement sits on a line of its own, directly below its own tagged
+  // justification, so the in-source justification of the by-design #734 flow
+  // cannot silently decay (#1773 review).
+  const source = readFileSync("src/executor/kubernetes-api.ts", "utf8");
+  assert.doesNotMatch(source, /https\.request\(/, "the analyzed sink must stay in the aliased named-import form");
+  const lines = source.split("\n");
   const suppressions = lines
     .map((line, i) => ({ line, next: lines[i + 1] ?? "" }))
     .filter(({ line }) => line.includes("codeql[js/"));
@@ -2747,8 +2751,63 @@ test("the file-access suppressions stay standalone directly above their sinks", 
     );
     assert.match(
       next,
-      /https?Request\(options\)/,
-      "the suppression must sit directly above the request call it silences",
+      /^\s*request = (https|http)Request\(options\);\s*$/,
+      "the suppression must sit directly above the request statement it silences — not inside a conditional expression",
     );
   }
+});
+
+test("the analysis keeps js/file-access-to-http enabled for the whole repository", () => {
+  // The in-cluster executor's projected-file-to-request flow is BY-DESIGN
+  // (#734): the endpoint is the cluster's own API and the files are the
+  // pod's own projected material, so its alerts are dispositioned AT THE
+  // ALERT LEVEL (dismissed as false positives, as on `main`). The analysis
+  // must therefore never exclude the query: an analysis-level exclusion
+  // would silence every file-data-to-request flow introduced anywhere else
+  // in the runtime, not just this one (#1773 review).
+  const workflow = readFileSync(".github/workflows/codeql.yml", "utf8");
+  const configRefs = [...workflow.matchAll(/config-file:\s*(\S+)/g)]
+    .map((match) => match[1])
+    .filter((ref): ref is string => ref !== undefined);
+  const sources = [
+    workflow,
+    ...configRefs.map((ref) => readFileSync(ref.replace(/^\.\//, ""), "utf8")),
+  ];
+  for (const source of sources) {
+    const excludedIds: string[] = [];
+    for (const block of source.split(/-\s*exclude:/).slice(1)) {
+      for (const match of block.matchAll(/^\s*id:\s*(\S+)/gm)) {
+        if (match[1] !== undefined) excludedIds.push(match[1]);
+      }
+    }
+    assert.deepEqual(
+      excludedIds.filter((id) => id === "js/file-access-to-http"),
+      [],
+      "the analysis must not exclude js/file-access-to-http repo-wide: the by-design #734 flow is dispositioned at the alert level",
+    );
+  }
+});
+
+test("the API TLS identity rule is operator-facing (#1773)", () => {
+  // The derived-SNI behavior and its non-default-control-plane escape
+  // hatch must live in the deployment runbook, not only in source
+  // comments: an apiserver certificate without the
+  // `kubernetes.default.svc` SAN fails the handshake and the operator
+  // fixes it by projecting a hostname `KUBERNETES_SERVICE_HOST`.
+  const deployment = readFileSync("docs/self-hosted-deployment.md", "utf8");
+  assert.match(
+    deployment,
+    /### TLS identity of the API connection \(#1773\)/,
+    "the deployment runbook must carry the API TLS identity section",
+  );
+  assert.match(
+    deployment,
+    /verifies the certificate against\s+`kubernetes\.default\.svc`/,
+    "the runbook must name the derived SAN identity",
+  );
+  assert.match(
+    deployment,
+    /`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT` explicitly/,
+    "the runbook must state the operator override for non-standard control planes",
+  );
 });

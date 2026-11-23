@@ -466,6 +466,7 @@ test("example values parse and stay non-privileged", () => {
     "values-controller-only.yaml",
     "values-kubernetes-executor.yaml",
     "values-external-postgres.yaml",
+    "values-admin-oidc.yaml",
   ]) {
     const text = read(`deploy/charts/pr-reviewer/examples/${example}`);
     const values = parse(text) as Record<string, unknown> | null;
@@ -484,14 +485,30 @@ test("example values parse and stay non-privileged", () => {
 
 test("chart env names never drift from the controller entrypoint", () => {
   const mainSource = read("src/controller/main.ts");
+  const oidcSource = read("src/admin/oidc.ts");
+  // FORGEJO_TOKEN is consumed by the platform seam's own env helper, not the
+  // entrypoint directly.
+  const platformSource = read("src/platform/forge-identity.ts") + read("src/platform/forgejo-auth.ts");
   for (const name of chartControllerEnvNames()) {
+    // For the #1770 OIDC names, pin the actual env read: these names also
+    // appear in refusal message strings, and a name-only check would pass
+    // code that stopped consuming the variable. Legacy names keep the
+    // original presence check because several are read through helpers like
+    // portFromEnv(env, "PR_REVIEWER_ADMIN_PORT"), not a literal env access.
+    const strict = name.startsWith("PR_REVIEWER_ADMIN_OIDC_") || name === "PR_REVIEWER_ADMIN_AUTH_MODE";
     assert.ok(
-      mainSource.includes(name),
-      `chart sets ${name} but src/controller/main.ts never reads it`,
+      strict
+        ? oidcSource.includes(`env.${name}`)
+        : mainSource.includes(name) || oidcSource.includes(name) || platformSource.includes(name),
+      `chart sets ${name} but the controller does not read it`,
     );
   }
   // Credential material is env-wired through the documented prefix.
   assert.ok(mainSource.includes("PR_REVIEWER_CREDENTIAL_"));
+  const helper = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  for (const name of ["PR_REVIEWER_ADMIN_AUTH_MODE", "PR_REVIEWER_ADMIN_OIDC_ISSUER", "PR_REVIEWER_ADMIN_OIDC_CLIENT_ID", "PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET", "PR_REVIEWER_ADMIN_OIDC_REDIRECT_BASE", "PR_REVIEWER_ADMIN_OIDC_ALLOWED_SUBJECTS", "PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS", "PR_REVIEWER_ADMIN_OIDC_ALLOWED_GROUPS", "PR_REVIEWER_ADMIN_OIDC_SESSION_TTL_MS"]) assert.ok(helper.includes(name), name);
+  const example = parse(read("deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml")) as any;
+  assert.equal(example.controller.admin.auth.mode, "oidc");
 });
 
 test("credential env name: chart helper sanitizes exactly like credentialEnvName (#1710)", () => {

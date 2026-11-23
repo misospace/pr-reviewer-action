@@ -134,16 +134,46 @@ skip. Secret material always travels through secretKeyRef, never inline.
 {{- if $v.admin.enabled }}
 - name: PR_REVIEWER_ADMIN_PORT
   value: {{ $v.admin.port | quote }}
+- name: PR_REVIEWER_ADMIN_BIND
+  value: "0.0.0.0"
+{{- if or (not (empty $v.admin.token)) (not (empty $v.admin.existingSecret.name)) }}
 - name: PR_REVIEWER_ADMIN_TOKEN
   valueFrom:
     secretKeyRef:
       name: {{ ternary (printf "%s-admin" $fullname) $v.admin.existingSecret.name (empty $v.admin.existingSecret.name) }}
       key: {{ default "token" $v.admin.existingSecret.key }}
-{{/* the admin surface is bearer-token guarded (fail-closed) and the
-NetworkPolicy bounds ingress, so the pod-wide wildcard is what makes
-/healthz, /readyz and /metrics reachable by kubelet and Prometheus */}}
-- name: PR_REVIEWER_ADMIN_BIND
-  value: "0.0.0.0"
+{{- end }}
+- name: PR_REVIEWER_ADMIN_AUTH_MODE
+  value: {{ $v.admin.auth.mode | quote }}
+{{- if eq $v.admin.auth.mode "oidc" }}
+- name: PR_REVIEWER_ADMIN_OIDC_ISSUER
+  value: {{ $v.admin.auth.oidc.issuer | quote }}
+- name: PR_REVIEWER_ADMIN_OIDC_CLIENT_ID
+  value: {{ $v.admin.auth.oidc.clientId | quote }}
+- name: PR_REVIEWER_ADMIN_OIDC_REDIRECT_BASE
+  value: {{ $v.admin.auth.oidc.redirectBase | quote }}
+- name: PR_REVIEWER_ADMIN_OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ ternary (printf "%s-admin-oidc" $fullname) $v.admin.auth.oidc.existingSecret.name (empty $v.admin.auth.oidc.existingSecret.name) }}
+      key: {{ default "client-secret" $v.admin.auth.oidc.existingSecret.key }}
+{{- with $v.admin.auth.oidc.allowedSubjects }}
+- name: PR_REVIEWER_ADMIN_OIDC_ALLOWED_SUBJECTS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- with $v.admin.auth.oidc.allowedEmails }}
+- name: PR_REVIEWER_ADMIN_OIDC_ALLOWED_EMAILS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- with $v.admin.auth.oidc.allowedGroups }}
+- name: PR_REVIEWER_ADMIN_OIDC_ALLOWED_GROUPS
+  value: {{ join "," . | quote }}
+{{- end }}
+- name: PR_REVIEWER_ADMIN_OIDC_SESSION_TTL_MS
+  value: {{ mul $v.admin.auth.oidc.sessionTtlMinutes 60000 | quote }}
+{{- end }}
+{{- /* the admin surface's network policy bounds ingress; wildcard binding
+makes health, readiness, and metrics reachable by probes and Prometheus */}}
 {{- if $v.admin.dashboard }}
 {{/* #742 dashboard: rendered only when the knob is on, with the exact ON
 spelling the lexical check in src/controller/main.ts accepts; OFF stays
@@ -268,8 +298,31 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- end -}}
 {{- end -}}
 {{- if $v.admin.enabled -}}
+{{- $authMode := $v.admin.auth.mode | default "token" -}}
+{{- if not (has $authMode (list "token" "oidc")) -}}
+{{- fail "controller.admin.auth.mode must be token or oidc" -}}
+{{- end -}}
+{{- if eq $authMode "token" -}}
 {{- if and (empty $v.admin.token) (empty $v.admin.existingSecret.name) -}}
-{{- fail "controller.admin.token or controller.admin.existingSecret.name is required when the admin listener is enabled" -}}
+{{- fail "controller.admin.token or controller.admin.existingSecret.name is required in token mode" -}}
+{{- end -}}
+{{- else -}}
+{{- $oidc := $v.admin.auth.oidc -}}
+{{- if or (empty $oidc.issuer) (empty $oidc.clientId) (empty $oidc.redirectBase) -}}
+{{- fail "controller.admin.auth.oidc issuer, clientId, and redirectBase are required in OIDC mode" -}}
+{{- end -}}
+{{- if and (empty $oidc.clientSecret) (empty $oidc.existingSecret.name) -}}
+{{- fail "controller.admin.auth.oidc clientSecret or existingSecret.name is required in OIDC mode" -}}
+{{- end -}}
+{{- if and (not (empty $oidc.clientSecret)) (not (empty $oidc.existingSecret.name)) -}}
+{{- fail "controller.admin.auth.oidc clientSecret and existingSecret.name are mutually exclusive (one inline value, one reference)" -}}
+{{- end -}}
+{{- if not $v.admin.dashboard -}}
+{{- fail "controller.admin.auth.mode oidc requires controller.admin.dashboard (the OIDC sign-in flow ends on the dashboard shell)" -}}
+{{- end -}}
+{{- if and (empty $oidc.allowedSubjects) (empty $oidc.allowedEmails) (empty $oidc.allowedGroups) -}}
+{{- fail "controller.admin.auth.oidc requires at least one allowlist" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if and $v.admin.dashboard (not $v.admin.enabled) -}}
@@ -303,8 +356,11 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if and $v.webhook.enabled (empty $v.webhook.existingSecret.name) -}}
 {{- $_ := set $rendered "webhook" (dict "forceRename" (printf "%s-webhook" $fullname) "stringData" (dict "webhook-secret" $v.webhook.secret)) -}}
 {{- end -}}
-{{- if and $v.admin.enabled (empty $v.admin.existingSecret.name) -}}
+{{- if and $v.admin.enabled (not (empty $v.admin.token)) (empty $v.admin.existingSecret.name) -}}
 {{- $_ := set $rendered "admin" (dict "forceRename" (printf "%s-admin" $fullname) "stringData" (dict "token" $v.admin.token)) -}}
+{{- end -}}
+{{- if and $v.admin.enabled (eq $v.admin.auth.mode "oidc") (not (empty $v.admin.auth.oidc.clientSecret)) (empty $v.admin.auth.oidc.existingSecret.name) -}}
+{{- $_ := set $rendered "admin-oidc" (dict "forceRename" (printf "%s-admin-oidc" $fullname) "stringData" (dict "client-secret" $v.admin.auth.oidc.clientSecret)) -}}
 {{- end -}}
 {{- $inlineCredentials := dict -}}
 {{- range $ref, $cred := $v.credentials -}}

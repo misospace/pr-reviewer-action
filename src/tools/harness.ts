@@ -1907,10 +1907,19 @@ export function buildPlanningContext(
                   ...(tag.obligations.length > 0 ? { obligations: tag.obligations } : {}),
                   // #1657 (review round 3): the trusted dependency update
                   // identity rides the row too — the strict `{slug,
-                  // versions}` entry set, the same shape classification.json
-                  // persists; absent/empty fails closed downstream.
+                  // versions[, kind][, digests]}` entry set, the same shape
+                  // classification.json persists (#1763: the ecosystem kind
+                  // and image digests propagate when present; absent means
+                  // absent); absent/empty fails closed downstream.
                   ...(tag.dependencyScope.length > 0
-                    ? { dependency_scope: tag.dependencyScope.map((entry) => ({ slug: entry.slug, versions: [...entry.versions] })) }
+                    ? {
+                      dependency_scope: tag.dependencyScope.map((entry) => ({
+                        slug: entry.slug,
+                        versions: [...entry.versions],
+                        ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+                        ...(entry.digests !== undefined && entry.digests.length > 0 ? { digests: [...entry.digests] } : {}),
+                      })),
+                    }
                     : {}),
                 }
               : {}),
