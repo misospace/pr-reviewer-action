@@ -808,6 +808,29 @@ jobs:
           expect_refusal 'route.parentRefs is required' -f "$standard" --set-json route.parentRefs=[]
           expect_refusal 'route.raw is exclusive' -f "$standard" --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
           expect_refusal 'requires dashboard.enabled or controller.admin.enabled' --set monitoring.serviceMonitor.enabled=true
+          # monitoring stays nullable (#1768 review round 4): a null
+          # override anywhere on the monitoring/serviceMonitor path reads
+          # as "monitor disabled" — the render must succeed WITHOUT a
+          # ServiceMonitor, never a nil-pointer template error.
+          for monitor_null in monitoring=null monitoring.serviceMonitor=null; do
+            monitor_null_out="$(helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+              --namespace pr-reviewer \
+              --set "$monitor_null")"
+            if printf '%s' "$monitor_null_out" | grep -q 'kind: ServiceMonitor'; then
+              echo "::error::--set $monitor_null must render without a ServiceMonitor" >&2
+              exit 1
+            fi
+          done
+          # The advanced section stays nullable too (monitoring off by
+          # default there): `serviceMonitor: null` must render, never a
+          # nil-pointer error on the disabled path.
+          helm template pr-reviewer "$chart" \
+            -f "$chart/examples/values-controller-only.yaml" \
+            --namespace pr-reviewer \
+            --set serviceMonitor=null > /dev/null
+          # The enabled case stays first-class: standard mode renders the
+          # ServiceMonitor (target port derived from the admin listener).
+          grep -q 'kind: ServiceMonitor' /var/tmp/render-standard.yaml
           expect_refusal 'requires an enabled webhook or dashboard backend' \
             --set route.enabled=true \
             --set-json 'route.hostnames=["pr-reviewer.example.com"]' \
@@ -876,6 +899,27 @@ jobs:
           fi
           if ! netpol_doc /var/tmp/render-standard-netpol.yaml | awk '/^  ingress:/{ing=1;next} /^  egress:/{ing=0} ing && /^    - /{if (rule&&p8081&&!from) bad++; rule=1; from=($0~/^    - from:/); p8081=0; next} ing && rule && /port: 8081/{p8081=1} END{if (rule&&p8081&&!from) bad++; exit bad>0}'; then
             echo "::error::an ingress rule exposes the admin port without a from: scope" >&2
+            exit 1
+          fi
+          # Standard mode enables the monitor, so the scrape allowance (the
+          # ONLY release-namespace matchLabels selector in the controller
+          # policy — the gateway allowance lists parentRef namespaces, the
+          # DNS egress names kube-system) renders here.
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -q 'kubernetes.io/metadata.name: pr-reviewer'
+          # ...and a null monitoring override drops exactly that allowance
+          # while BOTH policies stay (controller + worker; nil-safe lookups,
+          # #1768 review round 4: `monitoring: null` reads as "monitor
+          # disabled", never a nil-pointer template error).
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
+            --set monitoring=null \
+            --set networkPolicy.enabled=true > /var/tmp/render-standard-netpol-no-monitor.yaml
+          if netpol_doc /var/tmp/render-standard-netpol-no-monitor.yaml | grep -q 'kubernetes.io/metadata.name: pr-reviewer'; then
+            echo "::error::monitoring: null must drop the Prometheus scrape allowance" >&2
+            exit 1
+          fi
+          if [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-standard-netpol-no-monitor.yaml)" -ne 2 ]; then
+            echo "::error::monitoring: null must not drop the NetworkPolicy itself" >&2
             exit 1
           fi
           # Raw passthrough positive path: the complete operator manifest

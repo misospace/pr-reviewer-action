@@ -8,7 +8,12 @@ monitor selects pods by label via targetPort — no dedicated Service
 needed. The listener's ingress is still bounded by the NetworkPolicy.
 */}}
 {{- $stdAdmin := include "pr-reviewer.std.admin" . | fromYaml -}}
-{{- $monitorEnabled := or (.Values.monitoring.serviceMonitor.enabled | default false) .Values.serviceMonitor.enabled -}}
+{{- /* #1768 review round 4: nil-safe lookups — `monitoring: null` (or the
+   nested `monitoring.serviceMonitor` section nulled) must read as
+   "monitor disabled" on this path, never a nil-pointer template error;
+   a `| default false` downstream of a nil parent does not help. Same
+   contract as the NetworkPolicy template. */ -}}
+{{- $monitorEnabled := or (dig "serviceMonitor" "enabled" false (.Values.monitoring | default dict)) (dig "enabled" false (.Values.serviceMonitor | default dict)) -}}
 {{- if $monitorEnabled }}
 {{- if not (or $stdAdmin.enabled .Values.controller.admin.enabled) }}
 {{- fail "monitoring.serviceMonitor.enabled or serviceMonitor.enabled requires dashboard.enabled or controller.admin.enabled (metrics are served on the admin listener)" }}

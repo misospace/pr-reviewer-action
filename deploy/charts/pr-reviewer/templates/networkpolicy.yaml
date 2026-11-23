@@ -33,7 +33,12 @@ Default-deny network policies (#738). Two policies, one per pod family:
 {{- end }}
 {{- $stdWebhook := include "pr-reviewer.std.webhook" . | fromYaml -}}
 {{- $stdAdmin := include "pr-reviewer.std.admin" . | fromYaml -}}
-{{- $monitorEnabled := or .Values.monitoring.serviceMonitor.enabled .Values.serviceMonitor.enabled -}}
+{{- /* #1768 review round 4: nil-safe lookups — an operator override
+   `monitoring: null` (or the nested `monitoring.serviceMonitor` section
+   nulled) must read as "monitor disabled" on this path, never a
+   nil-pointer template error; a plain field dereference (or a
+   `| default false` downstream of it) does not survive a nil parent. */ -}}
+{{- $monitorEnabled := or (dig "serviceMonitor" "enabled" false (.Values.monitoring | default dict)) (dig "enabled" false (.Values.serviceMonitor | default dict)) -}}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
