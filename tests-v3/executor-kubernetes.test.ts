@@ -2779,3 +2779,27 @@ test("the CodeQL analysis excludes the one by-design file-data-to-request flow",
     "the CodeQL workflow must pass the exclusion config to the init step",
   );
 });
+
+test("the API TLS identity rule is operator-facing (#1773)", () => {
+  // The derived-SNI behavior and its non-default-control-plane escape
+  // hatch must live in the deployment runbook, not only in source
+  // comments: an apiserver certificate without the
+  // `kubernetes.default.svc` SAN fails the handshake and the operator
+  // fixes it by projecting a hostname `KUBERNETES_SERVICE_HOST`.
+  const deployment = readFileSync("docs/self-hosted-deployment.md", "utf8");
+  assert.match(
+    deployment,
+    /### TLS identity of the API connection \(#1773\)/,
+    "the deployment runbook must carry the API TLS identity section",
+  );
+  assert.match(
+    deployment,
+    /verifies the certificate against\s+`kubernetes\.default\.svc`/,
+    "the runbook must name the derived SAN identity",
+  );
+  assert.match(
+    deployment,
+    /`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT` explicitly/,
+    "the runbook must state the operator override for non-standard control planes",
+  );
+});

@@ -23,13 +23,17 @@
 # `main` (dismissed by hand as false positives) and re-raised on the head of
 # the change that fixed that transport's TLS identity.
 #
-# The exclusion is stated by query id rather than by path. CodeQL's query
-# filter does accept a `paths` scope, but the CLI does not honor it — a
-# path-scoped filter for this one file still reports the finding (verified
-# against the same CLI) — and the alternative, excluding the file from the
-# analysis, would take the credential-handling transport out of every other
-# check. Every other check, the request-forgery and path-traversal families
-# the threat model in SECURITY.md names among them, stays on for every file.
+# The exclusion is stated by query id rather than by path because no query
+# filter can express "this query, only for this analyzed file": the path
+# keys of a filter (`query path`, `query filename`) match the location of
+# the QUERY file inside its CodeQL pack, never the file being analyzed
+# (CodeQL docs, "Creating CodeQL query suites"), and a path-scoped exclude
+# was confirmed against the CodeQL CLI 2.27.5 to still report the finding
+# here. The only file-scoped mechanism is the config's top-level
+# `paths`/`paths-ignore`, and that drops the file from EVERY query; it
+# would take the credential-handling transport out of every other check.
+# Every other check, the request-forgery and path-traversal families the
+# threat model in SECURITY.md names among them, stays on for every file.
 #
 # The residual cost is explicit: a file-data-to-request flow introduced
 # elsewhere in this repository would not be reported by CodeQL. It is
