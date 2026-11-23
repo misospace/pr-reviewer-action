@@ -147,11 +147,18 @@ The chart derives everything else from those two entries:
   follow the relocation, and the render-time verification below refuses
   when they have not.
 - Each claim is either operator-provided (`existingClaim: <name>`) or
-  chart-created. A chart-created claim renders as the PVC
-  `<chart-fullname>-runs` or `<chart-fullname>-workspace-cache`, where the
-  chart fullname comes from the release and chart names and ignores
-  `global.*Override` values. The chart pins the name with `forceRename`
-  because the common library otherwise names PVCs by enabled-claim count.
+  chart-created. A chart-created claim renders under the name the common
+  library derives from the number of chart-created PVC entries:
+  `<chart-fullname>-<key>` whenever several render — the standard
+  topology's `runs`, `workspace-cache`, and `durable-state` together —
+  and the bare `<chart-fullname>` when exactly one does. The chart
+  reproduces that rule itself (and pins the result with `forceRename`)
+  because the pre-#1767 chart let the library name its claims from the
+  same count: an upgrade that keeps the storage topology keeps every
+  claim name exactly. The chart fullname comes from the release and
+  chart names and ignores `global.*Override` values; a `prefix` or
+  `suffix` on a standard entry refuses the render — set `existingClaim`
+  or `forceRename` explicitly instead.
 - The template `pr-reviewer.shared-volume-mappings` exposes the derived
   `{claim, controllerRoot}` pairs. #1766 will consume it to synthesize the
   default Kubernetes executor profile, so the worker Jobs receive the
@@ -230,32 +237,45 @@ namespace contract: `workerExecutor.namespace` and the inline instance
 config's `kubernetes.namespace` must equal the release namespace, and
 the render refuses otherwise.
 
-The durable-state claim is pinned per mode (`<fullname>` under the
-Kubernetes executor, `<fullname>-durable-state` controller-only) and
-carries `retain: true`, so the PVC the chart renders survives uninstalls.
-Which pre-#1767 name an upgrade must keep depends on how many PVC-type
-persistence entries the old install enabled (the old chart named claims
-by that count):
+The durable-state claim carries `retain: true`, so the PVC the chart
+renders survives uninstalls and, for installs first rendered by this
+chart, any later storage-topology change that would rename it. Its name
+resolves with the same count rule the pre-#1767 chart named claims from
+(see the naming bullet above), so an upgrade that does not change the
+storage topology keeps the exact claim the install already has:
 
 - Documented example posture — every standard claim operator-provided,
-  durable-state the only chart-rendered PVC: it rendered as the bare
-  `<fullname>`, which is exactly the name the chart now pins, so the
-  upgrade keeps the PVC (and additionally gains the keep annotation the
-  old chart never set).
+  durable-state the only chart-created PVC: it rendered as the bare
+  `<fullname>` and keeps rendering that way, now with the keep annotation
+  the old chart never set.
 - Chart-created shared claims — the old defaults enabled durable-state,
   runs, and workspace-cache together, so durable-state rendered as
-  `<fullname>-durable-state`. The new chart pins the bare `<fullname>`
-  instead, and on upgrade Helm deletes the old claim (it has no keep
-  annotation). Copy the durable state (the audit ledger and the queue
-  snapshot under `controller.paths.durableStateDir`) before upgrading,
-  or pin the old name with
-  `controller.persistence.durable-state.existingClaim` so the chart
-  keeps mounting it.
+  `<fullname>-durable-state` and keeps that name.
+
+Upgrading from the old documented example to the chart-created shared
+shape IS a topology change (the standard claims stop being
+operator-provided, so the chart-created count moves from one to three and
+the durable-state resolution follows it). The example's `runs` claim
+survives that move because the names coincide
+(`pr-reviewer-runs`), but the durable-state claim does not — without
+help, the adopting upgrade would rename it and Helm would delete the old
+claim with the audit ledger and queue snapshot under
+`controller.paths.durableStateDir`. Keep it with one explicit value in
+the adopted values (permanently — removing it later would rename the
+claim back):
+
+```yaml
+controller:
+  persistence:
+    durable-state:
+      forceRename: pr-reviewer # the bare fullname the old posture rendered
+```
 
 The chart's fullname also ignores `global.fullnameOverride`; an old
 install that renamed the release through it carries a durable-state
-claim outside both pinned names, so check the rendered name before
-upgrading and pin it the same way.
+claim outside both resolutions, so check the rendered name before
+upgrading and pin it the same way (`forceRename`, or `existingClaim` to
+manage the claim yourself).
 
 ## PR discovery (polling-first)
 

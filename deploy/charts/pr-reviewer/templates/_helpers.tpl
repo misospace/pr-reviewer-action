@@ -275,9 +275,11 @@ The standard shared worker/controller storage (#1767), derived from the
 single source `controller.persistence`: one entry per standard key, in a
 fixed order, each naming the resolved claim and the controller-side root
 the runtime contract mounts it at. The claim resolves to the operator's
-`existingClaim`, or to the chart-created `<fullname>-<key>` PVC the
-configure step pins with forceRename. #1766 consumes this artifact to
-synthesize the default Kubernetes executor profile's volume mappings.
+`existingClaim`, or to the chart-created PVC named by
+pr-reviewer.chart-created-claim-name (the common library's own rule,
+reproduced so upgrades keep claim names) and pinned with forceRename.
+#1766 consumes this artifact to synthesize the default Kubernetes
+executor profile's volume mappings.
 Every ambiguous or missing shape fails closed here, in one place.
 */}}
 {{- define "pr-reviewer.shared-volume-mappings" -}}
@@ -301,10 +303,14 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- if ne $type "persistentVolumeClaim" -}}
 {{- fail (printf "controller.persistence.%s must be an operator-provided existingClaim or a chart-created persistentVolumeClaim (standard shared storage)" $key) -}}
 {{- end -}}
-{{- /* The common library lowercases rendered object names; derive the
-       same spelling so the artifact, the forceRename pin, and the
-       redeclare guard can never drift from the rendered PVC. */ -}}
-{{- $claim = printf "%s-%s" $fullname $key | lower -}}
+{{- if or (hasKey $entry "prefix") (hasKey $entry "suffix") -}}
+{{- fail (printf "controller.persistence.%s prefix/suffix rename is ambiguous under the derived standard storage; set existingClaim or forceRename explicitly (#1767)" $key) -}}
+{{- end -}}
+{{- /* Resolve the claim with the common library's own naming rule (see
+       pr-reviewer.chart-created-claim-name) so the artifact, the
+       forceRename pin, and the redeclare guard can never drift from the
+       rendered PVC. */ -}}
+{{- $claim = include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $fullname "key" $key) -}}
 {{- end -}}
 {{- /* chartCreated is the provisioning fact, not a name shape: an
        operator-provided existingClaim may coincidentally carry the
@@ -314,6 +320,46 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- $mappings = append $mappings (dict "key" $key "claim" $claim "controllerRoot" $root "chartCreated" (empty $entry.existingClaim)) -}}
 {{- end -}}
 {{- $mappings | toYaml -}}
+{{- end -}}
+
+{{/*
+Resolve the rendered name of a chart-created standard claim (#1767). The
+common library names every PVC from the count of chart-created PVC entries
+it renders (bjw-s.common.lib.pvc.enabledPVCs feeds
+determineResourceNameFromValues): the bare fullname when exactly one
+renders, `<fullname>-<identifier>` when several do — or when
+`global.alwaysAppendIdentifierToResourceName` is set. Reproducing that
+rule exactly is what keeps claim names stable across upgrades: the
+pre-#1767 chart let the library name its claims from the same count, so
+an upgrade that does not change the storage topology renames nothing —
+durable state included. A `prefix`/`suffix` rename on a standard entry is
+refused upstream: the derived references could not follow it.
+*/}}
+{{- define "pr-reviewer.chart-created-claim-name" -}}
+{{- $v := index . "values" -}}
+{{- $fullname := index . "fullname" -}}
+{{- $key := index . "key" -}}
+{{- $enabledPvcs := 0 -}}
+{{- range $identifier, $entry := ($v.persistence | default dict) -}}
+{{- if kindIs "map" $entry -}}
+{{- $pvcEnabled := true -}}
+{{- if hasKey $entry "enabled" -}}
+{{- $pvcEnabled = $entry.enabled -}}
+{{- end -}}
+{{- if and $pvcEnabled (eq ($entry.type | default "persistentVolumeClaim") "persistentVolumeClaim") (empty $entry.existingClaim) -}}
+{{- $enabledPvcs = add1 $enabledPvcs -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $appendIdentifier := or (gt $enabledPvcs 1) (dig "alwaysAppendIdentifierToResourceName" false ($v.global | default dict)) -}}
+{{- $name := $fullname -}}
+{{- if $appendIdentifier -}}
+{{- if and (not (hasSuffix (printf "-%s" $key) $name)) (ne $key $name) -}}
+{{- $name = printf "%s-%s" $name $key -}}
+{{- end -}}
+{{- end -}}
+{{- /* the common library lowercases rendered object names */ -}}
+{{- $name | lower -}}
 {{- end -}}
 
 {{/*
@@ -498,13 +544,15 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- range $mapping := $mappings -}}
 {{- $entry := index $v.persistence $mapping.key -}}
 {{- if empty $entry.existingClaim -}}
-{{- /* Pin the chart-created claim name: the common library otherwise names
-       PVCs by enabled-claim count (<fullname> for one, <fullname>-<key>
-       for more), which no derived reference may depend on. The chart
-       renders this claim itself, so a same-named workerExecutor.volumeClaims
-       entry would render a second PVC. When the operator provides the
-       claim via existingClaim, a matching volumeClaim is its provisioner
-       (the pre-#1767 documented posture) and stays allowed. */ -}}
+{{- /* Pin the chart-created claim name to the resolution the artifact
+        derived (the common library's own naming rule, reproduced by
+        pr-reviewer.chart-created-claim-name): pinning keeps the rendered
+        PVC name deterministic against the derived references even if the
+        library's rule changes upstream. The chart renders this claim
+        itself, so a same-named workerExecutor.volumeClaims entry would
+        render a second PVC. When the operator provides the claim via
+        existingClaim, a matching volumeClaim is its provisioner (the
+        pre-#1767 documented posture) and stays allowed. */ -}}
 {{- $_ := set $entry "forceRename" $mapping.claim -}}
 {{- range $claim := ($workerExecutor.volumeClaims | default list) -}}
 {{- if eq ($claim.name | lower) $mapping.claim -}}
@@ -514,21 +562,29 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- /* Durable state must survive chart upgrades and uninstalls, and its
-       name must be deterministic in EVERY mode: the common library's
-       count-based naming would otherwise rename the claim when the shared
-       posture changes. Kubernetes-executor mode pins the bare fullname
-       (the name the documented pre-#1767 example posture rendered, so
-       adopting the single-source shape does not orphan it); controller-only
-       mode pins <fullname>-durable-state (the name its defaults render).
-       An operator-set existingClaim or forceRename wins. retain keeps the
-       PVC on uninstall and across the one-time rename of installs that
-       ran Kubernetes-executor mode with chart-created shared claims. */ -}}
+{{- /* Durable state must survive chart upgrades and uninstalls. Its name
+        resolves with the same rule the common library names every PVC
+        from (pr-reviewer.chart-created-claim-name), because the
+        pre-#1767 chart let that rule name the claim too: an upgrade that
+        keeps the storage topology keeps the exact claim name — a single
+        chart-created PVC renders the bare fullname (the documented
+        pre-#1767 example posture), several render
+        <fullname>-durable-state (the controller-only defaults and the
+        chart-created shared-claims topology). A per-mode pin would
+        silently rename one of those postures on upgrade and Helm would
+        delete the old claim with the audit ledger and queue snapshot.
+        An operator-set existingClaim or forceRename wins — that is the
+        explicit way to keep a name across a deliberate topology change
+        (the adoption path documents it). retain keeps the PVC on
+        uninstall and, for installs first rendered by this chart, across
+        any later rename. */ -}}
 {{- $durableState := index ($v.persistence | default dict) "durable-state" | default dict -}}
 {{- if empty $durableState.existingClaim -}}
 {{- if not (hasKey $durableState "forceRename") -}}
-{{- $durableStateName := ternary $fullname (printf "%s-durable-state" $fullname) $kubeExecutor -}}
-{{- $_ := set $durableState "forceRename" ($durableStateName | lower) -}}
+{{- if or (hasKey $durableState "prefix") (hasKey $durableState "suffix") -}}
+{{- fail "controller.persistence.durable-state prefix/suffix rename is ambiguous under the derived standard storage; set existingClaim or forceRename explicitly (#1767)" -}}
+{{- end -}}
+{{- $_ := set $durableState "forceRename" (include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $fullname "key" "durable-state")) -}}
 {{- end -}}
 {{- if not (hasKey $durableState "retain") -}}
 {{- $_ := set $durableState "retain" true -}}

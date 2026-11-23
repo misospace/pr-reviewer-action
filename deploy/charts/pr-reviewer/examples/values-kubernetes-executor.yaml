@@ -113,11 +113,14 @@ controller:
       enabled: true
 
   # Standard shared storage, declared once (#1767): the chart renders
-  # these chart-created claims (pr-reviewer-runs and
-  # pr-reviewer-workspace-cache for release name `pr-reviewer`) and
-  # derives the worker-side references. 20Gi matches the claims the
+  # these chart-created claims (pr-reviewer-runs,
+  # pr-reviewer-workspace-cache, and pr-reviewer-durable-state for
+  # release name `pr-reviewer`) and derives the worker-side references.
+  # 20Gi matches the claims the
   # pre-#1767 example provisioned, so adopting this shape keeps the
-  # existing pr-reviewer-runs PVC. For operator-provided claims, set
+  # existing pr-reviewer-runs PVC; pin durable-state with
+  # forceRename: pr-reviewer to keep that claim too (see the chart
+  # README's upgrade section). For operator-provided claims, set
   # existingClaim here instead and keep the size/storageClass unset.
   persistence:
     runs:

@@ -356,8 +356,13 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
   );
   assert.match(
     helpers,
-    /\$claim = printf "%s-%s" \$fullname \$key/,
-    "a chart-created standard claim must derive as <fullname>-<key>",
+    /\{\{- define "pr-reviewer\.chart-created-claim-name" -\}\}/,
+    "the chart-created claim-name resolution define must exist",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$claim = include "pr-reviewer\.chart-created-claim-name" \(dict "values" \$v "fullname" \$fullname "key" \$key\) -\}\}/,
+    "a chart-created standard claim must resolve through the common library's naming rule",
   );
   assert.match(
     helpers,
@@ -389,13 +394,33 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     /\{\{- \$_ := set \$entry "forceRename" \$mapping\.claim -\}\}/,
     "the derived claim name must be pinned with forceRename",
   );
-  // Upgrade continuity: durable-state is pinned deterministically per
-  // mode (bare fullname under the Kubernetes executor, the documented
-  // pre-#1767 name; <fullname>-durable-state controller-only) and retained.
+  // Upgrade continuity: chart-created standard claim names (runs,
+  // workspace-cache, durable-state) resolve with the common library's own
+  // count-based naming rule, reproduced by the chart, because the
+  // pre-#1767 chart let that same rule name its claims — an upgrade that
+  // keeps the storage topology therefore keeps every claim name exactly.
+  // A per-mode pin would silently rename the posture whose count the mode
+  // guess misses, and Helm would delete the renamed-off claim with the
+  // durable state on it.
   assert.match(
     helpers,
-    /\{\{- \$durableStateName := ternary \$fullname \(printf "%s-durable-state" \$fullname\) \$kubeExecutor -\}\}/,
-    "durable-state must be pinned per mode, not by the library's count-based naming",
+    /\(eq \(\$entry\.type \| default "persistentVolumeClaim"\) "persistentVolumeClaim"\) \(empty \$entry\.existingClaim\)/,
+    "the naming rule must count chart-created PVC entries exactly like bjw-s common's enabledPVCs",
+  );
+  assert.match(
+    helpers,
+    /"alwaysAppendIdentifierToResourceName"/,
+    "the naming rule must honor the library's global always-append flag",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$durableState "forceRename" \(include "pr-reviewer\.chart-created-claim-name" \(dict "values" \$v "fullname" \$fullname "key" "durable-state"\)\) -\}\}/,
+    "durable-state must resolve its name with the rule the pre-#1767 chart named claims from",
+  );
+  assert.match(
+    helpers,
+    /prefix\/suffix rename is ambiguous under the derived standard storage/,
+    "a prefix/suffix rename on a standard entry must fail closed with existingClaim/forceRename guidance",
   );
   assert.match(
     helpers,
@@ -522,8 +547,20 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     "charts.yaml must pin that worker-rbac renders no PVC in the standard topology",
   );
   assert.ok(
+    workflow.includes(`index($0,"\\n  name: pr-reviewer-durable-state\\n")`),
+    "charts.yaml must pin the durable-state PVC metadata name in the chart-created shared-claims topology (not its labels)",
+  );
+  assert.ok(
     workflow.includes(`index($0,"\\n  name: pr-reviewer\\n")`),
-    "charts.yaml must pin the durable-state PVC metadata name (not its labels)",
+    "charts.yaml must pin the legacy single-chart-created-PVC posture keeping the bare-fullname durable-state claim",
+  );
+  assert.ok(
+    workflow.includes("render-legacy-single-pvc.yaml"),
+    "charts.yaml must pin the pre-#1767 example posture's durable-state continuity render",
+  );
+  assert.ok(
+    workflow.includes("render-durable-state-adoption-pin.yaml"),
+    "charts.yaml must pin the adoption path's explicit operator forceRename render",
   );
   assert.ok(
     workflow.includes("helm.sh/resource-policy: keep"),

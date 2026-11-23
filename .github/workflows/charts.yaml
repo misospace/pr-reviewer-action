@@ -74,6 +74,10 @@ jobs:
             > /var/tmp/render-controller-only-init-section.yaml
           grep -A1 'mountPath: /var/lib/pr-reviewer/runs' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: runs'
           grep -A1 'mountPath: /var/lib/pr-reviewer/cache' /var/tmp/render-controller-only-init-section.yaml | grep -q 'name: workspace-cache'
+          # #1767: controller-only defaults render three chart-created PVCs,
+          # so the count-based resolution keeps the <fullname>-durable-state
+          # name the pre-#1767 chart rendered for this exact topology.
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer-durable-state\n") {found=1} END{exit !found}' /var/tmp/render-controller-only.yaml
           # Policies are opt-in; verify default renders none, opt-in renders one.
           if grep -q '^kind: NetworkPolicy$' /var/tmp/render-controller-only.yaml; then
             echo "unexpected default NetworkPolicy in controller-only chart" >&2
@@ -260,9 +264,13 @@ jobs:
           [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-executor.yaml)" -eq 3 ]
           grep -q 'name: pr-reviewer-runs$' /var/tmp/render-kubernetes-executor.yaml
           grep -q 'name: pr-reviewer-workspace-cache$' /var/tmp/render-kubernetes-executor.yaml
-          # #1767: durable-state keeps its pre-#1767 chart-created name
-          # (the bare fullname) and is retained across uninstalls.
-          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") {found=1} END{exit !found}' /var/tmp/render-kubernetes-executor.yaml
+          # #1767: the chart resolves chart-created claim names with the
+          # common library's own count-based rule, so the three-claim
+          # standard topology renders <fullname>-<key> for every claim —
+          # exactly the name the pre-#1767 chart rendered for this
+          # topology, and the durable-state claim is retained across
+          # uninstalls.
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer-durable-state\n") {found=1} END{exit !found}' /var/tmp/render-kubernetes-executor.yaml
           grep -q 'helm.sh/resource-policy: keep' /var/tmp/render-kubernetes-executor.yaml
           if ! awk '/^# Source: pr-reviewer\/templates\/worker-rbac.yaml/{inrbac=1; next} /^# Source:/{inrbac=0} inrbac && /^kind: PersistentVolumeClaim$/{bad=1} END{exit bad?1:0}' /var/tmp/render-kubernetes-executor.yaml; then
             echo "worker-rbac must not render PVCs in the standard topology" >&2
@@ -281,6 +289,37 @@ jobs:
             echo "existing standard claim must not render a pr-reviewer-runs PVC" >&2
             exit 1
           fi
+          # #1767 upgrade continuity, both count postures: the chart
+          # resolves chart-created claim names with the same count rule the
+          # pre-#1767 chart named claims from, so an upgrade that keeps the
+          # storage topology keeps every claim name. The documented
+          # pre-#1767 example posture (both standard claims
+          # operator-provided, durable-state the only chart-created PVC)
+          # rendered the claim as the bare fullname and must keep doing so,
+          # with the retain annotation it gains.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            > /var/tmp/render-legacy-single-pvc.yaml
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-legacy-single-pvc.yaml)" -eq 1 ]
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") && index($0,"helm.sh/resource-policy: keep") {found=1} END{exit !found}' /var/tmp/render-legacy-single-pvc.yaml
+          if grep -q 'name: pr-reviewer-durable-state$' /var/tmp/render-legacy-single-pvc.yaml; then
+            echo "the legacy single-chart-created-PVC posture must keep the bare-fullname durable-state claim" >&2
+            exit 1
+          fi
+          # The chart-created shared-claims topology (the standard example)
+          # must keep the <fullname>-durable-state name the pre-#1767 chart
+          # rendered for it — asserted above — and the documented adoption
+          # path (old single-PVC posture moving to chart-created claims)
+          # keeps the old claim with an explicit operator forceRename pin.
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.durable-state.forceRename=pr-reviewer \
+            > /var/tmp/render-durable-state-adoption-pin.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") && index($0,"helm.sh/resource-policy: keep") {found=1} END{exit !found}' /var/tmp/render-durable-state-adoption-pin.yaml
           # Relocation stays single-source, but the single source now spans
           # the operator's inline config too: relocating the chart side
           # renders only when the instance config's repetition agrees. The
@@ -302,10 +341,12 @@ jobs:
           # the render with the guard's own message.
           for spec in \
             'workerExecutor.volumeClaims[0].name=pr-reviewer-runs|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created standard claim' \
-            'workerExecutor.volumeClaims[0].name=pr-reviewer|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created durable-state claim' \
+            'workerExecutor.volumeClaims[0].name=pr-reviewer-durable-state|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created durable-state claim' \
             'controller.persistence.runs.type=hostPath|controller.persistence.runs.hostPath=/tmp/x|must be an operator-provided existingClaim or a chart-created persistentVolumeClaim' \
             'controller.persistence.runs.enabled=false||is required as the standard shared storage' \
             'controller.persistence.durable-state=null||is required (the standard storage is single-source' \
+            'controller.persistence.runs.prefix=alt-||prefix/suffix rename is ambiguous under the derived standard storage' \
+            'controller.persistence.durable-state.suffix=-old||prefix/suffix rename is ambiguous under the derived standard storage' \
             'controller.paths.runsRoot=data/runs||must be a non-empty absolute path starting with /' \
             'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
             'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
