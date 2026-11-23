@@ -267,6 +267,64 @@ test("ensureMirror: an echoing child cannot return this run's credential in the 
   }
 });
 
+test("ensureMirror: a child echoing ONLY the bare Basic payload cannot leak it (#1786 review)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "echopayload/repo");
+    const root = await tempRoot();
+    try {
+      const scratch = await mkdtemp(join(tmpdir(), "acq-echopayloadgit-"));
+      const echoGit = join(scratch, "git");
+      // The same echoing child, but printing the credential WITHOUT its
+      // `Basic ` framing: the heuristic redactor needs the scheme, and
+      // `maskKnownSecrets` only nukes the literal it is given — the bare
+      // base64 payload is a distinct representation that must be in the
+      // known-secret set too (#252: the boundary token itself, here the
+      // payload with the framing stripped, is the input).
+      const payload = Buffer.from("echopayload-user:canary-token-8d4c", "utf8").toString("base64").trimEnd();
+      const authorization = `Basic ${payload}`;
+      await writeFile(
+        echoGit,
+        "#!/bin/sh\n" +
+          'for a in "$@"; do\n' +
+          '  if [ "$a" = "fetch" ]; then\n' +
+          "    printf 'fatal: Authentication failed (cred=%s)\\n' \"${GIT_CONFIG_VALUE_0#Basic }\" >&2\n" +
+          "    exit 128\n" +
+          "  fi\n" +
+          "done\n" +
+          `exec ${REAL_GIT_PATH} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "echopayload/repo",
+        cloneUrl: `${fixture.baseUrl}/echopayload/repo.git`,
+        credentials: { cloneUrl: `${fixture.baseUrl}/echopayload/repo.git`, authorization },
+        gitBinary: echoGit,
+      });
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        assert.match(error.message, /Authentication failed/);
+        assert.match(error.message, /⟦•⟧/, "the payload was masked in place, not dropped with the line");
+        assert.ok(!error.message.includes(payload), "the bare base64 payload must never surface");
+        assert.ok(!error.message.includes(authorization), "the full header must never surface");
+        assert.ok(
+          !error.message.includes("echopayload-user:canary-token-8d4c"),
+          "the decoded credential material must never surface",
+        );
+        return true;
+      });
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("ensureMirror: invisible format characters cannot spoof the surfaced class (#1786 review)", async () => {
   const fixture = await startGitHttpFixture();
   try {

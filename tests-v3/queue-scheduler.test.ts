@@ -783,6 +783,53 @@ test("failed-outcome backoff is capped by retryMaxMs", async () => {
   );
 });
 
+// ── the terminal queue reason carries the durable bound (#1786 review) ──
+
+test("terminal failureReason is bounded to the run-record cap, never persisted raw (#1786 review)", async () => {
+  const { executor, controller } = setup({ maxAttempts: 1 });
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  // The realistic shape from #1775: an exit-code prefix plus the full
+  // 300-char git-stderr class — above the 256-char bound the control
+  // plane's RunRecord validator enforces. The queue reader accepts any
+  // string, so the settle path must apply the same bound itself.
+  const gitClass = `git fetch: exited 128: ${"x".repeat(300)}`;
+  assert.ok(gitClass.length > 256);
+  executor.last().settle({ status: "failed", resultHeadSha: "", failureCategory: gitClass });
+  await flush();
+  const terminal = controller.recordFor("job-a")!;
+  assert.equal(terminal.state, "failed");
+  assert.ok(
+    terminal.failureReason.length <= 256,
+    `reason must fit the 256-char durable bound, got ${terminal.failureReason.length}`,
+  );
+  assert.ok(terminal.failureReason.startsWith("git fetch: exited 128: xxx"));
+  assert.ok(terminal.failureReason.endsWith("…"), "the truncation is visible, not silent");
+});
+
+test("terminal failureReason collapses control characters and falls back when empty (#1786 review)", async () => {
+  const { executor, controller } = setup({ maxAttempts: 1 });
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle({
+    status: "failed",
+    resultHeadSha: "",
+    failureCategory: " git fetch:   fatal \u001b[31m\u0007 ",
+  });
+  await flush();
+  const terminal = controller.recordFor("job-a")!;
+  assert.ok(!/[\u0000-\u001f\u007f]/.test(terminal.failureReason), "control characters collapse");
+  assert.equal(terminal.failureReason.trim(), terminal.failureReason, "the reason is trimmed");
+  assert.ok(terminal.failureReason.startsWith("git fetch:"));
+  assert.ok(terminal.failureReason.endsWith("[31m"), "ordinary text survives");
+
+  controller.enqueue(makeJob("job-b"));
+  await controller.tick();
+  executor.last().settle({ status: "failed", resultHeadSha: "", failureCategory: "   " });
+  await flush();
+  assert.equal(controller.recordFor("job-b")!.failureReason, "execution-failed");
+});
+
 // ── superseded attempt failure never resurrects the cancelled generation ─
 
 const ABORT_FAILED: ExecutionOutcome = Object.freeze({

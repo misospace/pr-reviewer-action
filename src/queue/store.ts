@@ -416,6 +416,10 @@ function normalizeJobRecord(
     leaseExpiresAtMs: raw["leaseExpiresAtMs"] as number,
     cancelRequested: raw["cancelRequested"] as boolean,
     resultHeadSha: raw["resultHeadSha"] as string,
+    // Carried verbatim: a snapshot written BEFORE the #1786 settle-bound
+    // may hold an unbounded legacy reason. The queue reader judges strings
+    // only and nothing on the 256-validating RunRecord path re-reads it,
+    // so recovery replays history rather than rejecting the snapshot.
     failureReason: raw["failureReason"] as string,
     supersededByJobId: raw["supersededByJobId"] as string,
     updatedAtMs: raw["updatedAtMs"] as number,

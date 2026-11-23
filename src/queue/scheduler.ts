@@ -47,6 +47,7 @@ import {
   isTerminalState,
   newJobRecord,
   prIdentityKey,
+  runFailureReason,
   withState,
 } from "./types.js";
 
@@ -771,8 +772,12 @@ export class ReviewQueueController {
           jobId,
           Object.freeze({
             ...withState(record, "failed", now),
-            failureReason:
-              outcome.failureCategory !== "" ? outcome.failureCategory : "execution-failed",
+            // The queue snapshot reader accepts any string here, so the
+            // executor-supplied category (git-stderr classes included,
+            // #1775) goes through the SAME bounded single-line rule the
+            // control-plane run mirror applies — never persisted raw
+            // and unbounded (#1786 review).
+            failureReason: runFailureReason(outcome.failureCategory, "execution-failed"),
             leaseOwner: "",
             leaseExpiresAtMs: 0,
           }),

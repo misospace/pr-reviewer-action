@@ -39,7 +39,7 @@ import { pullHeadRefspec, type AcquisitionPlatform } from "../platform/head-ref.
 import { isForgeId } from "../platform/resolve.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { maskDiagnostic } from "../context/redact.js";
-import { gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
+import { credentialDiagnosticSecrets, gitCredentialEnv, gitInvocationEnv, safeCloneUrl } from "./git-env.js";
 import { AcquisitionError, type AcquisitionFailureCode, type FetchCredentials, type MirrorInfo } from "./types.js";
 
 const DEFAULT_FETCH_TIMEOUT_MS = 600_000;
@@ -487,7 +487,11 @@ export class MirrorCache {
       timeoutMs: this.fetchTimeoutMs,
       signal: this.signal,
       extraEnv: gitCredentialEnv(this.credentials, this.cloneUrl),
-      diagnosticSecrets: [this.credentials?.authorization],
+      // The header AND its derived Basic payload: an echoing child that
+      // prints only the bare base64 payload (no `Basic ` framing left for
+      // the heuristic redactor) must not put credential material into the
+      // durable reason (#1786 review).
+      diagnosticSecrets: credentialDiagnosticSecrets(this.credentials),
     });
   }
 
