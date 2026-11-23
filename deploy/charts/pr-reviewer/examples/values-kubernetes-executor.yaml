@@ -1,9 +1,10 @@
 # Kubernetes-executor example: a GitHub App instance whose reviews run as
-# ephemeral Jobs in a dedicated worker namespace, with shared PVCs
-# carrying the run/workspace state between controller and workers.
-# Install:
+# ephemeral Jobs in the release namespace, with chart-created shared PVCs
+# carrying the run/workspace state between controller and workers (#1767).
+# Install into the namespace the instance config names:
 #
 #   helm install pr-reviewer deploy/charts/pr-reviewer \
+#     -n pr-reviewer \
 #     -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
 #
 # Prerequisites (see examples/README.md for the manifests): GitHub App
@@ -13,9 +14,14 @@ controller:
   # Inline instance config (rendered into a chart-managed Secret). This
   # is a trimmed example — the full schema lives in
   # docs/operator-config-and-adoption.md. The kubernetes executor
-  # profile's per-profile facts (namespace, service account, claim names)
-  # match workerExecutor provisioning. Image, resources, and TTL inherit the
-  # chart defaults unless explicitly overridden in the profile.
+  # profile's per-profile facts (namespace, service account) match
+  # workerExecutor provisioning; image, resources, and TTL inherit chart
+  # defaults. The profile omits volumes, so the controller injects the
+  # chart-derived standard shared mappings automatically; each claim is
+  # mounted at the SAME absolute path in controller and worker pods.
+  # Explicit volumes remain the advanced override, and the chart refuses
+  # a declared derived claim mounted anywhere other than its derived
+  # controller.paths root (single source).
   instanceConfig: |-
     version: 1
     unknown-profile-policy: reject
@@ -39,11 +45,6 @@ controller:
           args: []
           namespace: pr-reviewer
           service-account: pr-reviewer-worker
-          volumes:
-            - claim: pr-reviewer-runs
-              controller-root: /var/lib/pr-reviewer/runs
-            - claim: pr-reviewer-workspace
-              controller-root: /var/lib/pr-reviewer/cache
     default-executor-profile: k8s-jobs
     evidence-profiles:
       - name: default
@@ -93,12 +94,21 @@ controller:
     webhook:
       enabled: true
 
-  # Mount the SAME claims the worker Jobs mount (at identical paths).
+  # Standard shared storage, declared once (#1767): the chart renders
+  # these chart-created claims (pr-reviewer-runs,
+  # pr-reviewer-workspace-cache, and pr-reviewer-durable-state for
+  # release name `pr-reviewer`) and derives the worker-side references.
+  # 20Gi matches the claims the
+  # pre-#1767 example provisioned, so adopting this shape keeps the
+  # existing pr-reviewer-runs PVC; pin durable-state with
+  # forceRename: pr-reviewer to keep that claim too (see the chart
+  # README's upgrade section). For operator-provided claims, set
+  # existingClaim here instead and keep the size/storageClass unset.
   persistence:
     runs:
-      existingClaim: pr-reviewer-runs
+      size: 20Gi
     workspace-cache:
-      existingClaim: pr-reviewer-workspace
+      size: 20Gi
 
 # On Cilium kube-proxy-replacement clusters, also allow the Kubernetes
 # API on TCP 6443 — the base 443 egress rule does not match there, and
@@ -115,19 +125,21 @@ controller:
 #             port: 6443
 workerExecutor:
   mode: kubernetes
-  # Same namespace as the controller: the #734 shared-run-directory
-  # protocol mounts the same claims at the same absolute paths on BOTH
-  # sides, and PVCs are namespace-scoped. A dedicated worker namespace
-  # would need identical claims there — not the default posture.
+  # Standard shared claims render in the release namespace, so the guard
+  # requires this namespace to equal it; an all-existingClaim posture
+  # (for example a dedicated worker namespace provisioning its own
+  # claims) is exempt, though the chart-created durable-state PVC still
+  # renders in the release namespace.
   namespace: ""
   serviceAccount:
     create: true
     name: pr-reviewer-worker
-  # Defaults follow Chart.appVersion; optionally pin exact bytes here.
+  # Image defaults to the upstream published worker image with the tag
+  # following Chart.appVersion; pin exact bytes here if you build your
+  # own worker:
   # image:
   #   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  volumeClaims:
-    - name: pr-reviewer-runs
-      size: 20Gi
-    - name: pr-reviewer-workspace
-      size: 20Gi
+  # No volumeClaims: the standard shared claims derive from
+  # controller.persistence (chart-created here; for release name
+  # `pr-reviewer` they render as pr-reviewer-runs and
+  # pr-reviewer-workspace-cache). Add only non-standard claims here.
