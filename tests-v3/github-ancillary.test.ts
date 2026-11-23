@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { githubAncillaryWrite, githubApiBase } from "../src/platform/github-ancillary.js";
+import { DEFAULT_TEXT_RESPONSE_MAX_BYTES, PlatformRequestError } from "../src/platform/http.js";
 import { startMockServer } from "./helpers.js";
 
 test("GitHub ancillary writes use the typed transport for DELETE and JSON POST", async () => {
@@ -83,6 +84,30 @@ test("GitHub ancillary writes refuse redirects without forwarding credentials", 
   } finally {
     await source.close();
     await target.close();
+  }
+});
+
+test("GitHub ancillary responses are read through the streamed default byte cap", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    // The client cancels the response mid-stream once the cap is exceeded,
+    // so the server-side socket can surface a write error — swallow it here;
+    // it is the refusal under test, not a failure.
+    res.on("error", () => undefined);
+    res.end(Buffer.alloc(DEFAULT_TEXT_RESPONSE_MAX_BYTES + 1, 0x61));
+  });
+  const token = "cap-refusal-token";
+  try {
+    await assert.rejects(
+      githubAncillaryWrite({ GITHUB_API_URL: server.url, GH_TOKEN: token }, `${server.url}/write`, "POST", {}),
+      (error: unknown) => {
+        assert.ok(error instanceof PlatformRequestError);
+        assert.equal(error.kind, "too-large");
+        assert.equal(error.message.includes(token), false);
+        return true;
+      },
+    );
+  } finally {
+    await server.close();
   }
 });
 
