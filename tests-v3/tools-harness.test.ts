@@ -2935,9 +2935,11 @@ test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens
 test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so the records derive the aggregate", async () => {
   const { root, deps } = workspace();
   // A conversation budget small enough that compaction fires mid-loop:
-  // context 8700 → conversation budget 4000 approx tokens (what's left after
+  // context 8801 → conversation budget 4101 approx tokens (what's left after
   // the completion, framing and tool-schema reserves), result envelope cap
-  // 2000 bytes, corpus cap 7200 bytes. The corpus (~1850 tokens) plus four
+  // 2000 bytes, corpus cap 7200 bytes (both pinned). The 101 tokens over the
+  // 4000 floor carry TOOL_USE_PREAMBLE's #1800 planning sentences, so the
+  // compaction point is unchanged. The corpus (~1850 tokens) plus four
   // read results (~512 tokens each) crosses the budget before round 5, so the
   // single digest model call happens exactly there — between rounds, carrying
   // NO round record of its own.
@@ -2965,7 +2967,7 @@ test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so 
   ];
   let n = 0;
   const { result } = await runToolHarness(deps({
-    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "8700", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
+    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "8801", TOOL_CORPUS_MAX_BYTES: "7200", TOOL_MAX_RESPONSE_BYTES: "2000", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
     transport: async () => scripted[n++],
   }));
   assert.equal(result.native_loop_verdict_produced, true);

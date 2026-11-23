@@ -202,7 +202,12 @@ export const TOOL_USE_PREAMBLE =
   "changelogs, security advisories, compatibility matrices), gather that " +
   "evidence with your tools before concluding. Prioritize exact repository " +
   "paths and upstream sources named by those standards before broad " +
-  "discovery calls. When you have gathered " +
+  "discovery calls. Once any required evidence is gathered, spend calls on " +
+  "falsifying the merge-critical assumptions — the code that would make this " +
+  "change unsafe or incomplete to merge if it were wrong — before more " +
+  "happy-path confirmation. Stop when those assumptions have been challenged " +
+  "and no supported blocker or material unknown remains; there is no minimum " +
+  "call count. When you have gathered " +
   "sufficient evidence, stop calling tools; you will then be asked to produce " +
   "the final review verdict.";
 
