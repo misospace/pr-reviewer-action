@@ -329,6 +329,23 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- range $item := (list (dict "key" "runs" "pathField" "runsRoot") (dict "key" "workspace-cache" "pathField" "workspaceCacheRoot")) -}}
 {{- $key := $item.key -}}
 {{- $root := index $v.paths $item.pathField -}}
+{{- /* Mirror the runtime's mount-root grammar (kubernetesMountRootAt in
+       src/config/instance-config.ts) at render time: this artifact is
+       what the controller parses into the worker's volume mappings, so a
+       malformed root must refuse the render instead of crash-looping the
+       deployed controller at startup. */ -}}
+{{- if eq $root "/" -}}
+{{- fail (printf "controller.paths.%s must not be the filesystem root (it anchors a shared volume mapping)" $item.pathField) -}}
+{{- end -}}
+{{- if hasSuffix "/" $root -}}
+{{- fail (printf "controller.paths.%s must not end with '/'" $item.pathField) -}}
+{{- end -}}
+{{- if gt (len $root) 4096 -}}
+{{- fail (printf "controller.paths.%s must be at most 4096 bytes" $item.pathField) -}}
+{{- end -}}
+{{- if regexMatch "[[:cntrl:]]" $root -}}
+{{- fail (printf "controller.paths.%s must not contain control characters" $item.pathField) -}}
+{{- end -}}
 {{- $persistence := $v.persistence | default dict -}}
 {{- if not (hasKey $persistence $key) -}}
 {{- fail (printf "controller.persistence.%s is required as the standard shared storage (or set an explicit advanced topology)" $key) -}}
@@ -338,11 +355,16 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- fail (printf "controller.persistence.%s is required as the standard shared storage (or set an explicit advanced topology)" $key) -}}
 {{- end -}}
 {{- $claim := $entry.existingClaim -}}
-{{- if empty $claim -}}
+{{- /* The type guard covers BOTH provisionings: the worker mounts the
+       derived mapping by PVC claim name, so an emptyDir/secret entry
+       would render the controller a non-PVC volume while the worker
+       mounts a claim that does not exist — the two sides would disagree
+       about what lives at the shared root. */ -}}
 {{- $type := $entry.type | default "persistentVolumeClaim" -}}
 {{- if ne $type "persistentVolumeClaim" -}}
-{{- fail (printf "controller.persistence.%s must be an operator-provided existingClaim or a chart-created persistentVolumeClaim (standard shared storage)" $key) -}}
+{{- fail (printf "controller.persistence.%s must be an operator-provided existingClaim or a chart-created persistentVolumeClaim (standard shared storage; the worker mounts the claim by name)" $key) -}}
 {{- end -}}
+{{- if empty $claim -}}
 {{- /* Resolve the claim with the common library's own naming rules (see
        pr-reviewer.chart-created-claim-name): an operator-set forceRename
        is the rendered name and every derived reference follows it, so
@@ -356,6 +378,14 @@ Every ambiguous or missing shape fails closed here, in one place.
        posture must key on whether the chart actually renders the
        claim. */ -}}
 {{- $mappings = append $mappings (dict "key" $key "claim" $claim "controllerRoot" $root "chartCreated" (empty $entry.existingClaim)) -}}
+{{- end -}}
+{{- /* The two standard storages must resolve to distinct claims: one PVC
+       mounted at both roots would alias the runs and workspace-cache
+       trees (the mirror's own eviction could then delete live run
+       directories). The runtime refuses overlapping ROOTS but cannot see
+       a duplicate claim, so the single source refuses here. */ -}}
+{{- if and (ge (len $mappings) 2) (eq (index (index $mappings 0) "claim") (index (index $mappings 1) "claim")) -}}
+{{- fail (printf "controller.persistence.runs and controller.persistence.workspace-cache both resolve to claim %q; the two standard storages must be distinct claims" (index (index $mappings 0) "claim")) -}}
 {{- end -}}
 {{- $mappings | toYaml -}}
 {{- end -}}
@@ -569,6 +599,13 @@ dict "ctx" <component context> "root" <chart root>
 {{- if or (empty (index $paths $field)) (not (hasPrefix "/" (index $paths $field))) -}}
 {{- fail (printf "controller.paths.%s must be a non-empty absolute path starting with / (it is the single source for the standard mounts, the env contract, and fix-roots)" $field) -}}
 {{- end -}}
+{{- end -}}
+{{- /* The two shared payload roots must not overlap — the runtime refuses
+       overlapping controller roots in the volume mappings it parses
+       (one path matching two mappings is a config bug), so the single
+       source refuses the same shape at render time. */ -}}
+{{- if and (index $paths "runsRoot") (index $paths "workspaceCacheRoot") (or (eq (index $paths "runsRoot") (index $paths "workspaceCacheRoot")) (hasPrefix (printf "%s/" (index $paths "runsRoot")) (index $paths "workspaceCacheRoot")) (hasPrefix (printf "%s/" (index $paths "workspaceCacheRoot")) (index $paths "runsRoot"))) -}}
+{{- fail "controller.paths.runsRoot and controller.paths.workspaceCacheRoot overlap; each shared storage must anchor at its own root (the runtime refuses overlapping volume-mapping roots)" -}}
 {{- end -}}
 {{- /* Chart-created claim names resolve from the fullname the common
         library's PVC naming used pre-#1767

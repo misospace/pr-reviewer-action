@@ -174,9 +174,14 @@ The chart derives everything else from those two entries:
 - The template `pr-reviewer.shared-volume-mappings` exposes the derived
   `{claim, controllerRoot}` pairs and passes them to the controller in
   Kubernetes mode. A standard worker profile may omit `volumes`; the
-  controller injects these mappings automatically. Explicitly declared
-  volumes remain supported as the advanced posture, but a derived claim
-  must mount at its derived `controller.paths` root or the render refuses.
+  controller injects these mappings automatically (this needs a controller
+  image from the same release as the chart — see "Release version
+  synchronization" above). Explicitly declared
+  volumes remain supported as the advanced posture and REPLACE the
+  inherited set whole (never a merge): a profile that declares `volumes`
+  must re-declare every mapping its requests need. A declared derived
+  claim must mount at its derived `controller.paths` root or the render
+  refuses.
   Profiles other than the one `default-executor-profile` names
   keep raw advanced mappings supported unchecked; a declared default is
   trusted only when it names a kubernetes profile — otherwise the check

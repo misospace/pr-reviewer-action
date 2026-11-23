@@ -502,7 +502,7 @@ test("chart-derived shared volumes parse bounded mappings and resolve only when 
     namespace: "review-workers", "service-account": "worker", volumes: [{ claim: "own", "controller-root": "/own" }],
   } }] }).executorProfiles[0]!.kubernetes!;
   assert.equal(resolveKubernetesExecutorSpec(declared, defaults, "k8s", shared).volumes, declared.volumes);
-  for (const text of ["not json", "{}", '[{"claim":"runs","controllerRoot":"/runs","extra":true}]', '[{"controllerRoot":"/runs"}]', JSON.stringify(Array.from({ length: 9 }, (_, i) => ({ claim: `c${i}`, controllerRoot: `/r${i}` }))), '[{"claim":"a","controllerRoot":"/data"},{"claim":"b","controllerRoot":"/data/child"}]', '[{"claim":"a","controllerRoot":"/"}]']) {
+  for (const text of ["not json", "{}", "[]", '[{"claim":"runs","controllerRoot":"/runs","extra":true}]', '[{"controllerRoot":"/runs"}]', JSON.stringify(Array.from({ length: 9 }, (_, i) => ({ claim: `c${i}`, controllerRoot: `/r${i}` }))), '[{"claim":"a","controllerRoot":"/data"},{"claim":"b","controllerRoot":"/data/child"}]', '[{"claim":"a","controllerRoot":"/"}]']) {
     assert.throws(() => parseKubernetesSharedVolumes(text), /Kubernetes shared volume mappings/);
   }
 });

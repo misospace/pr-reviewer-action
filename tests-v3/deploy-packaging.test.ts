@@ -10,7 +10,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { parseKubernetesDeploymentDefaults } from "../src/config/instance-config.js";
+import { parseKubernetesDeploymentDefaults, parseKubernetesSharedVolumes } from "../src/config/instance-config.js";
 
 function read(path: string): string {
   return readFileSync(path, "utf8");
@@ -704,6 +704,27 @@ test("worker deployment defaults are chart-owned and emitted only in Kubernetes 
     controller: { instanceConfig: string };
   };
   assert.doesNotMatch(example.controller.instanceConfig, /volumes:/, "standard example must inherit chart-derived shared volumes");
+});
+
+test("chart shared-volume JSON matches the runtime grammar", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    controller: { paths: { durableStateDir: string; runsRoot: string; workspaceCacheRoot: string } };
+  };
+  // The chart projects each standard mapping to exactly {claim,
+  // controllerRoot} (the runtime's closed key set) in the fixed
+  // runs → workspace-cache order; for the default values the three
+  // chart-created PVCs render <fullname>-<key>, release name
+  // `pr-reviewer` included. Build the same JSON from the values source
+  // of truth and require the runtime parser to accept it.
+  const paths = values.controller.paths;
+  const sharedJson = JSON.stringify([
+    { claim: "pr-reviewer-runs", controllerRoot: paths.runsRoot },
+    { claim: "pr-reviewer-workspace-cache", controllerRoot: paths.workspaceCacheRoot },
+  ]);
+  const parsed = parseKubernetesSharedVolumes(sharedJson);
+  assert.deepEqual(parsed, JSON.parse(sharedJson));
+  assert.equal(parsed[0]?.controllerRoot, paths.runsRoot);
+  assert.equal(parsed[1]?.controllerRoot, paths.workspaceCacheRoot);
 });
 
 test("chart deployment-default JSON matches the runtime grammar, including digest pins", () => {

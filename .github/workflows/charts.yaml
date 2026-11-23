@@ -53,6 +53,10 @@ jobs:
             echo "Kubernetes deployment defaults must be absent outside Kubernetes mode" >&2
             exit 1
           fi
+          if grep -q 'name: PR_REVIEWER_KUBERNETES_SHARED_VOLUMES' /var/tmp/render-controller-only.yaml; then
+            echo "shared volume mappings must be absent outside Kubernetes mode" >&2
+            exit 1
+          fi
           # #1712: controller-only mode keeps the default-deny token posture
           # on the controller Deployment itself.
           if awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml | grep -q "automountServiceAccountToken: true"; then

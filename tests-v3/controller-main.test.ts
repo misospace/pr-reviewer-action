@@ -451,6 +451,30 @@ test("invalid Kubernetes deployment defaults refuse startup before composition",
   }
 });
 
+test("invalid Kubernetes shared volume mappings refuse startup before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-shared-volumes-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, MIN_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_SHARED_VOLUMES = '{"claim":"runs"}';
+  let composed = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { composed = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /PR_REVIEWER_KUBERNETES_SHARED_VOLUMES is invalid/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(composed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
 test("missing required environment: exit 2 naming every missing variable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ctl-env-"));
   const configPath = join(dir, "instance.yaml");
