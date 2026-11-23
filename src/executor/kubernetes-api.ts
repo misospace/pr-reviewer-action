@@ -39,16 +39,26 @@
  * TESTABILITY: every filesystem and network coordinate is an option with
  * the in-cluster default, so tests point the module at a temporary
  * "service-account" directory and a local HTTP fake and never touch the
- * real projected mount. Production always uses the defaults.
+ * real projected mount, and the `transport` seam captures the exact
+ * request options without opening a socket. Production always uses the
+ * defaults.
  */
 
 import { readFileSync } from "node:fs";
-import { request as httpRequest, type RequestOptions } from "node:http";
+import { request as httpRequest, type ClientRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 
 /** The https request options extend the http ones with the TLS trust
  * material and the SNI host name. */
 type HttpsRequestOptions = RequestOptions & { ca?: Buffer; servername?: string };
+
+/** The request factory seam (#1773 review): production always uses the
+ * named `httpsRequest`/`httpRequest` imports — the call forms the pinned
+ * in-source justifications sit directly above — while a test may inject a
+ * capture-only double to assert the exact options object the transport would
+ * send, without opening any socket. */
+export type ApiTransport = (options: HttpsRequestOptions) => ClientRequest;
 
 import type {
   KubernetesApi,
@@ -121,9 +131,36 @@ export interface InClusterKubernetesApiOptions {
   readonly maxResponseBytes?: number;
 }
 
+/** The conventional in-cluster DNS name of the Kubernetes API service.
+ * Every provisioned apiserver certificate carries it (plus the short
+ * `kubernetes` form and the advertise address) in its SAN set — which is
+ * exactly why it, and never the service ClusterIP, is the TLS identity
+ * an in-cluster client verifies against (#1773). A control plane whose
+ * apiserver certificate omits this SAN (a non-default service name or
+ * namespace) must project a hostname `KUBERNETES_SERVICE_HOST` instead:
+ * `apiTlsServername` then keeps that host verbatim as the SNI identity. */
+export const IN_CLUSTER_API_SERVICE_NAME = "kubernetes.default.svc";
+
+/** The TLS server name (SNI and certificate-verification identity) for the
+ * API endpoint. `KUBERNETES_SERVICE_HOST` is the kubelet-projected service
+ * address and in the overwhelming default case an IP literal (the ClusterIP,
+ * e.g. `10.43.0.1`) — and no apiserver certificate carries an IP SAN for its
+ * service ClusterIP, so an IP SNI fails every handshake (#1773). An IP
+ * literal therefore presents the conventional service DNS name; an actual
+ * hostname is kept verbatim. The socket still connects to `host` unchanged.
+ * A bracketed IPv6 literal (`[fd00::1]`, the URL authority form) is the same
+ * address — brackets are never valid SNI either — so the IP test sees the
+ * bare form while a bracketed non-IP stays a verbatim host. */
+export function apiTlsServername(host: string): string {
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return isIP(bare) === 0 ? host : IN_CLUSTER_API_SERVICE_NAME;
+}
+
 export interface ApiMaterial {
   readonly scheme: "http" | "https";
   readonly host: string;
+  /** TLS server name derived from `host` by `apiTlsServername` (#1773). */
+  readonly servername: string;
   readonly port: string;
   readonly token: string;
   readonly ca: Buffer | null;
@@ -192,6 +229,7 @@ export function buildMaterial(options: InClusterKubernetesApiOptions): ApiMateri
   return {
     scheme,
     host,
+    servername: apiTlsServername(host),
     port,
     token,
     ca,
@@ -212,6 +250,7 @@ export function apiRequest(
   path: string,
   body: string | null,
   contentType = "application/json",
+  transport?: ApiTransport,
 ): Promise<ApiResponse> {
   return new Promise<ApiResponse>((resolve, reject) => {
     const options: HttpsRequestOptions = {
@@ -230,11 +269,13 @@ export function apiRequest(
       },
     };
     if (material.scheme === "https") {
-      // Verify the endpoint against the projected CA bundle; SNI must be
-      // the API host or the handshake fails (never `rejectUnauthorized:false`).
+      // Verify the endpoint against the projected CA bundle; SNI is the
+      // derived API identity (`material.servername`, #1773: the IP-literal
+      // ClusterIP is never a certificate SAN) while the socket still
+      // connects to `material.host` (never `rejectUnauthorized:false`).
       const tlsOptions = options as HttpsRequestOptions;
       if (material.ca !== null) tlsOptions.ca = material.ca;
-      tlsOptions.servername = material.host;
+      tlsOptions.servername = material.servername;
     }
     // The bearer token and CA material are PROJECTED FILES by contract
     // (#734 in-cluster posture): reading them and sending them to the
@@ -242,15 +283,34 @@ export function apiRequest(
     // source. The files are the pod's own service-account material, the
     // endpoint is the kubelet-projected KUBERNETES_SERVICE_HOST, and both
     // are read once, bounded, and fail closed at construction.
-    // The suppression comments below must stay standalone on the line
-    // directly above each request call: CodeQL only recognizes a tagged
-    // codeql suppression comment that starts its line, and it covers
-    // exactly the line that follows it.
-    const request = material.scheme === "https"
+    //
+    // The two request calls below keep the aliased named-import form and
+    // each sit in a statement of their own, directly below their own
+    // tagged suppression comment. CodeQL covers exactly the line that
+    // FOLLOWS such a comment, so the sink belongs on that line and its
+    // justification belongs on the line above it.
+    //
+    // The tagged comments are the in-source justification for this flow and
+    // they travel with the alert it raises. The alert is a TRUE positive
+    // about a BY-DESIGN flow, so it is dispositioned at the alert level
+    // (dismissed as a false positive, exactly as on `main`): the analysis
+    // keeps `js/file-access-to-http` enabled for every other file, so a
+    // file-data-to-request flow introduced elsewhere in the runtime is
+    // still reported. The alert is NOT silenced by an analysis-level query
+    // exclusion — see `.github/workflows/codeql.yml`.
+    //
+    // Runtime option capture is a test-only seam (the `transport`
+    // parameter), never a rewrite of the analyzed call form.
+    let request: ClientRequest;
+    if (transport !== undefined) {
+      request = transport(options);
+    } else if (material.scheme === "https") {
       // codeql[js/file-access-to-http] projected service-account material sent to its own kubelet-projected cluster endpoint is the #734 contract
-      ? httpsRequest(options)
+      request = httpsRequest(options);
+    } else {
       // codeql[js/file-access-to-http] same intended flow over the test-only plaintext scheme
-      : httpRequest(options);
+      request = httpRequest(options);
+    }
     request.on("timeout", () => {
       request.destroy(new KubernetesApiError("the Kubernetes API call timed out", null));
     });

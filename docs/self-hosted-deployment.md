@@ -309,6 +309,29 @@ CiliumNetworkPolicy using `toEntities: [kube-apiserver]`, which resolves
 the API server endpoints automatically; the chart's stock NetworkPolicy
 cannot do that, so the ipBlock exception above is the portable form.
 
+### TLS identity of the API connection (#1773)
+
+Kubernetes also fills `KUBERNETES_SERVICE_HOST` in every pod from the
+`kubernetes` Service, and that value is the Service ClusterIP: an IP
+address. An apiserver certificate is never valid for its own ClusterIP, so
+the client cannot use that IP as the TLS server name. When the projected
+host is an IP address (IPv4 or IPv6, with or without brackets), the
+controller verifies the certificate against `kubernetes.default.svc`, the
+conventional DNS name of that Service. The socket still connects to the
+projected IP. When the host is a hostname, the controller keeps that
+hostname as the TLS identity.
+
+Every standard control plane lists `kubernetes.default.svc` in the
+apiserver certificate, so the default works on those clusters. A
+non-standard control plane can ship a certificate without that name, for
+example when its API Service uses a different name or namespace. The API
+calls then fail with a certificate name mismatch. On such a cluster, set
+`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT` explicitly on the
+controller Deployment to a hostname that resolves to the API server and
+that its certificate lists. Kubelet accepts the explicit value in place of
+the Service-derived one. The chart sets no default for this override,
+because the right hostname is cluster-specific.
+
 The Kubernetes worker executor pins worker pods to uid/gid 65532, so the
 controller deployment must share group 65532 with the worker pin (the
 chart sets `fsGroup: 65532`; operators running the controller outside the

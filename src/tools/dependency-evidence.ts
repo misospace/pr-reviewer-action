@@ -337,6 +337,306 @@ export function authoritativeRegistryPackageSlug(url: string): string | null {
   return registrySpecSlug(after[0] ?? "", after.slice(1));
 }
 
+// Container/OCI registries whose CATALOG page for the exact repository path
+// is the publisher-authoritative identity surface for the artifact (the
+// image/chart analogue of NPM_REGISTRY_HOSTS above): the host enforces path
+// uniqueness under its namespaces, so only the exact catalog/manifest page
+// binds the identity. `hub.docker.com`/`docker.io`, `ghcr.io`, and `quay.io`
+// have their own path spellings and are handled separately; these accept the
+// plain `<host>/<path…>` shape with at least two path segments.
+const PLAIN_IMAGE_CATALOG_HOSTS: ReadonlySet<string> = new Set([
+  "gcr.io",
+  "us.gcr.io",
+  "eu.gcr.io",
+  "asia.gcr.io",
+  "registry.k8s.io",
+  "k8s.gcr.io",
+  "mcr.microsoft.com",
+  "public.ecr.aws",
+  "gallery.ecr.aws",
+]);
+
+/**
+ * #1763 (canonical-registry-catalog rule): the AUTHORITATIVE container-registry
+ * catalog identity a web target is the catalog/manifest surface FOR, or `null`
+ * when the target is not a canonical registry catalog page. This is the
+ * image/chart analogue of `authoritativeRegistryPackageSlug` beside it: the
+ * registry host enforces path uniqueness under its namespaces, so the catalog
+ * page for the EXACT image path is the publisher-authoritative identity for
+ * that artifact — the provenance obligation for an `image`/`chart` scope entry
+ * SETTLES only from this shape (see `dependencyCellCovered`). A same-named
+ * image under a different namespace, a source-repository read on a forge, or
+ * a search query proves nothing about who publishes the artifact.
+ *
+ * The accepted spellings canonicalize every surface to the ONE lowercase
+ * identity the trusted scope parse records:
+ * - `hub.docker.com` / `docker.io`: `r/<owner>/<name>` →
+ *   `docker.io/<owner>/<name>`, with the official-image `library` namespace
+ *   collapsing to `docker.io/<name>`, the `/_/<name>` official-image
+ *   spelling → `docker.io/<name>`, and the repository-API document
+ *   `v2/repositories/<owner>/<name>[/<rest>]` (the publisher-metadata JSON
+ *   surface, #1782) → the same identity; every other Docker Hub path shape
+ *   (search, profile, deeper listing) binds nothing;
+ * - `ghcr.io`: at least two path segments → `ghcr.io/<joined path>` (OCI
+ *   charts live at deeper paths such as `prometheus-community/charts/<chart>`);
+ * - `quay.io`: `repository/<a>/<b>` (the app-catalog surface) strips its
+ *   `repository` marker → `quay.io/<a>/<b>`; plain `<a>/<b>` →
+ *   `quay.io/<a>/<b>`; anything else nothing;
+ * - `gcr.io` (plus the `us.`/`eu.`/`asia.` regional hosts), `registry.k8s.io`,
+ *   `k8s.gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`, `gallery.ecr.aws`:
+ *   at least two path segments → `<host>/<joined path>`.
+ * An off-vocabulary host, a shallower page (registry root, search page,
+ * publisher profile), and any percent-escape anywhere in the path bind
+ * NOTHING — fail closed, never a decoded-guessed identity. A host carrying
+ * user-info or a port is not a clean registry origin. Lexical and total:
+ * never throws, never touches the network.
+ */
+export function canonicalRegistryCatalogImageIdentity(url: string): string | null {
+  const lower = url.trim().toLowerCase();
+  const schemeAt = lower.indexOf("://");
+  if (schemeAt === -1) return null;
+  const rest = lower.slice(schemeAt + 3);
+  const pathStart = rest.indexOf("/");
+  const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  // A host carrying credentials or a port is not a clean registry origin.
+  if (rawHost.includes("@") || rawHost.includes(":")) return null;
+  const host = rawHost.replace(/^www\./, "");
+  const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
+  const segments = rawPath.replace(/\/$/, "").split("/").filter((segment) => segment !== "");
+  if (segments.length === 0) return null;
+  // The scope grammar carries bare path names; an escaped segment is never
+  // decoded-guessed into one.
+  if (segments.some((segment) => segment.includes("%"))) return null;
+  if (host === "hub.docker.com" || host === "docker.io") {
+    if (segments.length === 3 && segments[0] === "r") {
+      const owner = segments[1]!;
+      const name = segments[2]!;
+      // Docker Hub canonicalizes an official image to `docker.io/<name>` —
+      // the `library/` namespace is spelling, not identity.
+      return owner === "library" ? `docker.io/${name}` : `docker.io/${owner}/${name}`;
+    }
+    if (segments.length === 2 && segments[0] === "_") return `docker.io/${segments[1]}`;
+    // The repository API document (`/v2/repositories/<owner>/<name>`, the
+    // shape a reviewer actually reaches for when it wants the repository
+    // METADATA — the publisher-owned `source`/`repository` fields): the
+    // exact repository path under the namespace-owning host, deeper
+    // sub-resources (`/tags`, `/images`) are pages OF that same document's
+    // repository. #1782: without this spelling the organic Hub JSON surface
+    // was invisible to the mapping rule even when the publisher HAD set
+    // `source`.
+    if (segments.length >= 4 && segments[0] === "v2" && segments[1] === "repositories") {
+      const owner = segments[2]!;
+      const name = segments[3]!;
+      return owner === "library" ? `docker.io/${name}` : `docker.io/${owner}/${name}`;
+    }
+    return null;
+  }
+  if (host === "ghcr.io") {
+    return segments.length >= 2 ? `${host}/${segments.join("/")}` : null;
+  }
+  if (host === "quay.io") {
+    if (segments.length === 3 && segments[0] === "repository") return `quay.io/${segments[1]}/${segments[2]}`;
+    if (segments.length === 2) return `quay.io/${segments[0]}/${segments[1]}`;
+    return null;
+  }
+  if (PLAIN_IMAGE_CATALOG_HOSTS.has(host)) {
+    return segments.length >= 2 ? `${host}/${segments.join("/")}` : null;
+  }
+  return null;
+}
+
+/**
+ * #1782 (independent review blocker 1): normalize one claimed source/build
+ * repository value into the canonical `host/owner/repo` identity, or `null`
+ * when the claim is not one clean repository identity. Accepted spellings:
+ * an `http(s)://` URL or a bare `host/owner/repo`, each optionally deeper
+ * (`/tree/<ref>`, `/releases`, …) and with a trailing `.git`; the `www.`
+ * prefix is spelling, not identity. A host carrying user-info, a port, or
+ * any percent-escape, a scheme other than http(s), or fewer than three
+ * clean segments names no repository — fail closed, never a decoded-guessed
+ * identity. Lexical and total: never throws.
+ */
+function normalizeSourceRepoClaim(raw: string): string | null {
+  const value = raw.trim().toLowerCase();
+  // Printable ASCII only: zero-width and other invisible code points (JS
+  // `\s` does not cover U+200B) must never ride a retained identity into
+  // the artifact or render spoofably in diagnostics.
+  if (value === "" || !/^[\x21-\x7e]+$/.test(value)) return null;
+  const schemeAt = value.indexOf("://");
+  let rest: string;
+  if (schemeAt === -1) {
+    if (value.includes(":")) return null;
+    rest = value;
+  } else {
+    const scheme = value.slice(0, schemeAt);
+    if (scheme !== "https" && scheme !== "http") return null;
+    rest = value.slice(schemeAt + 3);
+  }
+  const path = rest.split(/[?#]/, 1)[0] ?? "";
+  const segments = path.split("/").filter((segment) => segment !== "");
+  if (segments.length < 3) return null;
+  // The spelling strips run to fixpoint so the rule is idempotent on its
+  // own output (the persisted `source_repo` must survive the strict
+  // reader's re-check): `www.www.`, `…git.git`.
+  let host = segments[0]!;
+  while (host.startsWith("www.")) host = host.slice("www.".length);
+  const owner = segments[1]!;
+  let repo = segments[2]!;
+  while (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  for (const segment of [host, owner, repo]) {
+    if (segment === "" || segment.includes("@") || segment.includes(":") || segment.includes("%")) return null;
+  }
+  if (!host.includes(".")) return null;
+  return `${host}/${owner}/${repo}`;
+}
+
+/** `org.opencontainers.image.source` in any publisher spelling: the JSON
+ * annotation form of an OCI manifest/config document (`"key":"value"`), and
+ * the Dockerfile `LABEL key=value` build-metadata form. */
+const OCI_SOURCE_ANNOTATION_RE = /org\.opencontainers\.image\.source["']?\s*[:=]\s*["']?([^\s"',;}\]]+)/gi;
+
+/** Registry-metadata JSON fields whose value IS the artifact's source/build
+ * repository: Docker Hub's repository API `source`, Quay's application API
+ * `repository`. Matched only as a strict quoted JSON key with a quoted
+ * string value — prose that merely spells the word binds nothing. */
+const REGISTRY_SOURCE_METADATA_RE = /"(?:source|repository)"\s*:\s*"([^"\r\n]+)"/gi;
+
+/**
+ * #1782 (independent review blocker 1): the bounded registry-artifact →
+ * source/build-repository mapping a canonical registry document CLAIMS, as
+ * the canonical `host/owner/repo` identity, or `null` when the document
+ * carries no attributable mapping. #1763 requires image provenance to prove
+ * the image/source relationship, not just a pullable artifact identity: a
+ * successful fetch of the catalog URL proves the registry serves the slug,
+ * never WHICH repository builds it — the claim must come from the document's
+ * own content (verified OCI `org.opencontainers.image.source` annotations,
+ * registry metadata `source`/`repository` fields, or the Dockerfile `LABEL`
+ * spelling of the same annotation, read ONLY from a document fetched at the
+ * canonical catalog identity for the exact artifact path, which the caller
+ * enforces — the registry host enforces path uniqueness under its
+ * namespaces, so the publisher's own document is the authority for its
+ * source mapping). Every claim in the document must normalize to ONE
+ * identity: a malformed/irrepresentable claim, or several claims naming
+ * different repositories (a repacked or ambiguous document), yields `null`
+ * — fail closed, never pick a convenient mapping. Lexical and total: never
+ * throws, never touches the network.
+ */
+export function registryDocumentSourceRepo(content: string): string | null {
+  let mapping: string | null = null;
+  const claims = [
+    ...content.matchAll(OCI_SOURCE_ANNOTATION_RE),
+    ...content.matchAll(REGISTRY_SOURCE_METADATA_RE),
+  ];
+  for (const match of claims) {
+    const claim = normalizeSourceRepoClaim(match[1] ?? "");
+    if (claim === null) return null;
+    if (mapping !== null && mapping !== claim) return null;
+    mapping = claim;
+  }
+  return mapping;
+}
+
+/** Whether a persisted `source_repo` claim is exactly the canonical
+ * normalized form `normalizeSourceRepoClaim` produces — the strict ledger
+ * reader re-enforces the grammar on reload instead of trusting the shape
+ * it wrote. Lexical, total. */
+export function isCanonicalSourceRepoIdentity(value: string): boolean {
+  return normalizeSourceRepoClaim(value) === value;
+}
+
+/**
+ * #1782 (independent review blocker 2): the canonical source-repository
+ * identity a FETCHED web surface addresses — `host/owner/repo` from the
+ * target's host and first two path segments (deeper paths are pages OF that
+ * repository: `/compare/…`, `/releases`, `/commit/…`), or `null` when the
+ * target is not a clean repository surface (no path, user-info or port on
+ * the host, any percent-escape, a non-http scheme). This is the surface-side
+ * counterpart of `registryDocumentSourceRepo`: an upstream release/advisory
+ * fetch speaks for the dependency exactly when the repository IT addresses
+ * equals the source/build mapping the artifact's canonical registry document
+ * established — never when it merely spells one segment of it. Lexical and
+ * total: never throws, never touches the network.
+ */
+export function sourceRepoSurfaceIdentity(url: string): string | null {
+  const value = url.trim().toLowerCase();
+  const schemeAt = value.indexOf("://");
+  if (schemeAt === -1) return null;
+  const scheme = value.slice(0, schemeAt);
+  if (scheme !== "https" && scheme !== "http") return null;
+  const rest = value.slice(schemeAt + 3);
+  const pathStart = rest.indexOf("/");
+  const rawHost = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  if (rawHost.includes("@") || rawHost.includes(":")) return null;
+  let host = rawHost;
+  while (host.startsWith("www.")) host = host.slice("www.".length);
+  if (host === "" || host.includes("%") || !host.includes(".")) return null;
+  const rawPath = pathStart === -1 ? "" : (rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "");
+  const segments = rawPath.split("/").filter((segment) => segment !== "");
+  if (segments.length < 2) return null;
+  const owner = segments[0]!;
+  let repo = segments[1]!;
+  while (repo.endsWith(".git")) repo = repo.slice(0, -".git".length);
+  if (owner === "" || repo === "" || owner.includes("%") || repo.includes("%")) return null;
+  return `${host}/${owner}/${repo}`;
+}
+
+/**
+ * #1782 (independent review round 2, blocker 1): the artifact→source/build
+ * mapping the REGISTRY HOST ITSELF asserts through a validated redirect
+ * chain. `ghcr.io` answers a fetch of a package path NOT with a document at
+ * that path: the registry 303s to GitHub's package page for the exact
+ * artifact, and GitHub's own Location chain lands on
+ * `github.com/<owner>/<repo>/pkgs/container/<artifact>` — the page OF the
+ * repository the registry's operator associates with the package. That
+ * terminal URL is executor-attested (the web_fetch hop loop re-validates
+ * every Location against the source-host allowlist and reports the chain's
+ * terminal URL as `finalUrl`); it is the registry operator's statement of
+ * the image/source relationship — namespace-uniqueness-bound, reachable on
+ * the organic surface, and readable WITHOUT trusting any fetched body.
+ * Returns the mapped `github.com/<owner>/<repo>` identity, or `null`:
+ * - `null` unless the REQUESTED URL canonicalizes (via
+ *   `canonicalRegistryCatalogImageIdentity`) to a `ghcr.io/…` slug — no
+ *   other accepted registry host redirects to a repository-addressing
+ *   package page, so no other host asserts a mapping this way;
+ * - `null` unless the terminal URL is a clean repository surface
+ *   (`sourceRepoSurfaceIdentity`) ON `github.com`, its FIRST two path
+ *   segments, immediately followed by the exact `pkgs/container/<artifact>`
+ *   marker — a lookalike that merely spells the marker deeper in the path,
+ *   a `github.com/-/<owner>/packages/…` hop that never resolved to a
+ *   repository, or any other page shape asserts nothing;
+ * - `null` unless the marker's artifact segment decodes (the registry's own
+ *   `%2f`-only spelling) to exactly the slug's path below the ghcr.io
+ *   namespace — the redirect must speak about THIS artifact, not some other
+ *   package on the same host. Any other percent-escape fails closed.
+ * Lexical and total: never throws, never touches the network.
+ */
+export function registryRedirectSourceMapping(requestedUrl: string, finalUrl: string): string | null {
+  const slug = canonicalRegistryCatalogImageIdentity(requestedUrl);
+  if (slug === null || !slug.startsWith("ghcr.io/")) return null;
+  const repo = sourceRepoSurfaceIdentity(finalUrl);
+  if (repo === null || !repo.startsWith("github.com/")) return null;
+  const lower = finalUrl.trim().toLowerCase();
+  const rest = lower.slice(lower.indexOf("://") + 3);
+  const pathStart = rest.indexOf("/");
+  if (pathStart === -1) return null;
+  const rawPath = rest.slice(pathStart).split(/[?#]/, 1)[0] ?? "";
+  const segments = rawPath.split("/").filter((segment) => segment !== "");
+  if (segments.length !== 5 || segments[2] !== "pkgs" || segments[3] !== "container") return null;
+  // The reserved `-` namespace (the repository-INDEPENDENT package hop) is
+  // not an owner: a five-segment lookalike of it asserts no repository.
+  if (segments[0] === "-") return null;
+  const encoded = segments[4]!;
+  // The registry's own spelling of a nested artifact path is `%2f`-joined;
+  // any OTHER percent-escape is not a clean identity character.
+  if (encoded.replace(/%2f/g, "").includes("%")) return null;
+  // The pkgs marker names the artifact BELOW the ghcr.io namespace; the
+  // namespace itself is the slug's first path segment and is not part of
+  // the encoded page spelling.
+  const artifact = slug.split("/").slice(2).join("/");
+  if (artifact === "" || encoded.replace(/%2f/g, "/") !== artifact) return null;
+  return repo;
+}
+
 /**
  * #1396: the obligation a deterministic dependency-evidence `must_check`
  * checklist text names (the DEPENDENCY_EVIDENCE_CHECKS family templates), or

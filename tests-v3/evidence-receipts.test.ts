@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildEvidenceLedger,
   checkEvidenceTagsFromArtifact,
+  dependencyScopeEntriesFromArtifact,
   evaluateRowEvidence,
   evidenceLedgerFromArtifact,
   evidenceLedgerToArtifact,
@@ -558,18 +559,34 @@ test("#1657 (round 2): the SAME dependency with the WRONG obligation kind does n
   assert.equal(state.state, "receipt-absent");
 });
 
-test("#1657 (round 2): a failed or truncated matching acquisition stays receipt-unverified — identity relevance without verified acquisition", () => {
+test("#1657 (round 2) / #1782 (round 2): a FAILED matching acquisition stays receipt-unverified; a TRUNCATED URL-attested cell settles — the fetch slice clips the body, never the acquisition facts", () => {
+  // #1657 (round 2), unchanged: a failed acquisition fetched nothing —
+  // identity relevance without ANY verified acquisition reads
+  // receipt-unverified, never credited.
   const failed = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "error" }],
     toolResults: [{ status: "error", result: { error: "web_fetch: HTTP 404 from github.com" } }],
   });
-  const deltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
-  assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", failed).state, "receipt-unverified");
+  const versionedDeltaTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [{ slug: DEP_A, versions: ["4.17.15", "4.17.21"] }]);
+  assert.equal(evaluateRowEvidence(versionedDeltaTag, "inspect the exact old→new upstream release delta for the updated dependency", failed).state, "receipt-unverified");
+  // #1782 (round 2): the dependency-evidence pool credits ACQUISITION facts
+  // — the target URL (the identity and version carries read it, never the
+  // fetched body), the validated redirect chain, the 2xx status. The
+  // executor's fixed 10k-codepoint slice clips every real GitHub compare
+  // page, and the clip says nothing about those facts, so a TRUNCATED
+  // acquisition of the exact old→new compare URL settles the delta cell:
+  // receipt-backed, same as the unclipped fetch two tests above.
   const truncated = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.21" }, status: "ok" }],
     toolResults: [{ status: "ok", result: { content: "compare v4.17.15...v4.17.21", truncated: true } }],
   });
-  assert.equal(evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", truncated).state, "receipt-unverified");
+  const settled = evaluateRowEvidence(versionedDeltaTag, "inspect the exact old→new upstream release delta for the updated dependency", truncated);
+  assert.deepEqual([settled.state, settled.receipts], ["receipt-backed", ["call-1"]]);
+  // The settlement is the URL-attested coverage, not a truncation waiver:
+  // the same truncated acquisition beside a versionless entry (round 9 —
+  // no captured version identity to assert) stays receipt-mismatch.
+  const versionlessTag = tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [DEP_A]);
+  assert.equal(evaluateRowEvidence(versionlessTag, "inspect the exact old→new upstream release delta for the updated dependency", truncated).state, "receipt-mismatch");
 });
 
 test("#1657 (round 2): exact identity collisions stay refused — lodash never carries from lodash-es; scope-less tags fail closed", () => {
@@ -1032,14 +1049,26 @@ test("#1748: a same-slug repository under an unrelated owner never settles prove
   assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, nearMiss).state, "receipt-absent");
 });
 
-test("#1748: an incomplete registry acquisition stays receipt-unverified; registry evidence for ONE entry never covers an aggregate row", () => {
-  // Truncated registry document: the acquisition happened but the receipt is
-  // incomplete — reason-coded unverified, never credited.
+test("#1748 / #1782 (round 2): a truncated npm registry acquisition settles the URL-identity cells while a failed one stays receipt-unverified; registry evidence for ONE entry never covers an aggregate row", () => {
+  // #1782 (round 2): the provenance cell's binding evidence is the ACQUISITION
+  // TARGET — `authoritativeRegistryPackageSlug(url)` — an executor-attested
+  // fact the 10k-codepoint fetch slice cannot invalidate. A truncated
+  // registry document of the exact slug is therefore an acquired, verified
+  // cell and SETTLES (the clip only ever hid body prose, and body content is
+  // evidence nowhere in the npm cells).
   const truncated = buildEvidenceLedger({
     toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg" }, status: "ok" }],
     toolResults: [{ status: "ok", result: { content: '{"name":"example-pkg"', truncated: true } }],
   });
-  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, truncated).state, "receipt-unverified");
+  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, truncated).state, "receipt-backed");
+  // A FAILED acquisition is different in kind: it fetched NOTHING, so the
+  // acquisition fact itself is unproven — reason-coded unverified, never
+  // credited (the #1657 rule the round-2 relaxation deliberately keeps).
+  const failed = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://registry.npmjs.org/example-pkg" }, status: "error" }],
+    toolResults: [{ status: "error", result: { error: "web_fetch: HTTP 502 from registry.npmjs.org" } }],
+  });
+  assert.equal(evaluateRowEvidence(provenanceTag, PROVENANCE_ROW, failed).state, "receipt-unverified");
   // An aggregate provenance row over two slugs needs the registry document
   // for EACH: a document for one (plus an attacker-repo read of the other)
   // leaves the aggregate specifically unresolved (mismatch).
@@ -1113,4 +1142,75 @@ test("#1753 (review): the trace receipt vocabulary credits only ACQUIRED HEAD-BO
   // (no acquisition record) credit nothing — fail closed.
   assert.deepEqual(receiptVocabularyForTrace({ state: "refused", receipts: ledger.receipts }).tokens, []);
   assert.deepEqual(receiptVocabularyForTrace({ state: "unavailable", receipts: [] }).tokens, []);
+});
+
+// ── #1763: the strict scope parser accepts the extended `image`/`chart`
+// entry shape (kind + digests + short dotted tags) and refuses everything
+// off the closed vocabularies — a refused entry drops the ROW to legacy,
+// exactly like every other hostile shape. ───────────────────────────────────
+
+test("#1763: the strict scope parser accepts kind/digests and the image short-tag grammar", () => {
+  const digestA = "0".repeat(64);
+  const digestB = "abc123".padEnd(64, "0");
+  // Absent kind = npm: the pre-#1763 shape parses byte-for-byte unchanged.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]),
+    [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }],
+  );
+  // An image entry with both extension keys.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([
+      { slug: "ghcr.io/sirkirby/unifi-network-mcp", versions: ["0.49.2", "0.50.0"], kind: "image", digests: [digestA, digestB] },
+    ]),
+    [{ slug: "ghcr.io/sirkirby/unifi-network-mcp", versions: ["0.49.2", "0.50.0"], kind: "image", digests: [digestA, digestB] }],
+  );
+  // Explicit npm kind keeps the exact x.y.z rule; short tags stay refused there.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "lodash", versions: ["4.17.21"], kind: "npm" }]),
+    [{ slug: "lodash", versions: ["4.17.21"], kind: "npm" }],
+  );
+  // chart kind + short dotted tag + suffix spellings the tag grammar allows.
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([
+      { slug: "ghcr.io/prometheus-community/charts/kube-prometheus-stack", versions: ["7.2", "7.2.0-rc.1", "65.1.2+build.9"], kind: "chart" },
+    ]),
+    [{ slug: "ghcr.io/prometheus-community/charts/kube-prometheus-stack", versions: ["7.2", "7.2.0-rc.1", "65.1.2+build.9"], kind: "chart" }],
+  );
+  // Digests-only image entry (empty versions is legitimate).
+  assert.deepEqual(
+    dependencyScopeEntriesFromArtifact([{ slug: "docker.io/alpine", versions: [], kind: "image", digests: [digestA] }]),
+    [{ slug: "docker.io/alpine", versions: [], kind: "image", digests: [digestA] }],
+  );
+});
+
+test("#1763: the strict scope parser refuses kind/digest/version shapes off the closed vocabularies — the row drops to legacy", () => {
+  const digestA = "0".repeat(64);
+  for (const bad of [
+    // Unknown key (unchanged rule, now alongside the extension keys).
+    [{ slug: "lodash", versions: ["4.17.21"], extra: true }],
+    // kind outside the closed vocabulary / wrong-typed.
+    [{ slug: "lodash", versions: ["4.17.21"], kind: "oci" }],
+    [{ slug: "lodash", versions: ["4.17.21"], kind: 1 }],
+    // digests: uppercase hex, too short, non-string, too many, non-array.
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: ["A".repeat(64)] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: ["0".repeat(63)] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: [7] }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: Array.from({ length: 17 }, () => digestA) }],
+    [{ slug: "ghcr.io/o/n", versions: [], kind: "image", digests: digestA }],
+    // Short dotted tag on an npm/absent-kind entry — the exact rule stays (#1748).
+    [{ slug: "lodash", versions: ["7.2"] }],
+    [{ slug: "lodash", versions: ["7.2"], kind: "npm" }],
+    // Non-numeric junk on an image entry's short-tag channel.
+    [{ slug: "ghcr.io/o/n", versions: ["v7.2"], kind: "image" }],
+    [{ slug: "ghcr.io/o/n", versions: ["7.x"], kind: "image" }],
+    [{ slug: "ghcr.io/o/n", versions: ["7"], kind: "image" }],
+  ]) {
+    assert.equal(dependencyScopeEntriesFromArtifact(bad), null, JSON.stringify(bad));
+    // And through the tag parser: the whole ROW drops (legacy/fail closed).
+    assert.deepEqual(
+      checkEvidenceTagsFromArtifact([{ text: "t", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: bad }]),
+      [],
+      JSON.stringify(bad),
+    );
+  }
 });
