@@ -16,7 +16,7 @@ behind a missing DSN and an in-memory drift cannot hide behind a skip.
 Production scheduling correctness never depends on process memory:
 the in-memory backend is for tests/dev only. Driver compatibility:
 node-postgres documents support for every PostgreSQL version from 8.x
-to the most recent — current `pg` 8.23.1 against the PostgreSQL 18
+to the most recent — current `pg` 8.23.1 against the PostgreSQL 19
 service container CI provisions (and runs the full conformance battery
 against) covers the deployed matrix.
 

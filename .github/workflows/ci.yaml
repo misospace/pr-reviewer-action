@@ -56,7 +56,7 @@ jobs:
     # — this database is ephemeral to the job and holds nothing.
     services:
       postgres:
-        image: postgres:18@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a
+        image: postgres:19@sha256:766ddae4967301b9802b341bb596905f11dd5c558149690a7a4d80c2f61bbcf9
         env:
           POSTGRES_USER: pr_reviewer
           POSTGRES_PASSWORD: pr_reviewer
