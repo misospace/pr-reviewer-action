@@ -3,11 +3,20 @@
 
 Consumes a JSON report produced by ``scripts/eval_harness.py`` and renders
 the scheduled sweep's Markdown summary for ``GITHUB_STEP_SUMMARY`` and the
-#472 tracking issue. The per-mode pass rate is read from the canonical
+tracking issue. The tracking issue is passed by the workflow
+(``--post-issue``); the live tracker is issue #1801. Issue #472 closed in
+August 2026 and must not stay the destination for the weekly telemetry
+(#1799). The per-mode pass rate is read from the canonical
 generated-report shape ``report["mode_summary"][mode]`` — the harness's
 headline field is ``capability_pass_rate`` (issue #715: the summary used to
 read ``report["modes"][mode]["pass_rate"]``, a structure the producer has
 never emitted, so every mode rendered as an unknown ``❓`` rate).
+
+The summary separates the two ways a sweep can fail (#1799):
+  - an operational failure (the replay input did not materialize, or the
+    runtime refused to review) says nothing about review quality,
+  - an assertion failure (the review ran and the expected evidence did not
+    show up) is the number that tracks review quality.
 
 Compatibility is explicit, never silent:
   - ``capability_pass_rate`` is the canonical field; a block that carries a
@@ -20,16 +29,18 @@ Compatibility is explicit, never silent:
   - A non-numeric rate renders as unreadable rather than being coerced.
   - ``metadata.total_prs`` is canonical; ``pr_count`` is honoured as an
     explicit legacy alias.
+  - The operational counters are optional: a report from an older harness
+    has none, and the summary then omits those lines.
 
 Rendering is deterministic: the run stamp is an input (the workflow passes
 the wall-clock time; tests pass a fixed one), so identical report + stamp
 produce byte-identical output.
 
 The #711 all-runs-error behavior is preserved: when zero harness runs
-completed, the summary is still written (and the #472 comment posted) and
-the process then exits 1, so the evidence stays visible on a red run.
+completed, the summary is still written (and the tracking comment posted)
+and the process then exits 1, so the evidence stays visible on a red run.
 
-The #472 tracking comment is written through ``pr_reviewer.forge`` — the
+The tracking comment is written through ``pr_reviewer.forge`` — the
 configured forge capability — so the credential rides only the
 ``Authorization`` header, redirects are refused, and a plaintext-HTTP base
 URL for a host that is not loopback is refused before any byte goes out
@@ -112,6 +123,48 @@ def all_runs_errored(report: dict[str, Any]) -> bool:
     return count_completed_runs(report) == 0
 
 
+def _int_counter(value: Any) -> int | None:
+    """An integer counter, or None when the field is absent or unreadable."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _failure_counts(report: dict[str, Any]) -> tuple[int, int, int]:
+    """The operational/assertion split of a sweep (#1799).
+
+    Returns ``(replay_failures, admission_skips, assertion_failures)``:
+
+      - a replay failure is a run whose pinned replay input did not
+        materialize, so the reviewer never saw the scenario,
+      - an admission skip is a run the runtime refused to review,
+      - an assertion failure is a completed run that reviewed the scenario
+        without the expected evidence; only this one tracks review quality.
+
+    The counters are optional. A report from a harness that predates them
+    falls back to the per-mode blocks, and then to zero.
+    """
+    metadata = _metadata(report)
+    mode_summary = report.get("mode_summary")
+    mode_summary = mode_summary if isinstance(mode_summary, dict) else {}
+
+    def total(metadata_key: str, mode_key: str) -> int:
+        value = _int_counter(metadata.get(metadata_key))
+        if value is not None:
+            return value
+        return sum(
+            _int_counter(block.get(mode_key)) or 0
+            for block in mode_summary.values()
+            if isinstance(block, dict)
+        )
+
+    return (
+        total("replay_failed_runs", "replay_failures"),
+        total("admission_skipped_runs", "admission_skips"),
+        total("assertion_failed_runs", "capability_failures"),
+    )
+
+
 def _mode_pass_rate(block: dict[str, Any]) -> tuple[float | None, str | None]:
     """Resolve a mode block's headline pass rate.
 
@@ -190,6 +243,26 @@ def render_weekly_summary(report: dict[str, Any], run_stamp: str) -> str:
     if isinstance(total_runs, int) and not isinstance(total_runs, bool):
         summary_lines.append(f"- **Runs completed:** {completed_runs}/{total_runs}")
 
+    # #1799: an operational failure and an eval assertion are different
+    # facts. The first says the sweep never exercised the reviewer. The
+    # second says the reviewer ran and missed the expected evidence.
+    replay_failures, admission_skips, assertion_failures = _failure_counts(report)
+    if replay_failures:
+        summary_lines.append(
+            f"- **Replay failures:** {replay_failures} run(s) did not materialize "
+            "their pinned input, so they say nothing about review quality"
+        )
+    if admission_skips:
+        summary_lines.append(
+            f"- **Admission skips:** {admission_skips} run(s) were refused before "
+            "the review, so they say nothing about review quality"
+        )
+    if assertion_failures:
+        summary_lines.append(
+            f"- **Assertion failures:** {assertion_failures} run(s) reviewed the "
+            "scenario without the expected evidence"
+        )
+
     any_regression = False
     for mode in modes:
         block = mode_summary.get(mode)
@@ -239,10 +312,23 @@ def render_weekly_summary(report: dict[str, Any], run_stamp: str) -> str:
         )
 
     if all_runs_errored(report):
+        if replay_failures and not admission_skips:
+            cause = (
+                "Every harness run failed to materialize its pinned replay input; "
+                "no pass rates exist. Failing the job (issue #711)."
+            )
+        elif admission_skips and not replay_failures:
+            cause = (
+                "Every harness run was refused before the review; no pass rates "
+                "exist. Failing the job (issue #711)."
+            )
+        else:
+            cause = (
+                "Every harness run errored; no pass rates exist. "
+                "Failing the job (issue #711)."
+            )
         summary_lines.append("")
-        summary_lines.append(
-            "> ❌ Every harness run errored; no pass rates exist. Failing the job (issue #711)."
-        )
+        summary_lines.append(f"> ❌ {cause}")
 
     return "\n".join(summary_lines)
 
@@ -257,7 +343,7 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
     """Best-effort post of the summary to the tracking issue.
 
     The issue number comes from the caller's ``--post-issue`` argument
-    (the workflow passes the #472 tracking issue explicitly). The write
+    (the workflow passes the live tracker issue explicitly). The write
     goes through ``pr_reviewer.forge.ForgeClient`` — the configured forge
     capability — so the credential rides only the ``Authorization``
     header, redirects are refused, and a configured base URL that uses
@@ -320,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Render the weekly eval-harness regression summary from a "
-            "scripts/eval_harness.py report (#472, #715)."
+            "scripts/eval_harness.py report (#472, #715, #1799)."
         )
     )
     parser.add_argument(
@@ -346,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Also post the summary as a comment on this issue (best-effort; "
             "requires GITHUB_TOKEN and GITHUB_REPOSITORY; the scheduled "
-            "sweep passes the #472 tracking issue)"
+            "sweep passes the live tracker issue)"
         ),
     )
     args = parser.parse_args(argv)

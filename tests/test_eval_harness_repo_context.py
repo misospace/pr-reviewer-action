@@ -309,20 +309,25 @@ def test_errored_run_fails_repository_context_checks() -> None:
 def test_old_agentic_canonical_behavior_is_unchanged() -> None:
     old_path = CORPUS_PATH.parent / "corpus-agentic.json"
     old_corpus = BenchmarkCorpus.from_file(old_path)
-    canonical = next(pr for pr in old_corpus.prs if pr["number"] == 7462)
+    # The corpus entry is fixture-local since #1799: the scenario identity is
+    # the pinned replay fixture, not a live PR number.
+    canonical = next(
+        pr for pr in old_corpus.prs
+        if pr["repo_full_name"] == "eval-fixtures/talos-k8s-support"
+    )
     passing = ReviewRun(
         mode="native_loop",
-        pr_number=7462,
+        pr_number=canonical["number"],
         repo_full_name=canonical["repo_full_name"],
         review_markdown="Verified against the Talos support matrix.",
         tool_calls=[
-            call("read_file", "talos/main/machineconfig.yaml.j2"),
+            call("read_file", "cluster/talos/machineconfig/worker.yaml"),
             {"tool": "web_fetch", "args": {"url": "https://www.talos.dev/support-matrix"}, "status": "ok"},
         ],
     )
     failing = ReviewRun(
         mode="native_loop",
-        pr_number=7462,
+        pr_number=canonical["number"],
         repo_full_name=canonical["repo_full_name"],
         review_markdown="Patch bump, approve.",
     )

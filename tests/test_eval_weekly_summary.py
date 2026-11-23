@@ -584,7 +584,7 @@ class TestPostIssueArgument:
         assert "## Weekly eval-harness regression summary" in captured["body"]
 
     def test_workflow_contract_targets_the_tracking_issue(self, tmp_path, monkeypatch):
-        """The scheduled sweep's --post-issue 472 hits the #472 issue."""
+        """The scheduled sweep's --post-issue reaches the tracker issue."""
         captured: dict[str, object] = {}
 
         def fake_opener_open(request, timeout=None):
@@ -599,11 +599,11 @@ class TestPostIssueArgument:
         rc = eval_weekly_summary.main([
             "--report", str(FIXTURES / "eval-report-agentic.json"),
             "--stamp", STAMP,
-            "--post-issue", "472",
+            "--post-issue", "1801",
         ])
 
         assert rc == 0
-        assert captured["url"].endswith("/issues/472/comments")
+        assert captured["url"].endswith("/issues/1801/comments")
 
     def test_skips_gracefully_without_credentials(self, tmp_path, monkeypatch, capsys):
         """No token/repo env → best-effort skip, never a crash."""
