@@ -938,18 +938,27 @@ jobs:
 
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
-        # release binary with its CHECKSUMS-verified tarball instead.
+        # release binary with its CHECKSUMS-verified tarball instead. The
+        # default schema repo covers no CRDs, so the derived standard-mode
+        # HTTPRoute (#1768) is validated against a SHA-pinned CRD catalog
+        # instead of being skipped; ServiceMonitor stays skipped (no
+        # chart-owned schema contract).
         run: |
           set -euo pipefail
           version=v0.8.0
           checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          crd_catalog_rev=04af58d740718c4dc719441bf39fb284c784f4a8
+          crd_catalog="https://raw.githubusercontent.com/datreeio/CRDs-catalog/${crd_catalog_rev}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
           cd "$(mktemp -d)"
           curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
           echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
           tar -xzf kubeconform.tar.gz kubeconform
-          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
+          ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
             -summary /var/tmp/render-controller-only.yaml
-          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
+          ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
             -summary /var/tmp/render-kubernetes-executor.yaml
-          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
+          ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
             -summary /var/tmp/render-standard.yaml

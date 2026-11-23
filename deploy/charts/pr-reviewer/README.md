@@ -569,6 +569,12 @@ controller:
           backendRefs: [{ identifier: webhook, port: 8081 }]
 ```
 
+Upgrades from an older advanced-mode install need one extra step. Add the
+`Exact /` rule from the snippet above to a hand-written HTTPRoute that lacks
+it. The OIDC flow returns the browser to `/` after a successful sign-in and
+to `/?login=failed` after a failed one. Without the root rule, those
+redirects land on the gateway's 404.
+
 `backendRefs[].identifier` names the Service key under `controller.service`
 (here `webhook`), never the rendered resource name. Three rules to keep:
 
