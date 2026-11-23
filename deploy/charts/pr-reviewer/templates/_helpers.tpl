@@ -335,12 +335,21 @@ readiness:
 {{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "webhook.enabled requires controller.enabled" }}{{- end -}}
 {{- $intakePath := $std.path | default "/hook" -}}
 {{- /* The intake path must stay a usable HTTPRoute rule value and must
-       never collide with the reserved admin surface (a first-rule
-       PathPrefix "/" or "/admin" would swallow the dashboard and the
-       bearer-guarded API with no render-time error). */ -}}
+        never collide with the reserved admin surface (a first-rule
+        PathPrefix "/" or "/admin" would swallow the dashboard and the
+        bearer-guarded API with no render-time error). The collision
+        check is semantic, not string-exact: Gateway API PathPrefix
+        matching is element-based and ignores a trailing "/", so
+        /admin/ resolves to the same rule as /admin, //admin to the
+        same rule on slash-normalizing infrastructure, and any deeper
+        path under a reserved prefix (/admin/api) matches that rule
+        too — the intake rule is emitted FIRST and would capture the
+        traffic. Trailing and duplicate slashes carry no match
+        semantics, so they normalize away before comparing. */ -}}
 {{- if and $std.enabled (or (empty $intakePath) (not (hasPrefix "/" $intakePath))) -}}{{ fail "webhook.path must be an absolute request path starting with / (forge deliveries POST there; Gitea/GitLab instances need their canonical /webhooks/<forge> route)" }}{{- end -}}
 {{- if and $std.enabled (regexMatch "[[:space:]?#]" $intakePath) -}}{{ fail "webhook.path must not contain whitespace, ?, or # (it becomes an HTTPRoute path match verbatim)" }}{{- end -}}
-{{- if and $std.enabled (has $intakePath (list "/" "/admin" "/auth" "/dashboard")) -}}{{ fail (printf "webhook.path %s collides with the reserved admin surface" $intakePath) }}{{- end -}}
+{{- $normalizedPath := regexReplaceAll "/{2,}" (regexReplaceAll "/+$" $intakePath "" | default "/") "/" -}}
+{{- if and $std.enabled (or (eq $normalizedPath "/") (regexMatch "^/(admin|auth|dashboard)(/|$)" $normalizedPath)) -}}{{ fail (printf "webhook.path %s collides with the reserved admin surface (PathPrefix matching is element-based and ignores trailing slashes, so /admin/, /admin/api, and //admin resolve to the reserved admin rules)" $intakePath) }}{{- end -}}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
 {{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "path" $intakePath "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname | lower) | toYaml -}}
 {{- end -}}

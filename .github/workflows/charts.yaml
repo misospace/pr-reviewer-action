@@ -830,6 +830,16 @@ jobs:
             exit 1
           fi
           expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin
+          # Gateway API PathPrefix matching is element-based and ignores a
+          # trailing '/', so the collision check is semantic, not exact:
+          # /admin/, /auth/, /dashboard/ must refuse exactly like their
+          # reserved spellings, /admin/api is under the reserved prefix, and
+          # //admin collapses to /admin on slash-normalizing infrastructure.
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/auth/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/dashboard/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin/api
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=//admin
           expect_refusal 'conflicts with the standard dashboard (standard mode derives token auth)' -f "$standard" --set controller.admin.auth.oidc.clientSecret=leftover
           # A listener-port override stays first-class: the derived Service
           # port follows it (the chart's own default Service port must not

@@ -150,7 +150,7 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   const txCookie = login.headers.get("set-cookie")!.split(";")[0]!;
   const callback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(authorization.searchParams.get("state")!)}`, { headers: { cookie: txCookie }, redirect: "manual" });
   assert.equal(callback.status, 302);
-  assert.equal(callback.headers.get("location"), "/dashboard");
+  assert.equal(callback.headers.get("location"), "/");
   assert.equal(callback.headers.get("cache-control"), "no-store");
   const sessionCookie = callback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
   const session = await fetch(`${base}/auth/session`, { headers: { cookie: sessionCookie } });
@@ -167,12 +167,12 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   assert.match(logout.headers.get("set-cookie") ?? "", /pr_reviewer_oidc_tx=.*Max-Age=0/);
   assert.equal((await fetch(`${base}/admin/status`, { headers: { cookie: sessionCookie } })).status, 401);
   // A tampered or mismatched state never reaches the token endpoint and lands
-  // back on the dashboard login-failed marker with the transaction cleared.
+  // back on the root login-failed marker with the transaction cleared.
   const tampered = await fetch(`${base}/auth/login`, { redirect: "manual" });
   const tamperedTx = tampered.headers.get("set-cookie")!.split(";")[0]!;
   const tamperedCallback = await fetch(`${base}/auth/callback?code=one&state=forged-state`, { headers: { cookie: tamperedTx }, redirect: "manual" });
   assert.equal(tamperedCallback.status, 302);
-  assert.equal(tamperedCallback.headers.get("location"), "/dashboard?login=failed");
+  assert.equal(tamperedCallback.headers.get("location"), "/?login=failed");
   // Disallowed claims fail closed at the callback with no session minted.
   tokenEmail = "intruder@example.org";
   const deniedLogin = await fetch(`${base}/auth/login`, { redirect: "manual" });
@@ -180,7 +180,7 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   nonce = new URL(deniedLogin.headers.get("location")!).searchParams.get("nonce")!;
   const deniedCallback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(deniedLogin.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: deniedTx }, redirect: "manual" });
   assert.equal(deniedCallback.status, 302);
-  assert.equal(deniedCallback.headers.get("location"), "/dashboard?login=failed");
+  assert.equal(deniedCallback.headers.get("location"), "/?login=failed");
   const deniedCookies = deniedCallback.headers.get("set-cookie") ?? "";
   assert.ok(!deniedCookies.includes("pr_reviewer_admin_session=") || deniedCookies.includes("pr_reviewer_admin_session=;"));
   // A wrong authorized-party claim fails closed even with an allowed subject.
@@ -191,7 +191,7 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   nonce = new URL(wrongAzpLogin.headers.get("location")!).searchParams.get("nonce")!;
   const wrongAzpCallback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(wrongAzpLogin.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: wrongAzpTx }, redirect: "manual" });
   assert.equal(wrongAzpCallback.status, 302);
-  assert.equal(wrongAzpCallback.headers.get("location"), "/dashboard?login=failed");
+  assert.equal(wrongAzpCallback.headers.get("location"), "/?login=failed");
   // A multi-audience token without azp fails closed (OIDC Core 3.1.3.7).
   tokenAzp = undefined;
   tokenAud = [parsed.config.clientId, "other-client"];
@@ -200,17 +200,17 @@ test("OIDC login uses state, nonce, PKCE, claim allowlists, session cookies, and
   nonce = new URL(multiAudLogin.headers.get("location")!).searchParams.get("nonce")!;
   const multiAudCallback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(multiAudLogin.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: multiAudTx }, redirect: "manual" });
   assert.equal(multiAudCallback.status, 302);
-  assert.equal(multiAudCallback.headers.get("location"), "/dashboard?login=failed");
+  assert.equal(multiAudCallback.headers.get("location"), "/?login=failed");
   assert.equal(multiAudCallback.headers.get("cache-control"), "no-store");
   // A login flood exhausts the pending-transaction cap: further /auth/login
-  // navigations bounce to the dashboard sign-in state instead of minting
+  // navigations bounce to the bare-origin sign-in state instead of minting
   // more transactions (each provider redirect below consumed nothing).
   let providerRedirects = 0;
   let refused = false;
   for (let i = 0; i < 300 && !refused; i++) {
     const attempt = await fetch(`${base}/auth/login`, { redirect: "manual" });
     assert.equal(attempt.status, 302);
-    if (attempt.headers.get("location") === "/dashboard?login=failed") refused = true;
+    if (attempt.headers.get("location") === "/?login=failed") refused = true;
     else providerRedirects++;
   }
   assert.ok(refused, "login transaction cap never refused");
@@ -261,7 +261,7 @@ test("OIDC session identity never displays an unverified email claim", async (t)
   const txCookie = login.headers.get("set-cookie")!.split(";")[0]!;
   const callback = await fetch(`${base}/auth/callback?code=one&state=${encodeURIComponent(new URL(login.headers.get("location")!).searchParams.get("state")!)}`, { headers: { cookie: txCookie }, redirect: "manual" });
   assert.equal(callback.status, 302);
-  assert.equal(callback.headers.get("location"), "/dashboard");
+  assert.equal(callback.headers.get("location"), "/");
   const sessionCookie = callback.headers.get("set-cookie")!.split(", ").find((item) => item.startsWith("pr_reviewer_admin_session="))!.split(";")[0]!;
   const session = await fetch(`${base}/auth/session`, { headers: { cookie: sessionCookie } });
   assert.equal(session.status, 200);

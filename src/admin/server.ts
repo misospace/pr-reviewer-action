@@ -153,9 +153,12 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
           const created = sessions.createTransaction();
           if (!created) {
             // Pending-transaction cap full (login flood): send the browser
-            // back to the dashboard's sign-in state instead of a bare 503 —
-            // /auth/login is a top-level browser navigation.
-            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.end(); return;
+            // back to the sign-in state instead of a bare 503 — /auth/login
+            // is a top-level browser navigation. #1768: browser-return paths
+            // stay at the bare origin (`/?login=failed` serves the same
+            // shell); /dashboard is compatibility-only and must not become
+            // a redirect destination.
+            response.statusCode = 302; response.setHeader("location", "/?login=failed"); response.setHeader("cache-control", "no-store"); response.end(); return;
           }
           try {
             response.statusCode = 302; response.setHeader("location", await oidc.authorizationUrl(created.transaction, callbackUrl));
@@ -178,11 +181,14 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
             // email, the session stays subject-keyed and the dashboard falls
             // back to the subject.
             const id = sessions.create({ subject: claims.sub, email: attestedEmail(claims), groups: Array.isArray(claims.groups) ? claims.groups.filter((x): x is string => typeof x === "string").slice(0, 128) : [] }, oidcConfig.sessionTtlMs);
-            response.statusCode = 302; response.setHeader("location", "/dashboard");
+            // #1768: a successful login returns the browser to the bare
+            // origin — `/` serves the shell natively and /dashboard stays a
+            // compatibility alias, never a canonical redirect destination.
+            response.statusCode = 302; response.setHeader("location", "/");
             response.setHeader("cache-control", "no-store");
             response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", id, secureCookies, Math.floor(oidcConfig.sessionTtlMs / 1000)), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;
           } catch {
-            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)); response.end(); return;
+            response.statusCode = 302; response.setHeader("location", "/?login=failed"); response.setHeader("cache-control", "no-store"); response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)); response.end(); return;
           }
         }
         send(response, 404, NOT_FOUND); return;
