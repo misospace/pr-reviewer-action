@@ -23,7 +23,7 @@ needed. The listener's ingress is still bounded by the NetworkPolicy.
   "releaseName" .Release.Name
   "chartName" .Chart.Name
   "nameOverride" .Values.controller.nameOverride
-  "fullnameOverride" .Values.controller.fullnameOverride) }}
+  "fullnameOverride" .Values.controller.fullnameOverride) | lower }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

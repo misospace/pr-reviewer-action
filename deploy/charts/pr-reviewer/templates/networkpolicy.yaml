@@ -39,11 +39,11 @@ Default-deny network policies (#738). Two policies, one per pod family:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "pr-reviewer.resource-fullname" (dict
+  name: {{ (include "pr-reviewer.resource-fullname" (dict
     "releaseName" .Release.Name
     "chartName" .Chart.Name
     "nameOverride" .Values.controller.nameOverride
-    "fullnameOverride" .Values.controller.fullnameOverride) }}-controller
+    "fullnameOverride" .Values.controller.fullnameOverride) | lower) }}-controller
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
@@ -72,13 +72,22 @@ spec:
            without a namespace live in the release namespace) — NOT
            any-source, because this port also serves the UNAUTHENTICATED
            /metrics, /healthz, and /readyz endpoints; /admin/* stays
-           bearer-guarded. Widen for hostNetwork gateways (a node-source
-           exception) via additionalIngress. A raw route is rendered
-           verbatim, so this allowance is never derived for it. */ -}}
-    {{- $routeNamespaces := list ( .Release.Namespace | toString ) -}}
+           bearer-guarded. Widen via additionalIngress for hostNetwork
+           gateways AND for kubelet HTTP probes on CNIs that enforce
+           node→pod traffic (a node-source ipBlock exception) — the
+           liveness/readiness probes hit this port from the node. A raw
+           route is rendered verbatim, so this allowance is never derived
+           for it. */ -}}
+    {{- /* #1768 review round 2: seed the release namespace only when a
+           parentRef omits its namespace (parentRefs without a namespace
+           live in the release namespace) — never widen beyond what the
+           route actually points at. */ -}}
+    {{- $routeNamespaces := list -}}
+    {{- $hasLocalParent := false -}}
     {{- range $parent := .Values.route.parentRefs -}}
-    {{- with $parent.namespace -}}{{- $routeNamespaces = append $routeNamespaces (toString .) -}}{{- end -}}
+    {{- if empty $parent.namespace -}}{{- $hasLocalParent = true -}}{{- else -}}{{- $routeNamespaces = append $routeNamespaces (toString $parent.namespace) -}}{{- end -}}
     {{- end -}}
+    {{- if $hasLocalParent -}}{{- $routeNamespaces = append $routeNamespaces (.Release.Namespace | toString) -}}{{- end -}}
     - from:
         - namespaceSelector:
             matchExpressions:
@@ -134,11 +143,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "pr-reviewer.resource-fullname" (dict
+  name: {{ (include "pr-reviewer.resource-fullname" (dict
     "releaseName" .Release.Name
     "chartName" .Chart.Name
     "nameOverride" .Values.controller.nameOverride
-    "fullnameOverride" .Values.controller.fullnameOverride) }}-worker
+    "fullnameOverride" .Values.controller.fullnameOverride) | lower) }}-worker
   namespace: {{ default .Release.Namespace .Values.workerExecutor.namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}

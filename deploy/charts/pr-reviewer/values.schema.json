@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["controller", "workerExecutor"],
   "properties": {
-    "webhook": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "path": { "type": "string" }, "existingSecret": { "type": "string" }, "secret": { "type": "string" } } },
+    "webhook": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "path": { "type": "string", "pattern": "^/[^\\s?#]*$", "description": "Absolute request path forge deliveries POST to (default /hook; Gitea/GitLab set their canonical /webhooks/<forge> path)." }, "existingSecret": { "type": "string" }, "secret": { "type": "string" } } },
     "dashboard": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "existingSecret": { "type": "string" }, "secret": { "type": "string" } } },
     "route": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "hostnames": { "type": "array", "items": { "type": "string" } }, "parentRefs": { "type": "array", "items": { "type": "object", "additionalProperties": true } }, "raw": { "type": "object", "additionalProperties": true } } },
     "monitoring": { "type": "object", "additionalProperties": false, "properties": { "serviceMonitor": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } } } },

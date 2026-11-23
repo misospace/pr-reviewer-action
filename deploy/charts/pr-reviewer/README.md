@@ -414,7 +414,10 @@ controller:
   when `serviceMonitor` is on — a gateway in another namespace cannot reach
   8081. Add a matching rule (gateway pod/namespace selector, port 8081) under
   `networkPolicy.additionalIngress`. Standard mode derives this allowance
-  whenever it renders the route.
+  (scoped to the route's `parentRefs` namespaces). Note that the kubelet's
+  HTTP liveness/readiness probes also hit the admin port from the node — on
+  CNIs that enforce node→pod traffic, add a node-source `ipBlock` exception
+  to `networkPolicy.additionalIngress` or the controller will restart-loop.
 
 To keep a browser surface off entirely, leave `controller.admin.dashboard`
 at its default `false`; then the shell answers the fixed 404 on every path

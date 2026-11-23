@@ -138,7 +138,7 @@ ABSENT when their feature is off. Secret material uses secretKeyRef. */}}
 {{- $root := index . "root" -}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $v := $ctx.Values -}}
-{{- $fullname := include "pr-reviewer.fullname" $ctx -}}
+{{- $fullname := include "pr-reviewer.fullname" $ctx | lower -}}
 - name: PR_REVIEWER_INSTANCE_CONFIG
   value: /config/instance-config.yaml
 {{- if $kubeExecutor }}
@@ -316,19 +316,25 @@ readiness:
 {{- if and $std.enabled $advanced.secret -}}{{ fail "webhook.secret conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
 {{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.webhook.existingSecret.name conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
 {{- $svc := dig "service" "webhook" dict .Values.controller -}}
+{{- /* #1768 review round 2: the standard merge is authoritative for
+       enabled/type/forceRename/ports.webhook.port (it overwrites them),
+       so the guard only refuses what the merge CANNOT remove: extra
+       keys, extra ports, and explicit advanced enablement. */ -}}
 {{- if and $std.enabled (not (empty $svc)) -}}
 {{- range $key, $_ := $svc -}}{{- if not (has $key (list "enabled" "controller" "type" "ports")) -}}{{ fail (printf "controller.service.webhook.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
 {{- if dig "enabled" false $svc -}}{{ fail "webhook.enabled conflicts with controller.service.webhook.enabled" }}{{- end -}}
-{{- $svcType := dig "type" "ClusterIP" $svc -}}
-{{- if ne $svcType "ClusterIP" -}}{{ fail (printf "controller.service.webhook.type %s conflicts with the standard webhook Service derivation" $svcType) }}{{- end -}}
-{{- $svcPort := dig "ports" "webhook" "port" (dig "webhook" "port" 8080 $advanced) $svc -}}
-{{- if ne ($svcPort | int) ((dig "port" 8080 $advanced) | int) -}}{{ fail "controller.service.webhook.ports.webhook.port conflicts with the webhook listener port derived from controller.webhook.port" }}{{- end -}}
 {{- range $key, $_ := (dig "ports" dict $svc) -}}{{- if ne $key "webhook" -}}{{ fail (printf "controller.service.webhook.ports.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
 {{- end -}}
 {{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "webhook.existingSecret and webhook.secret are mutually exclusive" }}{{- end -}}
 {{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "webhook.enabled requires controller.enabled" }}{{- end -}}
 {{- $intakePath := $std.path | default "/hook" -}}
+{{- /* The intake path must stay a usable HTTPRoute rule value and must
+       never collide with the reserved admin surface (a first-rule
+       PathPrefix "/" or "/admin" would swallow the dashboard and the
+       bearer-guarded API with no render-time error). */ -}}
 {{- if and $std.enabled (or (empty $intakePath) (not (hasPrefix "/" $intakePath))) -}}{{ fail "webhook.path must be an absolute request path starting with / (forge deliveries POST there; Gitea/GitLab instances need their canonical /webhooks/<forge> route)" }}{{- end -}}
+{{- if and $std.enabled (regexMatch "[[:space:]?#]" $intakePath) -}}{{ fail "webhook.path must not contain whitespace, ?, or # (it becomes an HTTPRoute path match verbatim)" }}{{- end -}}
+{{- if and $std.enabled (has $intakePath (list "/" "/admin" "/auth" "/dashboard")) -}}{{ fail (printf "webhook.path %s collides with the reserved admin surface" $intakePath) }}{{- end -}}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
 {{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "path" $intakePath "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname | lower) | toYaml -}}
 {{- end -}}
@@ -343,6 +349,10 @@ readiness:
        existingSecret), so it fails the render. */ -}}
 {{- if and $std.enabled $advanced.token -}}{{ fail "controller.admin.token conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
 {{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.admin.existingSecret.name conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
+{{- /* #1768 review round 2: OIDC material cannot shadow the standard
+       selection (the mode itself is refused and the merge forces token
+       auth), but a silently discarded credential is a trap — refuse it. */ -}}
+{{- if and $std.enabled (or (dig "auth" "oidc" "clientSecret" "" $advanced) (dig "auth" "oidc" "existingSecret" "name" "" $advanced)) -}}{{ fail "controller.admin.auth.oidc client material conflicts with the standard dashboard (standard mode derives token auth)" }}{{- end -}}
 {{- /* #1768 review: the standard section owns the admin Service; the
        chart ships no default `controller.service.admin`, so ANY content
        there is operator-authored residue that would otherwise merge
@@ -373,7 +383,7 @@ dict "ctx" <component context> "root" <chart root>
 {{- $root := index . "root" -}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $v := $ctx.Values -}}
-{{- $fullname := include "pr-reviewer.fullname" $ctx -}}
+{{- $fullname := include "pr-reviewer.fullname" $ctx | lower -}}
 {{- $stdWebhook := include "pr-reviewer.std.webhook" $root | fromYaml -}}
 {{- $stdAdmin := include "pr-reviewer.std.admin" $root | fromYaml -}}
 {{- if $stdWebhook.enabled -}}
@@ -388,7 +398,7 @@ dict "ctx" <component context> "root" <chart root>
 {{- $_ := set $v.webhook "existingSecret" (dict "name" "" "key" $stdWebhook.secretRefKey) -}}
 {{- $_ := set $v.webhook "secret" $stdWebhook.inlineSecret -}}
 {{- end -}}
-{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "webhook" (dict "enabled" true "forceRename" $stdWebhook.serviceName "controller" "main" "ports" (dict "webhook" (dict "port" $stdWebhook.port))))) -}}
+{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "webhook" (dict "enabled" true "type" "ClusterIP" "forceRename" $stdWebhook.serviceName "controller" "main" "ports" (dict "webhook" (dict "port" $stdWebhook.port))))) -}}
 {{- end -}}
 {{- if $stdAdmin.enabled -}}
 {{- $_ := set $v.admin "enabled" true -}}{{- $_ := set $v.admin "dashboard" true -}}{{- $_ := set $v.admin.auth "mode" "token" -}}

@@ -175,21 +175,28 @@ test("traversal paths are delivered verbatim and never serve shell content", asy
 test("#1768 review: dot-segment requests are refused before dispatch, never normalized into another route", async (t) => {
   const f = await listening(true, "admin-secret");
   t.after(() => f.server.close());
-  // WHATWG URL resolution collapses literal and %2e-encoded dot segments,
-  // so a prefix-routed `/admin/../metrics` would otherwise REACH the
+  // WHATWG URL resolution collapses dot segments — including the mixed
+  // spellings (`.%2e`, `%2e.`, any case) and backslash separators — so a
+  // prefix-routed `/admin/.%2e/metrics` would otherwise REACH the
   // unauthenticated metrics route. The listener refuses the raw dot
   // segment instead of guessing what it normalizes to.
-  for (const path of ["/admin/../metrics", "/admin/./metrics", "/auth/../metrics", "/dashboard/../healthz", "/metrics/../metrics", "/admin/%2e%2e/metrics", "/admin/%2E%2E/healthz", "/%2e/readyz", "/..", "/admin/.."]) {
+  for (const path of ["/admin/../metrics", "/admin/./metrics", "/auth/../metrics", "/dashboard/../healthz", "/metrics/../metrics", "/admin/%2e%2e/metrics", "/admin/%2E%2E/healthz", "/admin/.%2e/metrics", "/admin/%2e./metrics", "/admin/.%2E/healthz", "/admin\\..\\metrics", "/%2e/readyz", "/..", "/admin/.."]) {
     const r = await rawGet(f.base, path);
     assert.equal(r.status, 404, path);
     assert.match(r.body, /not found/);
     assert.doesNotMatch(r.body, /<!doctype html/i);
   }
-  // Controls: clean paths keep their treatment, and a dot-inclusive
-  // literal segment ("...") is not a dot segment.
+  // Absolute-form request targets carry the same dot segments; the guard
+  // runs on the raw target before any URL parsing.
+  const absolute = await rawGet(f.base, "http://127.0.0.1/admin/.%2e/metrics");
+  assert.equal(absolute.status, 404);
+  assert.match(absolute.body, /not found/);
+  // Controls: clean paths keep their treatment; `..%2e` and `...` are NOT
+  // WHATWG dot segments (they normalize to themselves and answer 404 via
+  // the ordinary route table, not the guard).
   assert.equal((await rawGet(f.base, "/metrics")).status, 200);
   assert.equal((await rawGet(f.base, "/...")).status, 404);
-  assert.equal((await rawGet(f.base, "/admin/status", )).status, 401);
+  assert.equal((await rawGet(f.base, "/admin/status")).status, 401);
 });
 test("shell is inert, byte-identical, and carries no host or token", async (t) => {
   const f = await listening(true, "admin-secret-token-value");

@@ -104,15 +104,28 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       let url: URL;
       try { url = new URL(request.url ?? "/", `http://${host}`); } catch { send(response, 404, NOT_FOUND); return; }
       // Dot-segment traversal guard (#1768 review): WHATWG URL resolution
-      // collapses literal AND percent-encoded (`%2e`) dot segments before
-      // dispatch, so a raw path like `/admin/../metrics` — or one that
-      // arrives through a prefix-routed Gateway HTTPRoute — would silently
-      // resolve to `/metrics` and reach the unauthenticated metrics route.
-      // The check runs on the RAW path (pre-parse, pre-decode) and rejects
-      // any request whose path carries a dot segment instead of guessing
-      // what it would normalize to. Legit clients never send dot segments.
+      // collapses dot segments before dispatch, so a raw path like
+      // `/admin/../metrics` — or one that arrives through a prefix-routed
+      // Gateway HTTPRoute — would silently resolve to `/metrics` and reach
+      // the unauthenticated metrics route. The check runs on the RAW
+      // request target (pre-parse, pre-decode) and rejects any request
+      // whose path carries a WHATWG dot segment instead of guessing what
+      // it would normalize to. WHATWG's grammar: a backslash is a path
+      // separator for special schemes, and the single-dot segment is `.`
+      // or `%2e` while the double-dot segment is `..`, `.%2e`, `%2e.`, or
+      // `%2e%2e` (case-insensitive) — folding `%2e` to `.` first makes the
+      // comparison exact (`..%2e` and `%2e%2e%2e` are NOT dot segments).
+      // Legit clients never send dot segments.
       const rawPath = (request.url ?? "/").split(/[?#]/)[0] ?? "/";
-      if (rawPath.split("/").some((segment) => { const s = segment.toLowerCase(); return s === "." || s === ".." || s === "%2e" || s === "%2e%2e"; })) {
+      if (
+        rawPath
+          .replace(/\\/g, "/")
+          .split("/")
+          .some((segment) => {
+            const folded = segment.replace(/%2e/gi, ".").toLowerCase();
+            return folded === "." || folded === "..";
+          })
+      ) {
         send(response, 404, NOT_FOUND);
         return;
       }
