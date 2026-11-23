@@ -36,7 +36,12 @@ import {
   type WorkspaceInfo,
   type WorkspaceRequest,
 } from "../acquisition/index.js";
-import type { InstanceConfig } from "../config/instance-config.js";
+import {
+  emptyKubernetesDeploymentDefaults,
+  resolveKubernetesExecutorSpec,
+  type InstanceConfig,
+  type KubernetesDeploymentDefaults,
+} from "../config/instance-config.js";
 import { isSecretShapedValue } from "../credentials/types.js";
 import type { CredentialRef } from "../credentials/types.js";
 import {
@@ -286,6 +291,7 @@ export interface ExecutorSelectorOptions {
   /** REQUIRED binding for `kind: "kubernetes"` profiles: constructs the
    * executor from the profile spec plus the daemon-bound cluster seams. */
   readonly kubernetes?: (spec: KubernetesExecutorSpec, profileName: string) => Executor;
+  readonly kubernetesDeploymentDefaults?: KubernetesDeploymentDefaults;
 }
 
 /** The profile→executor mapping the daemon dispatches through, plus the
@@ -340,7 +346,10 @@ export function createExecutorSelector(options: ExecutorSelectorOptions): Execut
           `executor profile '${profileName}' is a kubernetes profile but the daemon has no cluster executor binding`,
         );
       }
-      executor = options.kubernetes(profile.kubernetes, profileName);
+      executor = options.kubernetes(
+        resolveKubernetesExecutorSpec(profile.kubernetes, options.kubernetesDeploymentDefaults ?? emptyKubernetesDeploymentDefaults(), profileName),
+        profileName,
+      );
     } else {
       // The instance-config schema admits `kind: "oci"`, but no executor
       // implementation ships for it yet (#733 shipped local + kubernetes).

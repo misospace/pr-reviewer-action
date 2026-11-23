@@ -295,6 +295,7 @@ export interface ControllerDaemonOptions {
   readonly resolveEventIdentity?: EventIdentityResolver;
   /** Executor construction overrides (see `ExecutorBindings`). */
   readonly executors?: ExecutorBindings;
+  readonly kubernetesDeploymentDefaults?: import("../config/instance-config.js").KubernetesDeploymentDefaults;
   /** The instance-config forge integration `name` this daemon instance
    * serves (#1440). Infrastructure bound by the operator; never
    * repository- or event-supplied. When bound, every job this daemon's
@@ -1330,6 +1331,9 @@ export async function startControllerDaemon(
   //    executor, and the durable publication path.
   const selector = createExecutorSelector({
     instance: options.instance,
+    ...(options.kubernetesDeploymentDefaults !== undefined
+      ? { kubernetesDeploymentDefaults: options.kubernetesDeploymentDefaults }
+      : {}),
     ...(options.executors?.kubernetes !== undefined
       ? { kubernetes: options.executors.kubernetes }
       : {}),

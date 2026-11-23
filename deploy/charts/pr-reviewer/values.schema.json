@@ -219,23 +219,27 @@
         },
         "image": {
           "type": "object",
+          "description": "Authoritative Kubernetes worker image default passed to the controller; the instance profile may override it.",
           "additionalProperties": false,
           "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" }
+            "repository": { "type": "string", "description": "Worker image repository." },
+            "tag": { "type": "string", "description": "Image tag; empty defaults to Chart.appVersion." },
+            "digest": { "type": "string", "description": "Optional exact-byte pin in sha256:<64 lowercase hex> form." }
           }
         },
         "resources": {
           "type": "object",
+          "description": "Authoritative Kubernetes worker resource defaults passed to the controller; profile resources override this whole block.",
           "additionalProperties": false,
+          "required": ["requests", "limits"],
           "properties": {
             "requests": {
               "type": "object",
               "additionalProperties": false,
               "required": ["cpu", "memory"],
               "properties": {
-                "cpu": { "type": "string" },
-                "memory": { "type": "string" }
+                "cpu": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|Ki|Mi|Gi|Ti)?$" },
+                "memory": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|Ki|Mi|Gi|Ti)?$" }
               }
             },
             "limits": {
@@ -243,13 +247,13 @@
               "additionalProperties": false,
               "required": ["cpu", "memory"],
               "properties": {
-                "cpu": { "type": "string" },
-                "memory": { "type": "string" }
+                "cpu": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|Ki|Mi|Gi|Ti)?$" },
+                "memory": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|Ki|Mi|Gi|Ti)?$" }
               }
             }
           }
         },
-        "ttlSecondsAfterFinished": { "type": "integer", "minimum": 0 },
+        "ttlSecondsAfterFinished": { "type": "integer", "minimum": 1, "maximum": 604800, "description": "Authoritative worker Job cleanup TTL default; an explicit instance profile value wins." },
         "volumeClaims": {
           "type": "array",
           "items": {
