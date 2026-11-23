@@ -255,13 +255,19 @@ jobs:
           app_version="$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}' deploy/charts/pr-reviewer/Chart.yaml)"
           grep -q 'name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS' /var/tmp/render-kubernetes-executor.yaml
           grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version" /var/tmp/render-kubernetes-executor.yaml
+          # Both digest renders pin --namespace: without it helm renders in
+          # "default", and the #1767 namespace guard refuses the standard
+          # example (its inline config names the pr-reviewer release
+          # namespace), so the pin would fail for the wrong reason.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-string workerExecutor.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             > /var/tmp/render-kubernetes-executor-digest.yaml
           grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" /var/tmp/render-kubernetes-executor-digest.yaml
           if helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-string workerExecutor.image.digest=sha256:INVALID >/dev/null 2>&1; then
             echo "invalid worker image digest must fail chart rendering" >&2
             exit 1
@@ -403,7 +409,11 @@ jobs:
           # durable-state), non-claim standard storage, disabled standard
           # storage, a mount/path conflict, a readOnly standard root, and
           # a mismatched worker or instance-config namespace each refuse
-          # the render with the guard's own message.
+          # the render with the guard's own message. A relocated
+          # controller.paths root is NOT here: the example profile
+          # inherits the derived mappings, so relocation renders by design
+          # (pinned below); a DECLARED derived claim at a stale root is
+          # what refuses, pinned by the set-file cases further down.
           for spec in \
             'workerExecutor.volumeClaims[0].name=pr-reviewer-runs|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created standard claim' \
             'workerExecutor.volumeClaims[0].name=pr-reviewer-durable-state|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created durable-state claim' \
@@ -414,8 +424,7 @@ jobs:
             'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
             'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
             'workerExecutor.namespace=other-ns||requires workerExecutor.namespace' \
-            'controller.enabled=false||requires controller.enabled' \
-            'controller.paths.runsRoot=/stale/location||must mount at the derived controller root'; do
+            'controller.enabled=false||requires controller.enabled'; do
             IFS='|' read -r first second message <<< "$spec"
             args=(--set "$first")
             if [ -n "$second" ]; then args+=(--set "$second"); fi
