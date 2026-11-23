@@ -7,6 +7,7 @@
  */
 import type { AdminAuthenticator } from "./auth.js";
 import type { AdminMetricsRegistry } from "./metrics.js";
+import { csrfMatches, type AdminSessionPrincipal } from "./oidc.js";
 import { SECRET_KEY_ALTERNATION } from "../context/redact.js";
 import { redactSecretShapes } from "../context/secret-shape.js";
 import {
@@ -27,6 +28,8 @@ export interface AdminDispatchInput {
   readonly pathname: string;
   readonly search: string;
   readonly authorization?: string | string[];
+  readonly session?: AdminSessionPrincipal;
+  readonly csrfToken?: string | string[];
   readonly contentType?: string;
   readonly body?: unknown;
   readonly requestId: string;
@@ -200,7 +203,9 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
   if (method === "GET" && pathname === "/metrics") return { status: 200, body: context.metrics.renderPrometheus(), contentType: "text/plain; version=0.0.4; charset=utf-8" };
   if (!pathname.startsWith("/admin/") && pathname !== "/admin") return fixed(404, { error: "not found" });
   if (!context.auth.configured()) return denied(503);
-  if (!context.auth.authenticate(request.authorization)) return denied(401);
+  const bearer = context.auth.authenticate(request.authorization);
+  if (!bearer && request.session === undefined) return denied(401);
+  if (!bearer && method === "POST" && (request.session === undefined || !csrfMatches(request.session.csrfToken, request.csrfToken))) return fixed(403, { error: "forbidden" });
 
   if (method === "GET" && pathname === "/admin/status") {
     const [queue, adoption, readiness] = await Promise.all([context.deps.queueStatus(), context.deps.adoptionStatus(), context.deps.readiness()]);

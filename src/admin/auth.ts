@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 export class AdminAuthenticator {
   private readonly digest: Buffer | null;
 
-  constructor(token: string | undefined) {
+  constructor(token: string | undefined, private readonly sessionConfigured = false) {
     if (token !== undefined && (typeof token !== "string" || token.trim() === "")) {
       throw new TypeError("admin token must not be empty or whitespace");
     }
@@ -12,7 +12,7 @@ export class AdminAuthenticator {
   }
 
   configured(): boolean {
-    return this.digest !== null;
+    return this.digest !== null || this.sessionConfigured;
   }
 
   authenticate(header: string | string[] | undefined): boolean {
