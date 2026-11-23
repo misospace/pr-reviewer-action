@@ -27,7 +27,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { gitEnv } from "../acquisition/git-env.js";
-import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
+import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText, redactText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
@@ -1131,11 +1131,15 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
     // so the terminal surface is a fact about the acquisition, not about
     // any fetched body — the evidence ledger reads registry redirect
     // assertions off it. Absent when nothing redirected (the requested URL
-    // is already the terminal surface).
+    // is already the terminal surface). The echo passes the SAME masking as
+    // the payload body before its bounded slice (mask-before-truncate,
+    // #926 order): a Location carrying userinfo or a secret-shaped token
+    // reaches the conversation masked, and a masked identity then fails the
+    // ledger's exact-URL grammar closed rather than carrying the secret.
     return {
       content: sliced,
       truncated: sliced !== res.body,
-      ...(hop > 0 ? { finalUrl: current.slice(0, 1024) } : {}),
+      ...(hop > 0 ? { finalUrl: redactText(current).slice(0, 1024) } : {}),
     };
   }
   return { error: "Too many redirects" };

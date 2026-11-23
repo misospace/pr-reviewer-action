@@ -1098,10 +1098,11 @@ test("#1782: web_fetch reports the terminal URL of an organic GHCR package redir
 });
 
 test("#252: a hostile redirect terminal is echoed bounded and never widens past the allowlist", async () => {
-  // The terminal URL is echoed into the payload UNMASKED (like run_command's
-  // `command` and the receipt's own `subject.url`), so the boundary itself
-  // is pinned: a Location carrying userinfo or an over-long path survives
-  // only as a bounded echo of an allowlisted, resolver-gated host — never a
+  // The terminal URL passes the SAME redactor as the payload body before its
+  // bounded slice (#1782 review round: the echo must not carry a credential
+  // past the masker), so the boundary itself is pinned: a Location carrying
+  // userinfo, a secret-shaped token, or an over-long path survives only as a
+  // bounded, redacted echo of an allowlisted, resolver-gated host — never a
   // second fetch, never an un-allowlisted surface, and never a credential
   // the tool itself holds (those travel only in auth headers).
   const long = "a".repeat(2000);
@@ -1120,6 +1121,29 @@ test("#252: a hostile redirect terminal is echoed bounded and never widens past 
   assert.equal(res.error, undefined);
   assert.equal(res.finalUrl, `https://tok@github.com/${long}`.slice(0, 1024));
   assert.equal((res.finalUrl as string).length, 1024);
+  // The redactor's own boundary token, echoed through both the unit and the
+  // production envelope: a Location query carrying a credential-shaped value
+  // reaches the conversation ONLY as the `[REDACTED]` echo — and the masked
+  // terminal then fails the ledger's exact-URL grammar closed, it can never
+  // launder the unmasked URL back into an acquisition fact.
+  const poisoned = new Map<string, NetworkResponse>([
+    ["https://ghcr.io/o/x", { status: 303, headers: { location: "https://github.com/o/r/pkgs?token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" }, body: "" }],
+    ["https://github.com/o/r/pkgs?token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", { status: 200, body: "body" }],
+  ]);
+  const poisonedContext = ctx("/tmp", {
+    allowedHosts: ["ghcr.io", "github.com"],
+    deps: {
+      ...deps(),
+      resolver: async () => ["140.82.112.22"],
+      fetch: async (url: string) => poisoned.get(url) ?? { status: 404, body: "" },
+    },
+  });
+  const masked = await webFetch("https://ghcr.io/o/x", poisonedContext);
+  assert.equal(masked.error, undefined);
+  assert.equal(masked.finalUrl, "https://github.com/o/r/pkgs?[REDACTED]");
+  const poisonedEnvelope = await executeToolRequest("web_fetch", { url: "https://ghcr.io/o/x" }, poisonedContext);
+  assert.equal(poisonedEnvelope.status, "ok");
+  assert.equal((poisonedEnvelope.result as { finalUrl?: string }).finalUrl, "https://github.com/o/r/pkgs?[REDACTED]");
   // A pivot host the allowlist refuses still fails closed with no body.
   const hostile = await webFetch("https://ghcr.io/o/x", ctx("/tmp", {
     allowedHosts: ["ghcr.io"],
