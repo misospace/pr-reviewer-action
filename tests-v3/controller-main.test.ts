@@ -343,6 +343,110 @@ test("an invalid instance config: exit 2 with the validator's bounded reason", a
   }
 });
 
+const KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS = MIN_INSTANCE_CONFIG.replace(
+  `executor-profiles:
+  - name: local-dev
+    kind: local
+    local:
+      command: /bin/true
+      args: []
+default-executor-profile: local-dev`,
+  `executor-profiles:
+  - name: k8s
+    kind: kubernetes
+    kubernetes:
+      args: []
+      namespace: review
+      service-account: worker
+      volumes:
+        - claim: runs
+          controller-root: /srv/runs
+default-executor-profile: k8s`,
+);
+
+const CHART_SHAPED_KUBERNETES_DEFAULTS = JSON.stringify({
+  image: "ghcr.io/misospace/pr-reviewer-worker:3.10.0",
+  ttlSecondsAfterFinished: 1800,
+  resources: {
+    requests: { cpu: "500m", memory: "512Mi" },
+    limits: { cpu: "2", memory: "2Gi" },
+  },
+});
+
+test("Kubernetes profile without deployment defaults refuses before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-no-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS, "utf8");
+  const env = baseEnv(configPath);
+  let ready = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { ready = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /neither the profile nor the deployment defaults provide it/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(ready, false, "pre-flight refusal must happen before composition");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("chart-shaped Kubernetes defaults pass profile pre-flight", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-valid-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, KUBERNETES_PROFILE_WITH_INHERITED_DEFAULTS, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS = CHART_SHAPED_KUBERNETES_DEFAULTS;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2);
+      const text = stderr.lines().join("");
+      // The refusal names the LATER forge stage, proving the deployment
+      // defaults parsed and the kubernetes pre-flight loop passed: the
+      // inheriting profile resolved against the chart-shaped defaults.
+      assert.match(text, /must declare forges for exactly one platform/);
+      assert.doesNotMatch(text, /neither the profile nor the deployment defaults provide it/);
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+test("invalid Kubernetes deployment defaults refuse startup before composition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-k8s-defaults-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, MIN_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS = '{"unknown":true}';
+  let composed = false;
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env, { onReady: () => { composed = true; } });
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid/);
+    } finally {
+      stderr.detach();
+    }
+    assert.equal(composed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
 test("missing required environment: exit 2 naming every missing variable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ctl-env-"));
   const configPath = join(dir, "instance.yaml");

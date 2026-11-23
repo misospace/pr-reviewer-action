@@ -182,9 +182,22 @@ export interface KubernetesVolumeMapping {
  * more. Every security-relevant pod property (non-root uid/gid, seccomp,
  * capability drop, read-only rootfs, no SA-token automount, backoffLimit
  * 0, TTL cleanup, resources, deadline) is a fixed executor default, not
- * configuration; this spec carries only the operator's deployment facts:
- * the worker image contract, where jobs live, and which PVCs carry the
- * controller/worker shared paths. */
+ * configuration; this spec carries operator deployment facts, with image,
+ * TTL, and resources optionally inherited from trusted deployment defaults. */
+export interface KubernetesExecutorProfileSpec {
+  readonly image: string | null;
+  readonly args: readonly string[];
+  readonly namespace: string;
+  readonly serviceAccount: string;
+  readonly ttlSecondsAfterFinished: number | null;
+  readonly resources: {
+    readonly requests: KubernetesResourcePair;
+    readonly limits: KubernetesResourcePair;
+  } | null;
+  readonly volumes: readonly KubernetesVolumeMapping[];
+  readonly runtimeClassName?: string;
+}
+
 export interface KubernetesExecutorSpec {
   readonly image: string;
   /** The image's fixed operator argv, placed before the envelope path the
@@ -224,7 +237,7 @@ export interface ExecutorProfile {
   readonly oci: OciImageSpec | null;
   /** The `kubernetes` backend spec; non-null only for `kind:
    * "kubernetes"`. */
-  readonly kubernetes: KubernetesExecutorSpec | null;
+  readonly kubernetes: KubernetesExecutorProfileSpec | null;
 }
 
 export interface EvidenceProfile {
@@ -560,31 +573,42 @@ function validateKubernetesVolumeMappings(value: unknown, path: string): readonl
   return mappings;
 }
 
-function validateKubernetesExecutorSpec(value: unknown, path: string): KubernetesExecutorSpec {
+function validateKubernetesExecutorSpec(value: unknown, path: string): KubernetesExecutorProfileSpec {
   const item = objectAt(value, path);
   // The closed key set is the whole point: a PodSpec fragment, host path,
   // node selector, toleration, or any other raw Kubernetes object has NO
   // field to land in — the executor builds the pod from fixed security
   // defaults plus exactly these operator facts.
   rejectUnknown(item, ["image", "args", "namespace", "service-account", "ttl-seconds-after-finished", "resources", "volumes", "runtime-class-name"], path);
-  const image = stringAt(item.image, `${path}.image`);
-  if (image.length > MAX_IMAGE_CHARS) fail(`${path}.image`, `must be at most ${MAX_IMAGE_CHARS} characters`);
-  if (!OCI_IMAGE_RE.test(image)) fail(`${path}.image`, "must be an image reference (name[:tag][@sha256:digest])");
+  let image: string | null = null;
+  if (item.image !== undefined) {
+    image = stringAt(item.image, `${path}.image`);
+    if (image.length > MAX_IMAGE_CHARS) fail(`${path}.image`, `must be at most ${MAX_IMAGE_CHARS} characters`);
+    if (!OCI_IMAGE_RE.test(image)) fail(`${path}.image`, "must be an image reference (name[:tag][@sha256:digest])");
+  }
   const argsRaw = item.args ?? [];
   if (!Array.isArray(argsRaw)) fail(`${path}.args`, "must be a list of argv strings");
   if (argsRaw.length > MAX_LOCAL_EXECUTOR_ARGS) fail(`${path}.args`, `must have at most ${MAX_LOCAL_EXECUTOR_ARGS} entries`);
-  const ttl = item["ttl-seconds-after-finished"];
-  if (ttl === undefined) fail(`${path}.ttl-seconds-after-finished`, "is required (finished jobs must always be cleaned up)");
-  const resources = objectAt(item.resources, `${path}.resources`);
-  rejectUnknown(resources, ["requests", "limits"], path);
+  const ttl = item["ttl-seconds-after-finished"] === undefined
+    ? null
+    : integerAt(item["ttl-seconds-after-finished"], `${path}.ttl-seconds-after-finished`, 1, MAX_KUBERNETES_TTL_SECONDS);
   const validatePair = (pairValue: unknown, label: string): KubernetesResourcePair => {
     const pair = objectAt(pairValue, `${path}.${label}`);
-    rejectUnknown(pair, ["cpu", "memory"], path);
+    rejectUnknown(pair, ["cpu", "memory"], `${path}.${label}`);
     return Object.freeze({
       cpu: kubernetesQuantityAt(pair.cpu, `${path}.${label}.cpu`),
       memory: kubernetesQuantityAt(pair.memory, `${path}.${label}.memory`),
     });
   };
+  let resources: KubernetesExecutorProfileSpec["resources"] = null;
+  if (item.resources !== undefined) {
+    const resourceBlock = objectAt(item.resources, `${path}.resources`);
+    rejectUnknown(resourceBlock, ["requests", "limits"], `${path}.resources`);
+    resources = Object.freeze({
+      requests: validatePair(resourceBlock.requests, "resources.requests"),
+      limits: validatePair(resourceBlock.limits, "resources.limits"),
+    });
+  }
   // Optional DNS-1123 label (#1422): the pin is carried through only when
   // the operator set it, so an absent field stays absent (the pod template
   // then carries no runtimeClassName and the cluster default applies).
@@ -596,13 +620,77 @@ function validateKubernetesExecutorSpec(value: unknown, path: string): Kubernete
     args: Object.freeze(argsRaw.map((entry, index) => executorArgvElementAt(entry, `${path}.args[${index}]`))) as readonly string[],
     namespace: kubernetesNameAt(item.namespace, `${path}.namespace`),
     serviceAccount: kubernetesNameAt(item["service-account"], `${path}.service-account`),
-    ttlSecondsAfterFinished: integerAt(ttl, `${path}.ttl-seconds-after-finished`, 1, MAX_KUBERNETES_TTL_SECONDS),
-    resources: Object.freeze({
-      requests: validatePair(resources.requests, "resources.requests"),
-      limits: validatePair(resources.limits, "resources.limits"),
-    }),
+    ttlSecondsAfterFinished: ttl,
+    resources,
     volumes: validateKubernetesVolumeMappings(item.volumes, `${path}.volumes`),
     ...(runtimeClassName === undefined ? {} : { runtimeClassName }),
+  });
+}
+
+export interface KubernetesDeploymentDefaults {
+  readonly image: string | null;
+  readonly ttlSecondsAfterFinished: number | null;
+  readonly resources: KubernetesExecutorProfileSpec["resources"];
+}
+
+export function emptyKubernetesDeploymentDefaults(): KubernetesDeploymentDefaults {
+  return Object.freeze({ image: null, ttlSecondsAfterFinished: null, resources: null });
+}
+
+export function parseKubernetesDeploymentDefaults(text: string): KubernetesDeploymentDefaults {
+  if (Buffer.byteLength(text, "utf8") > MAX_INSTANCE_CONFIG_BYTES) {
+    throw new InstanceConfigError(`Kubernetes deployment defaults exceed the ${MAX_INSTANCE_CONFIG_BYTES}-byte cap`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new InstanceConfigError("Kubernetes deployment defaults are not valid JSON");
+  }
+  const path = "Kubernetes deployment defaults";
+  const item = objectAt(parsed, path);
+  rejectUnknown(item, ["image", "ttlSecondsAfterFinished", "resources"], path);
+  let image: string | null = null;
+  if (item.image !== undefined) {
+    image = stringAt(item.image, `${path}.image`);
+    if (image.length > MAX_IMAGE_CHARS) fail(`${path}.image`, `must be at most ${MAX_IMAGE_CHARS} characters`);
+    if (!OCI_IMAGE_RE.test(image)) fail(`${path}.image`, "must be an image reference (name[:tag][@sha256:digest])");
+  }
+  const ttlSecondsAfterFinished = item.ttlSecondsAfterFinished === undefined
+    ? null
+    : integerAt(item.ttlSecondsAfterFinished, `${path}.ttlSecondsAfterFinished`, 1, MAX_KUBERNETES_TTL_SECONDS);
+  let resources: KubernetesExecutorProfileSpec["resources"] = null;
+  if (item.resources !== undefined) {
+    const block = objectAt(item.resources, `${path}.resources`);
+    rejectUnknown(block, ["requests", "limits"], `${path}.resources`);
+    const pair = (value: unknown, label: string): KubernetesResourcePair => {
+      const fields = objectAt(value, `${path}.resources.${label}`);
+      rejectUnknown(fields, ["cpu", "memory"], `${path}.resources.${label}`);
+      return Object.freeze({
+        cpu: kubernetesQuantityAt(fields.cpu, `${path}.resources.${label}.cpu`),
+        memory: kubernetesQuantityAt(fields.memory, `${path}.resources.${label}.memory`),
+      });
+    };
+    resources = Object.freeze({ requests: pair(block.requests, "requests"), limits: pair(block.limits, "limits") });
+  }
+  return Object.freeze({ image, ttlSecondsAfterFinished, resources });
+}
+
+export function resolveKubernetesExecutorSpec(
+  spec: KubernetesExecutorProfileSpec,
+  defaults: KubernetesDeploymentDefaults,
+  profileName: string,
+): KubernetesExecutorSpec {
+  const required = <T>(profileValue: T | null, defaultValue: T | null, field: string): T => {
+    if (profileValue !== null) return profileValue;
+    if (defaultValue !== null) return defaultValue;
+    fail(`executor profile '${profileName}' kubernetes.${field}`, "neither the profile nor the deployment defaults provide it");
+  };
+  return Object.freeze({
+    ...spec,
+    image: required(spec.image, defaults.image, "image"),
+    ttlSecondsAfterFinished: required(spec.ttlSecondsAfterFinished, defaults.ttlSecondsAfterFinished, "ttl-seconds-after-finished"),
+    resources: required(spec.resources, defaults.resources, "resources"),
   });
 }
 

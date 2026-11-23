@@ -117,10 +117,9 @@ listener binds loopback by default and the chart sets
               digest: sha256:<digest from the run summary>
   ```
 
-- **Worker image (instance config):** `kubernetes.image` is one full
-  image reference string, so write the digest into the string itself:
-  `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest from the run
-  summary>`.
+- **Worker image (chart):** set `workerExecutor.image.digest` to the digest
+  from the run summary. The instance-config `kubernetes.image` is an explicit
+  override, not the chart's worker-image pin path.
 - Release tags (`vX.Y.Z` — release-please tags the release commit) publish
   the exact SemVer ref (`X.Y.Z`) only for both images from that exact
   tagged commit, following the same digest-reporting pattern (the

@@ -17,9 +17,13 @@
  * Environment contract (all secret material travels through the
  * environment or the projected service-account mount, never argv, never a
  * URL, never a log line):
- *
- * - `PR_REVIEWER_INSTANCE_CONFIG` (or `--config <path>`): the #727
- *   instance-config file (required).
+  *
+  * - `PR_REVIEWER_INSTANCE_CONFIG` (or `--config <path>`): the #727
+  *   instance-config file (required).
+ * - `PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS`: optional bounded JSON
+ *   object carrying chart/deployment-owned worker image, TTL, and resources;
+ *   absent means no deployment defaults; Kubernetes profiles must declare
+ *   any missing deployment facts explicitly.
  * - `PR_REVIEWER_CONTROL_PLANE_URL`: the PostgreSQL DSN (required).
  * - `PR_REVIEWER_DURABLE_STATE_DIR`, `PR_REVIEWER_RUNS_ROOT`,
  *   `PR_REVIEWER_WORKSPACE_CACHE_ROOT`: the controller-owned roots
@@ -68,6 +72,9 @@ import { validateContract } from "../config/contract.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import {
   parseInstanceConfigText,
+  parseKubernetesDeploymentDefaults,
+  emptyKubernetesDeploymentDefaults,
+  resolveKubernetesExecutorSpec,
   forgeFamily,
   MAX_INSTANCE_CONFIG_BYTES,
   type InstanceConfig,
@@ -295,6 +302,7 @@ export class StartupRefusal extends Error {
  * cheap and total). */
 interface StartupConfig {
   readonly instance: InstanceConfig;
+  readonly kubernetesDeploymentDefaults: ReturnType<typeof emptyKubernetesDeploymentDefaults>;
   /** The configured identity platform (#1682: `gitea` is a Gitea-family
    * identity served by the Forgejo-compatible stack). Canonical jobs,
    * events, and credential scopes stay in the `forgeFamily` of this value. */
@@ -383,6 +391,23 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     instance = parseInstanceConfigText(text, validateContract(V3_CONTRACT));
   } catch (error) {
     throw new StartupRefusal(`the instance config is invalid: ${errorMessage(error)}`, 2);
+  }
+  let kubernetesDeploymentDefaults = emptyKubernetesDeploymentDefaults();
+  const defaultsText = env.PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS;
+  if (typeof defaultsText === "string" && defaultsText.trim() !== "") {
+    try {
+      kubernetesDeploymentDefaults = parseKubernetesDeploymentDefaults(defaultsText);
+    } catch (error) {
+      throw new StartupRefusal(`PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS is invalid: ${errorMessage(error)}`, 2);
+    }
+  }
+  for (const profile of instance.executorProfiles) {
+    if (profile.kind !== "kubernetes" || profile.kubernetes === null) continue;
+    try {
+      resolveKubernetesExecutorSpec(profile.kubernetes, kubernetesDeploymentDefaults, profile.name);
+    } catch (error) {
+      throw new StartupRefusal(errorMessage(error), 2);
+    }
   }
 
   // ── ONE platform per instance: the daemon serves one forge platform.
@@ -608,6 +633,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
 
   return {
     instance,
+    kubernetesDeploymentDefaults,
     platform,
     forgeEndpoint,
     controlPlaneDsn,
@@ -1544,6 +1570,7 @@ export async function controllerMain(
       resolveProfiles,
       credentialRefs: credentialBinding.credentialRefs,
       executors,
+      kubernetesDeploymentDefaults: startup.kubernetesDeploymentDefaults,
       ...(deps.createWorkspace !== undefined ? { createWorkspace: deps.createWorkspace } : {}),
       // #1723: the App installation identity repairs a webhook delivery that
       // omitted `installation.id` — the same identity the poll mints with.

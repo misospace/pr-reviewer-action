@@ -13,9 +13,9 @@ controller:
   # Inline instance config (rendered into a chart-managed Secret). This
   # is a trimmed example — the full schema lives in
   # docs/operator-config-and-adoption.md. The kubernetes executor
-  # profile's deployment facts (namespace, service account, claim names)
-  # MUST match the workerExecutor provisioning below: the executor mounts
-  # each claim at the SAME absolute path in controller and worker pods.
+  # profile's per-profile facts (namespace, service account, claim names)
+  # match workerExecutor provisioning. Image, resources, and TTL inherit the
+  # chart defaults unless explicitly overridden in the profile.
   instanceConfig: |-
     version: 1
     unknown-profile-policy: reject
@@ -36,18 +36,9 @@ controller:
         kind: kubernetes
         max-reviews: 4
         kubernetes:
-          image: ghcr.io/example/pr-reviewer-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
           args: []
           namespace: pr-reviewer
           service-account: pr-reviewer-worker
-          ttl-seconds-after-finished: 1800
-          resources:
-            requests:
-              cpu: 500m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
           volumes:
             - claim: pr-reviewer-runs
               controller-root: /var/lib/pr-reviewer/runs
@@ -132,10 +123,9 @@ workerExecutor:
   serviceAccount:
     create: true
     name: pr-reviewer-worker
-  image:
-    repository: ghcr.io/example/pr-reviewer-worker
-    tag: "3.10.0" # x-release-please-version
-  ttlSecondsAfterFinished: 1800
+  # Defaults follow Chart.appVersion; optionally pin exact bytes here.
+  # image:
+  #   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   volumeClaims:
     - name: pr-reviewer-runs
       size: 20Gi
