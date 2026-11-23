@@ -478,13 +478,28 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
   );
   assert.match(
     helpers,
+    /"chartCreated" \(empty \$entry\.existingClaim\)/,
+    "the derived artifact must carry the provisioning fact, not a name shape",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if \$mapping\.chartCreated -\}\}/,
+    "chartCreatesShared must key on the artifact's chartCreated flag, not claim-name equality",
+  );
+  assert.match(
+    helpers,
     /\{\{- if and \$chartCreatesShared \(kindIs "map" \$kubeProfile\)/,
     "the instance-config namespace guard must be conditioned on chart-created shared claims",
   );
   assert.match(
     helpers,
-    /\$enforceRoot := or \(empty \$defaultProfile\) \(eq \(index \$profile "name" \| default ""\) \$defaultProfile\)/,
-    "the root check must apply to the default executor profile only",
+    /\$defaultTrusted := and \(not \(empty \$defaultProfile\)\) \(has \$defaultProfile \$kubeProfileNames\)/,
+    "a declared default must be trusted only when it names a kubernetes profile",
+  );
+  assert.match(
+    helpers,
+    /\$enforceRoot := or \(not \$defaultTrusted\) \(eq \(index \$profile "name" \| default ""\) \$defaultProfile\)/,
+    "the root check must apply to the trusted default executor profile only",
   );
   // Worker provisioning without the controller fails closed.
   const workerRbac = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");

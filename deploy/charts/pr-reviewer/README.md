@@ -163,8 +163,12 @@ The chart derives everything else from those two entries:
   mount it at the derived `controller.paths` root, and a divergent root
   (after a relocation that the repetition did not follow) refuses the
   render. Profiles other than the one `default-executor-profile` names
-  keep raw advanced mappings supported unchecked; without a declared
-  default, every profile is checked. The
+  keep raw advanced mappings supported unchecked; a declared default is
+  trusted only when it names a kubernetes profile — otherwise the check
+  falls back to every kubernetes profile, and without a declared default
+  every profile is checked. The chart cannot know which profile a
+  repository config selects at run time, so a profile the default does
+  not name is the operator's responsibility. The
   claim NAME half stays operator-owned — a stale name after a release-name
   change or an `existingClaim` rename cannot be distinguished from a
   mapping on a non-standard claim (volumeClaims-provisioned or
@@ -185,7 +189,11 @@ make sure that namespace matches the release namespace yourself. The
 all-`existingClaim` posture is the opt-out: when every standard claim is
 operator-provided, no namespace guard fires, because the operator
 provisions identical claims in every namespace the topology names (the
-pre-#1767 dedicated-worker-namespace shape keeps rendering).
+pre-#1767 dedicated-worker-namespace shape keeps rendering). With the
+opt-out the chart also skips the cross-check between
+`workerExecutor.namespace` and the instance config's profile namespace —
+the provisioning objects and the Jobs then land wherever the operator
+points them, and a mismatch surfaces at review time, not render time.
 
 `workerExecutor.volumeClaims` is for additional, non-standard claims only.
 A name that redeclares a chart-created standard or durable-state claim
@@ -225,20 +233,29 @@ the render refuses otherwise.
 The durable-state claim is pinned per mode (`<fullname>` under the
 Kubernetes executor, `<fullname>-durable-state` controller-only) and
 carries `retain: true`, so the PVC the chart renders survives uninstalls.
-Upgrading the documented example posture keeps that PVC: Kubernetes
-executor mode with chart-created shared claims already rendered
-durable-state as the bare `<fullname>` before #1767 (it was the only
-enabled PVC-type persistence entry, so the common library used the
-release fullname), and the chart now pins exactly that name. The corner
-case needs care: an install that enabled additional PVC-type persistence
-entries before #1767 rendered durable-state as
-`<fullname>-durable-state`, that PVC has no keep annotation (the old
-chart set none), and on upgrade the chart renders the new `<fullname>`
-PVC instead while Helm deletes the old claim. Copy the durable state
-(the audit ledger and the queue snapshot under
-`controller.paths.durableStateDir`) before upgrading, or pin the old
-name with `controller.persistence.durable-state.existingClaim` so the
-chart keeps mounting it.
+Which pre-#1767 name an upgrade must keep depends on how many PVC-type
+persistence entries the old install enabled (the old chart named claims
+by that count):
+
+- Documented example posture — every standard claim operator-provided,
+  durable-state the only chart-rendered PVC: it rendered as the bare
+  `<fullname>`, which is exactly the name the chart now pins, so the
+  upgrade keeps the PVC (and additionally gains the keep annotation the
+  old chart never set).
+- Chart-created shared claims — the old defaults enabled durable-state,
+  runs, and workspace-cache together, so durable-state rendered as
+  `<fullname>-durable-state`. The new chart pins the bare `<fullname>`
+  instead, and on upgrade Helm deletes the old claim (it has no keep
+  annotation). Copy the durable state (the audit ledger and the queue
+  snapshot under `controller.paths.durableStateDir`) before upgrading,
+  or pin the old name with
+  `controller.persistence.durable-state.existingClaim` so the chart
+  keeps mounting it.
+
+The chart's fullname also ignores `global.fullnameOverride`; an old
+install that renamed the release through it carries a durable-state
+claim outside both pinned names, so check the rendered name before
+upgrading and pin it the same way.
 
 ## PR discovery (polling-first)
 

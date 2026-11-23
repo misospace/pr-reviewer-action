@@ -383,6 +383,10 @@ jobs:
           # the legacy all-existingClaim posture keeps rendering — including
           # a dedicated worker namespace, the pre-#1767 shape — because the
           # operator provisions identical claims in every named namespace.
+          # The claim names are the old documented example's exactly
+          # (pr-reviewer-runs / pr-reviewer-workspace as existingClaims): an
+          # operator-provided claim may coincide with the chart-created name
+          # spelling, and the provisioning fact, not the name, must decide.
           printf '%s\n' \
             'version: 1' \
             'default-executor-profile: k' \
@@ -392,21 +396,21 @@ jobs:
             '    kubernetes:' \
             '      namespace: workers' \
             '      volumes:' \
-            '        - claim: runs-pvc' \
+            '        - claim: pr-reviewer-runs' \
             '          controller-root: /var/lib/pr-reviewer/runs' \
             > /var/tmp/legacy-namespace-config.yaml
           helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
-            --set controller.persistence.runs.existingClaim=runs-pvc \
-            --set controller.persistence.workspace-cache.existingClaim=ws-pvc \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
             --set workerExecutor.namespace=workers \
-            --set 'workerExecutor.volumeClaims[0].name=runs-pvc' \
+            --set 'workerExecutor.volumeClaims[0].name=pr-reviewer-runs' \
             --set 'workerExecutor.volumeClaims[0].size=20Gi' \
-            --set 'workerExecutor.volumeClaims[1].name=ws-pvc' \
+            --set 'workerExecutor.volumeClaims[1].name=pr-reviewer-workspace' \
             --set 'workerExecutor.volumeClaims[1].size=20Gi' \
             --set-file controller.instanceConfig=/var/tmp/legacy-namespace-config.yaml \
             > /var/tmp/render-legacy-namespace.yaml
-          grep -q 'name: runs-pvc$' /var/tmp/render-legacy-namespace.yaml
+          grep -q 'name: pr-reviewer-runs$' /var/tmp/render-legacy-namespace.yaml
           # The root check applies to the default executor profile only:
           # a non-default profile's raw advanced mapping may mount a
           # derived claim at any root, while the named default still
@@ -448,6 +452,16 @@ jobs:
             > /var/tmp/default-divergent-config.yaml
           if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/default-divergent-config.yaml 2>&1 >/dev/null)"; then
             echo "the default executor profile must still refuse a stale derived claim root" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
+          # A declared default that names a missing profile must not
+          # silently uncheck the kubernetes profiles: the root check falls
+          # back to every kubernetes profile, so the stale root refuses.
+          sed 's|default-executor-profile: k|default-executor-profile: nope|' \
+            /var/tmp/default-divergent-config.yaml > /var/tmp/unknown-default-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/unknown-default-config.yaml 2>&1 >/dev/null)"; then
+            echo "an untrusted default-executor-profile must not uncheck the kubernetes profiles" >&2
             exit 1
           fi
           printf '%s' "$error" | grep -q "must mount at the derived controller root"

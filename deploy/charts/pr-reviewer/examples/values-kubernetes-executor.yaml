@@ -143,7 +143,8 @@ workerExecutor:
   # Standard shared claims render in the release namespace, so the guard
   # requires this namespace to equal it; an all-existingClaim posture
   # (for example a dedicated worker namespace provisioning its own
-  # claims) is exempt.
+  # claims) is exempt, though the chart-created durable-state PVC still
+  # renders in the release namespace.
   namespace: ""
   serviceAccount:
     create: true

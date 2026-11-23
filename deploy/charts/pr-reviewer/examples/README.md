@@ -23,7 +23,9 @@ renders standard shared PVCs from `controller.persistence.runs` and
 from the instance config. Keep `workerExecutor.namespace` equal to the release
 namespace because PVCs are namespace-scoped — the guard fires once the chart
 derives a standard claim itself; an all-`existingClaim` posture (for example a
-dedicated worker namespace provisioning its own claims) is exempt.
+dedicated worker namespace provisioning its own claims) is exempt, though the
+chart still renders the chart-created durable-state PVC in the release
+namespace in that posture.
 
 ```sh
 helm install pr-reviewer deploy/charts/pr-reviewer \
@@ -35,8 +37,8 @@ The `-n pr-reviewer` namespace matters: the instance config names the
 worker Jobs' namespace, and the chart derives the standard shared claims
 in the release namespace. The two must match (#1767), and the render
 refuses otherwise. Keeping every standard claim as an `existingClaim`
-opts out of the guard, because then the chart renders no claim for the
-operator to misplace.
+opts out of the guard, because the provisioning then follows whatever
+namespaces the operator manages.
 
 Point at external PostgreSQL (never deployed by this chart):
 

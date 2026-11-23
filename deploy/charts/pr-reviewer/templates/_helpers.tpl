@@ -306,7 +306,12 @@ Every ambiguous or missing shape fails closed here, in one place.
        redeclare guard can never drift from the rendered PVC. */ -}}
 {{- $claim = printf "%s-%s" $fullname $key | lower -}}
 {{- end -}}
-{{- $mappings = append $mappings (dict "key" $key "claim" $claim "controllerRoot" $root) -}}
+{{- /* chartCreated is the provisioning fact, not a name shape: an
+       operator-provided existingClaim may coincidentally carry the
+       chart-created name, and the guards that relax for the legacy
+       posture must key on whether the chart actually renders the
+       claim. */ -}}
+{{- $mappings = append $mappings (dict "key" $key "claim" $claim "controllerRoot" $root "chartCreated" (empty $entry.existingClaim)) -}}
 {{- end -}}
 {{- $mappings | toYaml -}}
 {{- end -}}
@@ -552,7 +557,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
        documented responsibility). */ -}}
 {{- $chartCreatesShared := false -}}
 {{- range $mapping := $mappings -}}
-{{- if eq ($mapping.claim | lower) (printf "%s-%s" $fullname $mapping.key | lower) -}}
+{{- if $mapping.chartCreated -}}
 {{- $chartCreatesShared = true -}}
 {{- end -}}
 {{- end -}}
@@ -575,10 +580,13 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
        the chart side only). The chart never rewrites operator config, so
        that drift refuses the render. The root check applies to the
        default executor profile only: when the instance config declares
-       default-executor-profile, profiles it does not name are advanced
-       operator material whose raw mappings stay supported unchecked (the
-       runtime refuses an unknown default at startup); without a declared
-       default every profile is checked. The claim NAME is operator-owned
+       default-executor-profile AND that name is a kubernetes profile,
+       profiles it does not name are advanced operator material whose raw
+       mappings stay supported unchecked; a declared default that is
+       missing or not a kubernetes profile must not silently uncheck the
+       kubernetes profiles (the runtime refuses an unknown default at
+       startup, but the render refuses first), so without a trusted
+       default every kubernetes profile is checked. The claim NAME is operator-owned
        and stays unverified: a stale name after a release-name change or
        an existingClaim rename is indistinguishable from a mapping on a
        non-standard claim (volumeClaims-provisioned or operator-managed),
@@ -589,20 +597,27 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- $_ := set $rootByClaim ($mapping.claim | lower) $mapping.controllerRoot -}}
 {{- end -}}
 {{- $defaultProfile := index $instanceCfg "default-executor-profile" | default "" -}}
+{{- $kubeProfileNames := list -}}
+{{- range $p := (index $instanceCfg "executor-profiles" | default list) -}}
+{{- if and (kindIs "map" $p) (kindIs "map" (index $p "kubernetes" | default dict)) -}}
+{{- $kubeProfileNames = append $kubeProfileNames (index $p "name" | default "") -}}
+{{- end -}}
+{{- end -}}
+{{- $defaultTrusted := and (not (empty $defaultProfile)) (has $defaultProfile $kubeProfileNames) -}}
 {{- range $profile := (index $instanceCfg "executor-profiles" | default list) -}}
 {{- if kindIs "map" $profile -}}
 {{- $kubeProfile := index $profile "kubernetes" | default dict -}}
 {{- if and $chartCreatesShared (kindIs "map" $kubeProfile) (not (empty $kubeProfile.namespace)) (ne $kubeProfile.namespace $ctx.Release.Namespace) -}}
 {{- fail (printf "instance config executor-profiles.kubernetes.namespace %q must equal the release namespace %q: the standard shared claims are derived in the release namespace and PVCs are namespace-scoped (#1767)" $kubeProfile.namespace $ctx.Release.Namespace) -}}
 {{- end -}}
-{{- $enforceRoot := or (empty $defaultProfile) (eq (index $profile "name" | default "") $defaultProfile) -}}
+{{- $enforceRoot := or (not $defaultTrusted) (eq (index $profile "name" | default "") $defaultProfile) -}}
 {{- if and $enforceRoot (kindIs "map" $kubeProfile) -}}
 {{- range $volume := (index $kubeProfile "volumes" | default list) -}}
 {{- if and (kindIs "map" $volume) (not (empty $volume.claim)) -}}
 {{- $derivedRoot := index $rootByClaim ($volume.claim | lower) -}}
 {{- $declaredRoot := index $volume "controller-root" | default "" -}}
 {{- if and (not (empty $derivedRoot)) (ne $declaredRoot $derivedRoot) -}}
-{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root on the default executor profile refuses the render" $volume.claim $derivedRoot) -}}
+{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root refuses the render" $volume.claim $derivedRoot) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
