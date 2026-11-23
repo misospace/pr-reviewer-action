@@ -554,11 +554,38 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
        refuses an unparseable instance config at startup anyway. */ -}}
 {{- $instanceCfg := fromYaml $v.instanceConfig -}}
 {{- if kindIs "map" $instanceCfg -}}
+{{- /* The derived artifact is the authority for the standard claims: the
+       executor mounts each mapping's claim at its controller-root in BOTH
+       pods, so an inline profile that repeats a derived claim at any other
+       root diverges from the single source and silently breaks the
+       shared-storage contract (a relocated controller.paths root moves
+       the chart side only). The chart never rewrites operator config, so
+       that drift refuses the render. The claim NAME is operator-owned and
+       stays unverified: a stale name after a release-name change or an
+       existingClaim rename is indistinguishable from a mapping on a
+       non-standard claim (volumeClaims-provisioned or operator-managed),
+       which stays supported; #1766 removes the repetition entirely by
+       synthesizing the default profile from this artifact. */ -}}
+{{- $rootByClaim := dict -}}
+{{- range $mapping := $mappings -}}
+{{- $_ := set $rootByClaim ($mapping.claim | lower) $mapping.controllerRoot -}}
+{{- end -}}
 {{- range $profile := (index $instanceCfg "executor-profiles" | default list) -}}
 {{- if kindIs "map" $profile -}}
 {{- $kubeProfile := index $profile "kubernetes" | default dict -}}
 {{- if and (kindIs "map" $kubeProfile) (not (empty $kubeProfile.namespace)) (ne $kubeProfile.namespace $ctx.Release.Namespace) -}}
 {{- fail (printf "instance config executor-profiles.kubernetes.namespace %q must equal the release namespace %q: the standard shared claims are derived in the release namespace and PVCs are namespace-scoped (#1767)" $kubeProfile.namespace $ctx.Release.Namespace) -}}
+{{- end -}}
+{{- if kindIs "map" $kubeProfile -}}
+{{- range $volume := (index $kubeProfile "volumes" | default list) -}}
+{{- if and (kindIs "map" $volume) (not (empty $volume.claim)) -}}
+{{- $derivedRoot := index $rootByClaim ($volume.claim | lower) -}}
+{{- $declaredRoot := index $volume "controller-root" | default "" -}}
+{{- if and (not (empty $derivedRoot)) (ne $declaredRoot $derivedRoot) -}}
+{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root refuses the render" $volume.claim $derivedRoot) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

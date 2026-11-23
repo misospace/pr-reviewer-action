@@ -142,7 +142,10 @@ The chart derives everything else from those two entries:
 
 - The controller mounts each claim at the root `controller.paths` names
   (`runsRoot`, `workspaceCacheRoot`). The chart derives the standard
-  `globalMounts` from those paths, so a relocation changes one value.
+  `globalMounts` from those paths, so a relocation changes one value on
+  the chart side. The inline instance config's repeated mappings must
+  follow the relocation, and the render-time verification below refuses
+  when they have not.
 - Each claim is either operator-provided (`existingClaim: <name>`) or
   chart-created. A chart-created claim renders as the PVC
   `<chart-fullname>-runs` or `<chart-fullname>-workspace-cache`, where the
@@ -153,7 +156,18 @@ The chart derives everything else from those two entries:
   `{claim, controllerRoot}` pairs. #1766 will consume it to synthesize the
   default Kubernetes executor profile, so the worker Jobs receive the
   matching mappings without a second declaration. Until then, a raw
-  instance config repeats them by hand, as the example shows.
+  instance config repeats them by hand, as the example shows. With
+  `workerExecutor.mode: kubernetes` and an inline instance config, the
+  chart verifies the repetition's ROOT half: every kubernetes profile
+  volume mapping that names a derived standard claim must mount it at
+  the derived `controller.paths` root, and a divergent root (after a
+  relocation that the repetition did not follow) refuses the render. The
+  claim NAME half stays operator-owned — a stale name after a release-name
+  change or an `existingClaim` rename cannot be distinguished from a
+  mapping on a non-standard claim (volumeClaims-provisioned or
+  operator-managed), which stays supported — so re-check the names when
+  either changes. An instance config provided through an existing Secret
+  cannot be checked at render time, so keep both halves in sync yourself.
 - `fix-roots` keeps reading `controller.paths.*`, unchanged (#1725/#1737).
 
 The standard topology requires the worker namespace to equal the release
@@ -171,7 +185,8 @@ refuses the render. One legacy shape stays valid: when a standard entry
 uses `existingClaim`, a `volumeClaims` entry of the same name is the
 claim's provisioner (the pre-#1767 documented posture). Raw, advanced
 instance-config volume mappings stay supported: the chart never merges
-derived mappings into operator config.
+derived mappings into operator config, and mappings on non-standard
+claims are not validated against the derived storage.
 
 ### Upgrading from the pre-#1767 shape
 

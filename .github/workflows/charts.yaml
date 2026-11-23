@@ -281,8 +281,15 @@ jobs:
             echo "existing standard claim must not render a pr-reviewer-runs PVC" >&2
             exit 1
           fi
+          # Relocation stays single-source, but the single source now spans
+          # the operator's inline config too: relocating the chart side
+          # renders only when the instance config's repetition agrees. The
+          # relocated config renames the runs controller-root to match.
+          sed 's|controller-root: /var/lib/pr-reviewer/runs|controller-root: /data/runs|' \
+            deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/values-relocated-runs.yaml
           helm template pr-reviewer deploy/charts/pr-reviewer \
-            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            -f /var/tmp/values-relocated-runs.yaml \
             --namespace pr-reviewer \
             --set controller.paths.runsRoot=/data/runs > /var/tmp/render-relocated-runs.yaml
           grep -A1 'name: PR_REVIEWER_RUNS_ROOT' /var/tmp/render-relocated-runs.yaml | grep -q 'value: /data/runs'
@@ -303,7 +310,8 @@ jobs:
             'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
             'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
             'workerExecutor.namespace=other-ns||requires workerExecutor.namespace' \
-            'controller.enabled=false||requires controller.enabled'; do
+            'controller.enabled=false||requires controller.enabled' \
+            'controller.paths.runsRoot=/stale/location||must mount at the derived controller root'; do
             IFS='|' read -r first second message <<< "$spec"
             args=(--set "$first")
             if [ -n "$second" ]; then args+=(--set "$second"); fi
@@ -328,6 +336,49 @@ jobs:
             exit 1
           fi
           printf '%s' "$error" | grep -q "must equal the release namespace"
+          # #1767: the derived mapping artifact's worker-profile consumer at
+          # render time — an inline kubernetes profile that repeats a derived
+          # standard claim at any other controller root refuses the render.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /old/stale/root' \
+            > /var/tmp/divergent-root-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/divergent-root-config.yaml 2>&1 >/dev/null)"; then
+            echo "an inline instance config repeating a derived claim at a stale root must refuse the render" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
+          # The guard's permissive side stays pinned: an inline profile's
+          # mapping on a NON-standard claim (here provisioned through
+          # workerExecutor.volumeClaims) must keep rendering, as must a
+          # profile that omits a standard claim entirely.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            '        - claim: extra-advanced' \
+            '          controller-root: /srv/extra' \
+            > /var/tmp/advanced-mapping-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-file controller.instanceConfig=/var/tmp/advanced-mapping-config.yaml \
+            --set 'workerExecutor.volumeClaims[0].name=extra-advanced' \
+            --set 'workerExecutor.volumeClaims[0].size=1Gi' \
+            > /var/tmp/render-advanced-mapping.yaml
+          grep -q 'name: extra-advanced$' /var/tmp/render-advanced-mapping.yaml
           # #1725: Kubernetes-executor mode must render the chart-owned
           # fix-roots init container — kubelet provisions claim roots as
           # group-writable 0775 uid 0, which the runtime's cache-root trust

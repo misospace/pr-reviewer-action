@@ -446,6 +446,25 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     /\{\{- if not \(hasKey \$persistenceValues \$mapping\.key\) -\}\}/,
     "a missing standard persistence entry must fail closed before the mount derivation",
   );
+  // The derived artifact's worker-profile consumer at render time: an
+  // inline kubernetes profile that repeats a derived standard claim at
+  // any other controller root diverges from the single source and fails
+  // closed, while mappings on non-standard claims stay untouched.
+  assert.match(
+    helpers,
+    /\$rootByClaim/,
+    "the inline instance-config check must resolve the derived claim-to-root mapping",
+  );
+  assert.match(
+    helpers,
+    /instance config executor-profiles\.kubernetes volumes claim %q must mount at the derived controller root %q/,
+    "a divergent manual volume mapping for a derived claim must fail closed",
+  );
+  assert.match(
+    helpers,
+    /\$declaredRoot := index \$volume "controller-root"/,
+    "the declared controller root must be read with index (hyphenated key)",
+  );
   // Worker provisioning without the controller fails closed.
   const workerRbac = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");
   assert.match(
@@ -486,12 +505,17 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     "requires workerExecutor.namespace",
     "requires controller.enabled",
     "must equal the release namespace",
+    "must mount at the derived controller root",
   ]) {
     assert.ok(workflow.includes(message), `charts.yaml must pin the fail-closed guard: ${message}`);
   }
   assert.ok(
     workflow.includes(`grep -A1 'mountPath: /data/runs' /var/tmp/render-relocated-init-section.yaml | grep -q 'name: runs'`),
     "charts.yaml must pin the relocated-root single-source render",
+  );
+  assert.ok(
+    workflow.includes("render-advanced-mapping.yaml"),
+    "charts.yaml must pin the permissive side: a mapping on a non-standard claim keeps rendering",
   );
   // The operator-facing contract is documented.
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");

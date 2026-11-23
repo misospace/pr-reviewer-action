@@ -14,10 +14,17 @@ controller:
   # Inline instance config (rendered into a chart-managed Secret). This
   # is a trimmed example — the full schema lives in
   # docs/operator-config-and-adoption.md. The kubernetes executor
-  # profile's volume mappings (claim names, controller-root paths) MUST
-  # match the chart-derived standard shared storage (#1767): the executor
-  # mounts each claim at the SAME absolute path in controller and worker
-  # pods. For release name `pr-reviewer` the chart-created claims are
+  # profile's volume mappings repeat the chart-derived standard shared
+  # storage (#1767) until #1766 synthesizes the default profile: the
+  # executor mounts each claim at the SAME absolute path in controller
+  # and worker pods. The chart verifies the root half of every mapping
+  # that names a derived claim at render time, so a relocated
+  # controller.paths root that this repetition did not follow refuses
+  # the render instead of diverging silently; the claim names stay
+  # operator-owned, so re-check them when the release name or an
+  # existingClaim changes (a non-default release name renders claims as
+  # <fullname>-runs / <fullname>-workspace-cache). For release name
+  # `pr-reviewer` the chart-created claims are
   # pr-reviewer-runs and pr-reviewer-workspace-cache.
   instanceConfig: |-
     version: 1
