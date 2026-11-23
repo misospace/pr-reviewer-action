@@ -25,7 +25,7 @@ import {
   workspaceAt,
 } from "../src/prompt/index.js";
 import { seedPromptWorkspace } from "../src/prompt/fixture.js";
-import { resolveReviewSystemPrompt } from "../src/tools/harness.js";
+import { TOOL_USE_PREAMBLE, resolveReviewSystemPrompt } from "../src/tools/harness.js";
 
 const FRAGMENT_DIR = "scripts/prompt_fragments";
 const PLACEHOLDERS = [
@@ -632,4 +632,55 @@ test("#1595: the lockfile-only scoped triage swaps in the advisory-only fragment
     const state = applySystemPromptFragments(replaced, { reviewVerbosity: "normal" }, ws);
     assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[scoped]!.trimEnd()), false);
   });
+});
+
+test("#1800: the default prompt reconciles discovered counterexamples against the merge contract", () => {
+  // Organic unsafe approvals found the exact defect and then rated it
+  // minor/info because the main path worked. The guidance must order the
+  // merge contract (linked issue before author non-goals), make the
+  // downgrade conditional on contract reconciliation, name the forge
+  // side-effect class (#1798's closing keyword), and keep clean controls
+  // approvable — in every route that ships the bundled default.
+  const required = [
+    "Judge merge readiness against the merge contract, in this order: the linked issue's acceptance criteria",
+    "never a linked issue the PR claims to fix or implement",
+    "the PR's stated purpose and the failure class it claims to fix",
+    "does it reproduce the failure class the PR exists to eliminate",
+    "let an operator or API success response disagree with a reachable durable outcome",
+    "ask what concrete reachable condition would make this change unsafe or incomplete to merge",
+    "a happy-path invariant is not a lifecycle invariant",
+    "separate the restrictions in the normal call path from the authority the credential, object, or capability itself carries",
+    "Before rating a concrete defect you found as minor or info, reconcile it against the merge contract",
+    "a closing keyword that would close an issue the PR says it does not resolve",
+    "rely on a test shape the production path cannot actually produce",
+    "the main path working is not a reason to downgrade it",
+    "whose relevant invariant you checked and found to hold stays approvable",
+  ];
+  withWorkspace({}, (dir) => {
+    const ws = workspaceAt(dir);
+    const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
+    const harnessFallback = resolveReviewSystemPrompt({
+      env: {},
+      cwd: ".",
+      readText: () => null,
+      exists: () => false,
+      writeArtifact: () => undefined,
+      transport: async () => ({}),
+    });
+    for (const text of [assembled, harnessFallback]) {
+      for (const phrase of required) assert.equal(text.includes(phrase), true, phrase);
+      const contract = text.indexOf("in this order:");
+      assert.ok(text.indexOf("linked issue's acceptance criteria", contract) < text.indexOf("author-stated non-goals", contract));
+    }
+  });
+});
+
+test("#1800: native-loop planning falsifies merge-critical assumptions after required evidence, with no call quota", () => {
+  // Same reviewer, same budget: the preamble reorders priorities inside the
+  // existing loop. Required evidence still comes first (#1379/#1381), and
+  // the stopping rule must not turn into a minimum tool-call count.
+  assert.match(TOOL_USE_PREAMBLE, /Once any required evidence is gathered, spend calls on falsifying the merge-critical assumptions/);
+  assert.match(TOOL_USE_PREAMBLE, /before more happy-path confirmation/);
+  assert.match(TOOL_USE_PREAMBLE, /no supported blocker or material unknown remains; there is no minimum call count/);
+  assert.ok(TOOL_USE_PREAMBLE.indexOf("merge-critical") < TOOL_USE_PREAMBLE.indexOf("you will then be asked to produce the final review verdict"));
 });
