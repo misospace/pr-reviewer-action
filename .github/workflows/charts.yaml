@@ -477,6 +477,13 @@ jobs:
           }
           expect_refusal 'webhook.enabled conflicts' -f "$standard" --set controller.webhook.enabled=true
           expect_refusal 'dashboard.enabled conflicts' -f "$standard" --set controller.admin.enabled=true
+          # Advanced residue must never silently shadow a standard section.
+          expect_refusal 'conflicts with the standard webhook Service derivation' -f "$standard" --set controller.service.webhook.type=LoadBalancer
+          expect_refusal 'conflicts with the standard dashboard Service derivation' -f "$standard" --set controller.service.admin.enabled=true
+          expect_refusal 'controller.webhook.existingSecret.name conflicts' -f "$standard" --set controller.webhook.existingSecret.name=other-secret
+          expect_refusal 'controller.admin.token conflicts' -f "$standard" --set controller.admin.token=other-token
+          expect_refusal 'serviceMonitor.port must equal the admin listener port' -f "$standard" --set serviceMonitor.port=9999
+          expect_refusal 'route.raw requires route.enabled: true' --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
           expect_refusal 'route.hostnames is required' -f "$standard" --set-json route.hostnames=[]
           expect_refusal 'route.parentRefs is required' -f "$standard" --set-json route.parentRefs=[]
           expect_refusal 'route.raw is exclusive' -f "$standard" --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
@@ -487,6 +494,27 @@ jobs:
             --set-json 'route.parentRefs=[{"name":"envoy-external","namespace":"network"}]' \
             --set controller.webhook.enabled=false --set controller.service.webhook.enabled=false
           expect_refusal 'requires non-empty apiVersion, kind HTTPRoute' -f "$base" --set route.enabled=true --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","metadata":{"name":"raw"}}'
+          # The intake path is standard-mode configurable: Gitea/GitLab
+          # instances route their canonical path instead of /hook.
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --set webhook.path=/webhooks/gitea > /var/tmp/render-standard-gitea.yaml
+          route_doc /var/tmp/render-standard-gitea.yaml | head -40 | grep -Fq 'value: /webhooks/gitea'
+          if route_doc /var/tmp/render-standard-gitea.yaml | grep -Fq 'value: /hook'; then
+            echo "::error::webhook.path override must replace the /hook rule" >&2
+            exit 1
+          fi
+          # The gateway NetworkPolicy allowance is scoped to the route's
+          # parentRef namespaces, never any-source (the port also serves
+          # the unauthenticated /metrics, /healthz, /readyz endpoints).
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --set networkPolicy.enabled=true > /var/tmp/render-standard-netpol.yaml
+          netpol_doc() { awk 'BEGIN{RS="---"} /kind: NetworkPolicy/ && /-controller/' "$1"; }
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -q 'kubernetes.io/metadata.name'
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -Eq '^[[:space:]]*- network[[:space:]]*$'
+          if ! netpol_doc /var/tmp/render-standard-netpol.yaml | awk '/^  ingress:/{ing=1;next} /^  egress:/{ing=0} ing && /^    - /{if (rule&&p8081&&!from) bad++; rule=1; from=($0~/^    - from:/); p8081=0; next} ing && rule && /port: 8081/{p8081=1} END{if (rule&&p8081&&!from) bad++; exit bad>0}'; then
+            echo "::error::an ingress rule exposes the admin port without a from: scope" >&2
+            exit 1
+          fi
           # Raw passthrough positive path: the complete operator manifest
           # renders verbatim (chart adds nothing).
           helm template pr-reviewer "$chart" -f "$base" \

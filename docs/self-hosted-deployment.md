@@ -168,7 +168,23 @@ monitoring:
     enabled: true
 ```
 
-The chart derives listener ports, stable webhook and admin Service names, ordered HTTPRoute rules, the ServiceMonitor target port, and gateway ingress in the controller NetworkPolicy. Webhook intake is routed only on `/hook`; the admin API remains bearer-protected and the dashboard shell is unauthenticated by design. `/metrics` and `/healthz` are never routed. There is no broad default backend, so unmatched paths 404 at the listener. Advanced controller Service, route, and listener wiring remains available as an escape hatch; setting standard and advanced values for the same concern together fails rendering rather than merging them.
+The chart derives the stable webhook and admin Service names (and their
+ports, which follow the listener ports), the ordered HTTPRoute rules, the
+ServiceMonitor target port, and the NetworkPolicy gateway ingress (scoped
+to the namespaces the route's `parentRefs` point at). The intake rides the
+standard rule path `webhook.path` (default `/hook`); a Gitea or GitLab
+instance MUST set that knob to its canonical intake path
+(`/webhooks/gitea`, `/webhooks/gitlab`) because those forges reject any
+other delivery path. The admin API remains bearer-protected and the
+dashboard shell is unauthenticated by design. `/metrics` and `/healthz`
+are never routed — not even through prefix tricks: the admin listener
+refuses dot-segment paths (`/admin/../metrics` answers 404) — and there
+is no catch-all rule, so unmatched paths 404 at the gateway. Advanced
+controller Service, route, and listener wiring remains available as an
+escape hatch; setting standard and advanced values for the same concern
+together fails rendering rather than merging them (including advanced
+secret material and Service blocks that would otherwise silently shadow a
+standard section).
 
 ### Published chart OCI artifact (#1708)
 

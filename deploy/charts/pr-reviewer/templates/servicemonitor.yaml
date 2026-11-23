@@ -13,6 +13,12 @@ needed. The listener's ingress is still bounded by the NetworkPolicy.
 {{- if not (or $stdAdmin.enabled .Values.controller.admin.enabled) }}
 {{- fail "monitoring.serviceMonitor.enabled or serviceMonitor.enabled requires dashboard.enabled or controller.admin.enabled (metrics are served on the admin listener)" }}
 {{- end }}
+{{- /* #1768 review: an override that disagrees with the admin listener
+       would render a ServiceMonitor Prometheus silently never scrapes
+       (the metrics are served on the admin port). */ -}}
+{{- if and .Values.serviceMonitor.port (ne (.Values.serviceMonitor.port | int) ($stdAdmin.port | int)) }}
+{{- fail (printf "serviceMonitor.port must equal the admin listener port (%v); metrics are served only there" $stdAdmin.port) }}
+{{- end }}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict
   "releaseName" .Release.Name
   "chartName" .Chart.Name

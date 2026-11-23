@@ -65,10 +65,28 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.controller.webhook.port }}
-    {{- end }}
-    {{- if and .Values.route.enabled $stdAdmin.enabled }}
-    # The public gateway path must reach the admin Service; the admin API stays bearer-guarded. Narrow it with additionalIngress.
-    - ports:
+    {{ end }}
+    {{- if and .Values.route.enabled $stdAdmin.enabled (empty (.Values.route.raw | default dict)) }}
+    {{- /* The public gateway path must reach the admin Service. Scoped to
+           the namespaces the route's parentRefs point at (parentRefs
+           without a namespace live in the release namespace) — NOT
+           any-source, because this port also serves the UNAUTHENTICATED
+           /metrics, /healthz, and /readyz endpoints; /admin/* stays
+           bearer-guarded. Widen for hostNetwork gateways (a node-source
+           exception) via additionalIngress. A raw route is rendered
+           verbatim, so this allowance is never derived for it. */ -}}
+    {{- $routeNamespaces := list ( .Release.Namespace | toString ) -}}
+    {{- range $parent := .Values.route.parentRefs -}}
+    {{- with $parent.namespace -}}{{- $routeNamespaces = append $routeNamespaces (toString .) -}}{{- end -}}
+    {{- end -}}
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+{{ $routeNamespaces | uniq | toYaml | indent 18 }}
+      ports:
         - protocol: TCP
           port: {{ $stdAdmin.port }}
     {{- end }}

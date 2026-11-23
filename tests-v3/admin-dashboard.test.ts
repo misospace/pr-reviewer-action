@@ -172,6 +172,25 @@ test("traversal paths are delivered verbatim and never serve shell content", asy
     assert.doesNotMatch(r.body, /<!doctype html|app\.js/i);
   }
 });
+test("#1768 review: dot-segment requests are refused before dispatch, never normalized into another route", async (t) => {
+  const f = await listening(true, "admin-secret");
+  t.after(() => f.server.close());
+  // WHATWG URL resolution collapses literal and %2e-encoded dot segments,
+  // so a prefix-routed `/admin/../metrics` would otherwise REACH the
+  // unauthenticated metrics route. The listener refuses the raw dot
+  // segment instead of guessing what it normalizes to.
+  for (const path of ["/admin/../metrics", "/admin/./metrics", "/auth/../metrics", "/dashboard/../healthz", "/metrics/../metrics", "/admin/%2e%2e/metrics", "/admin/%2E%2E/healthz", "/%2e/readyz", "/..", "/admin/.."]) {
+    const r = await rawGet(f.base, path);
+    assert.equal(r.status, 404, path);
+    assert.match(r.body, /not found/);
+    assert.doesNotMatch(r.body, /<!doctype html/i);
+  }
+  // Controls: clean paths keep their treatment, and a dot-inclusive
+  // literal segment ("...") is not a dot segment.
+  assert.equal((await rawGet(f.base, "/metrics")).status, 200);
+  assert.equal((await rawGet(f.base, "/...")).status, 404);
+  assert.equal((await rawGet(f.base, "/admin/status", )).status, 401);
+});
 test("shell is inert, byte-identical, and carries no host or token", async (t) => {
   const f = await listening(true, "admin-secret-token-value");
   t.after(() => f.server.close());

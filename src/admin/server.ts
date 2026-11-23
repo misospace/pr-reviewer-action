@@ -103,6 +103,19 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       const host = request.headers.host ?? "localhost";
       let url: URL;
       try { url = new URL(request.url ?? "/", `http://${host}`); } catch { send(response, 404, NOT_FOUND); return; }
+      // Dot-segment traversal guard (#1768 review): WHATWG URL resolution
+      // collapses literal AND percent-encoded (`%2e`) dot segments before
+      // dispatch, so a raw path like `/admin/../metrics` — or one that
+      // arrives through a prefix-routed Gateway HTTPRoute — would silently
+      // resolve to `/metrics` and reach the unauthenticated metrics route.
+      // The check runs on the RAW path (pre-parse, pre-decode) and rejects
+      // any request whose path carries a dot segment instead of guessing
+      // what it would normalize to. Legit clients never send dot segments.
+      const rawPath = (request.url ?? "/").split(/[?#]/)[0] ?? "/";
+      if (rawPath.split("/").some((segment) => { const s = segment.toLowerCase(); return s === "." || s === ".." || s === "%2e" || s === "%2e%2e"; })) {
+        send(response, 404, NOT_FOUND);
+        return;
+      }
       if (!(method === "GET" || method === "POST")) { send(response, 404, NOT_FOUND); return; }
       if (url.pathname.startsWith("/auth/")) {
         if (url.pathname === "/auth/config" && method === "GET") { send(response, 200, { mode: oidcConfig === null ? "token" : "oidc" }); return; }

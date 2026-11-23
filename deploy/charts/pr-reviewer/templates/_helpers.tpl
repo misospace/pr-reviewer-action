@@ -305,15 +305,32 @@ readiness:
 {{- end -}}
 
 {{- define "pr-reviewer.std.webhook" -}}
-{{- $root := . -}}
 {{- $std := .Values.webhook | default dict -}}
 {{- $advanced := .Values.controller.webhook | default dict -}}
 {{- if and $std.enabled $advanced.enabled -}}{{ fail "webhook.enabled conflicts with controller.webhook.enabled" }}{{- end -}}
-{{- if and $std.enabled (dig "service" "webhook" "enabled" false .Values.controller) -}}{{ fail "webhook.enabled conflicts with controller.service.webhook.enabled" }}{{- end -}}
+{{- /* #1768 review: standard mode owns webhook secret material AND the
+       webhook Service. Any advanced residue for the same concern merges
+       silently (bjw-s enables a Service whenever `enabled` is absent, and
+       the env wiring prefers existingSecret over secret), so it must fail
+       the render instead of shadowing the standard section. */ -}}
+{{- if and $std.enabled $advanced.secret -}}{{ fail "webhook.secret conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
+{{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.webhook.existingSecret.name conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
+{{- $svc := dig "service" "webhook" dict .Values.controller -}}
+{{- if and $std.enabled (not (empty $svc)) -}}
+{{- range $key, $_ := $svc -}}{{- if not (has $key (list "enabled" "controller" "type" "ports")) -}}{{ fail (printf "controller.service.webhook.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
+{{- if dig "enabled" false $svc -}}{{ fail "webhook.enabled conflicts with controller.service.webhook.enabled" }}{{- end -}}
+{{- $svcType := dig "type" "ClusterIP" $svc -}}
+{{- if ne $svcType "ClusterIP" -}}{{ fail (printf "controller.service.webhook.type %s conflicts with the standard webhook Service derivation" $svcType) }}{{- end -}}
+{{- $svcPort := dig "ports" "webhook" "port" (dig "webhook" "port" 8080 $advanced) $svc -}}
+{{- if ne ($svcPort | int) ((dig "port" 8080 $advanced) | int) -}}{{ fail "controller.service.webhook.ports.webhook.port conflicts with the webhook listener port derived from controller.webhook.port" }}{{- end -}}
+{{- range $key, $_ := (dig "ports" dict $svc) -}}{{- if ne $key "webhook" -}}{{ fail (printf "controller.service.webhook.ports.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
+{{- end -}}
 {{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "webhook.existingSecret and webhook.secret are mutually exclusive" }}{{- end -}}
 {{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "webhook.enabled requires controller.enabled" }}{{- end -}}
+{{- $intakePath := $std.path | default "/hook" -}}
+{{- if and $std.enabled (or (empty $intakePath) (not (hasPrefix "/" $intakePath))) -}}{{ fail "webhook.path must be an absolute request path starting with / (forge deliveries POST there; Gitea/GitLab instances need their canonical /webhooks/<forge> route)" }}{{- end -}}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
-{{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname) | toYaml -}}
+{{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "path" $intakePath "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname | lower) | toYaml -}}
 {{- end -}}
 
 {{- define "pr-reviewer.std.admin" -}}
@@ -321,10 +338,21 @@ readiness:
 {{- $advanced := .Values.controller.admin | default dict -}}
 {{- if and $std.enabled (or $advanced.enabled $advanced.dashboard) -}}{{ fail "dashboard.enabled conflicts with controller.admin.enabled or controller.admin.dashboard" }}{{- end -}}
 {{- if and $std.enabled (eq (dig "auth" "mode" "token" $advanced) "oidc") -}}{{ fail "dashboard.enabled conflicts with controller.admin.auth.mode oidc" }}{{- end -}}
+{{- /* #1768 review: the standard section owns the admin token material —
+       advanced residue would silently shadow it (env prefers
+       existingSecret), so it fails the render. */ -}}
+{{- if and $std.enabled $advanced.token -}}{{ fail "controller.admin.token conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
+{{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.admin.existingSecret.name conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
+{{- /* #1768 review: the standard section owns the admin Service; the
+       chart ships no default `controller.service.admin`, so ANY content
+       there is operator-authored residue that would otherwise merge
+       silently (a LoadBalancer admin Service would publish the
+       unauthenticated /metrics surface directly). */ -}}
+{{- if and $std.enabled (not (empty (dig "service" "admin" dict .Values.controller))) -}}{{ fail "controller.service.admin conflicts with the standard dashboard Service derivation" }}{{- end -}}
 {{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "dashboard.existingSecret and dashboard.secret are mutually exclusive" }}{{- end -}}
 {{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "dashboard.enabled requires controller.enabled" }}{{- end -}}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
-{{- dict "enabled" ($std.enabled | default false) "dashboard" ($std.enabled | default false) "port" ($advanced.port | default 8081) "tokenRefName" ($std.existingSecret | default "") "tokenRefKey" "token" "inlineToken" ($std.secret | default "") "serviceName" (printf "%s-admin" $fullname) "authMode" "token" | toYaml -}}
+{{- dict "enabled" ($std.enabled | default false) "dashboard" ($std.enabled | default false) "port" ($advanced.port | default 8081) "tokenRefName" ($std.existingSecret | default "") "tokenRefKey" "token" "inlineToken" ($std.secret | default "") "serviceName" (printf "%s-admin" $fullname | lower) "authMode" "token" | toYaml -}}
 {{- end -}}
 
 {{- define "pr-reviewer.std.route" -}}
@@ -350,12 +378,28 @@ dict "ctx" <component context> "root" <chart root>
 {{- $stdAdmin := include "pr-reviewer.std.admin" $root | fromYaml -}}
 {{- if $stdWebhook.enabled -}}
 {{- $_ := set $v.webhook "enabled" true -}}
-{{- if $stdWebhook.secretRefName -}}{{- $_ := set $v.webhook "existingSecret" (dict "name" $stdWebhook.secretRefName "key" $stdWebhook.secretRefKey) -}}{{- else -}}{{- $_ := set $v.webhook "secret" $stdWebhook.inlineSecret -}}{{- end -}}
+{{- /* #1768 review: the standard section owns the secret selection —
+       BOTH fields are set (one empty) so no advanced residue can
+       shadow it through the env wiring's existingSecret preference. */ -}}
+{{- if $stdWebhook.secretRefName -}}
+{{- $_ := set $v.webhook "existingSecret" (dict "name" $stdWebhook.secretRefName "key" $stdWebhook.secretRefKey) -}}
+{{- $_ := set $v.webhook "secret" "" -}}
+{{- else -}}
+{{- $_ := set $v.webhook "existingSecret" (dict "name" "" "key" $stdWebhook.secretRefKey) -}}
+{{- $_ := set $v.webhook "secret" $stdWebhook.inlineSecret -}}
+{{- end -}}
 {{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "webhook" (dict "enabled" true "forceRename" $stdWebhook.serviceName "controller" "main" "ports" (dict "webhook" (dict "port" $stdWebhook.port))))) -}}
 {{- end -}}
 {{- if $stdAdmin.enabled -}}
 {{- $_ := set $v.admin "enabled" true -}}{{- $_ := set $v.admin "dashboard" true -}}{{- $_ := set $v.admin.auth "mode" "token" -}}
-{{- if $stdAdmin.tokenRefName -}}{{- $_ := set $v.admin "existingSecret" (dict "name" $stdAdmin.tokenRefName "key" $stdAdmin.tokenRefKey) -}}{{- else -}}{{- $_ := set $v.admin "token" $stdAdmin.inlineToken -}}{{- end -}}
+{{- /* #1768 review: same authority rule for the admin token material. */ -}}
+{{- if $stdAdmin.tokenRefName -}}
+{{- $_ := set $v.admin "existingSecret" (dict "name" $stdAdmin.tokenRefName "key" $stdAdmin.tokenRefKey) -}}
+{{- $_ := set $v.admin "token" "" -}}
+{{- else -}}
+{{- $_ := set $v.admin "existingSecret" (dict "name" "" "key" $stdAdmin.tokenRefKey) -}}
+{{- $_ := set $v.admin "token" $stdAdmin.inlineToken -}}
+{{- end -}}
 {{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "admin" (dict "enabled" true "forceRename" $stdAdmin.serviceName "controller" "main" "ports" (dict "admin" (dict "port" $stdAdmin.port))))) -}}
 {{- end -}}
 

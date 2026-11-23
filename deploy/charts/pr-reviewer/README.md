@@ -86,7 +86,7 @@ helm install pr-reviewer \
 
 ## Standard mode
 
-Use top-level exposure intent to derive listener ports, stable webhook/admin Services, an ordered HTTPRoute, ServiceMonitor target port, and the gateway ingress allowance when NetworkPolicy is enabled:
+Use top-level exposure intent to derive the stable webhook/admin Services (ports follow the listener ports), an ordered HTTPRoute, the ServiceMonitor target port, and the gateway ingress allowance (scoped to the parentRef namespaces) when NetworkPolicy is enabled:
 
 ```yaml
 webhook:
@@ -104,7 +104,7 @@ monitoring:
     enabled: true
 ```
 
-Standard mode routes webhook intake only at `/hook`, admin and auth paths to the bearer-protected admin API, and the dashboard shell at `/` (plus `/dashboard` compatibility by default). It never routes `/metrics` or `/healthz`; there is no broad default backend. Advanced controller Service, listener, and route wiring remains an escape hatch, but contradictory standard and advanced settings fail rendering.
+Standard mode routes the forge intake at `webhook.path` (default `/hook`; Gitea/GitLab instances set their canonical `/webhooks/<forge>` path here), admin and auth paths to the bearer-protected admin API, and the dashboard shell at `/` (the native answer, plus the `/dashboard` prefix the shell's own asset path needs). It never routes `/metrics` or `/healthz` — the admin listener additionally refuses dot-segment paths, so a routed prefix cannot normalize into them — and there is no catch-all rule, so unmatched paths 404 at the gateway. Advanced controller Service, listener, and route wiring remains an escape hatch, but contradictory standard and advanced settings fail rendering (including advanced secret material and Service blocks that would otherwise silently shadow a standard section).
 
 ## Values structure
 
