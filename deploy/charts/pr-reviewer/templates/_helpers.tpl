@@ -271,14 +271,56 @@ readiness:
 {{- end -}}
 
 {{/*
+The standard shared worker/controller storage (#1767), derived from the
+single source `controller.persistence`: one entry per standard key, in a
+fixed order, each naming the resolved claim and the controller-side root
+the runtime contract mounts it at. The claim resolves to the operator's
+`existingClaim`, or to the chart-created `<fullname>-<key>` PVC the
+configure step pins with forceRename. #1766 consumes this artifact to
+synthesize the default Kubernetes executor profile's volume mappings.
+Every ambiguous or missing shape fails closed here, in one place.
+*/}}
+{{- define "pr-reviewer.shared-volume-mappings" -}}
+{{- $v := index . "values" -}}
+{{- $fullname := index . "fullname" -}}
+{{- $mappings := list -}}
+{{- range $item := (list (dict "key" "runs" "pathField" "runsRoot") (dict "key" "workspace-cache" "pathField" "workspaceCacheRoot")) -}}
+{{- $key := $item.key -}}
+{{- $root := index $v.paths $item.pathField -}}
+{{- $persistence := $v.persistence | default dict -}}
+{{- if not (hasKey $persistence $key) -}}
+{{- fail (printf "controller.persistence.%s is required as the standard shared storage (or set an explicit advanced topology)" $key) -}}
+{{- end -}}
+{{- $entry := index $persistence $key -}}
+{{- if or (not (kindIs "map" $entry)) (and (hasKey $entry "enabled") (not $entry.enabled)) -}}
+{{- fail (printf "controller.persistence.%s is required as the standard shared storage (or set an explicit advanced topology)" $key) -}}
+{{- end -}}
+{{- $claim := $entry.existingClaim -}}
+{{- if empty $claim -}}
+{{- $type := $entry.type | default "persistentVolumeClaim" -}}
+{{- if ne $type "persistentVolumeClaim" -}}
+{{- fail (printf "controller.persistence.%s must be an operator-provided existingClaim or a chart-created persistentVolumeClaim (standard shared storage)" $key) -}}
+{{- end -}}
+{{- /* The common library lowercases rendered object names; derive the
+       same spelling so the artifact, the forceRename pin, and the
+       redeclare guard can never drift from the rendered PVC. */ -}}
+{{- $claim = printf "%s-%s" $fullname $key | lower -}}
+{{- end -}}
+{{- $mappings = append $mappings (dict "key" $key "claim" $claim "controllerRoot" $root) -}}
+{{- end -}}
+{{- $mappings | toYaml -}}
+{{- end -}}
+
+{{/*
 Validate the controller wiring fail-closed at render time and inject the
 template-conditional pieces (env, probes, rendered Secrets, persistence)
 into the component values before the common library renders. Signature:
-dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
+dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor" <map>.
 */}}
 {{- define "pr-reviewer.controller.configure" -}}
 {{- $ctx := index . "ctx" -}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
+{{- $workerExecutor := index . "workerExecutor" -}}
 {{- $v := $ctx.Values -}}
 {{- $fullname := include "pr-reviewer.fullname" $ctx -}}
 
@@ -398,6 +440,130 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- $githubKeySecret = printf "%s-github-app" $fullname -}}
 {{- end -}}
 {{- $_ := set $v "persistence" (mustMergeOverwrite $v.persistence (dict "github-app" (dict "type" "secret" "name" $githubKeySecret "globalMounts" (list (dict "path" "/secrets/github-app" "readOnly" true))))) -}}
+{{- end -}}
+
+{{- /* #1767: the standard shared storage is declared once under
+       controller.persistence and derived here. The mappings define is the
+       single validation source for the two shared keys: it resolves each
+       standard claim and fails closed on every missing, disabled, or
+       ambiguous shape. */ -}}
+{{- $paths := $v.paths | default dict -}}
+{{- range $field := (list "runsRoot" "workspaceCacheRoot" "durableStateDir") -}}
+{{- if or (empty (index $paths $field)) (not (hasPrefix "/" (index $paths $field))) -}}
+{{- fail (printf "controller.paths.%s must be a non-empty absolute path starting with / (it is the single source for the standard mounts, the env contract, and fix-roots)" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $mappings := include "pr-reviewer.shared-volume-mappings" (dict "values" $v "fullname" $fullname) | fromYamlArray -}}
+{{- /* The standard mount path derives from controller.paths.* (the same
+       source as the env contract and fix-roots), so a relocation stays
+       one-source. Extra mounts of the same claim are allowed, but the
+       root mount must exist and be writable: fix-roots reaches it through
+       the globalMounts the common library renders for init containers,
+       and a readOnly or relocated root breaks that contract silently.
+       durable-state joins the two shared keys here: its claim is
+       controller-internal, but the same mount contract applies. */ -}}
+{{- $standardMounts := concat $mappings (list (dict "key" "durable-state" "controllerRoot" $paths.durableStateDir)) -}}
+{{- range $mapping := $standardMounts -}}
+{{- $persistenceValues := $v.persistence | default dict -}}
+{{- if not (hasKey $persistenceValues $mapping.key) -}}
+{{- fail (printf "controller.persistence.%s is required (the standard storage is single-source; relocate via controller.paths instead of removing or disabling the entry)" $mapping.key) -}}
+{{- end -}}
+{{- $entry := index $persistenceValues $mapping.key -}}
+{{- if or (not (kindIs "map" $entry)) (and (hasKey $entry "enabled") (not $entry.enabled)) -}}
+{{- fail (printf "controller.persistence.%s is required (the standard storage is single-source; relocate via controller.paths instead of removing or disabling the entry)" $mapping.key) -}}
+{{- end -}}
+{{- if hasKey $entry "globalMounts" -}}
+{{- $writableRoot := false -}}
+{{- range $mount := $entry.globalMounts -}}
+{{- if eq $mount.path $mapping.controllerRoot -}}
+{{- if $mount.readOnly -}}
+{{- fail (printf "controller.persistence.%s is mounted readOnly at the controller.paths root %q; the runtime must write it" $mapping.key $mapping.controllerRoot) -}}
+{{- end -}}
+{{- $writableRoot = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $writableRoot -}}
+{{- fail (printf "controller.persistence.%s globalMounts must include the writable controller.paths root %q (extra mounts are allowed; relocate via controller.paths, single source)" $mapping.key $mapping.controllerRoot) -}}
+{{- end -}}
+{{- else -}}
+{{- $_ := set $entry "globalMounts" (list (dict "path" $mapping.controllerRoot)) -}}
+{{- end -}}
+{{- end -}}
+{{- if $kubeExecutor -}}
+{{- range $mapping := $mappings -}}
+{{- $entry := index $v.persistence $mapping.key -}}
+{{- if empty $entry.existingClaim -}}
+{{- /* Pin the chart-created claim name: the common library otherwise names
+       PVCs by enabled-claim count (<fullname> for one, <fullname>-<key>
+       for more), which no derived reference may depend on. The chart
+       renders this claim itself, so a same-named workerExecutor.volumeClaims
+       entry would render a second PVC. When the operator provides the
+       claim via existingClaim, a matching volumeClaim is its provisioner
+       (the pre-#1767 documented posture) and stays allowed. */ -}}
+{{- $_ := set $entry "forceRename" $mapping.claim -}}
+{{- range $claim := ($workerExecutor.volumeClaims | default list) -}}
+{{- if eq ($claim.name | lower) $mapping.claim -}}
+{{- fail (printf "workerExecutor.volumeClaims must not redeclare the chart-created standard claim %q (derived from controller.persistence.%s, #1767); volumeClaims is for additional non-standard claims, or for provisioning a claim named by controller.persistence.*.existingClaim" $mapping.claim $mapping.key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* Durable state must survive chart upgrades and uninstalls, and its
+       name must be deterministic in EVERY mode: the common library's
+       count-based naming would otherwise rename the claim when the shared
+       posture changes. Kubernetes-executor mode pins the bare fullname
+       (the name the documented pre-#1767 example posture rendered, so
+       adopting the single-source shape does not orphan it); controller-only
+       mode pins <fullname>-durable-state (the name its defaults render).
+       An operator-set existingClaim or forceRename wins. retain keeps the
+       PVC on uninstall and across the one-time rename of installs that
+       ran Kubernetes-executor mode with chart-created shared claims. */ -}}
+{{- $durableState := index ($v.persistence | default dict) "durable-state" | default dict -}}
+{{- if empty $durableState.existingClaim -}}
+{{- if not (hasKey $durableState "forceRename") -}}
+{{- $durableStateName := ternary $fullname (printf "%s-durable-state" $fullname) $kubeExecutor -}}
+{{- $_ := set $durableState "forceRename" ($durableStateName | lower) -}}
+{{- end -}}
+{{- if not (hasKey $durableState "retain") -}}
+{{- $_ := set $durableState "retain" true -}}
+{{- end -}}
+{{- if $kubeExecutor -}}
+{{- range $claim := ($workerExecutor.volumeClaims | default list) -}}
+{{- if eq ($claim.name | lower) ($durableState.forceRename | lower) -}}
+{{- fail (printf "workerExecutor.volumeClaims must not redeclare the chart-created durable-state claim %q (pinned by the chart, #1767)" $durableState.forceRename) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $kubeExecutor -}}
+{{- /* Worker Jobs run in the namespace their instance config names, and
+       the standard claims are derived in the release namespace: PVCs are
+       namespace-scoped, so every namespace in the topology must be the
+       release namespace. workerExecutor.namespace is the provisioning
+       mirror; when the instance config is inline the chart also checks
+       its authoritative executor namespace (an opaque existingSecret
+       cannot be checked and stays the operator's documented
+       responsibility). */ -}}
+{{- if ne (default $ctx.Release.Namespace $workerExecutor.namespace) $ctx.Release.Namespace -}}
+{{- fail (printf "shared claims are namespace-scoped and the chart derives them once, in the release namespace %q; standard topology requires workerExecutor.namespace %q to equal the release namespace" $ctx.Release.Namespace $workerExecutor.namespace) -}}
+{{- end -}}
+{{- if not (empty $v.instanceConfig) -}}
+{{- /* fromYaml yields an empty map on unparseable input: the check then
+       finds no profiles and skips, which is acceptable because the runtime
+       refuses an unparseable instance config at startup anyway. */ -}}
+{{- $instanceCfg := fromYaml $v.instanceConfig -}}
+{{- if kindIs "map" $instanceCfg -}}
+{{- range $profile := (index $instanceCfg "executor-profiles" | default list) -}}
+{{- if kindIs "map" $profile -}}
+{{- $kubeProfile := index $profile "kubernetes" | default dict -}}
+{{- if and (kindIs "map" $kubeProfile) (not (empty $kubeProfile.namespace)) (ne $kubeProfile.namespace $ctx.Release.Namespace) -}}
+{{- fail (printf "instance config executor-profiles.kubernetes.namespace %q must equal the release namespace %q: the standard shared claims are derived in the release namespace and PVCs are namespace-scoped (#1767)" $kubeProfile.namespace $ctx.Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{- /* env + probes: template-conditional, injected into the container */ -}}

@@ -16,7 +16,7 @@ src/controller/main.ts is satisfied exactly.
   "Capabilities" .Capabilities
   "Template" .Template
 }}
-{{- include "pr-reviewer.controller.configure" (dict "ctx" $ctx "workerExecutorKubernetes" $kubeExecutor) }}
+{{- include "pr-reviewer.controller.configure" (dict "ctx" $ctx "workerExecutorKubernetes" $kubeExecutor "workerExecutor" $workerExecutor) }}
 {{- include "bjw-s.common.loader.init" $ctx }}
 {{- include "bjw-s.common.loader.generate" $ctx }}
 {{- end }}

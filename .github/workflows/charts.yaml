@@ -30,10 +30,10 @@ jobs:
         run: helm dependency build deploy/charts/pr-reviewer
 
       - name: Lint (controller-only example)
-        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+        run: helm lint --namespace pr-reviewer deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
 
       - name: Lint (kubernetes-executor example)
-        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+        run: helm lint --namespace pr-reviewer deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
 
       - name: Render (controller-only example)
         run: |
@@ -195,12 +195,12 @@ jobs:
             exit 1
           fi
           # A configured GitHub target must carry an exact App installation ID.
-          if helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          if helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set 'controller.reconcile.repos[0]=owner/name' >/dev/null 2>&1; then
             echo "GitHub polling must require a pinned installation identity" >&2
             exit 1
           fi
-          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set 'controller.reconcile.repos[0]=owner/name' \
             --set-string controller.reconcile.githubInstallationId=4242 \
             --set controller.webhook.enabled=false > /var/tmp/render-github-poll.yaml
@@ -210,7 +210,7 @@ jobs:
           # intake's fallback for a delivery that omitted `installation.id`,
           # so a configured id is emitted with polling explicitly disabled.
           # The poll env must stay absent in that render.
-          helm template pr-reviewer deploy/charts/pr-reviewer -f "$github_example" \
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f "$github_example" \
             --set controller.reconcile.enabled=false \
             --set-string controller.reconcile.githubInstallationId=4242 \
             > /var/tmp/render-github-no-poll.yaml
@@ -236,6 +236,7 @@ jobs:
           set -euo pipefail
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             > /var/tmp/render-kubernetes-executor.yaml
           # Worker-executor provisioning: namespace-scoped RBAC over jobs
           # ONLY (no cluster roles), the worker SA, and the shared claims.
@@ -252,7 +253,81 @@ jobs:
           # overrides from controllers.<name>.pod — the v1 `podOptions`
           # key is silently ignored, leaving the default-deny false).
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q "automountServiceAccountToken: true"
-          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          # #1767: the standard shared storage is declared once under
+          # controller.persistence and renders exactly three chart-created
+          # PVCs (durable-state, runs, workspace-cache) from the
+          # controller component; worker-rbac renders no PVC at all.
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-executor.yaml)" -eq 3 ]
+          grep -q 'name: pr-reviewer-runs$' /var/tmp/render-kubernetes-executor.yaml
+          grep -q 'name: pr-reviewer-workspace-cache$' /var/tmp/render-kubernetes-executor.yaml
+          # #1767: durable-state keeps its pre-#1767 chart-created name
+          # (the bare fullname) and is retained across uninstalls.
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") {found=1} END{exit !found}' /var/tmp/render-kubernetes-executor.yaml
+          grep -q 'helm.sh/resource-policy: keep' /var/tmp/render-kubernetes-executor.yaml
+          if ! awk '/^# Source: pr-reviewer\/templates\/worker-rbac.yaml/{inrbac=1; next} /^# Source:/{inrbac=0} inrbac && /^kind: PersistentVolumeClaim$/{bad=1} END{exit bad?1:0}' /var/tmp/render-kubernetes-executor.yaml; then
+            echo "worker-rbac must not render PVCs in the standard topology" >&2
+            exit 1
+          fi
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-runs'
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-workspace-cache'
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=operator-runs \
+            > /var/tmp/render-kubernetes-existing-claim.yaml
+          [ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-existing-claim.yaml)" -eq 2 ]
+          awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-existing-claim.yaml | grep -q 'claimName: operator-runs'
+          if grep -q 'name: pr-reviewer-runs$' /var/tmp/render-kubernetes-existing-claim.yaml; then
+            echo "existing standard claim must not render a pr-reviewer-runs PVC" >&2
+            exit 1
+          fi
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.paths.runsRoot=/data/runs > /var/tmp/render-relocated-runs.yaml
+          grep -A1 'name: PR_REVIEWER_RUNS_ROOT' /var/tmp/render-relocated-runs.yaml | grep -q 'value: /data/runs'
+          awk '/initContainers:/,/containers:/' /var/tmp/render-relocated-runs.yaml > /var/tmp/render-relocated-init-section.yaml
+          grep -A1 'mountPath: /data/runs' /var/tmp/render-relocated-init-section.yaml | grep -q 'name: runs'
+          # Fail closed: duplicate standard claim declarations (shared or
+          # durable-state), non-claim standard storage, disabled standard
+          # storage, a mount/path conflict, a readOnly standard root, and
+          # a mismatched worker or instance-config namespace each refuse
+          # the render with the guard's own message.
+          for spec in \
+            'workerExecutor.volumeClaims[0].name=pr-reviewer-runs|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created standard claim' \
+            'workerExecutor.volumeClaims[0].name=pr-reviewer|workerExecutor.volumeClaims[0].size=1Gi|must not redeclare the chart-created durable-state claim' \
+            'controller.persistence.runs.type=hostPath|controller.persistence.runs.hostPath=/tmp/x|must be an operator-provided existingClaim or a chart-created persistentVolumeClaim' \
+            'controller.persistence.runs.enabled=false||is required as the standard shared storage' \
+            'controller.persistence.durable-state=null||is required (the standard storage is single-source' \
+            'controller.paths.runsRoot=data/runs||must be a non-empty absolute path starting with /' \
+            'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
+            'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
+            'workerExecutor.namespace=other-ns||requires workerExecutor.namespace' \
+            'controller.enabled=false||requires controller.enabled'; do
+            IFS='|' read -r first second message <<< "$spec"
+            args=(--set "$first")
+            if [ -n "$second" ]; then args+=(--set "$second"); fi
+            if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml "${args[@]}" 2>&1 >/dev/null)"; then
+              echo "invalid shared-storage configuration rendered: $first" >&2
+              exit 1
+            fi
+            printf '%s' "$error" | grep -q "$message"
+          done
+          # The instance config is authoritative for the worker Jobs'
+          # namespace: an inline config naming another namespace refuses.
+          printf '%s\n' \
+            'version: 1' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: other-ns' \
+            > /var/tmp/mismatched-ns-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/mismatched-ns-config.yaml 2>&1 >/dev/null)"; then
+            echo "an instance config whose kubernetes namespace differs from the release namespace must refuse the render" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must equal the release namespace"
           # #1725: Kubernetes-executor mode must render the chart-owned
           # fix-roots init container — kubelet provisions claim roots as
           # group-writable 0775 uid 0, which the runtime's cache-root trust
@@ -279,6 +354,7 @@ jobs:
           # keyed by name) alongside the chart-owned one.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set controller.controllers.main.initContainers.operator-init.image.repository=busybox \
             --set controller.controllers.main.initContainers.operator-init.image.tag=latest \
             --set-json 'controller.controllers.main.initContainers.operator-init.command=["echo","ready"]' \
@@ -291,6 +367,7 @@ jobs:
           # not an opaque sprig merge type error.
           if list_err="$(helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set-json 'controller.controllers.main.initContainers=[{"name":"operator-init","image":"busybox:latest"}]' 2>&1 >/dev/null)"; then
             echo "a raw list under controller.controllers.main.initContainers must refuse the render" >&2
             exit 1
@@ -305,6 +382,7 @@ jobs:
           fi
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set networkPolicy.enabled=true > /var/tmp/render-kubernetes-executor-netpol.yaml
           # The worker selector is only present when the policy is opted in.
           grep -q 'app.kubernetes.io/managed-by: pr-reviewer-action' /var/tmp/render-kubernetes-executor-netpol.yaml
@@ -329,6 +407,7 @@ jobs:
           # PR_REVIEWER_CREDENTIAL_A_B.
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
             --set 'controller.credentials.a-b.value=x' \
             --set 'controller.credentials.a\.b.value=y' \
             --set 'controller.credentials.a_b.value=z' \
@@ -358,6 +437,7 @@ jobs:
           }
           # Default opt-in posture: worker keeps DNS + TLS only, no 4000.
           helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=true > /var/tmp/netpol-default.yaml
           worker_default="$(worker_doc /var/tmp/netpol-default.yaml)"
@@ -371,6 +451,7 @@ jobs:
           # the WORKER policy only; the controller keeps its own
           # additionalEgress and never sees the worker rule.
           helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=true \
             --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" \
@@ -412,6 +493,7 @@ jobs:
             exit 1
           fi
           refusal="$(helm template pr-reviewer deploy/charts/pr-reviewer \
+            --namespace pr-reviewer \
             -f "$github_example" \
             --set networkPolicy.enabled=false \
             --set-json "networkPolicy.workerAdditionalEgress=$worker_egress" 2>&1 >/dev/null || true)"

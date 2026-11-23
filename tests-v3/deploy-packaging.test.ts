@@ -344,6 +344,161 @@ test("#1725/#1737: every executor mode injects the fix-roots claim-root init con
   assert.match(deployment, /`0750 1000 65532` \(controller-only\)/, "deployment doc must state the controller-only stat contract");
 });
 
+test("#1767: standard shared storage is declared once and derived; ambiguous topologies fail closed", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The single derivation artifact: one entry per standard key, resolving
+  // the claim from existingClaim or the chart-created <fullname>-<key>,
+  // with the controller root taken from controller.paths.
+  assert.match(
+    helpers,
+    /\{\{- define "pr-reviewer\.shared-volume-mappings" -\}\}/,
+    "the shared-volume-mappings derivation define must exist",
+  );
+  assert.match(
+    helpers,
+    /\$claim = printf "%s-%s" \$fullname \$key/,
+    "a chart-created standard claim must derive as <fullname>-<key>",
+  );
+  assert.match(
+    helpers,
+    /is required as the standard shared storage/,
+    "a missing or disabled standard entry must fail closed",
+  );
+  assert.match(
+    helpers,
+    /must be an operator-provided existingClaim or a chart-created persistentVolumeClaim/,
+    "a non-claim standard storage type (hostPath and friends) must fail closed",
+  );
+  // The standard mount path derives from controller.paths (the same
+  // source as the env contract and fix-roots); an agreeing explicit
+  // globalMounts wins, a conflicting one fails closed.
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$entry "globalMounts" \(list \(dict "path" \$mapping\.controllerRoot\)\) -\}\}/,
+    "the standard globalMounts must derive from controller.paths",
+  );
+  assert.match(
+    helpers,
+    /globalMounts must include the writable controller\.paths root/,
+    "an explicit globalMounts without the writable standard root must fail closed",
+  );
+  // Chart-created standard claims are pinned with forceRename because the
+  // common library otherwise names PVCs by enabled-claim count.
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$entry "forceRename" \$mapping\.claim -\}\}/,
+    "the derived claim name must be pinned with forceRename",
+  );
+  // Upgrade continuity: durable-state is pinned deterministically per
+  // mode (bare fullname under the Kubernetes executor, the documented
+  // pre-#1767 name; <fullname>-durable-state controller-only) and retained.
+  assert.match(
+    helpers,
+    /\{\{- \$durableStateName := ternary \$fullname \(printf "%s-durable-state" \$fullname\) \$kubeExecutor -\}\}/,
+    "durable-state must be pinned per mode, not by the library's count-based naming",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$durableState "retain" true -\}\}/,
+    "durable-state must be retained across uninstalls and chart renames",
+  );
+  // Duplicated declarations and mismatched namespaces fail closed.
+  assert.match(
+    helpers,
+    /workerExecutor\.volumeClaims must not redeclare the chart-created standard claim/,
+    "redeclaring a chart-created standard claim in volumeClaims must fail closed",
+  );
+  assert.match(
+    helpers,
+    /workerExecutor\.volumeClaims must not redeclare the chart-created durable-state claim/,
+    "redeclaring the chart-created durable-state claim in volumeClaims must fail closed",
+  );
+  assert.match(
+    helpers,
+    /standard topology requires workerExecutor\.namespace/,
+    "a worker namespace other than the release namespace must fail closed",
+  );
+  assert.match(
+    helpers,
+    /instance config executor-profiles\.kubernetes\.namespace %q must equal the release namespace/,
+    "an inline instance config whose kubernetes namespace differs from the release namespace must fail closed",
+  );
+  // The standard root mount must exist and be writable.
+  assert.match(
+    helpers,
+    /is mounted readOnly at the controller\.paths root/,
+    "a readOnly standard root mount must fail closed",
+  );
+  assert.match(
+    helpers,
+    /globalMounts must include the writable controller\.paths root/,
+    "an explicit globalMounts without the writable standard root must fail closed",
+  );
+  // controller.paths is the single source for the three standard roots.
+  assert.match(
+    helpers,
+    /controller\.paths\.%s must be a non-empty absolute path starting with \//,
+    "an empty or relative standard root path must fail closed",
+  );
+  // A removed standard entry must fail closed, not silently unmount.
+  assert.match(
+    helpers,
+    /\{\{- if not \(hasKey \$persistenceValues \$mapping\.key\) -\}\}/,
+    "a missing standard persistence entry must fail closed before the mount derivation",
+  );
+  // Worker provisioning without the controller fails closed.
+  const workerRbac = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");
+  assert.match(
+    workerRbac,
+    /workerExecutor\.mode kubernetes requires controller\.enabled/,
+    "worker provisioning with the controller disabled must fail closed",
+  );
+  // CI pins the rendered contract: three chart-created PVCs, no
+  // worker-rbac PVC, the durable-state name and retain policy, the
+  // existingClaim posture, the relocated-root single-source, and each
+  // fail-closed guard.
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes(`[ "$(grep -c '^kind: PersistentVolumeClaim$' /var/tmp/render-kubernetes-executor.yaml)" -eq 3 ]`),
+    "charts.yaml must pin exactly three chart-created PVCs in the standard topology",
+  );
+  assert.ok(
+    workflow.includes("worker-rbac must not render PVCs in the standard topology"),
+    "charts.yaml must pin that worker-rbac renders no PVC in the standard topology",
+  );
+  assert.ok(
+    workflow.includes(`index($0,"\\n  name: pr-reviewer\\n")`),
+    "charts.yaml must pin the durable-state PVC metadata name (not its labels)",
+  );
+  assert.ok(
+    workflow.includes("helm.sh/resource-policy: keep"),
+    "charts.yaml must pin the durable-state retain policy",
+  );
+  for (const message of [
+    "must not redeclare the chart-created standard claim",
+    "must not redeclare the chart-created durable-state claim",
+    "must be an operator-provided existingClaim or a chart-created persistentVolumeClaim",
+    "is required as the standard shared storage",
+    "is required (the standard storage is single-source",
+    "must be a non-empty absolute path starting with /",
+    "must include the writable controller.paths root",
+    "mounted readOnly at the controller.paths root",
+    "requires workerExecutor.namespace",
+    "requires controller.enabled",
+    "must equal the release namespace",
+  ]) {
+    assert.ok(workflow.includes(message), `charts.yaml must pin the fail-closed guard: ${message}`);
+  }
+  assert.ok(
+    workflow.includes(`grep -A1 'mountPath: /data/runs' /var/tmp/render-relocated-init-section.yaml | grep -q 'name: runs'`),
+    "charts.yaml must pin the relocated-root single-source render",
+  );
+  // The operator-facing contract is documented.
+  const chartReadme = read("deploy/charts/pr-reviewer/README.md");
+  assert.match(chartReadme, /## Shared storage \(single source, #1767\)/);
+  assert.match(chartReadme, /`pr-reviewer\.shared-volume-mappings`/);
+});
+
 test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping — no doc keeps the false premise", () => {
   // Kubelet OnRootMismatch skips group application only when the volume
   // root mode is a superset of 0770 WITH setgid (requiresPermissionChange

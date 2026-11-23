@@ -100,8 +100,13 @@ helm install pr-reviewer \
   CONTROLLER's service account `create/get/list/delete` on `batch/jobs`
   plus `create/get/list/update/patch/delete` on core `secrets` in the
   worker namespace (pods are never touched directly — the Job
-  controller's background propagation removes them), and shared PVCs
-  mounted at identical absolute paths in controller and workers. The
+  controller's background propagation removes them). The chart declares
+  the standard shared storage once, in `controller.persistence.runs` and
+  `controller.persistence.workspace-cache`, and derives the PVC names and
+  the worker-side volume mappings from those entries (see "Shared storage"
+  below). Add only non-standard claims to `workerExecutor.volumeClaims`.
+  Set `workerExecutor.namespace` to the release namespace because PVCs are
+  namespace-scoped. The
   secrets verbs exist for the per-run credential Secrets the executor
   projects: it creates/replaces them, rebinds each to the owning Job,
   label-lists its own material, and deletes them at settle; they are
@@ -128,6 +133,77 @@ helm install pr-reviewer \
   enabled, so a Prometheus scrape works out of the box (still guarded by
   the admin bearer token; opt-in NetworkPolicies may additionally restrict ingress). Requires
   `controller.admin.enabled`.
+
+## Shared storage (single source, #1767)
+
+The standard shared worker/controller storage is declared once, in
+`controller.persistence.runs` and `controller.persistence.workspace-cache`.
+The chart derives everything else from those two entries:
+
+- The controller mounts each claim at the root `controller.paths` names
+  (`runsRoot`, `workspaceCacheRoot`). The chart derives the standard
+  `globalMounts` from those paths, so a relocation changes one value.
+- Each claim is either operator-provided (`existingClaim: <name>`) or
+  chart-created. A chart-created claim renders as the PVC
+  `<chart-fullname>-runs` or `<chart-fullname>-workspace-cache`, where the
+  chart fullname comes from the release and chart names and ignores
+  `global.*Override` values. The chart pins the name with `forceRename`
+  because the common library otherwise names PVCs by enabled-claim count.
+- The template `pr-reviewer.shared-volume-mappings` exposes the derived
+  `{claim, controllerRoot}` pairs. #1766 will consume it to synthesize the
+  default Kubernetes executor profile, so the worker Jobs receive the
+  matching mappings without a second declaration. Until then, a raw
+  instance config repeats them by hand, as the example shows.
+- `fix-roots` keeps reading `controller.paths.*`, unchanged (#1725/#1737).
+
+The standard topology requires the worker namespace to equal the release
+namespace, because PVCs are namespace-scoped and the chart derives the
+claims once. A `workerExecutor.namespace` that names another namespace
+refuses the render. The instance config names the worker Jobs' namespace
+itself; when it is inline, a `kubernetes.namespace` that differs from the
+release namespace also refuses. An instance config provided through an
+existing Secret cannot be checked at render time, so make sure that
+namespace matches the release namespace yourself.
+
+`workerExecutor.volumeClaims` is for additional, non-standard claims only.
+A name that redeclares a chart-created standard or durable-state claim
+refuses the render. One legacy shape stays valid: when a standard entry
+uses `existingClaim`, a `volumeClaims` entry of the same name is the
+claim's provisioner (the pre-#1767 documented posture). Raw, advanced
+instance-config volume mappings stay supported: the chart never merges
+derived mappings into operator config.
+
+### Upgrading from the pre-#1767 shape
+
+Installs of the old documented example carried `existingClaim` entries in
+`controller.persistence` and the same claim names in
+`workerExecutor.volumeClaims`. That shape still renders unchanged, so the
+cheapest upgrade path is to keep it. To adopt the single-source shape:
+
+1. Set the standard sizes under `controller.persistence` (at least the
+   current claim sizes; Kubernetes refuses to shrink a claim). With the
+   old example's 20Gi claims, use `runs.size: 20Gi` and
+   `workspace-cache.size: 20Gi`, which keeps the existing
+   `pr-reviewer-runs` PVC.
+2. Remove the matching `workerExecutor.volumeClaims` entries.
+3. Update the instance config's workspace mapping to the new claim name:
+   `pr-reviewer-workspace` becomes `pr-reviewer-workspace-cache`. The
+   workspace cache is expendable, so the renamed claim starts empty.
+4. Install into the namespace the instance config names (`-n pr-reviewer`
+   in the examples).
+
+The durable-state claim is pinned per mode (`<fullname>` under the
+Kubernetes executor, `<fullname>-durable-state` controller-only) and
+carries `retain: true`, so the PVC the chart renders survives uninstalls.
+One upgrade path needs care: an install that ran Kubernetes-executor mode
+with chart-created shared claims before #1767 rendered durable-state as
+`<fullname>-durable-state`, and that PVC has no keep annotation because
+the old chart did not set one. On upgrade the chart renders the new
+`<fullname>` PVC instead, and Helm deletes the old claim. Copy the durable
+state (the audit ledger and the queue snapshot under
+`controller.paths.durableStateDir`) before upgrading, or pin the old name
+with `controller.persistence.durable-state.existingClaim` so the chart
+keeps mounting it.
 
 ## PR discovery (polling-first)
 
@@ -219,11 +295,12 @@ and configured concurrency/model costs before first enabling the poll.
   refuses to start exactly as above. Verify a running install from inside
   the controller pod with
   `stat -c '%a %u %g' /var/lib/pr-reviewer/runs /var/lib/pr-reviewer/cache`,
-  expecting `2750 1000 65532` or `0750 1000 65532` for each. `fix-roots`
-  reaches the roots through the `persistence` `globalMounts` (the common
-  library renders them for init containers as well), so relocating
-  `controller.paths.*` requires updating the matching `globalMounts` paths
-  in sync. Custom init containers added under
+   expecting `2750 1000 65532` or `0750 1000 65532` for each. `fix-roots`
+   reaches the roots through the standard entries' `globalMounts` (the
+   common library renders them for init containers as well). The chart
+   derives those `globalMounts` from `controller.paths.*` (see "Shared
+   storage" below), so a relocation stays single-source. Custom init
+   containers added under
   `controller.controllers.main.initContainers` must use the common-library
   map shape keyed by container name; the chart's `fix-roots` merge
   preserves them next to its own container and refuses a raw Kubernetes

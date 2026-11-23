@@ -32,6 +32,11 @@
             "key": { "type": "string" }
           }
         },
+        "persistence": {
+          "type": "object",
+          "description": "runs and workspace-cache define standard shared storage once; mappings and PVC names derive from these entries.",
+          "additionalProperties": true
+        },
         "paths": {
           "type": "object",
           "additionalProperties": false,
@@ -252,6 +257,7 @@
         "ttlSecondsAfterFinished": { "type": "integer", "minimum": 0 },
         "volumeClaims": {
           "type": "array",
+          "description": "Additional non-standard worker claims only. Standard runs and workspace-cache claims derive from controller.persistence.",
           "items": {
             "type": "object",
             "additionalProperties": false,

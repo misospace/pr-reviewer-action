@@ -1,9 +1,10 @@
 # Kubernetes-executor example: a GitHub App instance whose reviews run as
-# ephemeral Jobs in a dedicated worker namespace, with shared PVCs
-# carrying the run/workspace state between controller and workers.
-# Install:
+# ephemeral Jobs in the release namespace, with chart-created shared PVCs
+# carrying the run/workspace state between controller and workers (#1767).
+# Install into the namespace the instance config names:
 #
 #   helm install pr-reviewer deploy/charts/pr-reviewer \
+#     -n pr-reviewer \
 #     -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
 #
 # Prerequisites (see examples/README.md for the manifests): GitHub App
@@ -13,9 +14,11 @@ controller:
   # Inline instance config (rendered into a chart-managed Secret). This
   # is a trimmed example — the full schema lives in
   # docs/operator-config-and-adoption.md. The kubernetes executor
-  # profile's deployment facts (namespace, service account, claim names)
-  # MUST match the workerExecutor provisioning below: the executor mounts
-  # each claim at the SAME absolute path in controller and worker pods.
+  # profile's volume mappings (claim names, controller-root paths) MUST
+  # match the chart-derived standard shared storage (#1767): the executor
+  # mounts each claim at the SAME absolute path in controller and worker
+  # pods. For release name `pr-reviewer` the chart-created claims are
+  # pr-reviewer-runs and pr-reviewer-workspace-cache.
   instanceConfig: |-
     version: 1
     unknown-profile-policy: reject
@@ -51,7 +54,7 @@ controller:
           volumes:
             - claim: pr-reviewer-runs
               controller-root: /var/lib/pr-reviewer/runs
-            - claim: pr-reviewer-workspace
+            - claim: pr-reviewer-workspace-cache
               controller-root: /var/lib/pr-reviewer/cache
     default-executor-profile: k8s-jobs
     evidence-profiles:
@@ -102,12 +105,18 @@ controller:
     webhook:
       enabled: true
 
-  # Mount the SAME claims the worker Jobs mount (at identical paths).
+  # Standard shared storage, declared once (#1767): the chart renders
+  # these chart-created claims (pr-reviewer-runs and
+  # pr-reviewer-workspace-cache for release name `pr-reviewer`) and
+  # derives the worker-side references. 20Gi matches the claims the
+  # pre-#1767 example provisioned, so adopting this shape keeps the
+  # existing pr-reviewer-runs PVC. For operator-provided claims, set
+  # existingClaim here instead and keep the size/storageClass unset.
   persistence:
     runs:
-      existingClaim: pr-reviewer-runs
+      size: 20Gi
     workspace-cache:
-      existingClaim: pr-reviewer-workspace
+      size: 20Gi
 
 # On Cilium kube-proxy-replacement clusters, also allow the Kubernetes
 # API on TCP 6443 — the base 443 egress rule does not match there, and
@@ -124,10 +133,7 @@ controller:
 #             port: 6443
 workerExecutor:
   mode: kubernetes
-  # Same namespace as the controller: the #734 shared-run-directory
-  # protocol mounts the same claims at the same absolute paths on BOTH
-  # sides, and PVCs are namespace-scoped. A dedicated worker namespace
-  # would need identical claims there — not the default posture.
+  # Standard shared claims render in the release namespace.
   namespace: ""
   serviceAccount:
     create: true
@@ -136,8 +142,7 @@ workerExecutor:
     repository: ghcr.io/example/pr-reviewer-worker
     tag: "3.10.0" # x-release-please-version
   ttlSecondsAfterFinished: 1800
-  volumeClaims:
-    - name: pr-reviewer-runs
-      size: 20Gi
-    - name: pr-reviewer-workspace
-      size: 20Gi
+  # No volumeClaims: the standard shared claims derive from
+  # controller.persistence (chart-created here; for release name
+  # `pr-reviewer` they render as pr-reviewer-runs and
+  # pr-reviewer-workspace-cache). Add only non-standard claims here.
