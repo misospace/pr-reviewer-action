@@ -137,7 +137,10 @@ data route stays bearer-protected (see
   operator-cancelled run** (#1772). Every settle path behind it ends
   `cancelled-by-operator`: a queued generation settles at once, an
   attempt settles when it observes the abort, and a generation whose
-  publication FAILED and awaits its retry never publishes again.
+  publication FAILED and awaits its retry never publishes again. So a
+  consumer never needs to poll before acting on a `200`: the terminal
+  outcome is already fixed, and `GET /admin/runs/{runId}` only observes
+  that the settle happened.
 - **A publication that was already ATTEMPTED answers `202`, not the
   applied-cancellation `200`.** The publication's outcome is not
   determined here: the forge side effect may already have landed and it
