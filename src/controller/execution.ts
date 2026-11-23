@@ -41,6 +41,7 @@ import {
   resolveKubernetesExecutorSpec,
   type InstanceConfig,
   type KubernetesDeploymentDefaults,
+  type KubernetesVolumeMapping,
 } from "../config/instance-config.js";
 import { isSecretShapedValue } from "../credentials/types.js";
 import type { CredentialRef } from "../credentials/types.js";
@@ -292,6 +293,7 @@ export interface ExecutorSelectorOptions {
    * executor from the profile spec plus the daemon-bound cluster seams. */
   readonly kubernetes?: (spec: KubernetesExecutorSpec, profileName: string) => Executor;
   readonly kubernetesDeploymentDefaults?: KubernetesDeploymentDefaults;
+  readonly kubernetesSharedVolumes?: readonly KubernetesVolumeMapping[] | null;
 }
 
 /** The profile→executor mapping the daemon dispatches through, plus the
@@ -347,7 +349,7 @@ export function createExecutorSelector(options: ExecutorSelectorOptions): Execut
         );
       }
       executor = options.kubernetes(
-        resolveKubernetesExecutorSpec(profile.kubernetes, options.kubernetesDeploymentDefaults ?? emptyKubernetesDeploymentDefaults(), profileName),
+        resolveKubernetesExecutorSpec(profile.kubernetes, options.kubernetesDeploymentDefaults ?? emptyKubernetesDeploymentDefaults(), profileName, options.kubernetesSharedVolumes ?? null),
         profileName,
       );
     } else {

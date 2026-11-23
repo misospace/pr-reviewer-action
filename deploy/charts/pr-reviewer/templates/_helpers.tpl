@@ -131,12 +131,14 @@ with an optional exact-byte digest pin. */}}
 {{/* The controller container's environment: the complete mapping of chart
 values onto the fail-closed env contract in src/controller/main.ts.
 Signature: dict "ctx" <component context> "root" <chart root>
-"workerExecutorKubernetes" <bool>. Conditional variables are genuinely
-ABSENT when their feature is off. Secret material uses secretKeyRef. */}}
+"workerExecutorKubernetes" <bool> "sharedVolumesJson" <string>.
+Conditional variables are genuinely ABSENT when their feature is off.
+Secret material uses secretKeyRef. */}}
 {{- define "pr-reviewer.controller.env" -}}
 {{- $ctx := index . "ctx" -}}
 {{- $root := index . "root" -}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
+{{- $sharedVolumesJson := index . "sharedVolumesJson" | default "" -}}
 {{- $v := $ctx.Values -}}
 {{- $fullname := include "pr-reviewer.fullname" $ctx -}}
 - name: PR_REVIEWER_INSTANCE_CONFIG
@@ -144,6 +146,10 @@ ABSENT when their feature is off. Secret material uses secretKeyRef. */}}
 {{- if $kubeExecutor }}
 - name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS
   value: {{ include "pr-reviewer.worker-deployment-defaults" $root | quote }}
+{{- if ne $sharedVolumesJson "" }}
+- name: PR_REVIEWER_KUBERNETES_SHARED_VOLUMES
+  value: {{ $sharedVolumesJson | quote }}
+{{- end }}
 {{- end }}
 - name: PR_REVIEWER_CONTROL_PLANE_URL
   valueFrom:
@@ -312,8 +318,8 @@ the runtime contract mounts it at. The claim resolves to the operator's
 `existingClaim`, or to the chart-created PVC named by
 pr-reviewer.chart-created-claim-name (the common library's own rule,
 reproduced so upgrades keep claim names) and pinned with forceRename.
-#1766 consumes this artifact to synthesize the default Kubernetes
-executor profile's volume mappings.
+Kubernetes profiles may inherit this artifact's volume mappings when they
+omit `volumes`; explicitly declared mappings remain advanced overrides.
 Every ambiguous or missing shape fails closed here, in one place.
 */}}
 {{- define "pr-reviewer.shared-volume-mappings" -}}
@@ -585,6 +591,14 @@ dict "ctx" <component context> "root" <chart root>
 {{- end -}}
 {{- $claimFullname = $claimFullname | toString | trunc 63 | trimSuffix "-" -}}
 {{- $mappings := include "pr-reviewer.shared-volume-mappings" (dict "values" $v "fullname" $claimFullname) | fromYamlArray -}}
+{{- $sharedVolumesJson := "" -}}
+{{- if $kubeExecutor -}}
+{{- $sharedVolumes := list -}}
+{{- range $mapping := $mappings -}}
+{{- $sharedVolumes = append $sharedVolumes (dict "claim" $mapping.claim "controllerRoot" $mapping.controllerRoot) -}}
+{{- end -}}
+{{- $sharedVolumesJson = $sharedVolumes | toJson -}}
+{{- end -}}
 {{- /* The standard mount path derives from controller.paths.* (the same
        source as the env contract and fix-roots), so a relocation stays
        one-source. Extra mounts of the same claim are allowed, but the
@@ -723,8 +737,9 @@ dict "ctx" <component context> "root" <chart root>
        and stays unverified: a stale name after a release-name change or
        an existingClaim rename is indistinguishable from a mapping on a
        non-standard claim (volumeClaims-provisioned or operator-managed),
-       which stays supported; #1766 removes the repetition entirely by
-       synthesizing the default profile from this artifact. */ -}}
+       which stays supported. Profiles may omit `volumes` to inherit this
+       artifact's mappings automatically; declared volumes remain the
+       advanced override whose derived roots this check keeps honest. */ -}}
 {{- $rootByClaim := dict -}}
 {{- range $mapping := $mappings -}}
 {{- $_ := set $rootByClaim ($mapping.claim | lower) $mapping.controllerRoot -}}
@@ -750,7 +765,7 @@ dict "ctx" <component context> "root" <chart root>
 {{- $derivedRoot := index $rootByClaim ($volume.claim | lower) -}}
 {{- $declaredRoot := index $volume "controller-root" | default "" -}}
 {{- if and (not (empty $derivedRoot)) (ne $declaredRoot $derivedRoot) -}}
-{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root refuses the render" $volume.claim $derivedRoot) -}}
+{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a profile that omits volumes inherits the derived mappings, so an explicitly declared derived claim must not diverge" $volume.claim $derivedRoot) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -765,7 +780,7 @@ dict "ctx" <component context> "root" <chart root>
 {{- $controllers := deepCopy ($v.controllers | default dict) -}}
 {{- $main := index $controllers "main" -}}
 {{- $container := index (index $main "containers") "main" -}}
-{{- $_ := set $container "env" (include "pr-reviewer.controller.env" (dict "ctx" $ctx "root" $root "workerExecutorKubernetes" $kubeExecutor) | fromYamlArray) -}}
+{{- $_ := set $container "env" (include "pr-reviewer.controller.env" (dict "ctx" $ctx "root" $root "workerExecutorKubernetes" $kubeExecutor "sharedVolumesJson" $sharedVolumesJson) | fromYamlArray) -}}
 {{- $_ := set $container "probes" (include "pr-reviewer.controller.probes" $ctx | fromYaml) -}}
 {{- if $kubeExecutor -}}
 {{- /* the Kubernetes executor needs the controller's in-cluster identity

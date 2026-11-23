@@ -194,7 +194,7 @@ export interface KubernetesExecutorProfileSpec {
     readonly requests: KubernetesResourcePair;
     readonly limits: KubernetesResourcePair;
   } | null;
-  readonly volumes: readonly KubernetesVolumeMapping[];
+  readonly volumes: readonly KubernetesVolumeMapping[] | null;
   readonly runtimeClassName?: string;
 }
 
@@ -551,16 +551,16 @@ function rootsConflict(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
-function validateKubernetesVolumeMappings(value: unknown, path: string): readonly KubernetesVolumeMapping[] {
+function validateKubernetesVolumeMappings(value: unknown, path: string, rootField = "controller-root"): readonly KubernetesVolumeMapping[] {
   if (!Array.isArray(value)) fail(path, "must be a list of volume mappings");
   if (value.length < 1) fail(path, "must have at least 1 entry");
   if (value.length > MAX_KUBERNETES_VOLUMES) fail(path, `must have at most ${MAX_KUBERNETES_VOLUMES} entries`);
   const mappings = Object.freeze(value.map((entry, index) => {
     const item = objectAt(entry, `${path}[${index}]`);
-    rejectUnknown(item, ["claim", "controller-root"], path);
+    rejectUnknown(item, ["claim", rootField], path);
     return Object.freeze({
       claim: kubernetesNameAt(item.claim, `${path}[${index}].claim`),
-      controllerRoot: kubernetesMountRootAt(item["controller-root"], `${path}[${index}].controller-root`),
+      controllerRoot: kubernetesMountRootAt(item[rootField], `${path}[${index}].${rootField}`),
     });
   }));
   for (let i = 0; i < mappings.length; i++) {
@@ -622,9 +622,22 @@ function validateKubernetesExecutorSpec(value: unknown, path: string): Kubernete
     serviceAccount: kubernetesNameAt(item["service-account"], `${path}.service-account`),
     ttlSecondsAfterFinished: ttl,
     resources,
-    volumes: validateKubernetesVolumeMappings(item.volumes, `${path}.volumes`),
+    volumes: item.volumes === undefined ? null : validateKubernetesVolumeMappings(item.volumes, `${path}.volumes`),
     ...(runtimeClassName === undefined ? {} : { runtimeClassName }),
   });
+}
+
+export function parseKubernetesSharedVolumes(text: string): readonly KubernetesVolumeMapping[] {
+  if (Buffer.byteLength(text, "utf8") > MAX_INSTANCE_CONFIG_BYTES) {
+    throw new InstanceConfigError(`Kubernetes shared volume mappings exceed the ${MAX_INSTANCE_CONFIG_BYTES}-byte cap`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new InstanceConfigError("Kubernetes shared volume mappings are not valid JSON");
+  }
+  return validateKubernetesVolumeMappings(parsed, "Kubernetes shared volume mappings", "controllerRoot");
 }
 
 export interface KubernetesDeploymentDefaults {
@@ -676,21 +689,31 @@ export function parseKubernetesDeploymentDefaults(text: string): KubernetesDeplo
   return Object.freeze({ image, ttlSecondsAfterFinished, resources });
 }
 
+/** Resolve profile-inherited deployment facts. Explicit profile values win;
+ * image/TTL/resources inherit deployment defaults, while volumes resolve
+ * from the profile, then chart-derived shared mappings, or refuse. */
 export function resolveKubernetesExecutorSpec(
   spec: KubernetesExecutorProfileSpec,
   defaults: KubernetesDeploymentDefaults,
   profileName: string,
+  sharedVolumes: readonly KubernetesVolumeMapping[] | null,
 ): KubernetesExecutorSpec {
   const required = <T>(profileValue: T | null, defaultValue: T | null, field: string): T => {
     if (profileValue !== null) return profileValue;
     if (defaultValue !== null) return defaultValue;
     fail(`executor profile '${profileName}' kubernetes.${field}`, "neither the profile nor the deployment defaults provide it");
   };
+  const volumes = spec.volumes !== null
+    ? spec.volumes
+    : sharedVolumes !== null
+      ? sharedVolumes
+      : fail(`executor profile '${profileName}' kubernetes.volumes`, "neither the profile nor the chart-derived shared volumes provide them");
   return Object.freeze({
     ...spec,
     image: required(spec.image, defaults.image, "image"),
     ttlSecondsAfterFinished: required(spec.ttlSecondsAfterFinished, defaults.ttlSecondsAfterFinished, "ttl-seconds-after-finished"),
     resources: required(spec.resources, defaults.resources, "resources"),
+    volumes,
   });
 }
 

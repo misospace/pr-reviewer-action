@@ -8,6 +8,7 @@ import {
   MAX_INSTANCE_CONFIG_BYTES,
   parseInstanceConfigText,
   parseKubernetesDeploymentDefaults,
+  parseKubernetesSharedVolumes,
   resolveKubernetesExecutorSpec,
   validateInstanceConfig,
   type InstanceConfig,
@@ -425,7 +426,7 @@ test("the kubernetes executor spec's fields are grammar-bounded (#734)", () => {
     ...spec,
     volumes: [{ ...spec.volumes[0], "controller-root": "/" }],
   }), "must not be the filesystem root");
-  broken("volumes-none", (spec) => ({ ...spec, volumes: undefined }), "must be a list of volume mappings");
+  assert.equal(validate({ ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: { ...baseKubernetes(), volumes: undefined } }] }).executorProfiles[0]!.kubernetes!.volumes, null);
 });
 
 test("deployment defaults parse bounded image, TTL, and resources and resolve as explicit profile overrides", () => {
@@ -442,17 +443,17 @@ test("deployment defaults parse bounded image, TTL, and resources and resolve as
   const profile = validate({ ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: {
     namespace: "review-workers", "service-account": "worker", volumes: [{ claim: "data", "controller-root": "/data" }],
   } }] }).executorProfiles[0]!.kubernetes!;
-  const resolved = resolveKubernetesExecutorSpec(profile, defaults, "k8s");
+  const resolved = resolveKubernetesExecutorSpec(profile, defaults, "k8s", null);
   assert.equal(resolved.image, defaults.image);
   assert.equal(resolved.ttlSecondsAfterFinished, 1800);
-  assert.throws(() => resolveKubernetesExecutorSpec(profile, parseKubernetesDeploymentDefaults("{}"), "k8s-jobs"), /executor profile 'k8s-jobs'.*image/);
+  assert.throws(() => resolveKubernetesExecutorSpec(profile, parseKubernetesDeploymentDefaults("{}"), "k8s-jobs", null), /executor profile 'k8s-jobs'.*image/);
   const override = {
     ...profile,
     image: "ghcr.io/acme/override:2",
     ttlSecondsAfterFinished: 2400,
     resources: { requests: { cpu: "1", memory: "1Gi" }, limits: { cpu: "3", memory: "3Gi" } },
   };
-  const resolvedOverride = resolveKubernetesExecutorSpec(override, defaults, "k8s");
+  const resolvedOverride = resolveKubernetesExecutorSpec(override, defaults, "k8s", null);
   assert.equal(resolvedOverride.image, override.image);
   assert.equal(resolvedOverride.ttlSecondsAfterFinished, override.ttlSecondsAfterFinished);
   assert.deepEqual(resolvedOverride.resources, override.resources);
@@ -473,14 +474,37 @@ test("deployment defaults parse bounded image, TTL, and resources and resolve as
       } },
     ],
   }).executorProfiles;
-  const explicitResolved = resolveKubernetesExecutorSpec(independentlyResolved[0]!.kubernetes!, defaults, "explicit");
-  const inheritedResolved = resolveKubernetesExecutorSpec(independentlyResolved[1]!.kubernetes!, defaults, "inherited");
+  const explicitResolved = resolveKubernetesExecutorSpec(independentlyResolved[0]!.kubernetes!, defaults, "explicit", null);
+  const inheritedResolved = resolveKubernetesExecutorSpec(independentlyResolved[1]!.kubernetes!, defaults, "inherited", null);
   assert.equal(explicitResolved.image, "ghcr.io/acme/explicit:1");
   assert.equal(explicitResolved.ttlSecondsAfterFinished, 900);
   assert.deepEqual(explicitResolved.resources?.requests, { cpu: "1", memory: "1Gi" });
   assert.equal(inheritedResolved.image, defaults.image);
   assert.equal(inheritedResolved.ttlSecondsAfterFinished, defaults.ttlSecondsAfterFinished);
   assert.deepEqual(inheritedResolved.resources, defaults.resources);
+});
+
+test("chart-derived shared volumes parse bounded mappings and resolve only when profile volumes are omitted", () => {
+  const defaults = parseKubernetesDeploymentDefaults(JSON.stringify({ image: "ghcr.io/acme/worker:1", ttlSecondsAfterFinished: 1800, resources: { requests: { cpu: "500m", memory: "512Mi" }, limits: { cpu: "2", memory: "2Gi" } } }));
+  const shared = parseKubernetesSharedVolumes(JSON.stringify([
+    { claim: "runs", controllerRoot: "/var/lib/runs" },
+    { claim: "cache", controllerRoot: "/var/lib/cache" },
+  ]));
+  assert.equal(Object.isFrozen(shared), true);
+  assert.equal(Object.isFrozen(shared[0]), true);
+  const omitted = validate({ ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: {
+    namespace: "review-workers", "service-account": "worker",
+  } }] }).executorProfiles[0]!.kubernetes!;
+  assert.equal(omitted.volumes, null);
+  assert.equal(resolveKubernetesExecutorSpec(omitted, defaults, "k8s", shared).volumes, shared);
+  assert.throws(() => resolveKubernetesExecutorSpec(omitted, defaults, "k8s", null), /neither the profile nor the chart-derived shared volumes provide them/);
+  const declared = validate({ ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: {
+    namespace: "review-workers", "service-account": "worker", volumes: [{ claim: "own", "controller-root": "/own" }],
+  } }] }).executorProfiles[0]!.kubernetes!;
+  assert.equal(resolveKubernetesExecutorSpec(declared, defaults, "k8s", shared).volumes, declared.volumes);
+  for (const text of ["not json", "{}", '[{"claim":"runs","controllerRoot":"/runs","extra":true}]', '[{"controllerRoot":"/runs"}]', JSON.stringify(Array.from({ length: 9 }, (_, i) => ({ claim: `c${i}`, controllerRoot: `/r${i}` }))), '[{"claim":"a","controllerRoot":"/data"},{"claim":"b","controllerRoot":"/data/child"}]', '[{"claim":"a","controllerRoot":"/"}]']) {
+    assert.throws(() => parseKubernetesSharedVolumes(text), /Kubernetes shared volume mappings/);
+  }
 });
 
 test("the kubernetes spec's optional runtime-class-name is a DNS-1123 label pin (#1422)", () => {

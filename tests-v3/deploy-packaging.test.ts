@@ -696,6 +696,14 @@ test("worker deployment defaults are chart-owned and emitted only in Kubernetes 
   const emittedKeys = [...dictBody.matchAll(/"([A-Za-z]+)"\s+(?:\(|\$worker\.)/g)].map((m) => m[1]).sort();
   assert.deepEqual(emittedKeys, ["image", "resources", "ttlSecondsAfterFinished"]);
   assert.match(read("src/controller/main.ts"), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS/);
+  assert.match(helpers, /PR_REVIEWER_KUBERNETES_SHARED_VOLUMES/);
+  assert.match(helpers, /"controllerRoot" \$mapping\.controllerRoot/);
+  assert.match(helpers, /"sharedVolumesJson" \$sharedVolumesJson/);
+  assert.match(read("src/controller/main.ts"), /parseKubernetesSharedVolumes\(sharedVolumesText\)/);
+  const example = parse(read("deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml")) as {
+    controller: { instanceConfig: string };
+  };
+  assert.doesNotMatch(example.controller.instanceConfig, /volumes:/, "standard example must inherit chart-derived shared volumes");
 });
 
 test("chart deployment-default JSON matches the runtime grammar, including digest pins", () => {

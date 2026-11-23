@@ -15,20 +15,13 @@ controller:
   # is a trimmed example — the full schema lives in
   # docs/operator-config-and-adoption.md. The kubernetes executor
   # profile's per-profile facts (namespace, service account) match
-  # workerExecutor provisioning; image, resources, and TTL inherit the
-  # chart defaults unless explicitly overridden in the profile. The
-  # volume mappings repeat the chart-derived standard shared storage
-  # (#1767) until #1766 synthesizes the default profile: the executor
-  # mounts each claim at the SAME absolute path in controller and worker
-  # pods, and the chart verifies the root half of every mapping that
-  # names a derived claim at render time, so a relocated
-  # controller.paths root that this repetition did not follow refuses
-  # the render instead of diverging silently. The claim names stay
-  # operator-owned, so re-check them when the release name or an
-  # existingClaim changes (a non-default release name renders claims as
-  # <fullname>-runs / <fullname>-workspace-cache). For release name
-  # `pr-reviewer` the chart-created claims are pr-reviewer-runs and
-  # pr-reviewer-workspace-cache.
+  # workerExecutor provisioning; image, resources, and TTL inherit chart
+  # defaults. The profile omits volumes, so the controller injects the
+  # chart-derived standard shared mappings automatically; each claim is
+  # mounted at the SAME absolute path in controller and worker pods.
+  # Explicit volumes remain the advanced override, and the chart refuses
+  # a declared derived claim mounted anywhere other than its derived
+  # controller.paths root (single source).
   instanceConfig: |-
     version: 1
     unknown-profile-policy: reject
@@ -52,11 +45,6 @@ controller:
           args: []
           namespace: pr-reviewer
           service-account: pr-reviewer-worker
-          volumes:
-            - claim: pr-reviewer-runs
-              controller-root: /var/lib/pr-reviewer/runs
-            - claim: pr-reviewer-workspace-cache
-              controller-root: /var/lib/pr-reviewer/cache
     default-executor-profile: k8s-jobs
     evidence-profiles:
       - name: default

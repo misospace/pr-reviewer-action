@@ -298,6 +298,18 @@ jobs:
           fi
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-runs'
           awk '/^kind: Deployment$/,0' /var/tmp/render-kubernetes-executor.yaml | grep -q 'claimName: pr-reviewer-workspace-cache'
+          # #1767: chart-derived {claim,controllerRoot} mappings reach the controller;
+          # the example profile omits raw volumes, so runtime inheritance owns them.
+          grep -A1 -- '- name: PR_REVIEWER_KUBERNETES_SHARED_VOLUMES' /var/tmp/render-kubernetes-executor.yaml \
+            | grep -q 'value:.*pr-reviewer-runs.*controllerRoot.*\/var\/lib\/pr-reviewer\/runs.*pr-reviewer-workspace-cache'
+          if grep -q 'controllerRoot.*durable-state' /var/tmp/render-kubernetes-executor.yaml; then
+            echo "durable-state must not be exposed as worker shared volume" >&2
+            exit 1
+          fi
+          if grep -q 'volumes:' deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml; then
+            echo "standard Kubernetes example must inherit shared volumes, not declare them" >&2
+            exit 1
+          fi
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
             --namespace pr-reviewer \

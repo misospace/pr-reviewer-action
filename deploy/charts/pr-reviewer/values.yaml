@@ -250,7 +250,9 @@ workerExecutor:
       memory: 2Gi
   ttlSecondsAfterFinished: 1800
   # Additional, non-standard PVCs for worker Jobs. The standard shared
-  # runs and workspace-cache claims derive from controller.persistence.
+  # runs and workspace-cache claims derive from controller.persistence;
+  # Kubernetes mode passes their claim/root mappings to the controller for
+  # profiles without explicit volumes to inherit.
   volumeClaims: []
 
 # ── network policy ─────────────────────────────────────────────────────

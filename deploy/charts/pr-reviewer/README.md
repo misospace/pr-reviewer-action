@@ -146,9 +146,9 @@ The chart derives everything else from those two entries:
 - The controller mounts each claim at the root `controller.paths` names
   (`runsRoot`, `workspaceCacheRoot`). The chart derives the standard
   `globalMounts` from those paths, so a relocation changes one value on
-  the chart side. The inline instance config's repeated mappings must
-  follow the relocation, and the render-time verification below refuses
-  when they have not.
+  the chart side. In Kubernetes mode the chart passes the derived mappings
+  to the controller; a profile without explicit `volumes` inherits them
+  automatically. Declared volumes remain an advanced override.
 - Each claim is either operator-provided (`existingClaim: <name>`) or
   chart-created. A chart-created claim renders under the name the common
   library's own rules derive for its persistence entry — an operator-set
@@ -172,16 +172,12 @@ The chart derives everything else from those two entries:
   naming from the chart's own mirror, which ignores the global
   overrides.
 - The template `pr-reviewer.shared-volume-mappings` exposes the derived
-  `{claim, controllerRoot}` pairs. #1766 will consume it to synthesize the
-  default Kubernetes executor profile, so the worker Jobs receive the
-  matching mappings without a second declaration. Until then, a raw
-  instance config repeats them by hand, as the example shows. With
-  `workerExecutor.mode: kubernetes` and an inline instance config, the
-  chart verifies the repetition's ROOT half for the default executor
-  profile: every volume mapping that names a derived standard claim must
-  mount it at the derived `controller.paths` root, and a divergent root
-  (after a relocation that the repetition did not follow) refuses the
-  render. Profiles other than the one `default-executor-profile` names
+  `{claim, controllerRoot}` pairs and passes them to the controller in
+  Kubernetes mode. A standard worker profile may omit `volumes`; the
+  controller injects these mappings automatically. Explicitly declared
+  volumes remain supported as the advanced posture, but a derived claim
+  must mount at its derived `controller.paths` root or the render refuses.
+  Profiles other than the one `default-executor-profile` names
   keep raw advanced mappings supported unchecked; a declared default is
   trusted only when it names a kubernetes profile — otherwise the check
   falls back to every kubernetes profile, and without a declared default
