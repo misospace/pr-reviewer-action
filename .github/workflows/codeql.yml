@@ -63,9 +63,20 @@ jobs:
           # `default`, not `security-and-quality`, and #621's acceptance
           # requires the full security-and-quality pack.
           queries: security-and-quality
-          # The analysis-level exclusion for the repository's one by-design
-          # file-data-to-request flow, with its justification:
-          # .github/codeql-config.yml
-          config-file: ./.github/codeql-config.yml
+          # NO analysis-level query exclusion. The `js/file-access-to-http`
+          # query ("File data in outbound network request") fires on ONE flow
+          # in this repository: the in-cluster Kubernetes API client
+          # (`src/executor/kubernetes-api.ts`) sends the pod's own projected
+          # service-account token and CA bundle to the kubelet-projected
+          # cluster API endpoint. That flow IS the #734 product contract —
+          # the endpoint is the cluster's own API and the files are the pod's
+          # own projected material — and it is justified in source, directly
+          # above both request sinks, with a tagged `codeql[...]` comment.
+          #
+          # Its alerts are dispositioned AT THE ALERT LEVEL (dismissed as
+          # false positives, as on `main`), never by switching the query off
+          # for the whole repository: an analysis-level exclusion would
+          # silence every file-data-to-request flow introduced anywhere else
+          # in the runtime, not just this one (#1773 review).
 
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

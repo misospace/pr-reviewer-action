@@ -54,10 +54,10 @@ import { isIP } from "node:net";
 type HttpsRequestOptions = RequestOptions & { ca?: Buffer; servername?: string };
 
 /** The request factory seam (#1773 review): production always uses the
- * named `httpsRequest`/`httpRequest` imports — the call form whose
- * `js/file-access-to-http` justification is pinned — while a test may
- * inject a capture-only double to assert the exact options object the
- * transport would send, without opening any socket. */
+ * named `httpsRequest`/`httpRequest` imports — the call forms the pinned
+ * in-source justifications sit directly above — while a test may inject a
+ * capture-only double to assert the exact options object the transport would
+ * send, without opening any socket. */
 export type ApiTransport = (options: HttpsRequestOptions) => ClientRequest;
 
 import type {
@@ -290,16 +290,15 @@ export function apiRequest(
     // FOLLOWS such a comment, so the sink belongs on that line and its
     // justification belongs on the line above it.
     //
-    // The tagged comments are the in-source justification for this flow,
-    // but they are NOT what silences the finding: CodeQL honors an
-    // in-source suppression comment only when the analysis also runs the
-    // language's alert-suppression query, and no standard query suite runs
-    // it — the `security-and-quality` suite this repository selects does
-    // not (verified against the CodeQL CLI the action resolves to: the
-    // suite's query list holds no alert-suppression query, and that same
-    // suite over this file still reports the finding with the comments in
-    // place). The analysis-level exclusion that actually silences it is
-    // `.github/codeql-config.yml`.
+    // The tagged comments are the in-source justification for this flow and
+    // they travel with the alert it raises. The alert is a TRUE positive
+    // about a BY-DESIGN flow, so it is dispositioned at the alert level
+    // (dismissed as a false positive, exactly as on `main`): the analysis
+    // keeps `js/file-access-to-http` enabled for every other file, so a
+    // file-data-to-request flow introduced elsewhere in the runtime is
+    // still reported. The alert is NOT silenced by an analysis-level query
+    // exclusion — see `.github/workflows/codeql.yml`.
+    //
     // Runtime option capture is a test-only seam (the `transport`
     // parameter), never a rewrite of the analyzed call form.
     let request: ClientRequest;

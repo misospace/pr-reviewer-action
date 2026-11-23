@@ -2729,14 +2729,13 @@ test("a recovered cancellation in an unlistable cluster fails closed when no wor
   rmSync(second.root, { recursive: true, force: true });
 });
 
-test("the file-access suppressions sit directly above their own request statements", () => {
+test("the file-access justifications sit directly above their own request statements", () => {
   // CodeQL only recognizes a `codeql[...]` comment that starts its line, and
   // it covers exactly the FOLLOWING line; a trailing comment suppresses
-  // nothing. An exact-head analyzer run also showed the sink FORM matters:
-  // `https.request(...)` property access is modeled as
-  // `js/file-access-to-http` where the aliased named imports are not. Pin
-  // the named-import call form and the standalone-statement placement, so
-  // the in-source justification cannot silently decay (#1773 review).
+  // nothing. The two sinks keep the aliased named-import call form and each
+  // sink statement sits on a line of its own, directly below its own tagged
+  // justification, so the in-source justification of the by-design #734 flow
+  // cannot silently decay (#1773 review).
   const source = readFileSync("src/executor/kubernetes-api.ts", "utf8");
   assert.doesNotMatch(source, /https\.request\(/, "the analyzed sink must stay in the aliased named-import form");
   const lines = source.split("\n");
@@ -2758,26 +2757,35 @@ test("the file-access suppressions sit directly above their own request statemen
   }
 });
 
-test("the CodeQL analysis excludes the one by-design file-data-to-request flow", () => {
-  // The in-source tagged comment above each sink silences the finding only
-  // when the analysis also runs CodeQL's alert-suppression query, and no
-  // standard suite runs it — so the analysis-level exclusion is what
-  // actually stops the finding. Pin the exclusion AND its wiring, so
-  // neither can disappear or widen silently.
-  const config = readFileSync(".github/codeql-config.yml", "utf8");
-  assert.match(config, /query-filters:/, "the exclusion must be a query filter, not a whole-file exclusion");
-  const excluded = [...config.matchAll(/^\s*id:\s*(\S+)\s*$/gm)].map((match) => match[1]);
-  assert.deepEqual(
-    excluded,
-    ["js/file-access-to-http"],
-    "the analysis-level exclusion must stay scoped to the one by-design flow",
-  );
+test("the analysis keeps js/file-access-to-http enabled for the whole repository", () => {
+  // The in-cluster executor's projected-file-to-request flow is BY-DESIGN
+  // (#734): the endpoint is the cluster's own API and the files are the
+  // pod's own projected material, so its alerts are dispositioned AT THE
+  // ALERT LEVEL (dismissed as false positives, as on `main`). The analysis
+  // must therefore never exclude the query: an analysis-level exclusion
+  // would silence every file-data-to-request flow introduced anywhere else
+  // in the runtime, not just this one (#1773 review).
   const workflow = readFileSync(".github/workflows/codeql.yml", "utf8");
-  assert.match(
+  const configRefs = [...workflow.matchAll(/config-file:\s*(\S+)/g)]
+    .map((match) => match[1])
+    .filter((ref): ref is string => ref !== undefined);
+  const sources = [
     workflow,
-    /config-file: \.\/\.github\/codeql-config\.yml/,
-    "the CodeQL workflow must pass the exclusion config to the init step",
-  );
+    ...configRefs.map((ref) => readFileSync(ref.replace(/^\.\//, ""), "utf8")),
+  ];
+  for (const source of sources) {
+    const excludedIds: string[] = [];
+    for (const block of source.split(/-\s*exclude:/).slice(1)) {
+      for (const match of block.matchAll(/^\s*id:\s*(\S+)/gm)) {
+        if (match[1] !== undefined) excludedIds.push(match[1]);
+      }
+    }
+    assert.deepEqual(
+      excludedIds.filter((id) => id === "js/file-access-to-http"),
+      [],
+      "the analysis must not exclude js/file-access-to-http repo-wide: the by-design #734 flow is dispositioned at the alert level",
+    );
+  }
 });
 
 test("the API TLS identity rule is operator-facing (#1773)", () => {
