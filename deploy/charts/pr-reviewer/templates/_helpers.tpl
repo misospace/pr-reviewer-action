@@ -99,18 +99,52 @@ ready to become a render context's `.Values` for the common library.
 {{- $values | toYaml -}}
 {{- end -}}
 
-{{/*
-The controller container's environment: the complete mapping of chart
+{{/* Build the worker image from the chart-owned repository, release tag,
+with an optional exact-byte digest pin. */}}
+{{- define "pr-reviewer.worker-deployment-image" -}}
+{{- $worker := .Values.workerExecutor -}}
+{{- $repository := dig "image" "repository" "" $worker -}}
+{{- if empty $repository -}}
+{{- fail "workerExecutor.image.repository is required for Kubernetes mode (defaults to the chart's worker repository)" -}}
+{{- end -}}
+{{- $tag := dig "image" "tag" "" $worker | default .Chart.AppVersion -}}
+{{- $digest := dig "image" "digest" "" $worker -}}
+{{- if not (kindIs "string" $digest) -}}
+{{- fail "workerExecutor.image.digest must match sha256:<64 lowercase hex characters>" -}}
+{{- end -}}
+{{- if and (ne $digest "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $digest)) -}}
+{{- fail "workerExecutor.image.digest must match sha256:<64 lowercase hex characters>" -}}
+{{- end -}}
+{{- if ne $digest "" -}}
+{{- printf "%s:%s@%s" $repository $tag $digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repository $tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Serialize exactly the deployment-defaults grammar consumed by the runtime. */}}
+{{- define "pr-reviewer.worker-deployment-defaults" -}}
+{{- $worker := .Values.workerExecutor -}}
+{{- dict "image" (include "pr-reviewer.worker-deployment-image" .) "ttlSecondsAfterFinished" $worker.ttlSecondsAfterFinished "resources" $worker.resources | toJson -}}
+{{- end -}}
+
+{{/* The controller container's environment: the complete mapping of chart
 values onto the fail-closed env contract in src/controller/main.ts.
-Conditional variables are genuinely ABSENT when their feature is off —
-an empty `PR_REVIEWER_ADMIN_PORT` would be a startup refusal, not a
-skip. Secret material always travels through secretKeyRef, never inline.
-*/}}
+Signature: dict "ctx" <component context> "root" <chart root>
+"workerExecutorKubernetes" <bool>. Conditional variables are genuinely
+ABSENT when their feature is off. Secret material uses secretKeyRef. */}}
 {{- define "pr-reviewer.controller.env" -}}
-{{- $v := .Values -}}
-{{- $fullname := include "pr-reviewer.fullname" . -}}
+{{- $ctx := index . "ctx" -}}
+{{- $root := index . "root" -}}
+{{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
+{{- $v := $ctx.Values -}}
+{{- $fullname := include "pr-reviewer.fullname" $ctx -}}
 - name: PR_REVIEWER_INSTANCE_CONFIG
   value: /config/instance-config.yaml
+{{- if $kubeExecutor }}
+- name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS
+  value: {{ include "pr-reviewer.worker-deployment-defaults" $root | quote }}
+{{- end }}
 - name: PR_REVIEWER_CONTROL_PLANE_URL
   valueFrom:
     secretKeyRef:
@@ -274,10 +308,12 @@ readiness:
 Validate the controller wiring fail-closed at render time and inject the
 template-conditional pieces (env, probes, rendered Secrets, persistence)
 into the component values before the common library renders. Signature:
-dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
+dict "ctx" <component context> "root" <chart root>
+"workerExecutorKubernetes" <bool>.
 */}}
 {{- define "pr-reviewer.controller.configure" -}}
 {{- $ctx := index . "ctx" -}}
+{{- $root := index . "root" -}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $v := $ctx.Values -}}
 {{- $fullname := include "pr-reviewer.fullname" $ctx -}}
@@ -404,7 +440,7 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- $controllers := deepCopy ($v.controllers | default dict) -}}
 {{- $main := index $controllers "main" -}}
 {{- $container := index (index $main "containers") "main" -}}
-{{- $_ := set $container "env" (include "pr-reviewer.controller.env" $ctx | fromYamlArray) -}}
+{{- $_ := set $container "env" (include "pr-reviewer.controller.env" (dict "ctx" $ctx "root" $root "workerExecutorKubernetes" $kubeExecutor) | fromYamlArray) -}}
 {{- $_ := set $container "probes" (include "pr-reviewer.controller.probes" $ctx | fromYaml) -}}
 {{- if $kubeExecutor -}}
 {{- /* the Kubernetes executor needs the controller's in-cluster identity

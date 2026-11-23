@@ -77,7 +77,7 @@ import { randomUUID } from "node:crypto";
 
 import type { CanonicalForgeEvent } from "../events/types.js";
 import { decideAdoption } from "../config/adoption.js";
-import type { InstanceConfig } from "../config/instance-config.js";
+import type { ForgeIntegration, InstanceConfig } from "../config/instance-config.js";
 import { forgeFamily } from "../config/instance-config.js";
 import {
   StateConflictError,
@@ -87,7 +87,9 @@ import {
   type StateMutation,
 } from "../state/index.js";
 import {
+  isOperatorCancellation,
   JsonFileQueueStore,
+  OPERATOR_CANCELLATION_REASON,
   ReviewQueueController,
   type ExecutionOutcome,
   type JobExecutor,
@@ -154,6 +156,26 @@ export interface ControllerForgeCapability {
   mirrorFor(job: ReviewJob): Promise<MirrorCache>;
   /** Current PR head on the forge, for the exact-head publication gate. */
   currentHeadSha(job: ReviewJob): Promise<string | null>;
+  /** The PR's current identity, read through the platform capability
+   *  (#1772): the head sha, the numeric PR id, the base sha, and the
+   *  fork derivation. `null` when the forge reports no usable PR.
+   *
+   *  The `installationId` is the installation the read AUTHENTICATES as
+   *  (the App installation a GitHub deployment serves): a private
+   *  repository's pull request is invisible to an unauthenticated read,
+   *  so the forced rereview would never see the head it must review. The
+   *  daemon passes the installation its minted job carries, so the read
+   *  and the generation agree on ONE installation. */
+  readPrIdentity(input: {
+    readonly repoFullName: string;
+    readonly prNumber: number;
+    readonly installationId: string;
+  }): Promise<{
+    readonly headSha: string;
+    readonly prId: number;
+    readonly baseSha: string;
+    readonly fork: boolean;
+  } | null>;
   /** The durable-result forge write (platform capability, never a CLI). */
   publish(input: { readonly job: ReviewJob; readonly resultPayload: string }): Promise<{
     readonly publicationId: string;
@@ -295,6 +317,7 @@ export interface ControllerDaemonOptions {
   readonly resolveEventIdentity?: EventIdentityResolver;
   /** Executor construction overrides (see `ExecutorBindings`). */
   readonly executors?: ExecutorBindings;
+  readonly kubernetesDeploymentDefaults?: import("../config/instance-config.js").KubernetesDeploymentDefaults;
   /** The instance-config forge integration `name` this daemon instance
    * serves (#1440). Infrastructure bound by the operator; never
    * repository- or event-supplied. When bound, every job this daemon's
@@ -408,6 +431,22 @@ export interface ControllerDaemon {
    * releases the durable reservation BEFORE the failure propagates, so
    * the head is re-discovered instead of staying suppressed. */
   enqueue(job: ReviewJob): Promise<void>;
+  /** Force a review generation for one pull request (#1772): the forge
+   *  read of the PR's current identity, the adoption gate, the identity
+   *  resolution, the dispatch reservation, and the queue handoff — the
+   *  SAME path the intake takes — with a FRESH NONCE, so the forced
+   *  generation is never deduped against the head's previous generation. */
+  forceRereview(input: { readonly repoFullName: string; readonly prNumber: number }): Promise<
+    | { readonly status: "scheduled"; readonly jobId: string }
+    | { readonly status: "refused"; readonly reason: string }
+  >;
+  /** Cancel one run's generation (#1772): the queue owns the
+   *  cancellation; the control plane owns the run record. */
+  cancelRun(runId: string): Promise<
+    | { readonly status: "cancelled" }
+    | { readonly status: "refused"; readonly reason: string }
+    | { readonly status: "publish-undetermined"; readonly reason: string }
+  >;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
   /** The operator host when `webhook` was configured. */
@@ -756,7 +795,7 @@ async function reconcileRunRecords(runtime: DaemonRuntime): Promise<void> {
     // once the queue retires the record, the run must follow it.
     const runId = executionRunId(record.job.jobId, record.attempt);
     if (runtime.settledRuns.has(runId)) continue;
-    const target = retiredRunState(record.state);
+    const target = retiredRunState(record);
     if (target === null) continue; // still in flight
     await mirrorRunTransition(runtime.store, runId, target.state, {
       nowMs: runtime.now(),
@@ -769,16 +808,26 @@ async function reconcileRunRecords(runtime: DaemonRuntime): Promise<void> {
 /** The terminal run state a retired queue record implies, or `null` when
  * the record is still in flight. A requeued record (`queued` with an
  * attempt already spent) means the attempt was abandoned: its worker
- * lease died and the queue handed the generation to a new attempt. */
-function retiredRunState(state: JobRecord["state"]):
+ * lease died and the queue handed the generation to a new attempt.
+ *
+ * The record — not just its state — is the input, because the
+ * ATTRIBUTION depends on how the record ended (#1772): an operator's
+ * cancellation is reported as such, never as a supersession or a
+ * shutdown, whichever mirror reaches the run first. */
+function retiredRunState(record: JobRecord):
   | {
       readonly state: "completed" | "failed" | "cancelled" | "superseded";
       readonly patch?: RunTransitionPatch;
     }
   | null {
+  const state = record.state;
   if (state === "completed") return { state: "completed" };
   if (state === "failed") return { state: "failed", patch: { failureReason: "attempt-failed" } };
-  if (state === "cancelled") return { state: "cancelled", patch: { failureReason: "attempt-cancelled" } };
+  if (state === "cancelled") {
+    return isOperatorCancellation(record)
+      ? { state: "cancelled", patch: { failureReason: OPERATOR_CANCELLATION_REASON } }
+      : { state: "cancelled", patch: { failureReason: "attempt-cancelled" } };
+  }
   if (state === "superseded") {
     return { state: "superseded", patch: { failureReason: "superseded-by-newer-head" } };
   }
@@ -846,7 +895,13 @@ function errorMessage(err: unknown): string {
  *   `failed`);
  * - a failure of a SUPERSEDED generation is retired as `superseded`,
  *   not as a plain failure;
- * - a cancellation is `cancelled`, with the queue's own reason. */
+ * - a cancellation is `cancelled`, with the queue's own reason — and an
+ *   OPERATOR's cancellation says so (#1772): the admin surface must
+ *   never show a supersession or a shutdown where the operator
+ *   stopped the run. The operator's cancellation outranks the attempt's
+ *   own outcome, exactly as it does in the queue's settle path: the run
+ *   settles `cancelled` even when the worker reported a failure, so the
+ *   two records never disagree about the same attempt. */
 async function settleRunForOutcome(
   runtime: DaemonRuntime,
   record: JobRecord,
@@ -861,6 +916,13 @@ async function settleRunForOutcome(
   const current = runtime.controller.recordFor(record.job.jobId);
   const supersededByJobId =
     current !== null && current.cancelRequested ? current.supersededByJobId : "";
+  if (current !== null && isOperatorCancellation(current)) {
+    await mirrorRunTransition(runtime.store, request.runId, "cancelled", {
+      nowMs,
+      patch: { failureReason: OPERATOR_CANCELLATION_REASON },
+    });
+    return;
+  }
   if (outcome.status === "completed") {
     await mirrorRunTransition(runtime.store, request.runId, "publishing", { nowMs });
     return;
@@ -1117,6 +1179,41 @@ function canonicalIntakeRoute(options: ControllerDaemonOptions): string {
   return ingressWebhookPath(platform);
 }
 
+/** The CANONICAL forge platform this daemon serves (#1772).
+ *
+ * The daemon serves ONE platform: the BOUND integration's kind when the
+ * operator bound one, else the kind of the configured integration(s).
+ * The kind is mapped to its canonical FAMILY (`forgeFamily` — a `gitea`
+ * instance serves the `forgejo` family), because the canonical event
+ * carries a family, never an identity.
+ *
+ * `null` when the platform cannot be determined UNAMBIGUOUSLY: several
+ * integrations of different families, no integration at all, or a family
+ * this daemon cannot serve (`gitlab` — its capability composition has
+ * not landed, #1677). An ambiguous platform is never guessed: a forced
+ * rereview minted under the wrong family would schedule a generation
+ * that no intake of this daemon could ever converge with. */
+function servedPlatform(options: ControllerDaemonOptions): "github" | "forgejo" | null {
+  let kind: ForgeIntegration["kind"] | null = null;
+  if (options.forgeIntegration !== undefined) {
+    const named = options.instance.forges.filter(
+      (entry) => entry.name === options.forgeIntegration,
+    );
+    if (named.length !== 1) return null;
+    kind = named[0]!.kind;
+  } else {
+    const families = new Set(
+      options.instance.forges.map((entry) => forgeFamily(entry.kind)),
+    );
+    if (families.size !== 1) return null;
+    kind = options.instance.forges[0]!.kind;
+  }
+  const family = forgeFamily(kind);
+  if (family === "github") return "github";
+  if (family === "forgejo") return "forgejo";
+  return null;
+}
+
 /** Start the controller daemon. Fails closed: every option is validated
  * before anything binds, migrations run before work is accepted, and
  * queue/state recovery happens before the first tick. */
@@ -1135,9 +1232,12 @@ export async function startControllerDaemon(
   if (
     typeof options.forge?.mirrorFor !== "function" ||
     typeof options.forge?.currentHeadSha !== "function" ||
+    typeof options.forge?.readPrIdentity !== "function" ||
     typeof options.forge?.publish !== "function"
   ) {
-    throw new TypeError("ControllerDaemonOptions.forge must provide mirrorFor, currentHeadSha and publish");
+    throw new TypeError(
+      "ControllerDaemonOptions.forge must provide mirrorFor, currentHeadSha, readPrIdentity and publish",
+    );
   }
   if (typeof options.resolveProfiles !== "function" || typeof options.credentialRefs !== "function") {
     throw new TypeError("ControllerDaemonOptions.resolveProfiles and credentialRefs are required");
@@ -1330,6 +1430,9 @@ export async function startControllerDaemon(
   //    executor, and the durable publication path.
   const selector = createExecutorSelector({
     instance: options.instance,
+    ...(options.kubernetesDeploymentDefaults !== undefined
+      ? { kubernetesDeploymentDefaults: options.kubernetesDeploymentDefaults }
+      : {}),
     ...(options.executors?.kubernetes !== undefined
       ? { kubernetes: options.executors.kubernetes }
       : {}),
@@ -1908,6 +2011,135 @@ export async function startControllerDaemon(
       // The identity guard runs BEFORE any queue mutation, and a refusal
       // releases the durable reservation before the failure propagates.
       await handOffGeneration(job);
+    },
+    async forceRereview(input) {
+      // A closed intake dispatches nothing: a forced rereview minted now
+      // would sit in the queue forever.
+      if (stopped) {
+        return { status: "refused", reason: "the controller intake is closed" };
+      }
+      const platform = servedPlatform(options);
+      if (platform === null) {
+        return { status: "refused", reason: "this daemon serves no unambiguous forge platform" };
+      }
+      // The installation the read authenticates as AND the minted job
+      // carries — ONE identity for both, so the generation and the read
+      // never disagree about which installation they belong to.
+      const installationId = options.githubInstallationId ?? "";
+      if (platform === "github" && installationId === "") {
+        // A GitHub deployment without a configured App installation has
+        // NO credential to read with: an unauthenticated read cannot see
+        // a private repository's pull request, so the forced rereview
+        // would refuse on exactly the repositories that matter. Fail
+        // closed with a bounded reason instead of reading anonymously.
+        return { status: "refused", reason: "this daemon has no configured GitHub App installation" };
+      }
+      // The forge read is the operator's own capability seam: a failed or
+      // empty read is a refusal with a bounded reason, never a crash and
+      // never a guess about the head.
+      let identity: Awaited<ReturnType<ControllerForgeCapability["readPrIdentity"]>>;
+      try {
+        identity = await options.forge.readPrIdentity({
+          repoFullName: input.repoFullName,
+          prNumber: input.prNumber,
+          installationId,
+        });
+      } catch {
+        return { status: "refused", reason: "the pull request could not be read from the forge" };
+      }
+      if (identity === null) {
+        return { status: "refused", reason: "the pull request could not be read from the forge" };
+      }
+      if (typeof identity.headSha !== "string" || identity.headSha === "") {
+        return { status: "refused", reason: "the pull request head could not be resolved" };
+      }
+      if (
+        !Number.isSafeInteger(identity.prId) ||
+        identity.prId < 0 ||
+        typeof identity.baseSha !== "string" ||
+        typeof identity.fork !== "boolean"
+      ) {
+        return { status: "refused", reason: "the pull request identity could not be resolved" };
+      }
+      // The canonical event the intake would have produced for this head.
+      // `manual` is the canonical manual source and `rereview_label` the
+      // canonical re-review kind, so the forced generation is scheduled
+      // by exactly the same policy every other generation is.
+      const forced: CanonicalForgeEvent = {
+        platform,
+        source: "manual",
+        kind: "rereview_label",
+        installationId,
+        repoFullName: input.repoFullName,
+        prNumber: input.prNumber,
+        prId: identity.prId,
+        headSha: identity.headSha,
+        baseSha: identity.baseSha,
+        draft: false,
+        fork: identity.fork,
+        labelName: "",
+        actor: "",
+        eventReference: "",
+      };
+      // The SAME adoption gate the intake applies: a repository the
+      // policy did not grant never schedules — not for an operator's
+      // button either.
+      const buildOptions = await resolveIntakeBuildOptions(forced);
+      if (buildOptions === null) {
+        return { status: "refused", reason: "the repository is not adopted for review" };
+      }
+      const dispatched = await dispatchCanonicalEvent(forced, {
+        ledger,
+        // A FRESH nonce: the operator asked for a NEW review of this
+        // head, so the forced generation must never dedupe against the
+        // head's previous generation.
+        buildOptions: { ...buildOptions, nonce: randomUUID() },
+      });
+      if (dispatched.status === "ignored") {
+        return { status: "refused", reason: "the forced rereview does not schedule a review generation" };
+      }
+      if (dispatched.status === "duplicate") {
+        // Defensive: a fresh nonce makes this practically impossible.
+        return { status: "refused", reason: "the forced rereview was already scheduled" };
+      }
+      // The daemon's own queue handoff: a refused handoff releases the
+      // durable reservation before the failure propagates (the dispatch
+      // contract), so the head is re-discoverable instead of staying
+      // suppressed.
+      await enqueueGeneration(dispatched.job);
+      return { status: "scheduled", jobId: dispatched.job.jobId };
+    },
+    async cancelRun(runId) {
+      const run = await runtime.store.getRun(runId);
+      if (run === null) {
+        return { status: "refused", reason: "no run with that id" };
+      }
+      const record = runtime.controller.recordFor(run.jobId);
+      if (record === null) {
+        return { status: "refused", reason: "the run has no queued generation" };
+      }
+      // The queue owns the cancellation: it aborts the live attempt and
+      // settles the record with the operator's attribution.
+      const outcome = runtime.controller.cancel(run.jobId);
+      if (outcome === "cancelled" || outcome === "cancel-requested") {
+        return { status: "cancelled" };
+      }
+      if (outcome === "publish-undetermined") {
+        // The publication attempt was FIRED and its outcome is not
+        // determined here: the operator's cancellation is REGISTERED,
+        // but the forge side effect may already have landed and it
+        // cannot be undone, so the terminal state is the publication's
+        // outcome and the caller must not report an applied
+        // cancellation (#1772).
+        return {
+          status: "publish-undetermined",
+          reason: "the publication was already attempted and its outcome is not determined here: a publication that already succeeded cannot be undone",
+        };
+      }
+      if (outcome === "terminal") {
+        return { status: "refused", reason: "the run already settled" };
+      }
+      return { status: "refused", reason: "the run has no queued generation" };
     },
     async stop() {
       if (stopped) return;

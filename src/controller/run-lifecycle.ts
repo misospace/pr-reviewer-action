@@ -90,13 +90,11 @@ export async function mirrorRunTransition(
 /** A bounded, single-line terminal reason for a run record: the control
  * plane's own validator refuses a reason that carries control characters,
  * exceeds its bound, or is untrimmed — so an executor-supplied message is
- * sanitized here, never trusted verbatim. */
-export function runFailureReason(raw: string, fallback: string): string {
-  const singleLine = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (singleLine === "") return fallback;
-  if (singleLine.length <= 256) return singleLine;
-  return `${singleLine.slice(0, 255)}…`;
-}
+ * sanitized here, never trusted verbatim. The rule lives with the queue's
+ * terminal-reason contract (`src/queue/types.ts`), which the queue
+ * scheduler's own settle path applies to its `JobRecord` as well (#1786);
+ * this module re-exports it as the control-plane name for it. */
+export { runFailureReason, FAILURE_REASON_MAX_CHARS } from "../queue/types.js";
 
 /** The identity of one attempt's run record. */
 export interface RunAttemptIdentity {

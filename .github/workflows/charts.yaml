@@ -49,6 +49,10 @@ jobs:
           grep -q -- "- ALL" /var/tmp/render-controller-only.yaml
           grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
+          if grep -q 'name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS' /var/tmp/render-controller-only.yaml; then
+            echo "Kubernetes deployment defaults must be absent outside Kubernetes mode" >&2
+            exit 1
+          fi
           # #1712: controller-only mode keeps the default-deny token posture
           # on the controller Deployment itself.
           if awk '/^kind: Deployment$/,0' /var/tmp/render-controller-only.yaml | grep -q "automountServiceAccountToken: true"; then
@@ -237,6 +241,22 @@ jobs:
           helm template pr-reviewer deploy/charts/pr-reviewer \
             -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
             > /var/tmp/render-kubernetes-executor.yaml
+          # Chart-owned worker deployment defaults: image follows the
+          # release coordinate, and the bounded JSON reaches controller startup.
+          app_version="$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}' deploy/charts/pr-reviewer/Chart.yaml)"
+          grep -q 'name: PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version" /var/tmp/render-kubernetes-executor.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-string workerExecutor.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            > /var/tmp/render-kubernetes-executor-digest.yaml
+          grep -q "ghcr.io/misospace/pr-reviewer-worker:$app_version@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" /var/tmp/render-kubernetes-executor-digest.yaml
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-string workerExecutor.image.digest=sha256:INVALID >/dev/null 2>&1; then
+            echo "invalid worker image digest must fail chart rendering" >&2
+            exit 1
+          fi
           # Worker-executor provisioning: namespace-scoped RBAC over jobs
           # ONLY (no cluster roles), the worker SA, and the shared claims.
           grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml

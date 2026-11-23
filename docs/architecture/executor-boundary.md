@@ -735,7 +735,12 @@ extension the #727 module reserved for #733/#734:
 |---|---|---|
 | `local` | `local: { command, args }` | required; argv elements bounded, NUL-free, metacharacter-free |
 | `oci` | `oci: { image }` | required; image-reference grammar |
-| `kubernetes` | `kubernetes: { image, args, namespace, service-account, ttl-seconds-after-finished, resources, volumes, runtime-class-name? }` | required; image-reference grammar, DNS-1123 names, bounded TTL, REQUIRED requests+limits, and 1..8 PVC volume mappings (`claim` mounted at `controller-root` on both sides) — the ONLY shared-storage surface; there is no field for a PodSpec fragment, hostPath, nodeSelector, toleration, or any raw Kubernetes object |
+| `kubernetes` | `kubernetes: { image?, args, namespace, service-account, ttl-seconds-after-finished?, resources?, volumes, runtime-class-name? }` | required; image, TTL, and resource values resolve profile override > trusted deployment defaults, then fail closed if absent; supplied values use image-reference grammar, bounded TTL, required requests+limits, and 1..8 PVC volume mappings (`claim` mounted at `controller-root` on both sides) — the ONLY shared-storage surface; there is no field for a PodSpec fragment, hostPath, nodeSelector, toleration, or any raw Kubernetes object |
+
+For Kubernetes deployment facts, the profile is the explicit override layer;
+chart/host-provided defaults are parsed separately and never become repository
+configuration. Startup validates every Kubernetes profile against those
+defaults, and dispatch resolves again before constructing the executor.
 
 Profiles remain **names, not infrastructure**: the spec is operator-owned
 configuration inside the trusted instance config; repository config still

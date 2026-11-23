@@ -120,8 +120,97 @@ data route stays bearer-protected (see
   admin layer validates the `prKey` shape (fail closed), audits, and
   reports the new `jobId` (`202`). A refused effect is `409`.
 - **Cancel only targets a live run:** unknown run → `404`, terminal run
-  → `409` (also the idempotent second-cancel outcome), active run →
-  `202`. The effect seam may still refuse; refusals are `409` too.
+  → `409` (also the idempotent second-cancel outcome), an active run →
+  `200 { "cancelled": true }`. The effect seam applied the cancellation
+  before the route answered (the queue stamped the generation and aborted
+  its attempt), so the route ACKNOWLEDGES the cancellation instead of
+  promising it; the durable run settles `cancelled` when the attempt
+  observes the abort. The effect seam may still refuse; refusals are `409` too.
+  If a newer head had already stamped the live generation (supersession
+  requested its abort but it had not settled yet), the operator's click
+  CONVERTS the record to the operator attribution — clearing the pending
+  superseder — so the acknowledgement and the durable settlement always
+  agree: the generation ends `cancelled` / `cancelled-by-operator`, never
+  supersession-shaped. The newer generation still runs; the conversion
+  only says why THIS generation ended.
+- **`200 { "cancelled": true }` is the ONLY answer that promises an
+  operator-cancelled run** (#1772). Every settle path behind it ends
+  `cancelled-by-operator`: a queued generation settles at once, an
+  attempt settles when it observes the abort, and a generation whose
+  publication FAILED and awaits its retry never publishes again. So a
+  consumer never needs to poll before acting on a `200`: the terminal
+  outcome is already fixed, and `GET /admin/runs/{runId}` only observes
+  that the settle happened.
+- **A publication that was already ATTEMPTED answers `202`, not the
+  applied-cancellation `200`.** The publication's outcome is not
+  determined here: the forge side effect may already have landed and it
+  cannot be undone, so the terminal state belongs to the publication,
+  not to the operator's click. The cancellation is REGISTERED (a
+  publication that fails still settles `cancelled-by-operator`, and no
+  retry publishes the review), but the run may still end `completed`
+  with the review published. The route answers `202 { "status":
+  "cancellation-registered", "cancelled": false, "detail": "<reason>"
+  }` — the request was accepted, its effect is not determined. The
+  dashboard reports the same outcome instead of "Cancellation accepted."
+  The attempt marker is DURABLE: the queue records that the publication
+  attempt was fired BEFORE the forge write, so a crash between the write
+  and its outcome leaves the same "undetermined" reading for the next
+  process — a publication that never happened is never reported as
+  cancelled.
+- **Contract change (#1781), disclosed for out-of-repo consumers:** releases
+  through v3.10.0 answered `202` on `POST /admin/runs/{runId}/cancel`; this
+  surface now answers `200` with the same `{ "cancelled": true }` body.
+  A consumer that checks `res.ok` (the shipped dashboard does) is
+  unaffected; one that requires exactly `202` must accept `200`. No other
+  route's status codes changed. A consumer that reads the body must
+  distinguish the three cancel answers: `200 { "cancelled": true }` (the
+  cancellation is applied), `202 { "status": "cancellation-registered",
+  "cancelled": false }` (registered, the publication's outcome is not
+  determined), and `409 { "error": "cancellation refused" }` (not
+  applied). Only the first promises a run that settles `cancelled`.
+
+| Mutation | Request body | Accepted | Refused |
+|---|---|---|---|
+| `POST /admin/rereview` | `{"prKey": "owner/repo#123", "reason": "<one line>"}` | `202 {"jobId": "<generation id>"}` | `400` invalid request, `409` refused effect |
+| `POST /admin/runs/{runId}/cancel` | `{}` | `200 {"cancelled": true}` (applied), `202 {"status": "cancellation-registered", "cancelled": false, "detail": "<reason>"}` (publication attempted) | `404` unknown run, `409` terminal run, `409` refused effect |
+
+- **The PR key names ONE pull request.** The controller's grammar is
+  `owner/repo#123`: an owner and a repository of `[A-Za-z0-9._-]`, a `#`,
+  and a POSITIVE decimal number with no leading zero. A dot-only segment
+  (`.` or `..`) is no repository identity: the parsed owner/repository pass
+  the platform's ONE repository-reference validator (`parseRepoRef`, which
+  refuses exactly those segments), so a traversal-shaped key like
+  `../..#7` is refused AT THE SHAPE GATE with the grammar as its reason —
+  never a forge read that surfaces the opaque "could not be read". The
+  admin layer's own shape gate is the wider, trimmed identifier vocabulary
+  (`[A-Za-z0-9._/@#:-]`, at most 512 characters) and refuses anything
+  else with a `400`; the controller's stricter parse refuses the rest as
+  a `409` with its reason. A key that could name several pull requests is
+  never resolved by guessing. The dashboard's client-side pattern carries
+  the same rules (the same charset, the same dot-segment refusal, the same
+  digit cap) so the form refuses what the controller refuses without a
+  round trip.
+- **The parsed repository identity carries the intake's canonical case.**
+  The controller lowercases the owner/repository the same way the intake's
+  forge normalizer does (`normalizeRepoFullName`), so a mixed-case key
+  names the same repository a webhook event would. The adoption record, the
+  allow/denylist match, and the generation identity all key on this
+  canonical form, so the operator's spelling can never miss the adoption
+  gate or mint a generation whose identity diverges from the intake's.
+- **Every refusal names itself.** No mutation answers with a bare
+  status: the body carries `detail` — the reason the effect seam gave,
+  or the admin layer's own fixed reason for an unknown run, a terminal
+  run, or a malformed request. The error field stays the stable class
+  name (`request refused`, `cancellation refused`, `run is terminal`,
+  `run not found`, `invalid request`), and `detail` is the "why".
+- **A seam reason is free text, so it passes ONE bounded projection.**
+  The input is capped (1 KiB) BEFORE any pattern runs, the
+  control/format/bidi characters are replaced (never rendered), the
+  whitespace collapses, the credential shapes are redacted through the
+  shared `redactSecretShapes` pass, and the RESULT is capped (200
+  characters). A blank or unusable reason falls back to a fixed phrase,
+  so the operator never gets an empty "why" and the response never
+  carries an unbounded or credential-shaped string.
 - **Auditability:** every mutation attempt that carries a validated target
   settles first, then records `{ atMs, requestId, action, target, outcome }`
   through the injected `audit` sink. `target` is `{ kind: "run" | "pr",
@@ -140,7 +229,21 @@ data route stays bearer-protected (see
   never swallowed silently — it bumps
   `pr_reviewer_admin_audit_failures_total`. This is a deliberate
   tradeoff: auditing after settlement keeps the audit record truthful
-  about what actually happened.
+  about what actually happened. Every attempted outcome writes exactly
+  ONE row — accepted, refused, or error — and the row is written after
+  the effect settled, never before.
+- **The operator's WHY rides the row.** The rereview's `reason` is a
+  required, validated input, so the row carries it: `reason` is present
+  on every rereview row (accepted, refused, and error) and ABSENT on
+  every cancel row — the cancel request carries no reason, and the field
+  is omitted rather than written as an empty value, so a row's shape
+  stays byte-compatible. The reason is operator free text on its way to a
+  durable ledger, so it passes the same redaction every other outbound
+  string passes (a credential shape is never written down) and keeps the
+  request's own bounds (trimmed, one line, at most 256 characters, capped
+  again after the redaction can lengthen it). It is never echoed into an
+  HTTP response body: the response carries the EFFECT's refusal reason,
+  not the operator's text.
 
 ## Readiness exposure (two projections, one seam)
 
@@ -197,7 +300,11 @@ feeds in), tool-loop budget counters — request and round counters
 `pr_reviewer_admin_tool_loop_rounds_total`, zero-label amounts fed from the
 loop telemetry) plus the stop-reason counter —, specialist usage, publication
 retry/failure, webhook verification outcomes, and
-cancellation/supersession counters.
+cancellation/supersession counters. The two accepted cancel answers count
+apart (#1772): `pr_reviewer_admin_cancellations_total` only follows the
+applied `200`, and a publication-in-flight `202` registration bumps
+`pr_reviewer_admin_cancellation_registrations_total`, so a registered
+cancellation that ended `completed` is never counted as a cancelled run.
 
 ## Diagnostics redaction (defense in depth)
 
@@ -259,9 +366,16 @@ hostile readiness seam, the bounded/redacted readiness detail on the
 authenticated route (including quoted and keyed credential assignments),
 metrics cardinality sanity and parseable exposition, diagnostics
 redaction, rereview/cancel effect + audit ordering and refusal codes,
-audit target identity and settlement timestamp on both mutation paths
-(including refused, failed-lookup, and error outcomes), a broken audit
-clock, body cap, and fixed 404s.
+the refusal reason reaching the operator (the seam's reason verbatim,
+the `400` naming the offending field, and a hostile or oversized reason
+bounded and redacted), audit target identity and settlement timestamp on
+both mutation paths (including refused, failed-lookup, and error
+outcomes), a broken audit clock, body cap, and fixed 404s. The daemon's
+own composition (`tests-v3/controller-main.test.ts`) pins the two
+mutations end to end and the key grammar: the canonical-case identity for
+a mixed-case operator key, and the shape gate refusing a traversal-shaped
+key (`../..#7`, `owner/..#7`) with the grammar as its reason before any
+forge read.
 
 ## Out of scope
 

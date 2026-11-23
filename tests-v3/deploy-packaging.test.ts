@@ -10,6 +10,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { parseKubernetesDeploymentDefaults } from "../src/config/instance-config.js";
 
 function read(path: string): string {
   return readFileSync(path, "utf8");
@@ -77,7 +78,7 @@ test("#1708: chart release coordinates equal the application release (version, a
 const VERSION_BOUND_DEPLOY_FILES = new Map<string, number>([
   ["deploy/charts/pr-reviewer/Chart.yaml", 2],
   ["deploy/charts/pr-reviewer/examples/values-controller-only.yaml", 1],
-  ["deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml", 2],
+  ["deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml", 1],
 ]);
 
 interface ReleasePleaseExtraFile {
@@ -374,6 +375,53 @@ test("#1736: durability is 'no fsGroup mount', never OnRootMismatch skipping —
   assert.match(deployment, /[Nn]o repository test can simulate kubelet/, "deployment doc must state the live-cluster run is operator-side");
 });
 
+test("worker deployment defaults are chart-owned and emitted only in Kubernetes mode", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  assert.match(helpers, /if \$kubeExecutor[\s\S]*PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS/);
+  assert.match(helpers, /regexMatch "\^sha256:\[0-9a-f\]\{64\}\$"/);
+  assert.match(helpers, /\.Chart\.AppVersion/);
+  assert.match(helpers, /worker-deployment-defaults/);
+  const defaultsHelper = /\{\{- define "pr-reviewer\.worker-deployment-defaults" -\}\}([\s\S]*?)\{\{- end -\}\}/.exec(helpers)?.[1] ?? "";
+  // The emitted key set must be EXACTLY the runtime's accepted grammar: an
+  // added key would brick every controller startup with 'unsupported field'.
+  const dictBody = /\bdict\s+([^|]+)\|?\s*toJson/.exec(defaultsHelper)?.[1] ?? "";
+  const emittedKeys = [...dictBody.matchAll(/"([A-Za-z]+)"\s+(?:\(|\$worker\.)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(emittedKeys, ["image", "resources", "ttlSecondsAfterFinished"]);
+  assert.match(read("src/controller/main.ts"), /PR_REVIEWER_KUBERNETES_DEPLOYMENT_DEFAULTS/);
+});
+
+test("chart deployment-default JSON matches the runtime grammar, including digest pins", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    workerExecutor: {
+      image: { repository: string; tag?: string; digest?: string };
+      resources: unknown;
+      ttlSecondsAfterFinished: number;
+    };
+  };
+  const chart = parse(read("deploy/charts/pr-reviewer/Chart.yaml")) as ChartYaml;
+  const worker = values.workerExecutor;
+  const imageFor = (digest: string | undefined) => {
+    const tag = worker.image.tag || chart.appVersion;
+    return digest ? `${worker.image.repository}:${tag}@${digest}` : `${worker.image.repository}:${tag}`;
+  };
+  const defaultsJson = (digest?: string) => JSON.stringify({
+    image: imageFor(digest),
+    ttlSecondsAfterFinished: worker.ttlSecondsAfterFinished,
+    resources: worker.resources,
+  });
+  const parsed = parseKubernetesDeploymentDefaults(defaultsJson());
+  assert.equal(parsed.image, `${worker.image.repository}:${chart.appVersion}`);
+  assert.equal(parsed.ttlSecondsAfterFinished, worker.ttlSecondsAfterFinished);
+  assert.deepEqual(parsed.resources, worker.resources);
+
+  const digest = `sha256:${"a".repeat(64)}`;
+  assert.equal(parseKubernetesDeploymentDefaults(defaultsJson(digest)).image, `${worker.image.repository}:${chart.appVersion}@${digest}`);
+  assert.throws(
+    () => parseKubernetesDeploymentDefaults(JSON.stringify({ ttl_seconds_after_finished: 1800 })),
+    /unsupported field 'ttl_seconds_after_finished'/,
+  );
+});
+
 test("values.schema.json is structurally valid with fail-closed top level", () => {
   const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);
@@ -381,8 +429,12 @@ test("values.schema.json is structurally valid with fail-closed top level", () =
   const properties = schema.properties as Record<string, Record<string, unknown>>;
   const workerExecutor = properties.workerExecutor!;
   assert.deepEqual(workerExecutor.required, ["mode"]);
-  const workerExecutorProps = workerExecutor.properties as Record<string, { enum?: unknown }>;
+  const workerExecutorProps = workerExecutor.properties as Record<string, { enum?: unknown; properties?: Record<string, unknown>; description?: string }>;
   assert.deepEqual(workerExecutorProps.mode!.enum, ["disabled", "kubernetes"]);
+  const image = workerExecutorProps.image!.properties as Record<string, unknown>;
+  assert.ok("digest" in image);
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as { workerExecutor: { image: { repository: string } } };
+  assert.equal(values.workerExecutor.image.repository, "ghcr.io/misospace/pr-reviewer-worker");
   // The bjw-s passthrough sections under controller stay permissive.
   assert.equal((properties.controller as Record<string, unknown>).additionalProperties, true);
   assert.equal((properties.global as Record<string, unknown>).additionalProperties, true);
@@ -688,9 +740,13 @@ test("Dockerfile: non-root USER 1000, exec-form entrypoint, worker argv", () => 
   assert.doesNotMatch(dockerfile, /npm start|sh -c|bash -c/);
   assert.doesNotMatch(dockerfile, /COPY --from=build .*node_modules/);
   // Both production targets inherit the same runtime stage. The subprocess
-  // boundary refuses every launch without pgrep; pin the image contract.
-  assert.match(dockerfile, /apt-get install -y --no-install-recommends git procps/);
+  // boundary refuses every launch without pgrep, and git's https transport
+  // has no trust store without the ca-certificates bundle (#1775: it is
+  // only a Recommends, so --no-install-recommends drops it). Pin the
+  // image contract: package list AND the in-layer assertions.
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends git procps ca-certificates/);
   assert.match(dockerfile, /command -v git && command -v pgrep && command -v pkill/);
+  assert.match(dockerfile, /test -f \/etc\/ssl\/certs\/ca-certificates\.crt/);
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists/);
   // #1584: every external base image stays pinned by sha256 digest, and
   // the whole file builds on ONE base revision. Stage-name FROMs are

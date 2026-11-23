@@ -73,9 +73,10 @@ helm install pr-reviewer \
   (`helm dependency build` runs in the publish job), so installation needs
   no source checkout. Installing from `deploy/charts/pr-reviewer/` in a
   checkout remains the development path, not the normal release path.
-- Digest-pinned image overrides work exactly as before (`image.digest` /
-  the instance-config `kubernetes.image` reference) and remain the exact
-  immutable production pin when desired; the chart does not weaken them.
+- The chart's worker image defaults to the upstream published image and
+  follows `Chart.appVersion`; set `workerExecutor.image.digest` for an
+  immutable byte pin. An instance-config `kubernetes.image` is an explicit
+  profile override.
 - The publish job refuses to replace an already-published chart version
   (GHCR does not enforce tag immutability) and never mutates `Chart.yaml`
   to make a mismatched release pass. There is no `latest` chart alias.
@@ -107,8 +108,10 @@ helm install pr-reviewer \
   label-lists its own material, and deletes them at settle; they are
   per-run and ephemeral, and `deploy/admission/worker-secret-policy.yaml`
   is the cluster-side guardrail on their shape.
-  The Job manifests themselves are built by the executor from the
-  instance config's `kubernetes` profile.
+  The Job manifests are built from per-profile Kubernetes facts plus
+  chart-owned image/resources/TTL deployment defaults. Profiles may override
+  those defaults; omitted values inherit. The default worker image follows
+  `Chart.appVersion`, with an optional chart-level digest pin.
 - `networkPolicy` (default **OFF**) — opt-in default-deny policies for controller
   and worker pods; configure only after verifying cluster-specific API, model,
   webhook and admin paths. When disabled the chart renders no NetworkPolicies; the worker selector matches the executor's
