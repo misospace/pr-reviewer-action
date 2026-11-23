@@ -10,7 +10,9 @@
 export type { JobLifecycleState, JobRecord } from "./types.js";
 export {
   isActiveState,
+  isOperatorCancellation,
   isTerminalState,
+  OPERATOR_CANCELLATION_REASON,
   prIdentityKey,
   canTransition,
   transitionPath,

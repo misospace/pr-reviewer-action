@@ -203,7 +203,7 @@ const DASHBOARD_HTML = `<!doctype html>
       <section id="actions">
         <h2>Force rereview</h2>
         <div class="rereview-form">
-          <input id="rereview-key" placeholder="owner&#47;repo#123 or PR key" aria-label="owner&#47;repo#123 or PR key" autocomplete="off">
+          <input id="rereview-key" placeholder="owner&#47;repo#123" aria-label="owner&#47;repo#123" autocomplete="off">
           <input id="rereview-reason" placeholder="Reason" aria-label="Reason" autocomplete="off">
           <button id="rereview" class="danger">Force rereview</button>
         </div>
@@ -231,6 +231,16 @@ const DASHBOARD_JS = `"use strict";
   let cursorStack = [];
   let currentCursor = "";
   let nextCursor = "";
+  // The PR key grammar the controller enforces: an owner, a repository, a
+  // "#", and a positive PR number, and never a dot-only segment ("." or
+  // "..") — the platform's repo-ref rule the controller applies at its
+  // shape gate. The form refuses a key the controller would reject, so the
+  // operator learns the shape without a round trip.
+  const PR_KEY_PATTERN = /^((?!\\.\\.?\\/)[A-Za-z0-9._-]+)\\/((?!\\.\\.?#)[A-Za-z0-9._-]+)#([1-9][0-9]{0,9})$/;
+  // The example is spelled with an escaped separator, exactly like the
+  // field's placeholder: the served shell carries no raw repository
+  // identity, while the operator still reads the real shape.
+  const PR_KEY_EXAMPLE = "owner\\u002Frepo#123";
   const views = ["overview", "runs", "run", "diagnostics"];
   function text(parent, value) {
     parent.appendChild(document.createTextNode(value === undefined || value === null ? "" : String(value)));
@@ -326,6 +336,28 @@ const DASHBOARD_JS = `"use strict";
       result.parsed = null;
     }
     return result;
+  }
+  // The controller's own reason for a refused mutation: the "detail" it
+  // supplied when present, else its "error", else a fixed phrase. The value
+  // reaches the page as text, never as markup.
+  function refusalDetail(result, fallback) {
+    const parsed = result.parsed;
+    let reason = "";
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.detail === "string" && parsed.detail !== "") reason = parsed.detail;
+      else if (typeof parsed.error === "string" && parsed.error !== "") reason = parsed.error;
+    }
+    if (reason === "") reason = fallback;
+    return "HTTP " + result.status + ": " + reason;
+  }
+  // The failure class the operator sees: a 400 is the request's own shape,
+  // a 409 is the controller's refusal, anything else is an unknown failure.
+  // The headlines are per action, so each button says what happened to its
+  // OWN request.
+  function mutationFailure(status, headlines) {
+    if (status === 400) return { headline: headlines.invalid, fallback: "The request was invalid." };
+    if (status === 409) return { headline: headlines.refused, fallback: "The request was refused." };
+    return { headline: headlines.unknown, fallback: "The request did not succeed." };
   }
   function relative(ms) {
     const n = Number(ms);
@@ -690,17 +722,26 @@ const DASHBOARD_JS = `"use strict";
       text(cancel, "Cancel run");
       cancel.addEventListener("click", async () => {
         if (!confirm("Cancel run " + run.runId + "?")) return;
-        const outcome = await api("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const outcome = await apiJson("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         feedback.replaceChildren();
         if (outcome.ok) {
-          text(feedback, "Cancellation accepted.");
-        } else {
-          const box = el("div", "error-state", feedback);
-          const h = el("strong", "", box);
-          text(h, "Cancellation was not accepted.");
-          const detail = el("span", "muted", box);
-          text(detail, "HTTP " + outcome.status + (outcome.body ? ": " + outcome.body : ""));
+          // 202: the cancellation is REGISTERED, but the publication was
+          // already in flight — the terminal state belongs to the
+          // publication, so the run may still end published. The
+          // controller's own reason reaches the operator.
+          if (outcome.status === 202) {
+            setFeedback(feedback, "Cancellation registered; the outcome is undetermined.", refusalDetail(outcome, "The publication is already in flight."));
+            return;
+          }
+          setFeedback(feedback, "Cancellation accepted.", "The controller applied the cancellation.");
+          return;
         }
+        const failure = mutationFailure(outcome.status, { invalid: "The request was invalid.", refused: "Cancellation was refused.", unknown: "Cancellation was not accepted." });
+        const box = el("div", "error-state", feedback);
+        const h = el("strong", "", box);
+        text(h, failure.headline);
+        const detail = el("span", "muted", box);
+        text(detail, refusalDetail(outcome, failure.fallback));
       });
     }
   }
@@ -830,12 +871,29 @@ const DASHBOARD_JS = `"use strict";
   });
   document.getElementById("rereview").addEventListener("click", async () => {
     const message = document.getElementById("rereview-msg");
-    const prKey = document.getElementById("rereview-key").value;
-    const reason = document.getElementById("rereview-reason").value;
+    const prKey = (document.getElementById("rereview-key").value || "").trim();
+    const reason = (document.getElementById("rereview-reason").value || "").trim();
+    // The client's own gate: an invalid key or an empty reason never
+    // reaches the controller, and the operator learns WHICH field was wrong
+    // without a round trip.
+    if (!PR_KEY_PATTERN.test(prKey)) {
+      setFeedback(message, "Rereview was not requested.", "The PR key must look like " + PR_KEY_EXAMPLE + ".");
+      return;
+    }
+    if (reason === "") {
+      setFeedback(message, "Rereview was not requested.", "The reason is required.");
+      return;
+    }
     if (!confirm("Force a rereview of " + prKey + "?")) return;
-    const outcome = await api("/admin/rereview", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ prKey, reason }) });
-    if (outcome.ok) setFeedback(message, "Rereview accepted.", outcome.body);
-    else setFeedback(message, "Rereview was not accepted.", "HTTP " + outcome.status + ": " + outcome.body);
+    const outcome = await apiJson("/admin/rereview", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ prKey, reason }) });
+    if (outcome.ok) {
+      const parsed = outcome.parsed;
+      const jobId = parsed && typeof parsed === "object" && typeof parsed.jobId === "string" ? parsed.jobId : "";
+      setFeedback(message, "Rereview accepted.", jobId === "" ? "The controller accepted the request." : "Job " + jobId + ".");
+      return;
+    }
+    const failure = mutationFailure(outcome.status, { invalid: "Rereview was not requested.", refused: "Rereview was refused.", unknown: "Rereview was not accepted." });
+    setFeedback(message, failure.headline, refusalDetail(outcome, failure.fallback));
   });`;
 function serveDashboard(pathname: string): DashboardResponse | null {
   if (pathname === "/dashboard") return { status: 200, body: DASHBOARD_HTML, contentType: "text/html; charset=utf-8", headers: DASHBOARD_HEADERS };
