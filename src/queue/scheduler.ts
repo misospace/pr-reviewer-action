@@ -969,6 +969,14 @@ export class ReviewQueueController {
     outcome: ExecutionOutcome,
     now: number,
   ): Promise<void> {
+    // INVARIANT (the #1772 cancel race): no `await` may sit between
+    // `settle`'s `isOperatorCancellation(record)` check and the
+    // `records.set` below. `withState(record, ...)` re-spreads the exact
+    // snapshot that check validated, and `cancel()` is fully synchronous,
+    // so check → set is one event-loop block: a `cancelRequested: true`
+    // stamped mid-path can never be clobbered by the stale spread. A
+    // cancel landing AFTER the set acts on the written `publishing`
+    // record — `runPublish` re-reads it fresh before settling.
     const publishing: JobRecord = Object.freeze({
       ...withState(record, "publishing", now),
       resultHeadSha: outcome.resultHeadSha,
