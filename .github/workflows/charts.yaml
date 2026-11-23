@@ -758,8 +758,12 @@ jobs:
           chart=deploy/charts/pr-reviewer
           base=$chart/examples/values-kubernetes-executor.yaml
           standard=$chart/examples/values-standard.yaml
-          helm lint "$chart" -f "$base" -f "$standard"
-          helm template pr-reviewer "$chart" -f "$base" -f "$standard" > /var/tmp/render-standard.yaml
+          # Every render in this step pins --namespace: without it helm
+          # renders in "default", and the #1767 namespace guard refuses the
+          # standard example (its inline config names the pr-reviewer
+          # release namespace) for the wrong reason.
+          helm lint --namespace pr-reviewer "$chart" -f "$base" -f "$standard"
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" --namespace pr-reviewer > /var/tmp/render-standard.yaml
           awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-admin/' /var/tmp/render-standard.yaml | grep -q 'port: 8081'
           awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard.yaml | grep -q 'port: 8080'
           grep -q 'kind: HTTPRoute' /var/tmp/render-standard.yaml
@@ -782,7 +786,7 @@ jobs:
           # Negative cases must fail for their own deterministic guard.
           expect_refusal() {
             fragment=$1; shift
-            if output=$(helm template pr-reviewer "$chart" -f "$base" "$@" 2>&1); then
+            if output=$(helm template pr-reviewer "$chart" --namespace pr-reviewer -f "$base" "$@" 2>&1); then
               echo "expected refusal: $fragment" >&2; exit 1
             fi
             printf '%s' "$output" | grep -Fq "$fragment"
@@ -814,6 +818,7 @@ jobs:
           # instances route their canonical path instead of /hook, still as
           # the FIRST rule.
           helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
             --set webhook.path=/webhooks/gitea > /var/tmp/render-standard-gitea.yaml
           gitea_order="$(route_doc /var/tmp/render-standard-gitea.yaml | grep -F 'value: ' | tr -d ' ' | tr '\n' '|')"
           if [ "$gitea_order" != "value:/webhooks/gitea|value:/admin|value:/auth|value:/dashboard|value:/|" ]; then
@@ -830,6 +835,7 @@ jobs:
           # port follows it (the chart's own default Service port must not
           # trip the residue guard).
           helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
             --set controller.webhook.port=9090 > /var/tmp/render-standard-port.yaml
           awk 'BEGIN{RS="---"} /kind: Service/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard-port.yaml | grep -q 'port: 9090'
           grep -A2 'name: PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-standard-port.yaml | grep -q 'value: "9090"'
@@ -838,6 +844,7 @@ jobs:
           # parentRef namespaces, never any-source (the port also serves
           # the unauthenticated /metrics, /healthz, /readyz endpoints).
           helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
             --set networkPolicy.enabled=true > /var/tmp/render-standard-netpol.yaml
           netpol_doc() { awk 'BEGIN{RS="---"} /kind: NetworkPolicy/ && /-controller/' "$1"; }
           netpol_doc /var/tmp/render-standard-netpol.yaml | grep -q 'kubernetes.io/metadata.name'
@@ -856,6 +863,7 @@ jobs:
           # Raw passthrough positive path: the complete operator manifest
           # renders verbatim (chart adds nothing).
           helm template pr-reviewer "$chart" -f "$base" \
+            --namespace pr-reviewer \
             --set route.enabled=true \
             --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"byo-route"},"spec":{"parentRefs":[{"name":"envoy-external","namespace":"network"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/webhooks/forgejo"}}],"backendRefs":[{"name":"pr-reviewer","port":8080}]}]}}' \
             > /var/tmp/render-raw-route.yaml
