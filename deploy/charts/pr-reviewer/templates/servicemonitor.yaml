@@ -7,9 +7,11 @@ surface is enabled, so a Prometheus scrape can reach /metrics. The
 monitor selects pods by label via targetPort — no dedicated Service
 needed. The listener's ingress is still bounded by the NetworkPolicy.
 */}}
-{{- if .Values.serviceMonitor.enabled }}
-{{- if not .Values.controller.admin.enabled }}
-{{- fail "serviceMonitor.enabled requires controller.admin.enabled (metrics are served on the admin listener)" }}
+{{- $stdAdmin := include "pr-reviewer.std.admin" . | fromYaml -}}
+{{- $monitorEnabled := or (.Values.monitoring.serviceMonitor.enabled | default false) .Values.serviceMonitor.enabled -}}
+{{- if $monitorEnabled }}
+{{- if not (or $stdAdmin.enabled .Values.controller.admin.enabled) }}
+{{- fail "monitoring.serviceMonitor.enabled or serviceMonitor.enabled requires dashboard.enabled or controller.admin.enabled (metrics are served on the admin listener)" }}
 {{- end }}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict
   "releaseName" .Release.Name
@@ -38,7 +40,7 @@ spec:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
-    - targetPort: {{ .Values.serviceMonitor.port }}
+    - targetPort: {{ .Values.serviceMonitor.port | default $stdAdmin.port }}
       path: {{ .Values.serviceMonitor.path }}
       interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}

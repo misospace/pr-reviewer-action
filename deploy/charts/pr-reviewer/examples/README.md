@@ -44,6 +44,16 @@ helm install pr-reviewer deploy/charts/pr-reviewer \
   -f deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml
 ```
 
+## Standard mode
+
+Layer the standard exposure values over the Kubernetes-executor example. The referenced webhook and admin Secrets are listed below.
+
+```sh
+helm install pr-reviewer deploy/charts/pr-reviewer \
+  -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+  -f deploy/charts/pr-reviewer/examples/values-standard.yaml
+```
+
 ## Prerequisite Secrets
 
 ### Forgejo instance (`values-controller-only.yaml`)

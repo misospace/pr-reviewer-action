@@ -145,8 +145,30 @@ revisions are coordinated by building both from the same commit.
 chart (pinned in `Chart.yaml`; CI runs `helm dependency build`, lint, and
 template rendering on every change to `deploy/**`). Custom templates exist
 only for what the common library cannot express: worker RBAC, the
-NetworkPolicy, the ServiceMonitor, and the env wiring that maps values onto
+NetworkPolicy, the ServiceMonitor, HTTPRoute, and the env wiring that maps values onto
 the controller's fail-closed environment contract.
+
+### Standard mode
+
+Set exposure intent without repeating listener or Service wiring:
+
+```yaml
+webhook:
+  enabled: true
+  existingSecret: github-webhook-secret
+dashboard:
+  enabled: true
+  existingSecret: pr-reviewer-admin
+route:
+  enabled: true
+  hostnames: [pr-reviewer.example.com]
+  parentRefs: [{name: envoy-external, namespace: network}]
+monitoring:
+  serviceMonitor:
+    enabled: true
+```
+
+The chart derives listener ports, stable webhook and admin Service names, ordered HTTPRoute rules, the ServiceMonitor target port, and gateway ingress in the controller NetworkPolicy. Webhook intake is routed only on `/hook`; the admin API remains bearer-protected and the dashboard shell is unauthenticated by design. `/metrics` and `/healthz` are never routed. There is no broad default backend, so unmatched paths 404 at the listener. Advanced controller Service, route, and listener wiring remains available as an escape hatch; setting standard and advanced values for the same concern together fails rendering rather than merging them.
 
 ### Published chart OCI artifact (#1708)
 
@@ -491,20 +513,27 @@ the admin surface is enabled so kubelet probes and Prometheus can reach it;
 the bearer token remains mandatory for privileged admin endpoints;
 chart-managed NetworkPolicies are opt-in and must not be assumed present. Set
 `serviceMonitor.enabled: true` (requires the admin surface) for the
-ServiceMonitor resource; `admin.enabled: false` keeps the listener
+ServiceMonitor resource; its target port derives from
+`controller.admin.port` when `serviceMonitor.port` is unset. `admin.enabled: false` keeps the listener
 loopback-only and off the network. The #742 operations dashboard
-(`GET /dashboard`) is served only when `PR_REVIEWER_ADMIN_DASHBOARD` is
+(`GET /` natively, with `GET /dashboard` as the compatibility spelling)
+is served only when `PR_REVIEWER_ADMIN_DASHBOARD` is
 ON; the chart exposes it as `controller.admin.dashboard` (default
 `false`, which leaves the flag unset; `true` requires the admin surface)
 — see `docs/architecture/operations-dashboard.md`.
 
-The chart's values define a single Service (`controller.service.webhook`, the
-POST-only intake on 8080); the admin listener on 8081 has no Service of its
-own. That is why turning on the dashboard alone does not make it reachable:
-exposing the admin surface is the operator's ingress decision, and because
-the shell carries no data it is served unauthenticated, so network access
-control is the remaining guard on who can reach it (all admin data stays
-bearer-protected). Reach it with the bjw-s `common` `service` and `route`
+In advanced mode the chart's values define a single Service
+(`controller.service.webhook`, the POST-only intake on 8080); the admin
+listener on 8081 has no Service of its own. That is why turning on the
+dashboard alone does not make it reachable: exposing the admin surface is
+the operator's ingress decision, and because the shell carries no data it
+is served unauthenticated, so network access control is the remaining
+guard on who can reach it (all admin data stays bearer-protected).
+Standard mode (`dashboard.enabled` + `route.enabled`, above) derives the
+admin Service and the public HTTPRoute — `/hook` for intake, `/admin` and
+`/auth` for the API, `/` (native, no rewrite) and `/dashboard` for the
+shell, never `/metrics` or `/healthz`. Advanced deployments reach it with
+the bjw-s `common` `service` and `route`
 passthrough — add an `admin` port to a controller Service and route the
 dashboard/admin paths to it. The chart README ("Reaching the dashboard from
 outside the pod") carries the full Gateway values. Two contract notes hold

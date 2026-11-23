@@ -304,6 +304,35 @@ readiness:
     failureThreshold: 6
 {{- end -}}
 
+{{- define "pr-reviewer.std.webhook" -}}
+{{- $root := . -}}
+{{- $std := .Values.webhook | default dict -}}
+{{- $advanced := .Values.controller.webhook | default dict -}}
+{{- if and $std.enabled $advanced.enabled -}}{{ fail "webhook.enabled conflicts with controller.webhook.enabled" }}{{- end -}}
+{{- if and $std.enabled (dig "service" "webhook" "enabled" false .Values.controller) -}}{{ fail "webhook.enabled conflicts with controller.service.webhook.enabled" }}{{- end -}}
+{{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "webhook.existingSecret and webhook.secret are mutually exclusive" }}{{- end -}}
+{{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "webhook.enabled requires controller.enabled" }}{{- end -}}
+{{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
+{{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname) | toYaml -}}
+{{- end -}}
+
+{{- define "pr-reviewer.std.admin" -}}
+{{- $std := .Values.dashboard | default dict -}}
+{{- $advanced := .Values.controller.admin | default dict -}}
+{{- if and $std.enabled (or $advanced.enabled $advanced.dashboard) -}}{{ fail "dashboard.enabled conflicts with controller.admin.enabled or controller.admin.dashboard" }}{{- end -}}
+{{- if and $std.enabled (eq (dig "auth" "mode" "token" $advanced) "oidc") -}}{{ fail "dashboard.enabled conflicts with controller.admin.auth.mode oidc" }}{{- end -}}
+{{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "dashboard.existingSecret and dashboard.secret are mutually exclusive" }}{{- end -}}
+{{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "dashboard.enabled requires controller.enabled" }}{{- end -}}
+{{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
+{{- dict "enabled" ($std.enabled | default false) "dashboard" ($std.enabled | default false) "port" ($advanced.port | default 8081) "tokenRefName" ($std.existingSecret | default "") "tokenRefKey" "token" "inlineToken" ($std.secret | default "") "serviceName" (printf "%s-admin" $fullname) "authMode" "token" | toYaml -}}
+{{- end -}}
+
+{{- define "pr-reviewer.std.route" -}}
+{{- $webhook := include "pr-reviewer.std.webhook" . | fromYaml -}}
+{{- $admin := include "pr-reviewer.std.admin" . | fromYaml -}}
+{{- dict "webhook" $webhook "admin" $admin | toYaml -}}
+{{- end -}}
+
 {{/*
 Validate the controller wiring fail-closed at render time and inject the
 template-conditional pieces (env, probes, rendered Secrets, persistence)
@@ -317,6 +346,18 @@ dict "ctx" <component context> "root" <chart root>
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $v := $ctx.Values -}}
 {{- $fullname := include "pr-reviewer.fullname" $ctx -}}
+{{- $stdWebhook := include "pr-reviewer.std.webhook" $root | fromYaml -}}
+{{- $stdAdmin := include "pr-reviewer.std.admin" $root | fromYaml -}}
+{{- if $stdWebhook.enabled -}}
+{{- $_ := set $v.webhook "enabled" true -}}
+{{- if $stdWebhook.secretRefName -}}{{- $_ := set $v.webhook "existingSecret" (dict "name" $stdWebhook.secretRefName "key" $stdWebhook.secretRefKey) -}}{{- else -}}{{- $_ := set $v.webhook "secret" $stdWebhook.inlineSecret -}}{{- end -}}
+{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "webhook" (dict "enabled" true "forceRename" $stdWebhook.serviceName "controller" "main" "ports" (dict "webhook" (dict "port" $stdWebhook.port))))) -}}
+{{- end -}}
+{{- if $stdAdmin.enabled -}}
+{{- $_ := set $v.admin "enabled" true -}}{{- $_ := set $v.admin "dashboard" true -}}{{- $_ := set $v.admin.auth "mode" "token" -}}
+{{- if $stdAdmin.tokenRefName -}}{{- $_ := set $v.admin "existingSecret" (dict "name" $stdAdmin.tokenRefName "key" $stdAdmin.tokenRefKey) -}}{{- else -}}{{- $_ := set $v.admin "token" $stdAdmin.inlineToken -}}{{- end -}}
+{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "admin" (dict "enabled" true "forceRename" $stdAdmin.serviceName "controller" "main" "ports" (dict "admin" (dict "port" $stdAdmin.port))))) -}}
+{{- end -}}
 
 {{- /* fail closed on incomplete wiring — the daemon would refuse anyway */ -}}
 {{- if empty (dig "controllers" "main" "containers" "main" "image" "repository" "" $v) -}}

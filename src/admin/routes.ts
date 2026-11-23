@@ -42,8 +42,9 @@ export interface AdminRouteContext {
   readonly nowMs?: () => number;
 }
 /** The dispatcher's route table (#737). The optional #742 dashboard shell
- * serves `GET /dashboard` and `GET /dashboard/app.js` OUTSIDE this table and
- * outside the `/admin/` namespace, so the every-route-here-is-authenticated
+ * serves `GET /`, `GET /dashboard`, and `GET /dashboard/app.js` OUTSIDE this
+ * table (#1768: the bare root is exact-match, so it swallows nothing here)
+ * and outside the `/admin/` namespace, so the every-route-here-is-authenticated
  * rule stays intact (see `src/admin/dashboard.ts`). */
 export const ADMIN_ROUTE_TABLE = Object.freeze([
   "GET /healthz", "GET /readyz", "GET /metrics", "GET /admin/status", "GET /admin/runs", "GET /admin/runs/{runId}", "POST /admin/runs/{runId}/cancel", "POST /admin/rereview", "GET /admin/diagnostics",

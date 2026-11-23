@@ -1,12 +1,72 @@
 # pr-reviewer self-hosted chart values (#738 Phase B).
 #
-# Structure: `controller` carries the controller daemon's wiring plus the
+# Structure: the STANDARD MODE sections below (#1768) let an operator
+# state exposure intent only — the chart derives the webhook/admin
+# listener wiring, the Services with stable backend names, the HTTPRoute
+# rules, the ServiceMonitor target port, and the NetworkPolicy gateway
+# ingress. `controller` carries the controller daemon's wiring plus the
 # bjw-s `common` library passthrough sections (`controllers`, `service`,
 # `persistence`, `secrets`, `serviceAccount`, `defaultPodOptions`, …)
-# rendered for the controller component; `workerExecutor` provisions the
-# namespace-scoped RBAC/service account/PVCs the #734 Kubernetes executor
-# needs. The chart NEVER deploys PostgreSQL — `controller.controlPlaneUrl`
-# (or an existing secret) points at operator-provided PostgreSQL.
+# rendered for the controller component — the ADVANCED escape hatch;
+# enabling the same concern through both layers fails the render rather
+# than silently merging. `workerExecutor` provisions the namespace-scoped
+# RBAC/service account/PVCs the #734 Kubernetes executor needs. The chart
+# NEVER deploys PostgreSQL — `controller.controlPlaneUrl` (or an existing
+# secret) points at operator-provided PostgreSQL.
+
+# ── standard mode: exposure intent (#1768) ────────────────────────────
+# No port fields here on purpose: the webhook port is `controller.webhook.port`
+# and the admin port is `controller.admin.port` (chart defaults 8080/8081);
+# an explicit advanced listener-port override stays first-class and the
+# derived Service ports follow it.
+
+webhook:
+  # Enable the forge webhook intake and derive its listener, Service
+  # (`<release>-webhook`), and HTTPRoute `/hook` rule. Contradicts the
+  # advanced `controller.webhook.enabled` / `controller.service.webhook`.
+  enabled: false
+  # The intake secret's existing Secret NAME (key: webhook-secret), or an
+  # inline `secret` — exactly one, never both.
+  existingSecret: ""
+  secret: ""
+
+dashboard:
+  # Enable the admin listener (token auth) with the operations dashboard,
+  # and derive its Service (`<release>-admin`) plus the route's `/admin`,
+  # `/auth`, `/dashboard`, and native `GET /` rules. Contradicts the
+  # advanced `controller.admin.enabled` / `controller.admin.dashboard`
+  # (and OIDC auth mode, which needs the advanced surface).
+  enabled: false
+  # The admin bearer token's existing Secret NAME (key: token), or an
+  # inline `secret` — exactly one, never both. The shell itself carries
+  # no data; this token guards the admin API behind it.
+  existingSecret: ""
+  secret: ""
+
+route:
+  # Render an HTTPRoute (gateway.networking.k8s.io/v1) from exposure
+  # intent. Requires `webhook.enabled` or `dashboard.enabled` as the
+  # backend, plus the two operator-owned facts below. Rules: `/hook` →
+  # webhook Service, `/admin` and `/auth` → admin Service, `/dashboard`
+  # and exact `/` → admin Service (paths preserved, no URLRewrite).
+  # `/metrics` and `/healthz` are never routed; there is no catch-all.
+  enabled: false
+  hostnames: []
+  # Gateway API ParentReference objects (name, namespace, …), verbatim.
+  parentRefs: []
+  # Also route the `/dashboard` compatibility prefix when the dashboard
+  # is on. Disable only when those paths are served differently.
+  dashboardCompatibilityPath: true
+  # Advanced escape hatch: a COMPLETE HTTPRoute manifest rendered
+  # verbatim. Mutually exclusive with hostnames/parentRefs.
+  raw: {}
+
+monitoring:
+  serviceMonitor:
+    # Enable the ServiceMonitor; its target port derives from the admin
+    # listener (set `serviceMonitor.port` to override). Requires the
+    # admin surface (standard dashboard or advanced `controller.admin`).
+    enabled: false
 
 controller:
   enabled: true
@@ -285,7 +345,7 @@ networkPolicy:
 serviceMonitor:
   enabled: false
   interval: 30s
-  port: 8081
+  port: null # empty/null = derived from controller.admin.port
   path: /metrics
   labels: {}
 

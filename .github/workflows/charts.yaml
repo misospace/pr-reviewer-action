@@ -440,6 +440,66 @@ jobs:
             exit 1
           fi
 
+      - name: Render (standard mode #1768)
+        run: |
+          set -euo pipefail
+          chart=deploy/charts/pr-reviewer
+          base=$chart/examples/values-kubernetes-executor.yaml
+          standard=$chart/examples/values-standard.yaml
+          helm lint "$chart" -f "$base" -f "$standard"
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" > /var/tmp/render-standard.yaml
+          awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-admin/' /var/tmp/render-standard.yaml | grep -q 'port: 8081'
+          awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard.yaml | grep -q 'port: 8080'
+          grep -q 'kind: HTTPRoute' /var/tmp/render-standard.yaml
+          for path in /hook /admin /auth /dashboard; do grep -Fq "value: $path" /var/tmp/render-standard.yaml; done
+          grep -Fq 'type: Exact' /var/tmp/render-standard.yaml
+          grep -Fq 'targetPort: 8081' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_ADMIN_DASHBOARD' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_ADMIN_PORT' /var/tmp/render-standard.yaml
+          route_doc() { awk 'BEGIN{RS="---"} /kind: HTTPRoute/' "$1"; }
+          route_doc /var/tmp/render-standard.yaml > /var/tmp/render-standard-route.yaml
+          # Rule order is contract: specific prefixes first, the Exact '/'
+          # dashboard rule LAST (the root swallows nothing before it).
+          order="$(grep -F 'value: ' /var/tmp/render-standard-route.yaml | tr -d ' ' | tr '\n' '|')"
+          if [ "$order" != "value:/hook|value:/admin|value:/auth|value:/dashboard|value:/|" ]; then
+            echo "::error::unexpected HTTPRoute rule order: $order" >&2
+            exit 1
+          fi
+          if grep -Eq 'filters:|urlRewrite|/metrics|/healthz' /var/tmp/render-standard-route.yaml; then exit 1; fi
+          # Negative cases must fail for their own deterministic guard.
+          expect_refusal() {
+            fragment=$1; shift
+            if output=$(helm template pr-reviewer "$chart" -f "$base" "$@" 2>&1); then
+              echo "expected refusal: $fragment" >&2; exit 1
+            fi
+            printf '%s' "$output" | grep -Fq "$fragment"
+          }
+          expect_refusal 'webhook.enabled conflicts' -f "$standard" --set controller.webhook.enabled=true
+          expect_refusal 'dashboard.enabled conflicts' -f "$standard" --set controller.admin.enabled=true
+          expect_refusal 'route.hostnames is required' -f "$standard" --set-json route.hostnames=[]
+          expect_refusal 'route.parentRefs is required' -f "$standard" --set-json route.parentRefs=[]
+          expect_refusal 'route.raw is exclusive' -f "$standard" --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
+          expect_refusal 'requires dashboard.enabled or controller.admin.enabled' --set monitoring.serviceMonitor.enabled=true
+          expect_refusal 'requires an enabled webhook or dashboard backend' \
+            --set route.enabled=true \
+            --set-json 'route.hostnames=["pr-reviewer.example.com"]' \
+            --set-json 'route.parentRefs=[{"name":"envoy-external","namespace":"network"}]' \
+            --set controller.webhook.enabled=false --set controller.service.webhook.enabled=false
+          expect_refusal 'requires non-empty apiVersion, kind HTTPRoute' -f "$base" --set route.enabled=true --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","metadata":{"name":"raw"}}'
+          # Raw passthrough positive path: the complete operator manifest
+          # renders verbatim (chart adds nothing).
+          helm template pr-reviewer "$chart" -f "$base" \
+            --set route.enabled=true \
+            --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"byo-route"},"spec":{"parentRefs":[{"name":"envoy-external","namespace":"network"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/webhooks/forgejo"}}],"backendRefs":[{"name":"pr-reviewer","port":8080}]}]}}' \
+            > /var/tmp/render-raw-route.yaml
+          route_doc /var/tmp/render-raw-route.yaml | grep -q 'name: byo-route'
+          route_doc /var/tmp/render-raw-route.yaml | grep -q 'backendRefs:'
+          if route_doc /var/tmp/render-raw-route.yaml | grep -q 'app.kubernetes.io/managed-by'; then
+            echo "::error::route.raw must render verbatim without injected chart labels" >&2
+            exit 1
+          fi
+
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
         # release binary with its CHECKSUMS-verified tarball instead.
@@ -451,7 +511,9 @@ jobs:
           curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
           echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
           tar -xzf kubeconform.tar.gz kubeconform
-          ./kubeconform -strict -skip ServiceMonitor \
+          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
             -summary /var/tmp/render-controller-only.yaml
-          ./kubeconform -strict -skip ServiceMonitor \
+          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
             -summary /var/tmp/render-kubernetes-executor.yaml
+          ./kubeconform -strict -skip ServiceMonitor,HTTPRoute \
+            -summary /var/tmp/render-standard.yaml

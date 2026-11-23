@@ -40,7 +40,7 @@ async function listening(dashboard: boolean, token?: string, overrides?: Partial
 test("dashboard is optional and off by default", async (t) => {
   const f = await listening(false);
   t.after(() => f.server.close());
-  for (const path of ["/dashboard", "/dashboard/app.js"]) {
+  for (const path of ["/", "/dashboard", "/dashboard/app.js"]) {
     const r = await fetch(f.base + path);
     assert.equal(r.status, 404, path);
     assert.match(await r.text(), /not found/);
@@ -78,6 +78,37 @@ test("enabled dashboard serves shell and script with fixed security headers", as
     assert.equal(await r.text(), body);
   }
 });
+test("#1768: the bare root serves the shell natively — 200, no redirect", async (t) => {
+  // Pure pin: exact `/` and `/dashboard` answer identically, nothing else.
+  assert.deepEqual(serveDashboard("/"), serveDashboard("/dashboard"));
+  const f = await listening(true);
+  t.after(() => f.server.close());
+  const root = await fetch(f.base + "/");
+  assert.equal(root.status, 200);
+  assert.equal(root.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.equal(root.headers.get("content-security-policy"), CSP);
+  assert.equal(root.headers.get("cache-control"), "no-store");
+  assert.equal(root.headers.get("location"), null, "the native root must never redirect to /dashboard");
+  const rootBody = await root.text();
+  assert.equal(rootBody, DASHBOARD_HTML);
+  // The compatibility spelling keeps working and stays byte-identical.
+  const compat = await fetch(f.base + "/dashboard");
+  assert.equal(compat.status, 200);
+  assert.equal(await compat.text(), rootBody);
+});
+test("the native root swallows nothing: health, metrics, admin, and unknown paths keep their treatment", async (t) => {
+  const f = await listening(true, "admin-secret");
+  t.after(() => f.server.close());
+  assert.equal((await fetch(f.base + "/healthz")).status, 200);
+  assert.equal((await fetch(f.base + "/readyz")).status, 200);
+  assert.equal((await fetch(f.base + "/metrics")).status, 200);
+  assert.equal((await fetch(f.base + "/admin/status", { headers: { authorization: "Bearer admin-secret" } })).status, 200);
+  for (const path of ["/index.html", "/app.js", "/dashboardx", "//"]) {
+    const r = await fetch(f.base + path);
+    assert.equal(r.status, 404, path);
+    assert.doesNotMatch(await r.text(), /<!doctype html|app\.js/i);
+  }
+});
 function servedStyleBlock() {
   const from = DASHBOARD_HTML.indexOf("<style>") + 7;
   assert.ok(from > 6);
@@ -109,10 +140,12 @@ test("dashboard doc pins the served CSP", () => {
   assert.ok(line);
   assert.equal(line.slice("Content-Security-Policy:".length).trim(), CSP);
 });
-test("method and path discipline: only two GET routes", async (t) => {
+test("method and path discipline: the shell is GET-only and exact-match", async (t) => {
   const f = await listening(true);
   t.after(() => f.server.close());
-  assert.equal((await fetch(f.base + "/dashboard", { method: "POST" })).status, 404);
+  for (const path of ["/", "/dashboard"]) {
+    assert.equal((await fetch(f.base + path, { method: "POST" })).status, 404, path);
+  }
   const extra = await fetch(f.base + "/dashboard/extra");
   assert.equal(extra.status, 404);
   assert.doesNotMatch(await extra.text(), /<!doctype html|app\.js/i);

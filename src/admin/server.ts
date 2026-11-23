@@ -37,10 +37,11 @@ export interface AdminHostOptions extends AdminMetricsOptions {
   readonly requestId?: () => string;
   readonly mcp?: AdminMcpOptions;
   /** Optional #742 static dashboard shell on the SAME listener. When
-   * present, `GET /dashboard` and `GET /dashboard/app.js` are served from
-   * compile-time constants; when absent the `/dashboard` paths answer the
-   * fixed 404 like any unknown path — the surface is not part of that
-   * deployment, never open. The paths stay OUTSIDE the `/admin/`
+   * present, `GET /`, `GET /dashboard`, and `GET /dashboard/app.js` are
+   * served from compile-time constants (#1768: the bare root is the
+   * shell's native address, exact-match only); when absent those paths
+   * answer the fixed 404 like any unknown path — the surface is not part
+   * of that deployment, never open. The paths stay OUTSIDE the `/admin/`
    * namespace, so the every-admin-route-is-authenticated rule is untouched,
    * and the shell itself carries zero dynamic data: every data route stays
    * bearer-protected. */
@@ -167,8 +168,9 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       // The optional #742 dashboard shell mounts on the SAME listener,
       // OUTSIDE the `/admin/` namespace: it serves compile-time constants
       // only (zero dynamic data, no request echo) and every data route the
-      // shell fetches stays bearer-protected under `/admin/*`. When not
-      // configured, `/dashboard` falls through to the fixed 404 like any
+      // shell fetches stays bearer-protected under `/admin/*`. #1768: the
+      // bare root is one of the shell's exact-match paths. When not
+      // configured, those paths fall through to the fixed 404 like any
       // unknown path — the surface is not part of that deployment, never
       // open.
       if (options.dashboard !== undefined && method === "GET") {
