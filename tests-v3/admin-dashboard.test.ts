@@ -473,6 +473,28 @@ test("a refused cancellation shows the controller's reason (409)", async () => {
   assert.ok(!h.propertyWrites.some((write) => String(write.value).includes("the run has no queued generation")));
 });
 
+test("a cancellation whose publication is in flight is reported as undetermined (202)", async () => {
+  // The controller registered the cancellation, but the publication was
+  // already in flight: the run may still end published. The dashboard
+  // must NOT report the applied cancellation.
+  const h = harness({
+    payloads: { "/admin/runs/pending": { runId: "pending", state: "publishing", usage: [], publication: {} } },
+    responses: {
+      "/admin/runs/pending/cancel": {
+        status: 202,
+        body: JSON.stringify({ status: "cancellation-registered", detail: "the publication is already in flight" }),
+      },
+    },
+  });
+  vm.runInContext("loadRunDetail('pending'); undefined", h.sandbox);
+  await h.untilSettled(() => h.handlerForLabel("Cancel run") !== undefined, "cancel pending button");
+  await h.handlerForLabel("Cancel run")!();
+  await h.untilSettled(() => h.paths.includes("/admin/runs/pending/cancel"), "cancel pending request");
+  await h.untilSettled(() => h.textData.includes("Cancellation registered; the outcome is undetermined."), "cancel pending headline");
+  assert.ok(h.textData.some((x) => x.includes("the publication is already in flight")), "the controller's reason reaches the operator");
+  assert.ok(!h.textData.includes("Cancellation accepted."), "an undetermined cancellation is never reported as applied");
+});
+
 test("an invalid rereview form never reaches the controller", async () => {
   const noReason = harness({ form: { reason: "   " } });
   await noReason.listeners["#rereview:click"]![0]!();

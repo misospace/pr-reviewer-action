@@ -133,17 +133,34 @@ data route stays bearer-protected (see
   agree: the generation ends `cancelled` / `cancelled-by-operator`, never
   supersession-shaped. The newer generation still runs; the conversion
   only says why THIS generation ended.
+- **`200 { "cancelled": true }` is the ONLY answer that promises an
+  operator-cancelled run** (#1772). Every settle path behind it ends
+  `cancelled-by-operator`: a queued generation settles at once, an
+  attempt settles when it observes the abort, and a generation whose
+  publication FAILED and awaits its retry never publishes again.
+- **A publication that is already IN FLIGHT answers `202`, not the
+  applied-cancellation `200`.** The forge side effect cannot be undone,
+  so the terminal state belongs to the publication, not to the operator's
+  click: the cancellation is REGISTERED (a publication that fails still
+  settles `cancelled-by-operator`, and no retry publishes the review),
+  but the run may still end `completed` with the review published. The
+  route answers `202 { "status": "cancellation-registered", "detail":
+  "<reason>" }` — the request was accepted, its effect is not
+  determined. The dashboard reports the same outcome instead of
+  "Cancellation accepted."
 - **Contract change (#1781), disclosed for out-of-repo consumers:** releases
   through v3.10.0 answered `202` on `POST /admin/runs/{runId}/cancel`; this
   surface now answers `200` with the same `{ "cancelled": true }` body.
   A consumer that checks `res.ok` (the shipped dashboard does) is
   unaffected; one that requires exactly `202` must accept `200`. No other
-  route's status codes changed.
+  route's status codes changed. A consumer that reads the body must
+  distinguish the `200 { "cancelled": true }` body from the `202
+  { "status": "cancellation-registered" }` body: both are `2xx`.
 
 | Mutation | Request body | Accepted | Refused |
 |---|---|---|---|
 | `POST /admin/rereview` | `{"prKey": "owner/repo#123", "reason": "<one line>"}` | `202 {"jobId": "<generation id>"}` | `400` invalid request, `409` refused effect |
-| `POST /admin/runs/{runId}/cancel` | `{}` | `200 {"cancelled": true}` | `404` unknown run, `409` terminal run, `409` refused effect |
+| `POST /admin/runs/{runId}/cancel` | `{}` | `200 {"cancelled": true}` (applied), `202 {"status": "cancellation-registered", "detail": "<reason>"}` (publication in flight) | `404` unknown run, `409` terminal run, `409` refused effect |
 
 - **The PR key names ONE pull request.** The controller's grammar is
   `owner/repo#123`: an owner and a repository of `[A-Za-z0-9._-]`, a `#`,

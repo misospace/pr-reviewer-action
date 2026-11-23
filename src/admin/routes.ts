@@ -323,6 +323,17 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
           return fixed(409, { error: "run is terminal", detail: "the run already settled" });
         }
         const result = await context.deps.cancelRun({ runId, requestId: request.requestId });
+        if ("undetermined" in result) {
+          // The publication is already in flight: the forge side effect
+          // may already have landed and it cannot be undone, so the
+          // terminal state belongs to the publication — not to the
+          // operator's click. The cancellation IS registered, but this
+          // is NOT the applied-cancellation contract (#1772): the route
+          // answers "accepted, undetermined" instead of the 200
+          // `cancelled: true` that promises an operator-cancelled run.
+          await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "accepted" });
+          return fixed(202, { status: "cancellation-registered", detail: boundedRefusalReason(result.undetermined) });
+        }
         if ("refused" in result) {
           await audit(context, { action: "cancel", requestId: request.requestId, target: { kind: "run", id: runId }, outcome: "refused" });
           // The seam's refusal reason reaches the operator, bounded and
@@ -342,7 +353,11 @@ export async function dispatchAdminRoute(context: AdminRouteContext, request: Ad
       // effect seam stamped the generation and aborted its attempt, so the
       // operator gets an acknowledgement, not an acceptance promise. The
       // durable run settles `cancelled` when the attempt observes the
-      // abort.
+      // abort. This 200 is the ONLY answer that promises an
+      // operator-cancelled run: every settle path behind it ends
+      // `cancelled-by-operator`. The publication-in-flight case answers
+      // 202 above, because its terminal state is the publication's
+      // outcome and not the operator's click.
       return fixed(200, cancelled);
     }
   }

@@ -836,7 +836,13 @@ function createAdminDeps(deps: {
     },
     async cancelRun(input) {
       const result = await deps.daemon.cancelRun(input.runId);
-      return result.status === "cancelled" ? { cancelled: true } : { refused: result.reason };
+      if (result.status === "cancelled") return { cancelled: true };
+      // The publication is already in flight: the cancellation is
+      // registered, but the terminal state is the publication's outcome
+      // — NOT the operator's click. The admin layer answers "accepted,
+      // undetermined" here, never the applied-cancellation contract.
+      if (result.status === "publish-in-flight") return { undetermined: result.reason };
+      return { refused: result.reason };
     },
     audit: (event) => {
       audit(JSON.stringify({

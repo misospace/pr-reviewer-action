@@ -288,11 +288,17 @@ interface Harness {
   }>;
   readonly dirs: { durableStateDir: string; runsRoot: string; workspaceCacheRoot: string };
   readonly fake: FakeExecution;
+  /** The gate a hanging publication waits on (#1772): the operator's
+   *  cancel lands while the forge side effect is still in flight. */
+  readonly publishGate: { readonly release: () => void };
   daemon: ControllerDaemon;
 }
 
 async function start(overrides: {
   hangUntilAbort?: boolean;
+  /** Hang the forge publication until the test releases it, so the
+   *  publication is IN FLIGHT while the operator cancels (#1772). */
+  hangPublish?: boolean;
   controlPlane?: ControlPlaneStore;
   fake?: FakeExecution;
   dirs?: Harness["dirs"];
@@ -307,6 +313,10 @@ async function start(overrides: {
   const forgePublishes: Array<{ job: ReviewJob; resultPayload: string }> = [];
   const heads: Array<string | null> = [];
   const prReads: Array<{ repoFullName: string; prNumber: number; installationId: string }> = [];
+  // The hanging publication: the test releases it explicitly.
+  let releasePublish: () => void = () => undefined;
+  const publishGatePromise = new Promise<void>((resolve) => { releasePublish = resolve; });
+  const publishGate = { release: (): void => { releasePublish(); } };
   const fake = overrides.fake ?? new FakeExecution(overrides.hangUntilAbort ?? false);
   const options: ControllerDaemonOptions = {
     instance: instanceConfig(),
@@ -330,6 +340,7 @@ async function start(overrides: {
       },
       publish: async (input) => {
         forgePublishes.push({ job: input.job, resultPayload: input.resultPayload });
+        if (overrides.hangPublish === true) await publishGatePromise;
         return { publicationId: "github-comment:99" };
       },
     },
@@ -353,7 +364,7 @@ async function start(overrides: {
     ...overrides.options,
   };
   const daemon = await startControllerDaemon(options);
-  return { controlPlane, forgePublishes, heads, prReads, dirs, fake, daemon };
+  return { controlPlane, forgePublishes, heads, prReads, dirs, fake, publishGate, daemon };
 }
 
 function cleanup(h: Pick<Harness, "dirs">): void {
@@ -4112,6 +4123,47 @@ test("cancelRun: a run's live generation is cancelled and settles cancelled-by-o
   const record = store.load().records.find((entry) => entry.job.jobId === request.jobId)!;
   assert.equal(record.failureReason, "cancelled-by-operator");
   assert.equal(record.supersededByJobId, "", "the generation was never superseded");
+});
+
+test("cancelRun: a generation whose publication is in flight is NOT reported as cancelled (#1772)", async (t) => {
+  // The publication is already in flight when the operator cancels: the
+  // forge side effect cannot be undone, so the seam must NOT report an
+  // applied cancellation — the terminal state belongs to the
+  // publication's outcome.
+  const store = new InMemoryQueueStore();
+  const h = await start({ hangUntilAbort: true, hangPublish: true, options: { queueStore: store } });
+  t.after(() => {
+    h.fake.dispose();
+    h.publishGate.release();
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+  h.fake.finish();
+  await waitFor(() => h.forgePublishes.length === 1);
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === request.jobId);
+    return record !== undefined && record.state === "publishing";
+  });
+
+  const result = await h.daemon.cancelRun(request.runId);
+  assert.equal(result.status, "publish-in-flight", "an in-flight publication cannot promise a cancelled run");
+  assert.equal(
+    result.status === "publish-in-flight" ? result.reason : "",
+    "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
+  );
+
+  // The publication succeeds: the review is on the forge, so the
+  // generation settles `completed` — never reported as cancelled.
+  h.publishGate.release();
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === request.jobId);
+    return record !== undefined && record.state === "completed";
+  });
+  const record = store.load().records.find((entry) => entry.job.jobId === request.jobId)!;
+  assert.equal(record.failureReason, "", "no cancellation is reported over a published review");
 });
 
 test("cancelRun: a queued generation's durable run settles cancelled-by-operator (#1772)", async (t) => {

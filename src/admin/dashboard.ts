@@ -725,6 +725,14 @@ const DASHBOARD_JS = `"use strict";
         const outcome = await apiJson("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         feedback.replaceChildren();
         if (outcome.ok) {
+          // 202: the cancellation is REGISTERED, but the publication was
+          // already in flight — the terminal state belongs to the
+          // publication, so the run may still end published. The
+          // controller's own reason reaches the operator.
+          if (outcome.status === 202) {
+            setFeedback(feedback, "Cancellation registered; the outcome is undetermined.", refusalDetail(outcome, "The publication is already in flight."));
+            return;
+          }
           setFeedback(feedback, "Cancellation accepted.", "The controller applied the cancellation.");
           return;
         }

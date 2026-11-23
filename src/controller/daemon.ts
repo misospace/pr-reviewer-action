@@ -444,6 +444,7 @@ export interface ControllerDaemon {
   cancelRun(runId: string): Promise<
     | { readonly status: "cancelled" }
     | { readonly status: "refused"; readonly reason: string }
+    | { readonly status: "publish-in-flight"; readonly reason: string }
   >;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
@@ -2118,6 +2119,17 @@ export async function startControllerDaemon(
       const outcome = runtime.controller.cancel(run.jobId);
       if (outcome === "cancelled" || outcome === "cancel-requested") {
         return { status: "cancelled" };
+      }
+      if (outcome === "publish-in-flight") {
+        // The publication is already in flight: the operator's
+        // cancellation is REGISTERED, but the forge side effect cannot
+        // be undone, so the terminal state is the publication's outcome
+        // and the caller must not report an applied cancellation
+        // (#1772).
+        return {
+          status: "publish-in-flight",
+          reason: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
+        };
       }
       if (outcome === "terminal") {
         return { status: "refused", reason: "the run already settled" };

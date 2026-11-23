@@ -328,7 +328,16 @@ export class ReviewQueueController {
    *  - `cancelled` — a `queued` record settled `cancelled` now;
    *  - `cancel-requested` — an active record was stamped and its
    *    executor aborted; the attempt settles `cancelled` when it
-   *    observes the abort.
+   *    observes the abort;
+   *  - `publish-in-flight` — the generation is `publishing` and its
+   *    publication is ALREADY in flight: the forge side effect cannot
+   *    be undone, so the cancellation cannot guarantee an
+   *    operator-cancelled terminal state (#1772). The operator's intent
+   *    is still REGISTERED — the stamp stops a would-be retry and a
+   *    publication that fails settles the generation
+   *    `cancelled-by-operator` — but the terminal state belongs to the
+   *    publication's outcome, so the caller must not report an applied
+   *    cancellation.
    *
    *  The stamp carries NO superseding job id: that absence is exactly
    *  what distinguishes the operator's cancellation from a supersession
@@ -336,7 +345,7 @@ export class ReviewQueueController {
    *  active record is CONVERTED to the operator attribution here, so a
    *  cancellation acknowledgement is never contradicted by the durable
    *  record. */
-  cancel(jobId: string): "cancelled" | "cancel-requested" | "unknown" | "terminal" {
+  cancel(jobId: string): "cancelled" | "cancel-requested" | "publish-in-flight" | "unknown" | "terminal" {
     this.ensureLoaded();
     const record = this.records.get(jobId);
     if (record === undefined) return "unknown";
@@ -364,6 +373,17 @@ export class ReviewQueueController {
     // operator-cancelled record keeps its empty superseder. The
     // newer generation runs regardless: this only says why THIS
     // generation ended.
+    //
+    // A generation whose PUBLICATION is already in flight is the one
+    // case the caller cannot report as an applied cancellation: the
+    // forge side effect may already have landed, and it cannot be
+    // undone. The stamp still registers the operator's intent (a
+    // publication that fails settles `cancelled-by-operator` and never
+    // retries), but the terminal state is the publication's outcome —
+    // so the seam says `publish-in-flight` and the caller answers
+    // "accepted, undetermined" instead of the applied-cancellation 200
+    // contract (#1772).
+    const publicationInFlight = record.state === "publishing" && this.publishInFlight.has(jobId);
     this.records.set(
       jobId,
       Object.freeze({
@@ -375,7 +395,7 @@ export class ReviewQueueController {
     const entry = this.controllers.get(jobId);
     if (entry !== undefined) entry.controller.abort();
     this.save();
-    return "cancel-requested";
+    return publicationInFlight ? "publish-in-flight" : "cancel-requested";
   }
 
   /** One scheduling pass: lease expiry, deadline expiry, publish

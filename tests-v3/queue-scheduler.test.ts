@@ -1598,14 +1598,54 @@ test("publish: a publish that already succeeded settles completed, not cancelled
   assert.equal(controller.recordFor("job-a")!.state, "publishing");
   assert.notEqual(deferred.current, null, "the publish is in flight");
 
-  assert.equal(controller.cancel("job-a"), "cancel-requested");
-  assert.equal(controller.recordFor("job-a")!.cancelRequested, true);
+  // A publication that is ALREADY in flight cannot promise an
+  // operator-cancelled run: the forge side effect may already have
+  // landed. The seam says so instead of reporting an applied
+  // cancellation (#1772).
+  assert.equal(controller.cancel("job-a"), "publish-in-flight");
+  assert.equal(controller.recordFor("job-a")!.cancelRequested, true, "the operator's intent is still registered");
 
   deferred.current!(true);
   await flush();
   const settled = controller.recordFor("job-a")!;
   assert.equal(settled.state, "completed", "the published review is not reported as cancelled");
   assert.equal(settled.failureReason, "", "no cancellation is reported over a published review");
+});
+
+test("publish: an in-flight publication that fails settles cancelled-by-operator (#1772)", async () => {
+  // The publication was already in flight when the operator cancelled,
+  // and it FAILED: the review never reached the forge, so the
+  // generation settles with the operator's attribution — and no retry
+  // publishes it afterwards.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const calls: number[] = [];
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      calls.push(1);
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { clock, executor, controller } = setup({ publisher: hungPublisher });
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+
+  assert.equal(controller.cancel("job-a"), "publish-in-flight");
+  deferred.current!(false);
+  await flush();
+  const settled = controller.recordFor("job-a")!;
+  assert.equal(settled.state, "cancelled", "a publication that failed leaves the operator's cancellation in charge");
+  assert.equal(settled.failureReason, "cancelled-by-operator");
+
+  // The retry never fires for an operator-cancelled generation.
+  clock.t += 1_000;
+  await controller.tick();
+  assert.equal(calls.length, 1, "the cancelled generation is never published again");
+  assert.equal(controller.recordFor("job-a")!.state, "cancelled");
 });
 
 test("publish: an operator-cancelled generation is never published and settles cancelled-by-operator (#1772)", async () => {

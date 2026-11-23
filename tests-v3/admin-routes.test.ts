@@ -305,6 +305,23 @@ test("a refused cancellation carries the seam's reason to the operator", async (
   assert.deepEqual(events.map((event) => event.outcome), ["refused"]);
 });
 
+test("a cancellation whose publication is in flight answers 202, never the applied 200 (#1772)", async () => {
+  // The publication is already in flight: the forge side effect may
+  // already have landed, so the route must NOT answer the
+  // applied-cancellation contract (200 `cancelled: true`), which
+  // promises an operator-cancelled run. The cancellation is REGISTERED
+  // and the terminal state is undetermined.
+  const { context, events } = fixture("running");
+  context.deps.cancelRun = async () => ({ undetermined: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone" });
+  const response = await dispatchAdminRoute(context, req("POST", "/admin/runs/run-1/cancel", { authorization: "Bearer secret-value", contentType: "application/json" }));
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body, {
+    status: "cancellation-registered",
+    detail: "the publication is already in flight: the cancellation is registered, but a publication that already succeeded cannot be undone",
+  });
+  assert.deepEqual(events.map((event) => event.outcome), ["accepted"]);
+});
+
 test("every attempted mutation outcome writes exactly one audit row", async () => {
   const { context, events } = fixture("running");
   const headers = { authorization: "Bearer secret-value", contentType: "application/json" };

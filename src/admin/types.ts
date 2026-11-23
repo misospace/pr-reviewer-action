@@ -109,7 +109,7 @@ export interface ControllerAdminDeps {
   queueStatus(): Promise<AdminQueueStatus>;
   diagnostics(): Promise<Record<string, string | number | boolean>>;
   forceRereview(input: { readonly prKey: string; readonly reason: string; readonly requestId: string }): Promise<{ readonly jobId: string } | { readonly refused: string }>;
-  cancelRun(input: { readonly runId: string; readonly requestId: string }): Promise<{ readonly cancelled: true } | { readonly refused: string }>;
+  cancelRun(input: { readonly runId: string; readonly requestId: string }): Promise<{ readonly cancelled: true } | { readonly refused: string } | { readonly undetermined: string }>;
   audit(event: AdminAuditEvent): Promise<void> | void;
 }
 
