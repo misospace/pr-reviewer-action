@@ -148,17 +148,23 @@ The chart derives everything else from those two entries:
   when they have not.
 - Each claim is either operator-provided (`existingClaim: <name>`) or
   chart-created. A chart-created claim renders under the name the common
-  library derives from the number of chart-created PVC entries:
-  `<chart-fullname>-<key>` whenever several render — the standard
-  topology's `runs`, `workspace-cache`, and `durable-state` together —
-  and the bare `<chart-fullname>` when exactly one does. The chart
-  reproduces that rule itself (and pins the result with `forceRename`)
-  because the pre-#1767 chart let the library name its claims from the
-  same count: an upgrade that keeps the storage topology keeps every
-  claim name exactly. The chart fullname comes from the release and
-  chart names and ignores `global.*Override` values; a `prefix` or
-  `suffix` on a standard entry refuses the render — set `existingClaim`
-  or `forceRename` explicitly instead.
+  library's own rules derive for its persistence entry — an operator-set
+  `forceRename` wins outright; otherwise `prefix` is prepended, the
+  identifier is appended whenever more than one chart-created PVC renders
+  (`<chart-fullname>-<key>`; the standard topology's `runs`,
+  `workspace-cache`, and `durable-state` together), a lone chart-created
+  claim renders as the bare `<chart-fullname>`, `suffix` is appended, and
+  `global.alwaysAppendIdentifierToResourceName` forces the identifier.
+  The chart reproduces those rules itself (and pins the result with
+  `forceRename`) because the pre-#1767 chart let the library name its
+  claims from the same rules: an upgrade that keeps the storage topology
+  keeps every claim name exactly. The `<chart-fullname>` in claim names
+  follows the library's fullname chain — `global.fullnameOverride` /
+  `global.nameOverride`, then the component overrides, then the release
+  and chart names — which is what an override install's claims were
+  already named from. The chart's other objects (Secrets, RBAC) keep
+  naming from the chart's own mirror, which ignores the global
+  overrides.
 - The template `pr-reviewer.shared-volume-mappings` exposes the derived
   `{claim, controllerRoot}` pairs. #1766 will consume it to synthesize the
   default Kubernetes executor profile, so the worker Jobs receive the
@@ -229,7 +235,18 @@ cheapest upgrade path is to keep it. To adopt the single-source shape:
 3. Update the instance config's workspace mapping to the new claim name:
    `pr-reviewer-workspace` becomes `pr-reviewer-workspace-cache`. The
    workspace cache is expendable, so the renamed claim starts empty.
-4. Install into the namespace the instance config names (`-n pr-reviewer`
+4. Pin the durable-state claim to the name it already has — the move from
+   one to three chart-created PVCs changes the count-derived resolution —
+   and keep that pin for as long as the release runs (removing it later
+   would rename the claim back):
+
+   ```yaml
+   controller:
+     persistence:
+       durable-state:
+         forceRename: pr-reviewer # the bare fullname the old posture rendered
+   ```
+5. Install into the namespace the instance config names (`-n pr-reviewer`
    in the examples).
 
 From that point on the chart derives the claims and enforces the
@@ -271,11 +288,13 @@ controller:
       forceRename: pr-reviewer # the bare fullname the old posture rendered
 ```
 
-The chart's fullname also ignores `global.fullnameOverride`; an old
-install that renamed the release through it carries a durable-state
-claim outside both resolutions, so check the rendered name before
-upgrading and pin it the same way (`forceRename`, or `existingClaim` to
-manage the claim yourself).
+Claim names also follow the library's fullname chain, so an old install
+renamed through `global.fullnameOverride`, `global.nameOverride`, or the
+component `fullnameOverride`/`nameOverride` keeps its claim names across
+the upgrade — the resolution reads the same overrides the old library
+naming read. The chart's other objects (Secrets, RBAC) have always
+ignored the global overrides and keep doing so, which does not affect
+storage.
 
 ## PR discovery (polling-first)
 

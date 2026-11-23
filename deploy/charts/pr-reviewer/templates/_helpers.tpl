@@ -303,14 +303,12 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- if ne $type "persistentVolumeClaim" -}}
 {{- fail (printf "controller.persistence.%s must be an operator-provided existingClaim or a chart-created persistentVolumeClaim (standard shared storage)" $key) -}}
 {{- end -}}
-{{- if or (hasKey $entry "prefix") (hasKey $entry "suffix") -}}
-{{- fail (printf "controller.persistence.%s prefix/suffix rename is ambiguous under the derived standard storage; set existingClaim or forceRename explicitly (#1767)" $key) -}}
-{{- end -}}
-{{- /* Resolve the claim with the common library's own naming rule (see
-       pr-reviewer.chart-created-claim-name) so the artifact, the
-       forceRename pin, and the redeclare guard can never drift from the
-       rendered PVC. */ -}}
-{{- $claim = include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $fullname "key" $key) -}}
+{{- /* Resolve the claim with the common library's own naming rules (see
+       pr-reviewer.chart-created-claim-name): an operator-set forceRename
+       is the rendered name and every derived reference follows it, so
+       the artifact, the pin below, and the redeclare guard can never
+       drift from the rendered PVC. */ -}}
+{{- $claim = include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $fullname "key" $key "entry" $entry) -}}
 {{- end -}}
 {{- /* chartCreated is the provisioning fact, not a name shape: an
        operator-provided existingClaim may coincidentally carry the
@@ -323,43 +321,59 @@ Every ambiguous or missing shape fails closed here, in one place.
 {{- end -}}
 
 {{/*
-Resolve the rendered name of a chart-created standard claim (#1767). The
-common library names every PVC from the count of chart-created PVC entries
-it renders (bjw-s.common.lib.pvc.enabledPVCs feeds
-determineResourceNameFromValues): the bare fullname when exactly one
-renders, `<fullname>-<identifier>` when several do — or when
-`global.alwaysAppendIdentifierToResourceName` is set. Reproducing that
-rule exactly is what keeps claim names stable across upgrades: the
-pre-#1767 chart let the library name its claims from the same count, so
-an upgrade that does not change the storage topology renames nothing —
-durable state included. A `prefix`/`suffix` rename on a standard entry is
-refused upstream: the derived references could not follow it.
+Resolve the rendered name of a chart-created standard claim (#1767). This
+reproduces the common library's naming for one persistence entry
+(determineResourceNameFromValues, fed by lib/pvc/enabledPVCs) exactly, in
+its order: an operator-set `forceRename` wins outright; otherwise the
+count of chart-created PVC entries decides whether the identifier is
+appended (bare fullname for one, `<fullname>-<identifier>` for several —
+or always, with `global.alwaysAppendIdentifierToResourceName`), with
+`prefix` prepended and `suffix` appended around that. The pre-#1767 chart
+let the library name its claims from the same rules, so reproducing them
+keeps claim names stable across upgrades: an upgrade that does not change
+the storage topology renames nothing — durable state included.
 */}}
 {{- define "pr-reviewer.chart-created-claim-name" -}}
 {{- $v := index . "values" -}}
 {{- $fullname := index . "fullname" -}}
 {{- $key := index . "key" -}}
+{{- $entry := index . "entry" -}}
+{{- if not (empty $entry.forceRename) -}}
+{{- /* the library applies forceRename before every other naming rule */ -}}
+{{- $entry.forceRename | lower -}}
+{{- else -}}
 {{- $enabledPvcs := 0 -}}
-{{- range $identifier, $entry := ($v.persistence | default dict) -}}
-{{- if kindIs "map" $entry -}}
+{{- range $identifier, $persistenceItem := ($v.persistence | default dict) -}}
+{{- if kindIs "map" $persistenceItem -}}
 {{- $pvcEnabled := true -}}
-{{- if hasKey $entry "enabled" -}}
-{{- $pvcEnabled = $entry.enabled -}}
+{{- if hasKey $persistenceItem "enabled" -}}
+{{- $pvcEnabled = $persistenceItem.enabled -}}
 {{- end -}}
-{{- if and $pvcEnabled (eq ($entry.type | default "persistentVolumeClaim") "persistentVolumeClaim") (empty $entry.existingClaim) -}}
+{{- if and $pvcEnabled (eq ($persistenceItem.type | default "persistentVolumeClaim") "persistentVolumeClaim") (empty $persistenceItem.existingClaim) -}}
 {{- $enabledPvcs = add1 $enabledPvcs -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $appendIdentifier := or (gt $enabledPvcs 1) (dig "alwaysAppendIdentifierToResourceName" false ($v.global | default dict)) -}}
 {{- $name := $fullname -}}
+{{- if not (empty $entry.prefix) -}}
+{{- if not (eq $name $entry.prefix) -}}
+{{- $name = printf "%s-%s" $entry.prefix $name -}}
+{{- end -}}
+{{- end -}}
 {{- if $appendIdentifier -}}
 {{- if and (not (hasSuffix (printf "-%s" $key) $name)) (ne $key $name) -}}
 {{- $name = printf "%s-%s" $name $key -}}
 {{- end -}}
 {{- end -}}
+{{- if not (empty $entry.suffix) -}}
+{{- if not (hasSuffix (printf "-%s" $entry.suffix) $name) -}}
+{{- $name = printf "%s-%s" $name $entry.suffix -}}
+{{- end -}}
+{{- end -}}
 {{- /* the common library lowercases rendered object names */ -}}
 {{- $name | lower -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -504,7 +518,27 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- fail (printf "controller.paths.%s must be a non-empty absolute path starting with / (it is the single source for the standard mounts, the env contract, and fix-roots)" $field) -}}
 {{- end -}}
 {{- end -}}
-{{- $mappings := include "pr-reviewer.shared-volume-mappings" (dict "values" $v "fullname" $fullname) | fromYamlArray -}}
+{{- /* Chart-created claim names resolve from the fullname the common
+        library's PVC naming used pre-#1767
+        (bjw-s.common.lib.chart.names.fullname): global overrides win over
+        the component ones, then the release containment chain. The
+        chart's other objects keep naming from the pr-reviewer.fullname
+        mirror, which deliberately ignores the global overrides — a claim
+        name that followed the mirror would silently rename the claims an
+        override install already has, and Helm would delete the old
+        claims on upgrade. */ -}}
+{{- $claimName := dig "nameOverride" "" ($v.global | default dict) | default ($v.nameOverride | default $ctx.Chart.Name) -}}
+{{- $claimFullname := dig "fullnameOverride" "" ($v.global | default dict) | default $v.fullnameOverride -}}
+{{- if empty $claimFullname -}}
+{{- $claimName = $claimName | toString | trunc 63 | trimSuffix "-" -}}
+{{- if contains $claimName $ctx.Release.Name -}}
+{{- $claimFullname = $ctx.Release.Name -}}
+{{- else -}}
+{{- $claimFullname = printf "%s-%s" $ctx.Release.Name $claimName -}}
+{{- end -}}
+{{- end -}}
+{{- $claimFullname = $claimFullname | toString | trunc 63 | trimSuffix "-" -}}
+{{- $mappings := include "pr-reviewer.shared-volume-mappings" (dict "values" $v "fullname" $claimFullname) | fromYamlArray -}}
 {{- /* The standard mount path derives from controller.paths.* (the same
        source as the env contract and fix-roots), so a relocation stays
        one-source. Extra mounts of the same claim are allowed, but the
@@ -580,11 +614,8 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
         any later rename. */ -}}
 {{- $durableState := index ($v.persistence | default dict) "durable-state" | default dict -}}
 {{- if empty $durableState.existingClaim -}}
-{{- if not (hasKey $durableState "forceRename") -}}
-{{- if or (hasKey $durableState "prefix") (hasKey $durableState "suffix") -}}
-{{- fail "controller.persistence.durable-state prefix/suffix rename is ambiguous under the derived standard storage; set existingClaim or forceRename explicitly (#1767)" -}}
-{{- end -}}
-{{- $_ := set $durableState "forceRename" (include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $fullname "key" "durable-state")) -}}
+{{- if empty $durableState.forceRename -}}
+{{- $_ := set $durableState "forceRename" (include "pr-reviewer.chart-created-claim-name" (dict "values" $v "fullname" $claimFullname "key" "durable-state" "entry" $durableState)) -}}
 {{- end -}}
 {{- if not (hasKey $durableState "retain") -}}
 {{- $_ := set $durableState "retain" true -}}

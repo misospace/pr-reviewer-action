@@ -320,6 +320,35 @@ jobs:
             --set controller.persistence.durable-state.forceRename=pr-reviewer \
             > /var/tmp/render-durable-state-adoption-pin.yaml
           awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer\n") && index($0,"helm.sh/resource-policy: keep") {found=1} END{exit !found}' /var/tmp/render-durable-state-adoption-pin.yaml
+          # The naming reproduction extends to the entry-level renames and
+          # the fullname overrides the pre-#1767 library naming read: an
+          # install using any of them keeps its claim names across the
+          # upgrade (rendered against the legacy single-PVC posture, where
+          # the bare-resolution path applies).
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set controller.persistence.durable-state.prefix=alt- \
+            > /var/tmp/render-naming-prefix.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: alt--pr-reviewer\n") {found=1} END{exit !found}' /var/tmp/render-naming-prefix.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set controller.persistence.durable-state.suffix=-old \
+            > /var/tmp/render-naming-suffix.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: pr-reviewer--old\n") {found=1} END{exit !found}' /var/tmp/render-naming-suffix.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --namespace pr-reviewer \
+            --set controller.persistence.runs.existingClaim=pr-reviewer-runs \
+            --set controller.persistence.workspace-cache.existingClaim=pr-reviewer-workspace \
+            --set global.fullnameOverride=renamed-release \
+            > /var/tmp/render-naming-override.yaml
+          awk 'BEGIN{RS="---"} index($0,"kind: PersistentVolumeClaim") && index($0,"\n  name: renamed-release\n") {found=1} END{exit !found}' /var/tmp/render-naming-override.yaml
           # Relocation stays single-source, but the single source now spans
           # the operator's inline config too: relocating the chart side
           # renders only when the instance config's repetition agrees. The
@@ -345,8 +374,6 @@ jobs:
             'controller.persistence.runs.type=hostPath|controller.persistence.runs.hostPath=/tmp/x|must be an operator-provided existingClaim or a chart-created persistentVolumeClaim' \
             'controller.persistence.runs.enabled=false||is required as the standard shared storage' \
             'controller.persistence.durable-state=null||is required (the standard storage is single-source' \
-            'controller.persistence.runs.prefix=alt-||prefix/suffix rename is ambiguous under the derived standard storage' \
-            'controller.persistence.durable-state.suffix=-old||prefix/suffix rename is ambiguous under the derived standard storage' \
             'controller.paths.runsRoot=data/runs||must be a non-empty absolute path starting with /' \
             'controller.persistence.runs.globalMounts[0].path=/elsewhere||must include the writable controller.paths root' \
             'controller.persistence.runs.globalMounts[0].path=/var/lib/pr-reviewer/runs|controller.persistence.runs.globalMounts[0].readOnly=true|mounted readOnly at the controller.paths root' \
