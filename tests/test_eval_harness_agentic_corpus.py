@@ -31,9 +31,13 @@ CORPUS_PATH = EVALS / "corpus-agentic.json"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import eval_harness  # noqa: E402
 from eval_harness import (  # noqa: E402
+    _fixture_pr_object,
     BenchmarkCorpus,
+    BenchmarkResult,
+    FAILURE_CLASS_ADMISSION_SKIP,
+    FAILURE_CLASS_REPLAY,
+    REPLAY_FAILURE_MARKER,
     ReplayMaterializationError,
     ReviewRun,
     generate_report,
@@ -116,7 +120,7 @@ class TestAgenticCorpusIsFixturePinned:
         # The harness only defaults a missing state. An explicit closed
         # state stays closed, so a fixture cannot smuggle a terminal pull
         # request past the runtime's admission gate.
-        pr = eval_harness._fixture_pr_object(
+        pr = _fixture_pr_object(
             {"number": 1, "state": "closed", "draft": False}, "eval-fixtures/x"
         )
         assert pr["state"] == "closed"
@@ -159,7 +163,7 @@ def _stub_review_script(tmp_path: Path) -> tuple[Path, Path]:
 class TestAgenticReplayNeverTouchesAForge:
     def test_fixture_entry_never_clones_or_fetches(self, tmp_path, monkeypatch) -> None:
         script, _env = _stub_review_script(tmp_path)
-        monkeypatch.setattr(eval_harness, "RUNTIME_ENTRYPOINT", tmp_path / "unused")
+        monkeypatch.setattr("eval_harness.RUNTIME_ENTRYPOINT", tmp_path / "unused")
         calls: list[list[str]] = []
         real_run = subprocess.run
 
@@ -192,7 +196,7 @@ class TestAgenticReplayNeverTouchesAForge:
 
     def test_fixture_entry_materializes_the_pinned_tree(self, tmp_path, monkeypatch) -> None:
         script, env_path = _stub_review_script(tmp_path)
-        monkeypatch.setattr(eval_harness, "RUNTIME_ENTRYPOINT", tmp_path / "unused")
+        monkeypatch.setattr("eval_harness.RUNTIME_ENTRYPOINT", tmp_path / "unused")
 
         corpus = _corpus()
         entry = corpus.prs[0]
@@ -325,7 +329,7 @@ class TestFailureTaxonomy:
     def _report(self, runs: list[ReviewRun]) -> dict:
         corpus = _corpus()
         entry = corpus.prs[0]
-        result = eval_harness.BenchmarkResult(
+        result = BenchmarkResult(
             pr_number=entry["number"], repo_full_name=entry["repo_full_name"]
         )
         result.runs = runs
@@ -337,8 +341,8 @@ class TestFailureTaxonomy:
             mode="native_loop",
             pr_number=entry["number"],
             repo_full_name=entry["repo_full_name"],
-            error=f"{eval_harness.REPLAY_FAILURE_MARKER}: fixture is corrupt",
-            failure_class=eval_harness.FAILURE_CLASS_REPLAY,
+            error=f"{REPLAY_FAILURE_MARKER}: fixture is corrupt",
+            failure_class=FAILURE_CLASS_REPLAY,
         )
         assertion_failure = ReviewRun(
             mode="native_loop",
@@ -366,7 +370,7 @@ class TestFailureTaxonomy:
             mode="native_loop",
             pr_number=entry["number"],
             repo_full_name=entry["repo_full_name"],
-            failure_class=eval_harness.FAILURE_CLASS_ADMISSION_SKIP,
+            failure_class=FAILURE_CLASS_ADMISSION_SKIP,
             skip_reason="pr-closed",
         )
 
@@ -395,3 +399,68 @@ class TestProductionAdmissionGateUnchanged:
         assert '"pr-closed"' in source and '"pr-state-unknown"' in source, (
             "the admission gate must keep its closed and unknown skip reasons"
         )
+
+
+# ---------------------------------------------------------------------------
+# Each arm runs the tool mode its report row claims (#1802)
+# ---------------------------------------------------------------------------
+
+
+def _child_env(env_path: Path) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            parsed[key] = value
+    return parsed
+
+
+class TestArmsDeclareTheirToolMode:
+    """The runtime's `tool-mode` input defaults to "native_loop", and an
+    empty or unset TOOL_MODE in the child env resolves to that default. A
+    tools_off arm that merely omits TOOL_MODE therefore runs the tool
+    harness (#1802), and the weekly two-mode A/B measures the same arm
+    twice while reporting two rows. Pin the exact child-env override for
+    both arms so the report row matches the mode that ran."""
+
+    def _run_arm(self, tmp_path: Path, monkeypatch, mode: str, arm_id: str = "0") -> dict[str, str]:
+        stub_dir = tmp_path / f"stub-{mode}-{arm_id}"
+        stub_dir.mkdir()
+        script, env_path = _stub_review_script(stub_dir)
+        monkeypatch.setattr("eval_harness.RUNTIME_ENTRYPOINT", tmp_path / "unused")
+        entry = _corpus().prs[0]
+        work_dir = tmp_path / f"work-{mode}-{arm_id}"
+        work_dir.mkdir()
+        run = run_review_for_pr(entry, mode, work_dir, {}, review_script=script)
+        assert run.error is None
+        return _child_env(env_path)
+
+    def test_tools_off_arm_disables_the_tool_harness(self, tmp_path, monkeypatch) -> None:
+        snap = self._run_arm(tmp_path, monkeypatch, "tools_off")
+        assert snap.get("TOOL_MODE") == "off", (
+            "the tools_off arm must send tool-mode=off explicitly: the "
+            "contract default is native_loop, so omitting it re-enables tools"
+        )
+
+    def test_native_loop_arm_enables_the_tool_harness(self, tmp_path, monkeypatch) -> None:
+        snap = self._run_arm(tmp_path, monkeypatch, "native_loop")
+        assert snap.get("TOOL_MODE") == "native_loop"
+
+    def test_arm_override_beats_an_ambient_tool_mode(self, tmp_path, monkeypatch) -> None:
+        # The child env starts from os.environ.copy(); a parent TOOL_MODE
+        # (developer shell, scheduled runner) must not pick either arm.
+        monkeypatch.setenv("TOOL_MODE", "native_loop")
+        snap = self._run_arm(tmp_path, monkeypatch, "tools_off")
+        assert snap.get("TOOL_MODE") == "off"
+        monkeypatch.setenv("TOOL_MODE", "off")
+        snap = self._run_arm(tmp_path, monkeypatch, "native_loop")
+        assert snap.get("TOOL_MODE") == "native_loop"
+
+    def test_off_is_a_valid_runtime_tool_mode(self) -> None:
+        # The harness sends "off" through the runtime's v2 env ABI; pin that
+        # the shipped vocabulary still accepts it, so the arm cannot be
+        # silently dropped by a future contract change.
+        schema = (ROOT / "src" / "config" / "schema.ts").read_text(encoding="utf-8")
+        assert '"tool-mode": ["off", "native_loop"]' in schema
+        contract = (ROOT / "contracts" / "action-v3.yml").read_text(encoding="utf-8")
+        assert 'id: tool-mode' in contract and 'v2_id: tool_mode' in contract

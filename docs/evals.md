@@ -860,6 +860,15 @@ the evidence chain stays the same and the replay stays deterministic. A live
 page can change or disappear, which would make the weekly rate measure the
 page instead of the reviewer.
 
+Every arm declares its tool mode to the runtime explicitly. The runtime's
+`tool-mode` input defaults to `native_loop`. If the `tools_off` arm left the
+mode unset, the runtime would turn the tool harness back on, and the weekly
+A/B would measure the same arm twice while reporting two rows. So the harness
+always sends `TOOL_MODE=off` for `tools_off` and `TOOL_MODE=native_loop` for
+`native_loop`, and never relies on the default (#1802).
+`tests/test_eval_harness_agentic_corpus.py` pins the child-environment value
+for both arms.
+
 To add a scenario or to change a fixture:
 
 1. Write the fixture file under `evals/agentic-fixtures/`. Use the shape of

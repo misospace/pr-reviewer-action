@@ -2078,9 +2078,13 @@ def run_review_for_pr(
     try:
         start = time.monotonic()
 
-        # Determine tool_mode argument for the runtime invocation
+        # Determine tool_mode argument for the runtime invocation.
+        # Every arm declares its mode explicitly (#1802): the runtime's
+        # `tool-mode` input defaults to "native_loop", so an empty or unset
+        # TOOL_MODE silently turns the tools_off arm back on — the two-mode
+        # A/B (#1799) would then measure the same arm twice.
         if mode == "tools_off":
-            tool_mode_arg = ""
+            tool_mode_arg = "off"
         elif mode == "native_loop":
             tool_mode_arg = "native_loop"
         else:
@@ -2238,8 +2242,10 @@ def run_review_for_pr(
             env["SEMANTIC_FIXTURE_MODE"] = "true"
             env["FORCE_REVIEW"] = "true"
             env["SKIP_IF_DIFF_UNCHANGED"] = "false"
-        if tool_mode_arg:
-            env["TOOL_MODE"] = tool_mode_arg
+        # Unconditional on purpose: the arm name in the report must match the
+        # mode the runtime actually ran (#1802). An ambient TOOL_MODE from the
+        # harness parent must not select either arm either.
+        env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
             env["DEEP_REVIEW"] = "true"
             # #635 benchmark execution shape; the default is the production
