@@ -47,11 +47,10 @@ controller:
       name: ""
       key: "webhook-secret"
 
-  # The #737 admin listener (PR_REVIEWER_ADMIN_PORT/_TOKEN). The token is
-  # required whenever the port is set — the admin surface is never served
-  # unauthenticated. The chart binds the listener to the pod-wide wildcard
-  # (PR_REVIEWER_ADMIN_BIND=0.0.0.0) so kubelet probes and Prometheus can
-  # reach it; the bearer token and the NetworkPolicy remain the guards.
+  # The #737 admin listener. Token mode requires a bearer token; OIDC mode
+  # adds browser sessions while retaining an optional token for automation.
+  # The chart binds the listener to the pod-wide wildcard so probes and
+  # Prometheus can reach it; network policy remains an ingress guard.
   admin:
     enabled: false
     port: 8081
@@ -59,6 +58,20 @@ controller:
     existingSecret:
       name: ""
       key: "token"
+    auth:
+      mode: token
+      oidc:
+        issuer: ""
+        clientId: ""
+        redirectBase: ""
+        allowedSubjects: []
+        allowedEmails: []
+        allowedGroups: []
+        sessionTtlMinutes: 480
+        clientSecret: ""
+        existingSecret:
+          name: ""
+          key: "client-secret"
     # The #742 operations dashboard (PR_REVIEWER_ADMIN_DASHBOARD). Off by
     # default: the variable stays absent, which is the controller's OFF
     # state (/dashboard answers the fixed 404). true renders

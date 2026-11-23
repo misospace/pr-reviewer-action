@@ -192,10 +192,7 @@ const DASHBOARD_HTML = `<!doctype html>
     <span id="conn" class="chip chip-none" role="status">disconnected</span>
     <button id="theme" aria-label="Change color theme">Theme: system</button>
     <span class="grow"></span>
-    <div class="auth">
-      <input type="password" id="token" autocomplete="new-password" aria-label="Admin bearer token" placeholder="Bearer token">
-      <button class="primary" id="load">Connect</button>
-    </div>
+    <div class="auth" id="auth"></div>
   </header>
   <main>
     <section id="view-overview" class="view view-active">
@@ -229,6 +226,8 @@ const DASHBOARD_HTML = `<!doctype html>
 </html>`;
 const DASHBOARD_JS = `"use strict";
   let token = "";
+  let authMode = "token";
+  let csrfToken = "";
   let cursorStack = [];
   let currentCursor = "";
   let nextCursor = "";
@@ -293,16 +292,25 @@ const DASHBOARD_JS = `"use strict";
     const h = el("strong", "", box);
     text(h, result.status === 0 ? "Can't reach the controller" : result.status === 401 || result.status === 403 ? "Authorization required" : "Controller request failed");
     const detail = el("span", "muted", box);
-    text(detail, result.status === 0 ? "Check the controller connection and try again." : result.status === 401 || result.status === 403 ? "Enter an admin token in the header, then connect." : "HTTP " + result.status + (result.body ? ": " + result.body : ""));
+    text(detail, result.status === 0 ? "Check the controller connection and try again." : result.status === 401 || result.status === 403 ? authMode === "oidc" ? "The session expired or was revoked. Sign in again." : "Enter an admin token in the header, then connect." : "HTTP " + result.status + (result.body ? ": " + result.body : ""));
   }
   // The only fetch site. Rejections become a synthetic offline result.
   async function api(path, options) {
     let response;
     try {
-      response = await fetch(path, Object.assign({ headers: { "Authorization": "Bearer " + token } }, options || {}));
+      const requestOptions = Object.assign({}, options || {});
+      const headers = Object.assign({}, requestOptions.headers || {});
+      if (authMode === "token") headers.Authorization = "Bearer " + token;
+      else { delete headers.Authorization; if (requestOptions.method === "POST") headers["X-CSRF-Token"] = csrfToken; }
+      requestOptions.headers = headers;
+      response = await fetch(path, requestOptions);
     } catch {
       return { ok: false, status: 0, body: "network error" };
     }
+    // An expired or revoked session must return the shell to the sign-in
+    // state instead of leaving a stale authenticated look. /auth/* paths
+    // are exempt: /auth/session answers 401 itself and re-renders the box.
+    if (response.status === 401 && authMode === "oidc" && !path.startsWith("/auth/")) { csrfToken = ""; void refreshOidcSession(); }
     let body = "";
     try {
       body = await response.text();
@@ -524,7 +532,8 @@ const DASHBOARD_JS = `"use strict";
     }
   }
   async function loadAll() {
-    token = document.getElementById("token").value || "";
+    const tokenInput = document.getElementById("token");
+    token = tokenInput ? tokenInput.value || "" : "";
     setConnection("loading", "chip chip-pending");
     const statusNode = document.getElementById("status");
     loading(statusNode);
@@ -681,7 +690,7 @@ const DASHBOARD_JS = `"use strict";
       text(cancel, "Cancel run");
       cancel.addEventListener("click", async () => {
         if (!confirm("Cancel run " + run.runId + "?")) return;
-        const outcome = await api("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: "{}" });
+        const outcome = await api("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         feedback.replaceChildren();
         if (outcome.ok) {
           text(feedback, "Cancellation accepted.");
@@ -744,12 +753,37 @@ const DASHBOARD_JS = `"use strict";
       text(small, detail);
     }
   }
+  function renderTokenAuth() {
+    const box = document.getElementById("auth");
+    box.replaceChildren();
+    const input = el("input", "", box);
+    input.type = "password"; input.id = "token"; input.autocomplete = "new-password"; input.ariaLabel = "Admin bearer token"; input.placeholder = "Bearer token";
+    const button = el("button", "primary", box); button.id = "load"; text(button, "Connect");
+    button.addEventListener("click", loadAll);
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") loadAll(); });
+  }
+  async function refreshOidcSession() {
+    const result = await apiJson("/auth/session");
+    if (!result.ok || !result.parsed || result.parsed.authenticated !== true || typeof result.parsed.csrfToken !== "string") { csrfToken = ""; renderOidcAuth(false); return false; }
+    csrfToken = result.parsed.csrfToken;
+    renderOidcAuth(true, result.parsed.email || result.parsed.subject || "Signed in");
+    return true;
+  }
+  function renderOidcAuth(connected, identity) {
+    const box = document.getElementById("auth"); box.replaceChildren();
+    if (connected) { const who = el("span", "", box); text(who, identity); const logout = el("button", "", box); text(logout, "Logout"); logout.addEventListener("click", async () => { const result = await api("/auth/logout", { method: "POST" }); if (result.ok || result.status === 401) { csrfToken = ""; renderOidcAuth(false); setConnection("disconnected", "chip chip-none"); return; } renderOidcAuth(true, identity); const error = el("span", "failure", document.getElementById("auth")); text(error, "Sign out failed. The session is still signed in."); }); }
+    else { const login = el("button", "primary", box); text(login, "Sign in"); login.addEventListener("click", () => { window.location.href = "/auth/login"; }); }
+    if (new URLSearchParams(window.location.search).get("login") === "failed") { const error = el("span", "failure", box); text(error, "Sign in failed."); }
+  }
   disablePagination();
   empty(document.getElementById("runs"), "Connect to load runs.");
-  document.getElementById("load").addEventListener("click", loadAll);
-  document.getElementById("token").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") loadAll();
-  });
+  renderTokenAuth();
+  apiJson("/auth/config").then((configResult) => {
+    const config = configResult.parsed || {};
+    authMode = config.mode === "oidc" ? "oidc" : "token";
+    if (authMode === "oidc") { renderOidcAuth(false); void refreshOidcSession().then((ok) => { if (ok) void loadAll(); }); }
+    else renderTokenAuth();
+  }).catch(() => { authMode = "token"; renderTokenAuth(); });
   document.getElementById("nav-overview").addEventListener("click", () => showView("overview"));
   document.getElementById("nav-runs").addEventListener("click", () => showView("runs"));
   document.getElementById("nav-diagnostics").addEventListener("click", () => {

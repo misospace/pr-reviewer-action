@@ -34,6 +34,16 @@ helm install pr-reviewer deploy/charts/pr-reviewer \
   -f deploy/charts/pr-reviewer/examples/values-external-postgres.yaml
 ```
 
+Run the dashboard with OIDC sign-in (Authorization Code + PKCE) instead of
+the pasted admin token. The example references an operator-provided Secret
+for the OIDC client secret; create it alongside the other prerequisite
+Secrets:
+
+```sh
+helm install pr-reviewer deploy/charts/pr-reviewer \
+  -f deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml
+```
+
 ## Prerequisite Secrets
 
 ### Forgejo instance (`values-controller-only.yaml`)

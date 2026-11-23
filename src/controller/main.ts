@@ -107,6 +107,7 @@ import { InClusterKubernetesApi } from "../executor/kubernetes-api.js";
 import { InClusterCredentialStore } from "../executor/kubernetes-credential-store.js";
 import { createFollowUpAnswerExecutor } from "../followup/executor.js";
 import { createAdminHost, type AdminHost } from "../admin/server.js";
+import { parseOidcAdminAuth, type AdminAuthConfig } from "../admin/oidc.js";
 import type {
   AdminAdoptionEntry,
   AdminQueueStatus,
@@ -304,7 +305,7 @@ interface StartupConfig {
   readonly runsRoot: string;
   readonly workspaceCacheRoot: string;
   readonly webhook: { readonly port: number; readonly secret: string } | null;
-  readonly admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean } | null;
+  readonly admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean; readonly auth: AdminAuthConfig } | null;
   readonly reconcile: { readonly intervalMs: number; readonly repos: readonly string[] } | null;
   readonly githubAppId: string;
   readonly githubAppPrivateKeyPem: string;
@@ -483,7 +484,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
     }
     webhook = { port: webhookPort, secret };
   }
-  let admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean } | null = null;
+  let admin: { readonly port: number; readonly token: string; readonly bind: string; readonly dashboard: boolean; readonly auth: AdminAuthConfig } | null = null;
   const adminPort = portFromEnv(env, "PR_REVIEWER_ADMIN_PORT");
   if (adminPort !== null) {
     if (adminPort === -1) {
@@ -506,14 +507,11 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
       );
     }
     const dashboardEnabled = DASHBOARD_ON.includes(dashboardRaw as typeof DASHBOARD_ON[number]);
-    // FAIL CLOSED: an admin listener without its bearer token is never
-    // served — the composition refuses instead of starting unauthenticated.
+    let auth: AdminAuthConfig;
+    try { auth = parseOidcAdminAuth(env); } catch (error) { throw new StartupRefusal(error instanceof Error ? error.message : "invalid admin auth configuration", 2); }
     const token = env.PR_REVIEWER_ADMIN_TOKEN ?? "";
-    if (token.trim() === "") {
-      throw new StartupRefusal(
-        "PR_REVIEWER_ADMIN_TOKEN is required when PR_REVIEWER_ADMIN_PORT is set (the admin surface is never served unauthenticated)",
-        2,
-      );
+    if (auth.mode === "token" && token.trim() === "") {
+      throw new StartupRefusal("PR_REVIEWER_ADMIN_TOKEN is required when PR_REVIEWER_ADMIN_PORT is set (the admin surface is never served unauthenticated)", 2);
     }
     // The bind address is a closed allowlist: a hostname would resolve and
     // rebind the surface in ways the operator cannot see, so only literal
@@ -525,7 +523,7 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
         2,
       );
     }
-    admin = { port: adminPort, token, bind, dashboard: dashboardEnabled };
+    admin = { port: adminPort, token, bind, dashboard: dashboardEnabled, auth };
   }
 
   // ── reconciliation schedule.
@@ -1585,7 +1583,8 @@ export async function controllerMain(
           platform: startup.platform,
           auditPath,
         }),
-        token: startup.admin.token,
+        ...(startup.admin.token ? { token: startup.admin.token } : {}),
+        auth: startup.admin.auth,
         ...(startup.admin.dashboard ? { dashboard: {} } : {}),
         nowMs: now,
       });
@@ -1620,6 +1619,7 @@ export async function controllerMain(
       // App intake is path-agnostic) — never a guess.
       ` route=${daemon.intakeRoute}` +
       ` admin=${startup.admin === null ? "off" : String(startup.admin.port)}` +
+      ` auth=${startup.admin === null ? "off" : startup.admin.auth.mode}` +
       ` dashboard=${startup.admin !== null && startup.admin.dashboard ? "on" : "off"}` +
       ` reconcile=${startup.reconcile === null ? "off" : String(startup.reconcile.intervalMs)}\n`,
   );

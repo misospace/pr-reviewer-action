@@ -161,6 +161,7 @@ test("no direct db, cluster, or forge access from dashboard", () => {
   assert.match(CSP, /connect-src 'self'/);
   assert.match(CSP, /frame-ancestors 'none'/);
   assert.equal([...DASHBOARD_JS.matchAll(/fetch\(/g)].length, 1);
+  for (const source of [DASHBOARD_HTML, DASHBOARD_JS]) assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB/i);
   for (const m of DASHBOARD_JS.matchAll(/[\"'](\/[^\"']*)[\"']/g)) {
     assert.ok(!m[1]!.startsWith("//"));
     assert.ok(!m[1]!.includes("://"));
@@ -274,8 +275,10 @@ function harness(options: HarnessOptions = {}) {
     const status = forced?.status ?? 200;
     return { ok: status >= 200 && status < 300, status, text: async () => body };
   } });
+  sandbox.window = { location: { href: "", search: "" } };
+  sandbox.URLSearchParams = URLSearchParams;
   vm.runInContext(DASHBOARD_JS, sandbox);
-  elements.get("token")!.raw.value = "token-user-input";
+  if (elements.has("token")) elements.get("token")!.raw.value = "token-user-input";
   function containerText(id: string): string {
     let out = "";
     const walk = (node: any) => {
@@ -346,8 +349,10 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
       "/admin/runs/active": { runId: "active", state: "running", usage: [], publication: { state: "none" } },
     },
     responses: {
+      "/auth/config": { status: 200, body: '{"mode":"token"}' },
       "/admin/rereview": { status: 202, body: '{"jobId":"accepted-rereview-sentinel"}' },
       "/admin/runs/active/cancel": { status: 202, body: '{"cancelled":true}' },
+      "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' }
     },
   });
   vm.runInContext("loadAll(); undefined", h.sandbox);
@@ -367,11 +372,13 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   vm.runInContext("loadAll(); undefined", offline.sandbox);
   await offline.untilSettled(() => offline.textData.includes("Can't reach the controller"), "offline");
   assert.ok(offline.textData.includes("Can't reach the controller"));
+  const existingButtonHandlers = h.listeners["button:click"]?.length ?? 0;
   vm.runInContext("loadRunDetail('active'); undefined", h.sandbox);
-  await h.untilSettled(() => Boolean(h.listeners["button:click"]?.length), "cancel registration");
+  await h.untilSettled(() => (h.listeners["button:click"]?.length ?? 0) > existingButtonHandlers, "cancel registration");
   const cancelHandlers = h.listeners["button:click"]!;
   await cancelHandlers[cancelHandlers.length - 1]!();
-  await h.untilSettled(() => h.textData.includes("Cancellation accepted."), "cancel success");
+  await h.untilSettled(() => h.paths.includes("/admin/runs/active/cancel"), "cancel request");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(h.textData.includes("Cancellation accepted."));
   const rereview = h.listeners["#rereview:click"]![0]!;
   await rereview();
@@ -383,9 +390,10 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await refused.untilSettled(() => refused.textData.includes("Rereview was not accepted."), "rereview refusal");
   assert.ok(refused.paths.includes("/admin/rereview"));
   assert.ok(refused.textData.some((x) => x.includes("HTTP 409")));
-  const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
+  const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/auth/config": { status: 200, body: '{"mode":"token"}' }, "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
   vm.runInContext("loadRunDetail('refused'); undefined", cancelRefused.sandbox);
-  await cancelRefused.untilSettled(() => Boolean(cancelRefused.listeners["button:click"]?.length), "cancel refusal button");
+  await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused"), "cancel refusal detail");
+  await cancelRefused.untilSettled(() => (cancelRefused.listeners["button:click"]?.length ?? 0) >= 2, "cancel refusal button");
   const refusalButton = cancelRefused.listeners["button:click"]!;
   await refusalButton[refusalButton.length - 1]!();
   await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
@@ -432,4 +440,25 @@ test("auth and redaction are covered", async (t) => {
   }
   assert.equal((await fetch(f.base + "/admin/diagnostics")).status, 401);
   assert.equal((await fetch(f.base + "/dashboard")).status, 200);
+});
+test("OIDC logout: a refused logout keeps the signed-in identity; a 401 signs out", async () => {
+  const responses = (logout: { status: number; body: string }) => ({
+    "/auth/config": { status: 200, body: '{"mode":"oidc"}' },
+    "/auth/session": { status: 200, body: '{"authenticated":true,"subject":"sub-1","csrfToken":"csrf-1"}' },
+    "/auth/logout": logout,
+  });
+  // Server-side refusal (e.g. store error): the UI stays signed in and says so.
+  const refused = harness({ responses: responses({ status: 500, body: '{"error":"logout-refused"}' }) });
+  await refused.untilSettled(() => refused.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const refusedClicks = refused.listeners["button:click"]!;
+  await refusedClicks[refusedClicks.length - 1]!();
+  await refused.untilSettled(() => refused.containerText("auth").includes("Sign out failed"), "refusal note renders");
+  assert.ok(refused.containerText("auth").includes("sub-1"));
+  // A 401 means the session is already gone: the UI returns to sign-in.
+  const expired = harness({ responses: responses({ status: 401, body: '{"error":"unauthorized"}' }) });
+  await expired.untilSettled(() => expired.containerText("auth").includes("sub-1"), "oidc identity renders");
+  const expiredClicks = expired.listeners["button:click"]!;
+  await expiredClicks[expiredClicks.length - 1]!();
+  await expired.untilSettled(() => expired.containerText("auth").includes("Sign in"), "sign-in state renders");
+  assert.ok(!expired.containerText("auth").includes("sub-1"));
 });
