@@ -465,6 +465,27 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     /\$declaredRoot := index \$volume "controller-root"/,
     "the declared controller root must be read with index (hyphenated key)",
   );
+  // Both guards are scoped, not unconditional: the namespace guards fire
+  // only when the chart actually derives a shared claim (the legacy
+  // all-existingClaim posture — including a dedicated worker namespace —
+  // must keep rendering), and the root check applies to the default
+  // executor profile only (non-default profiles keep raw advanced
+  // mappings supported unchecked).
+  assert.match(
+    helpers,
+    /\$chartCreatesShared := false/,
+    "the namespace guards must be conditioned on chart-created shared claims",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if and \$chartCreatesShared \(kindIs "map" \$kubeProfile\)/,
+    "the instance-config namespace guard must be conditioned on chart-created shared claims",
+  );
+  assert.match(
+    helpers,
+    /\$enforceRoot := or \(empty \$defaultProfile\) \(eq \(index \$profile "name" \| default ""\) \$defaultProfile\)/,
+    "the root check must apply to the default executor profile only",
+  );
   // Worker provisioning without the controller fails closed.
   const workerRbac = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");
   assert.match(
@@ -516,6 +537,14 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
   assert.ok(
     workflow.includes("render-advanced-mapping.yaml"),
     "charts.yaml must pin the permissive side: a mapping on a non-standard claim keeps rendering",
+  );
+  assert.ok(
+    workflow.includes("render-legacy-namespace.yaml"),
+    "charts.yaml must pin the permissive side: the legacy all-existingClaim posture keeps rendering a dedicated worker namespace",
+  );
+  assert.ok(
+    workflow.includes("render-non-default-divergent.yaml"),
+    "charts.yaml must pin the permissive side: a non-default executor profile keeps raw advanced mappings supported",
   );
   // The operator-facing contract is documented.
   const chartReadme = read("deploy/charts/pr-reviewer/README.md");

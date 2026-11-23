@@ -379,6 +379,78 @@ jobs:
             --set 'workerExecutor.volumeClaims[0].size=1Gi' \
             > /var/tmp/render-advanced-mapping.yaml
           grep -q 'name: extra-advanced$' /var/tmp/render-advanced-mapping.yaml
+          # The guards are conditioned on the chart deriving shared claims:
+          # the legacy all-existingClaim posture keeps rendering — including
+          # a dedicated worker namespace, the pre-#1767 shape — because the
+          # operator provisions identical claims in every named namespace.
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: workers' \
+            '      volumes:' \
+            '        - claim: runs-pvc' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            > /var/tmp/legacy-namespace-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set controller.persistence.runs.existingClaim=runs-pvc \
+            --set controller.persistence.workspace-cache.existingClaim=ws-pvc \
+            --set workerExecutor.namespace=workers \
+            --set 'workerExecutor.volumeClaims[0].name=runs-pvc' \
+            --set 'workerExecutor.volumeClaims[0].size=20Gi' \
+            --set 'workerExecutor.volumeClaims[1].name=ws-pvc' \
+            --set 'workerExecutor.volumeClaims[1].size=20Gi' \
+            --set-file controller.instanceConfig=/var/tmp/legacy-namespace-config.yaml \
+            > /var/tmp/render-legacy-namespace.yaml
+          grep -q 'name: runs-pvc$' /var/tmp/render-legacy-namespace.yaml
+          # The root check applies to the default executor profile only:
+          # a non-default profile's raw advanced mapping may mount a
+          # derived claim at any root, while the named default still
+          # refuses a stale root.
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /var/lib/pr-reviewer/runs' \
+            '  - name: adv' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /elsewhere/stale' \
+            > /var/tmp/non-default-divergent-config.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            --set-file controller.instanceConfig=/var/tmp/non-default-divergent-config.yaml \
+            > /var/tmp/render-non-default-divergent.yaml
+          printf '%s\n' \
+            'version: 1' \
+            'default-executor-profile: k' \
+            'executor-profiles:' \
+            '  - name: k' \
+            '    kind: kubernetes' \
+            '    kubernetes:' \
+            '      namespace: pr-reviewer' \
+            '      volumes:' \
+            '        - claim: pr-reviewer-runs' \
+            '          controller-root: /stale/root' \
+            > /var/tmp/default-divergent-config.yaml
+          if error="$(helm template pr-reviewer deploy/charts/pr-reviewer --namespace pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml --set-file controller.instanceConfig=/var/tmp/default-divergent-config.yaml 2>&1 >/dev/null)"; then
+            echo "the default executor profile must still refuse a stale derived claim root" >&2
+            exit 1
+          fi
+          printf '%s' "$error" | grep -q "must mount at the derived controller root"
           # #1725: Kubernetes-executor mode must render the chart-owned
           # fix-roots init container — kubelet provisions claim roots as
           # group-writable 0775 uid 0, which the runtime's cache-root trust

@@ -140,7 +140,10 @@ controller:
 #             port: 6443
 workerExecutor:
   mode: kubernetes
-  # Standard shared claims render in the release namespace.
+  # Standard shared claims render in the release namespace, so the guard
+  # requires this namespace to equal it; an all-existingClaim posture
+  # (for example a dedicated worker namespace provisioning its own
+  # claims) is exempt.
   namespace: ""
   serviceAccount:
     create: true

@@ -537,16 +537,29 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- end -}}
 {{- end -}}
 {{- if $kubeExecutor -}}
-{{- /* Worker Jobs run in the namespace their instance config names, and
-       the standard claims are derived in the release namespace: PVCs are
-       namespace-scoped, so every namespace in the topology must be the
-       release namespace. workerExecutor.namespace is the provisioning
-       mirror; when the instance config is inline the chart also checks
-       its authoritative executor namespace (an opaque existingSecret
-       cannot be checked and stays the operator's documented
-       responsibility). */ -}}
+{{- /* The namespace guards fire only when the chart actually derives
+       shared claims. With an all-existingClaim posture the operator
+       provisions identical claims in every namespace the topology names
+       (the pre-#1767 dedicated-worker-namespace shape), and that posture
+       must keep rendering — there is no chart-created claim the single
+       source could orphan. When ANY standard claim is chart-created,
+       PVCs are namespace-scoped and the chart derives the claims once,
+       in the release namespace, so every namespace in the topology must
+       be the release namespace. workerExecutor.namespace is the
+       provisioning mirror; when the instance config is inline the chart
+       also checks its authoritative executor namespace (an opaque
+       existingSecret cannot be checked and stays the operator's
+       documented responsibility). */ -}}
+{{- $chartCreatesShared := false -}}
+{{- range $mapping := $mappings -}}
+{{- if eq ($mapping.claim | lower) (printf "%s-%s" $fullname $mapping.key | lower) -}}
+{{- $chartCreatesShared = true -}}
+{{- end -}}
+{{- end -}}
+{{- if $chartCreatesShared -}}
 {{- if ne (default $ctx.Release.Namespace $workerExecutor.namespace) $ctx.Release.Namespace -}}
 {{- fail (printf "shared claims are namespace-scoped and the chart derives them once, in the release namespace %q; standard topology requires workerExecutor.namespace %q to equal the release namespace" $ctx.Release.Namespace $workerExecutor.namespace) -}}
+{{- end -}}
 {{- end -}}
 {{- if not (empty $v.instanceConfig) -}}
 {{- /* fromYaml yields an empty map on unparseable input: the check then
@@ -560,9 +573,14 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
        root diverges from the single source and silently breaks the
        shared-storage contract (a relocated controller.paths root moves
        the chart side only). The chart never rewrites operator config, so
-       that drift refuses the render. The claim NAME is operator-owned and
-       stays unverified: a stale name after a release-name change or an
-       existingClaim rename is indistinguishable from a mapping on a
+       that drift refuses the render. The root check applies to the
+       default executor profile only: when the instance config declares
+       default-executor-profile, profiles it does not name are advanced
+       operator material whose raw mappings stay supported unchecked (the
+       runtime refuses an unknown default at startup); without a declared
+       default every profile is checked. The claim NAME is operator-owned
+       and stays unverified: a stale name after a release-name change or
+       an existingClaim rename is indistinguishable from a mapping on a
        non-standard claim (volumeClaims-provisioned or operator-managed),
        which stays supported; #1766 removes the repetition entirely by
        synthesizing the default profile from this artifact. */ -}}
@@ -570,19 +588,21 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool> "workerExecutor
 {{- range $mapping := $mappings -}}
 {{- $_ := set $rootByClaim ($mapping.claim | lower) $mapping.controllerRoot -}}
 {{- end -}}
+{{- $defaultProfile := index $instanceCfg "default-executor-profile" | default "" -}}
 {{- range $profile := (index $instanceCfg "executor-profiles" | default list) -}}
 {{- if kindIs "map" $profile -}}
 {{- $kubeProfile := index $profile "kubernetes" | default dict -}}
-{{- if and (kindIs "map" $kubeProfile) (not (empty $kubeProfile.namespace)) (ne $kubeProfile.namespace $ctx.Release.Namespace) -}}
+{{- if and $chartCreatesShared (kindIs "map" $kubeProfile) (not (empty $kubeProfile.namespace)) (ne $kubeProfile.namespace $ctx.Release.Namespace) -}}
 {{- fail (printf "instance config executor-profiles.kubernetes.namespace %q must equal the release namespace %q: the standard shared claims are derived in the release namespace and PVCs are namespace-scoped (#1767)" $kubeProfile.namespace $ctx.Release.Namespace) -}}
 {{- end -}}
-{{- if kindIs "map" $kubeProfile -}}
+{{- $enforceRoot := or (empty $defaultProfile) (eq (index $profile "name" | default "") $defaultProfile) -}}
+{{- if and $enforceRoot (kindIs "map" $kubeProfile) -}}
 {{- range $volume := (index $kubeProfile "volumes" | default list) -}}
 {{- if and (kindIs "map" $volume) (not (empty $volume.claim)) -}}
 {{- $derivedRoot := index $rootByClaim ($volume.claim | lower) -}}
 {{- $declaredRoot := index $volume "controller-root" | default "" -}}
 {{- if and (not (empty $derivedRoot)) (ne $declaredRoot $derivedRoot) -}}
-{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root refuses the render" $volume.claim $derivedRoot) -}}
+{{- fail (printf "instance config executor-profiles.kubernetes volumes claim %q must mount at the derived controller root %q (single source: controller.persistence claim and controller.paths root, #1767); a raw instance config repeats the derived mappings by hand until #1766 synthesizes the default profile, and a divergent root on the default executor profile refuses the render" $volume.claim $derivedRoot) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

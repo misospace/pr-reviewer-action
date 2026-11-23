@@ -21,7 +21,9 @@ the worker service account and namespace-scoped Role/RoleBinding. The chart
 renders standard shared PVCs from `controller.persistence.runs` and
 `controller.persistence.workspace-cache`. The executor creates worker Jobs
 from the instance config. Keep `workerExecutor.namespace` equal to the release
-namespace because PVCs are namespace-scoped.
+namespace because PVCs are namespace-scoped — the guard fires once the chart
+derives a standard claim itself; an all-`existingClaim` posture (for example a
+dedicated worker namespace provisioning its own claims) is exempt.
 
 ```sh
 helm install pr-reviewer deploy/charts/pr-reviewer \
@@ -32,7 +34,9 @@ helm install pr-reviewer deploy/charts/pr-reviewer \
 The `-n pr-reviewer` namespace matters: the instance config names the
 worker Jobs' namespace, and the chart derives the standard shared claims
 in the release namespace. The two must match (#1767), and the render
-refuses otherwise.
+refuses otherwise. Keeping every standard claim as an `existingClaim`
+opts out of the guard, because then the chart renders no claim for the
+operator to misplace.
 
 Point at external PostgreSQL (never deployed by this chart):
 
