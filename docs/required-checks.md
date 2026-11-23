@@ -349,9 +349,10 @@ The rules this buys, and their limits:
   cover the requirement (jointly — one receipt may carry several identities),
   and stays unresolved with a reason code otherwise: `receipt-absent`
   (nothing relevant was acquired), `receipt-unverified` (relevant attempts
-  failed, were truncated, or are outside the requirement's freshness/trust
-  scope — an attempt is not evidence, and a stale/wrong-head read is
-  objectively invalid), `receipt-mismatch` (relevant receipts exist but none
+  failed, were truncated (except in the #1782 dependency-evidence pool,
+  where body completeness is not a pool gate — see below), or are outside
+  the requirement's freshness/trust scope — an attempt is not evidence, and
+  a stale/wrong-head read is objectively invalid), `receipt-mismatch` (relevant receipts exist but none
   carries the exact identity — kind-appropriate boundaries, never
   substrings), or `trace-refused`. The deterministic layer never flips an
   unresolved row to satisfied from receipts alone — that remains the
@@ -430,9 +431,18 @@ The rules this buys, and their limits:
   `provenance` only — the identity proves WHO the dependency is, never an
   exact delta or an updated version range — and a one-sided entry certifies
   no release delta; a kind-matched acquisition of the right identity then
-  stays `receipt-mismatch` and the objective row stays material-unresolved
-  through the existing disposition path (never a blocker, never versions
-  inferred from prose, URLs, or receipt text). Attribution is HUNK-LOCAL: a
+   stays `receipt-mismatch` and the objective row stays material-unresolved
+   through the existing disposition path (never a blocker, never versions
+   inferred from prose, URLs, or receipt text). The dependency pool credits
+   ACQUISITION facts — the tool, its target URL/query, the
+   executor-validated redirect chain, and the 2xx status — so body
+   completeness is NOT a pool gate for these cells (#1782): the executor's
+   fixed fetch slice clips every real registry/repository HTML page, and a
+   clipped body has never been evidence for them; the one place content IS
+   evidence (a document-claimed source mapping) carries its own completeness
+   gate in the rule above. `complete` stays on every receipt for all other
+   ledger consumers, and a FAILED acquisition still splits to
+   `receipt-unverified`. Attribution is HUNK-LOCAL: a
   `@@` header resets the lockfile package, manifest section, chart identity,
   and image/chart anchor, so a previous hunk's block header, dependency
   section, chart name, or image anchor never carries into this one (this

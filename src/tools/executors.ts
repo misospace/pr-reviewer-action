@@ -1479,7 +1479,15 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         // codepoint slice of the fetched body plus this wrapper byte cap
         // (#1657 round 10 — fetched-and-discarded bytes must not read as
         // a complete acquisition receipt).
-        result = { content: fetched.text, truncated: res.truncated === true || fetched.truncated };
+        // #1782: the executor-attested terminal URL travels with the payload.
+        // The evidence ledger reads the registry redirect assertion off it,
+        // so dropping it here would leave the redirect authority unreachable
+        // in production (the ledger only ever sees this envelope).
+        result = {
+          content: fetched.text,
+          truncated: res.truncated === true || fetched.truncated,
+          ...(typeof res.finalUrl === "string" ? { finalUrl: res.finalUrl } : {}),
+        };
         break;
       }
       case "web_search": {

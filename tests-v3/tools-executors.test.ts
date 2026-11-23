@@ -641,6 +641,9 @@ test("executor payloads carry clip state from every stage: wrapper cap, fetch sl
     deps: { ...deps(), fetch: async () => ({ status: 200, body: "short body" }), resolver: async () => ["93.184.216.34"] },
   }));
   assert.equal(clean.result.truncated, false);
+  // #1782: with no redirect there is no terminal-URL fact — the envelope
+  // stays byte-identical to the pre-#1782 payload, with NO `finalUrl` key.
+  assert.deepEqual(Object.keys(clean.result).sort(), ["content", "truncated"]);
   // Process-runner capture loss reaches the payload even when the wrapper
   // cap never fired on the (short) captured remainder.
   const captureDeps = {
@@ -1071,7 +1074,42 @@ test("#1782: web_fetch reports the terminal URL of an organic GHCR package redir
     ["https://github.com/-/sirkirby/packages/container/package/unifi-network-mcp", { status: 302, headers: { location: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp" }, body: "" }],
     ["https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp", { status: 200, body: html }],
   ]);
-  const res = await webFetch("https://ghcr.io/sirkirby/unifi-network-mcp", ctx("/tmp", {
+  const context = ctx("/tmp", {
+    allowedHosts: ["ghcr.io", "github.com"],
+    deps: {
+      ...deps(),
+      resolver: async () => ["140.82.112.22"],
+      fetch: async (url: string) => hops.get(url) ?? { status: 404, body: "" },
+    },
+  });
+  const res = await webFetch("https://ghcr.io/sirkirby/unifi-network-mcp", context);
+  assert.equal(res.error, undefined);
+  assert.equal(res.content, html);
+  assert.equal(res.truncated, false);
+  assert.equal(res.finalUrl, "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp");
+  // The production wiring, not just the unit: the ledger consumes the
+  // EXECUTOR ENVELOPE payload, so the terminal URL must survive the
+  // executeToolRequest wrapper (mask + byte cap) unchanged (#1782 review).
+  const envelope = await executeToolRequest("web_fetch", { url: "https://ghcr.io/sirkirby/unifi-network-mcp" }, context);
+  assert.equal(envelope.status, "ok");
+  assert.deepEqual(envelope.result, {
+    content: html, truncated: false, finalUrl: "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp",
+  });
+});
+
+test("#252: a hostile redirect terminal is echoed bounded and never widens past the allowlist", async () => {
+  // The terminal URL is echoed into the payload UNMASKED (like run_command's
+  // `command` and the receipt's own `subject.url`), so the boundary itself
+  // is pinned: a Location carrying userinfo or an over-long path survives
+  // only as a bounded echo of an allowlisted, resolver-gated host — never a
+  // second fetch, never an un-allowlisted surface, and never a credential
+  // the tool itself holds (those travel only in auth headers).
+  const long = "a".repeat(2000);
+  const hops = new Map<string, NetworkResponse>([
+    ["https://ghcr.io/o/x", { status: 303, headers: { location: `https://tok@github.com/${long}` }, body: "" }],
+    [`https://tok@github.com/${long}`, { status: 200, body: "body" }],
+  ]);
+  const res = await webFetch("https://ghcr.io/o/x", ctx("/tmp", {
     allowedHosts: ["ghcr.io", "github.com"],
     deps: {
       ...deps(),
@@ -1080,9 +1118,19 @@ test("#1782: web_fetch reports the terminal URL of an organic GHCR package redir
     },
   }));
   assert.equal(res.error, undefined);
-  assert.equal(res.content, html);
-  assert.equal(res.truncated, false);
-  assert.equal(res.finalUrl, "https://github.com/sirkirby/unifi-mcp/pkgs/container/unifi-network-mcp");
+  assert.equal(res.finalUrl, `https://tok@github.com/${long}`.slice(0, 1024));
+  assert.equal((res.finalUrl as string).length, 1024);
+  // A pivot host the allowlist refuses still fails closed with no body.
+  const hostile = await webFetch("https://ghcr.io/o/x", ctx("/tmp", {
+    allowedHosts: ["ghcr.io"],
+    deps: {
+      ...deps(),
+      resolver: async (host: string) => (host === "evil.example" ? ["93.184.216.34"] : ["140.82.112.22"]),
+      fetch: async () => ({ status: 302, headers: { location: "https://evil.example/steal" }, body: "" }),
+    },
+  }));
+  assert.match(String(hostile.error), /Redirect to disallowed host: evil\.example/);
+  assert.equal(hostile.finalUrl, undefined);
 });
 
 test("web_search treats non-2xx as errors even when the body is a valid JSON error object", async () => {
