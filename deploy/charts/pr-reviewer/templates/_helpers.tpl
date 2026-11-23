@@ -338,6 +338,16 @@ the storage topology renames nothing — durable state included.
 {{- $fullname := index . "fullname" -}}
 {{- $key := index . "key" -}}
 {{- $entry := index . "entry" -}}
+{{- /* The library tpl-evaluates values before naming; this resolution
+        composes and lowercases the raw strings, so a template inside a
+        derived rename field would corrupt the template (and then fail
+        the library's own evaluation opaquely). Derived claim names must
+        be literal; an existingClaim carries a template-resolved name. */ -}}
+{{- range $field := (list "forceRename" "prefix" "suffix") -}}
+{{- if contains "{{" (get $entry $field | default "" | toString) -}}
+{{- fail (printf "controller.persistence.%s %s must be a literal name (the derived claim resolution does not evaluate templates); use a literal rename or existingClaim (#1767)" $key $field) -}}
+{{- end -}}
+{{- end -}}
 {{- if not (empty $entry.forceRename) -}}
 {{- /* the library applies forceRename before every other naming rule */ -}}
 {{- $entry.forceRename | lower -}}

@@ -445,6 +445,20 @@ test("#1767: standard shared storage is declared once and derived; ambiguous top
     /\{\{- \$claimFullname := dig "fullnameOverride" "" \(\$v\.global \| default dict\) \| default \$v\.fullnameOverride -\}\}/,
     "the claim fullname must follow the library's fullname chain (global override, then component override)",
   );
+  // The mappings include must receive the library-chain fullname (not the
+  // chart's mirror): reverting that to the mirror renames exactly the
+  // shared claims of an override install, the regression the chain exists
+  // to prevent.
+  assert.match(
+    helpers,
+    /\{\{- \$mappings := include "pr-reviewer\.shared-volume-mappings" \(dict "values" \$v "fullname" \$claimFullname\) \| fromYamlArray -\}\}/,
+    "the shared-volume-mappings derivation must resolve claims from the library-chain fullname",
+  );
+  assert.match(
+    helpers,
+    /must be a literal name \(the derived claim resolution does not evaluate templates\)/,
+    "a template string in a derived rename field must fail closed with guidance instead of corrupting the name",
+  );
   assert.match(
     helpers,
     /\{\{- \$_ := set \$durableState "forceRename" \(include "pr-reviewer\.chart-created-claim-name" \(dict "values" \$v "fullname" \$claimFullname "key" "durable-state" "entry" \$durableState\)\) -\}\}/,

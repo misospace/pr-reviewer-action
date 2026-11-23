@@ -149,7 +149,10 @@ The chart derives everything else from those two entries:
 - Each claim is either operator-provided (`existingClaim: <name>`) or
   chart-created. A chart-created claim renders under the name the common
   library's own rules derive for its persistence entry — an operator-set
-  `forceRename` wins outright; otherwise `prefix` is prepended, the
+  `forceRename` wins outright (literal names only: the derived resolution
+  does not evaluate templates, and a template string in `forceRename`,
+  `prefix`, or `suffix` refuses the render — use `existingClaim` for a
+  template-resolved name); otherwise `prefix` is prepended, the
   identifier is appended whenever more than one chart-created PVC renders
   (`<chart-fullname>-<key>`; the standard topology's `runs`,
   `workspace-cache`, and `durable-state` together), a lone chart-created
