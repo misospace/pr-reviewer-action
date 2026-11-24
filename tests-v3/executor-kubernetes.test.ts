@@ -2788,6 +2788,32 @@ test("the analysis keeps js/file-access-to-http enabled for the whole repository
   }
 });
 
+test("the analysis runs the JS alert-suppression query so the in-source justifications take effect (#1788)", () => {
+  // Without a query of kind `alert-suppression` in the analysis, the CLI
+  // never reads `codeql[js/...]` comments and they stay inert: the alerts
+  // can then only be silenced by alert-level dispositions. Pin that the
+  // javascript-typescript leg adds the query (pack-root path since the
+  // codeql/javascript-queries reorganisation) and that BOTH matrix arms
+  // keep the explicit security-and-quality pin (#621).
+  const workflow = readFileSync(".github/workflows/codeql.yml", "utf8");
+  const queriesLines = [...workflow.matchAll(/^\s*queries:\s*(.+)$/gm)].map(
+    (match) => match[1],
+  );
+  assert.equal(queriesLines.length, 1, "the init step carries one queries input");
+  const [queries] = queriesLines;
+  assert.ok(queries !== undefined);
+  assert.match(
+    queries,
+    /javascript-typescript' && 'security-and-quality,codeql\/javascript-queries:AlertSuppression\.ql'/,
+    "the javascript-typescript leg must add the js alert-suppression query (#1788)",
+  );
+  assert.match(
+    queries,
+    /\|\|\s*'security-and-quality'\s*\}\}$/,
+    "the non-javascript leg must keep the security-and-quality pin",
+  );
+});
+
 test("the API TLS identity rule is operator-facing (#1773)", () => {
   // The derived-SNI behavior and its non-default-control-plane escape
   // hatch must live in the deployment runbook, not only in source

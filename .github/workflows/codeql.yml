@@ -62,7 +62,17 @@ jobs:
           # Pin the query suite explicitly: the implicit v4 suite is
           # `default`, not `security-and-quality`, and #621's acceptance
           # requires the full security-and-quality pack.
-          queries: security-and-quality
+          #
+          # The javascript-typescript leg also runs the pack's alert-suppression
+          # query (#1788). No standard suite ships a query of kind
+          # `alert-suppression`, so without it the `codeql[js/...]`
+          # justification comments in src/ (see the no-exclusion note below)
+          # are never collected and stay inert in the code scanning view. The
+          # query sits at the codeql/javascript-queries pack root since the
+          # pack reorganisation; the pre-reorganisation path quoted in #1788 is
+          # stale. A test pins this line: see
+          # tests-v3/executor-kubernetes.test.ts.
+          queries: ${{ matrix.language == 'javascript-typescript' && 'security-and-quality,codeql/javascript-queries:AlertSuppression.ql' || 'security-and-quality' }}
           # NO analysis-level query exclusion. The `js/file-access-to-http`
           # query ("File data in outbound network request") fires on ONE flow
           # in this repository: the in-cluster Kubernetes API client
