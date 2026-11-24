@@ -39,7 +39,7 @@ import {
   GitHubPublishApi,
   ForgejoPublishApi,
 } from "../platform/publish-api.js";
-import { GitHubAppAuthenticator } from "../ingress/github-app-auth.js";
+import { GitHubAppAuthenticator, isValidInstallationId } from "../ingress/github-app-auth.js";
 import { GitHubAppCapabilityClient } from "../ingress/github-app-client.js";
 import { ForgejoIngressClient } from "../ingress/api-client.js";
 import { buildCloneCredential } from "../ingress/clone-credentials.js";
@@ -320,15 +320,17 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
    * the gate would read `null` forever, settle every durable result as
    * unreadable, and never publish — so BOTH reads carry the installation
    * credential and agree on ONE head. With no installation to authenticate
-   * as, this refuses rather than falling back to an unauthenticated read
-   * that could only see public repositories; the callers fail closed on
-   * `null` (the gate retries, a rereview declines). */
+   * as (empty, or an id the authenticator would refuse), this refuses
+   * rather than falling back to an unauthenticated read that could only
+   * see public repositories; the callers fail closed on `null` (the gate
+   * retries, a rereview declines), so the null contract is total and the
+   * gate never classifies a constructor throw as a read outcome. */
   const readPullRequestAuthenticated = async (
     repoFullName: string,
     prNumber: number,
     installationId: string,
   ): Promise<unknown | null> => {
-    if (installationId === "") return null;
+    if (!isValidInstallationId(installationId)) return null;
     const client = new GitHubAppCapabilityClient({
       apiBaseUrl,
       appId: input.githubAppId!,

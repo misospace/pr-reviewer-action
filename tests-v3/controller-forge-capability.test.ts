@@ -196,9 +196,10 @@ test("the GitHub currentHeadSha with no installation refuses instead of reading 
   const { fetchImpl, calls } = makeGitHubFetch(() => ({ status: 200, body: prBody }));
   const composed = githubCompose(fetchImpl);
 
-  const head = await composed.capability.currentHeadSha(githubJob({ installationId: "" }));
-
-  assert.equal(head, null, "no credential means no read, so the gate fails closed and retries");
+  for (const installationId of ["", "0", "not-a-number", "12345678901234567890"]) {
+    const head = await composed.capability.currentHeadSha(githubJob({ installationId }));
+    assert.equal(head, null, `installation ${installationId}: no usable credential means no read`);
+  }
   assert.equal(calls.length, 0, "not one request leaves the process");
 });
 
@@ -207,6 +208,7 @@ test("the GitHub currentHeadSha maps a failed or malformed read to null (the pub
     { status: 404, body: { message: "Not Found" } },
     { status: 500, body: { message: "boom" } },
     { status: 200, body: { head: {} } },
+    { status: 200, body: { head: { sha: "" } } },
     { status: 200, body: null },
   ]) {
     const { fetchImpl } = makeGitHubFetch(() => served);
