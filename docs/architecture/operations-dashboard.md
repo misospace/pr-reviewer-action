@@ -11,19 +11,24 @@ truth and the single enforcement point.
 
 `src/admin/dashboard.ts` holds the shell's style block, an HTML shell,
 and a small vanilla-JS script as module constants. The pure function
-`serveDashboard(pathname)` answers exactly two GET routes. `GET /dashboard`
-serves the shell (`200`, `text/html; charset=utf-8`) and
+`serveDashboard(pathname)` answers exactly three GET routes (#1768).
+`GET /` — the shell's native address — and `GET /dashboard` — the
+compatibility spelling — both serve the shell (`200`,
+`text/html; charset=utf-8`, byte-identical, never a redirect), and
 `GET /dashboard/app.js` serves the script (`200`,
-`text/javascript; charset=utf-8`). Any other method or path under
-`/dashboard`, including subpaths like `/dashboard/extra`, returns `null`,
-and the host renders the fixed JSON 404. The shell carries zero dynamic
-data: no request echo, no repository content, no configuration, no token.
+`text/javascript; charset=utf-8`). The root match is EXACT: `/` swallows
+nothing, so `/metrics`, `/healthz`, `/admin/*`, and every other path keep
+their own treatment. Any other method or path under `/dashboard`,
+including subpaths like `/dashboard/extra`, returns `null`, and the host
+renders the fixed JSON 404. The shell carries zero dynamic data: no
+request echo, no repository content, no configuration, no token.
 
 ## Optional mount, off by default
 
 The mount is an option on `createAdminHost`: pass
 `dashboard: {}` in `AdminHostOptions` to enable it. When the option is
-absent, `/dashboard` paths answer the fixed 404 like any unknown path.
+absent, the shell's paths (`/`, `/dashboard`, `/dashboard/app.js`) answer
+the fixed 404 like any unknown path.
 The surface is not part of that deployment, so it is never open.
 
 The controller wires this through `PR_REVIEWER_ADMIN_DASHBOARD`. OFF
@@ -175,13 +180,19 @@ operator's remaining control for who can REACH the shell: the admin bind
 address (`PR_REVIEWER_ADMIN_BIND`, loopback by default) and network
 policy. All data stays bearer-protected regardless.
 
-Reaching `/dashboard` from outside the pod is a separate step from turning
-the flag on. The chart binds the admin listener to the pod-wide wildcard when
-the admin surface is enabled, but it defines only the webhook Service, so the
-dashboard port has no route by default. Exposing it is the operator's ingress
-choice: add a Service port for the admin listener and route the dashboard and
-admin paths to it, keeping `/admin` on the same origin as `/dashboard` (the
-script's `connect-src 'self'` only ever calls the origin that served it) and
-never routing `/dashboard*` or `/admin*` as the forge intake path. The chart
-README ("Reaching the dashboard from outside the pod") and
-`docs/self-hosted-deployment.md` carry the verified Gateway values.
+Reaching the shell from outside the pod is a separate step from turning
+the flag on. The chart's standard mode (#1768) derives the whole public
+surface from exposure intent: `dashboard.enabled: true` plus
+`route.enabled: true` (with operator-owned hostnames and Gateway
+`parentRefs`) renders the admin Service and an HTTPRoute that sends
+`/hook` to the webhook intake, `/admin` and `/auth` to the bearer-guarded
+admin API, and both `/` (native, no URLRewrite) and the `/dashboard`
+compatibility prefix to the admin listener — one origin, as the script's
+`connect-src 'self'` requires. `/metrics` and `/healthz` are never routed,
+and there is no catch-all rule, so unmatched paths 404 at the listener.
+Advanced deployments keep the manual shape instead: add a Service port for
+the admin listener and route the dashboard and admin paths to it, keeping
+`/admin` on the same origin as the shell and never routing `/dashboard*`
+or `/admin*` as the forge intake path. The chart README ("Reaching the
+dashboard from outside the pod") and `docs/self-hosted-deployment.md`
+carry the verified Gateway values.

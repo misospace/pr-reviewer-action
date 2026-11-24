@@ -1,0 +1,51 @@
+# Standard-mode exposure values (#1768). Layer over
+# values-kubernetes-executor.yaml:
+#
+#   helm install pr-reviewer deploy/charts/pr-reviewer \
+#     -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+#     -f deploy/charts/pr-reviewer/examples/values-standard.yaml
+#
+# These values state exposure intent only. The chart derives the webhook
+# and admin listener wiring, the `*-webhook` / `*-admin` Services, the
+# HTTPRoute rules (/hook, /admin, /auth, /dashboard, and the native GET /
+# dashboard), the ServiceMonitor target port, and the gateway ingress
+# allowance when the NetworkPolicy is enabled. Prerequisite Secrets:
+# `github-webhook-secret` (key webhook-secret) and `pr-reviewer-admin`
+# (key token) — see "Prerequisite Secrets" below in this README.
+#
+# Standard and advanced wiring for the same concern are mutually
+# exclusive: the executor example enables the webhook through the
+# ADVANCED knobs (including its secret reference), so they are explicitly
+# turned off here — standard mode owns webhook enablement and secret
+# selection, and the derived listener port and Service follow the
+# standard section.
+
+# Advanced webhook wiring off — `webhook` below owns it.
+controller:
+  webhook:
+    enabled: false
+    existingSecret:
+      name: ""
+  service:
+    webhook:
+      enabled: false
+
+webhook:
+  enabled: true
+  existingSecret: github-webhook-secret
+
+dashboard:
+  enabled: true
+  existingSecret: pr-reviewer-admin
+
+route:
+  enabled: true
+  hostnames:
+    - pr-reviewer.example.com
+  parentRefs:
+    - name: envoy-external
+      namespace: network
+
+monitoring:
+  serviceMonitor:
+    enabled: true

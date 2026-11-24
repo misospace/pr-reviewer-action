@@ -1,56 +1,95 @@
 {
   "benchmark_corpus": [
     {
-      "number": 7462,
-      "repo_full_name": "joryirving/home-ops",
-      "url": "https://github.com/joryirving/home-ops/pull/7462",
+      "number": 1,
+      "repo_full_name": "eval-fixtures/talos-k8s-support",
+      "url": "https://github.com/eval-fixtures/talos-k8s-support/pull/1",
       "title": "fix(container): update kubernetes group (v1.36.1 -> v1.36.2)",
+      "fixture": {
+        "path": "agentic-fixtures/talos-k8s-support-matrix.json",
+        "sha256": "3b35de84975b667869ea4090d116e3f35f2fe9a933bdfa107141408d8ccb6621"
+      },
       "known_findings": [],
       "expected_evidence": {
-        "description": "The founding use case (#203 acceptance criterion). With NO Talos-specific prompting, steering, or evidence provider, the reviewer must notice the bumped kubelet image runs on a host platform visible in the repo, chain read_file -> extract the deployed Talos version -> web_fetch that version's published support matrix (host talos.dev is already allowlisted), and cite the matrix as evidence for the verdict instead of a pattern-reasoned 'patch bump, low risk' rubber stamp. Capability altitude only: nothing here is given to the reviewer as a prompt; this block is the GRADER's expected concrete evidence.",
+        "description": "The grader expects the reviewer to read the Talos machineconfig, follow the support matrix that file itself points at, and cite that matrix in the verdict: the deployed Talos v1.9.5 only supports Kubernetes v1.31 – v1.33, so the bump to v1.36.2 is outside the supported range. That matrix used to be fetched from the web; it is now the repository's own pinned `docs/platform/talos-support-matrix.md`, materialized into the fixture workspace alongside the machineconfig, so the replay is deterministic and offline.",
         "checks": [
           {
             "id": "read_machineconfig",
             "type": "tool_call",
             "tool": "read_file",
-            "args_contains": { "path": ["machineconfig"] }
+            "args_contains": {
+              "path": [
+                "machineconfig"
+              ]
+            }
           },
           {
             "id": "consulted_support_matrix",
             "type": "tool_call",
-            "tool": ["web_fetch", "web_search"],
-            "args_any_contains": ["support-matrix", "support matrix", "compatibility matrix"]
+            "tool": [
+              "read_file",
+              "web_fetch",
+              "web_search"
+            ],
+            "args_any_contains": [
+              "support-matrix",
+              "support matrix",
+              "compatibility matrix",
+              "compatibility"
+            ]
           },
           {
             "id": "cited_matrix_in_review",
             "type": "review_mentions",
-            "any_of": ["support matrix", "support-matrix", "talos.dev", "siderolabs", "compatibility matrix"]
+            "any_of": [
+              "support matrix",
+              "support-matrix",
+              "compatibility matrix",
+              "talos support",
+              "siderolabs"
+            ]
           }
         ]
       }
     },
     {
-      "number": 8001,
-      "repo_full_name": "joryirving/home-ops",
-      "url": "https://github.com/joryirving/home-ops/pull/8001",
+      "number": 2,
+      "repo_full_name": "eval-fixtures/renovate-digest-bump",
+      "url": "https://github.com/eval-fixtures/renovate-digest-bump/pull/2",
       "title": "chore(deps): update digest sha256:abc1234 (no version bump)",
+      "fixture": {
+        "path": "agentic-fixtures/renovate-digest-bump.json",
+        "sha256": "9cdd8f0d4c28bdb90bc62150ef4c1e87d572ef68903b865dba3eabc71cf846d6"
+      },
       "known_findings": [],
       "expected_evidence": {
-        "description": "P2-5 trivial scenario (#301). A renovate digest-only bump — no semver change, no breaking behaviour. The reviewer must recognise this as a low-risk mechanical update and NOT escalate. The grader checks that the review does NOT mention any risk flag that would trigger unnecessary scrutiny on a pure digest pin.",
+        "description": "The grader expects the review to treat this as a trivial, low-risk digest-only pin — the image tag stays at v1.42.0 and only the sha256 digest moves — and NOT escalate it. The scenario used to be read from a live renovate PR that has since collided with unrelated repository content; it is now a retained fixture whose overlay and the deployment consuming the same image are pinned in the workspace, so the replay never depends on a live PR.",
         "checks": [
           {
             "id": "verdict_is_approve_or_trivial",
             "type": "review_mentions",
-            "any_of": ["digest", "low risk", "low-risk", "trivial", "no breaking", "no version change", "approve"]
+            "any_of": [
+              "digest",
+              "low risk",
+              "low-risk",
+              "trivial",
+              "no breaking",
+              "no version change",
+              "approve"
+            ]
           }
         ]
       }
     },
     {
-      "number": 8002,
-      "repo_full_name": "misospace/pr-reviewer-action",
-      "url": "https://github.com/misospace/pr-reviewer-action/pull/8002",
+      "number": 3,
+      "repo_full_name": "eval-fixtures/deploy-config-secret",
+      "url": "https://github.com/eval-fixtures/deploy-config-secret/pull/3",
       "title": "feat: add deployment config with credentials",
+      "fixture": {
+        "path": "agentic-fixtures/hardcoded-secret-config.json",
+        "sha256": "71f81d757b72c9e49ed6b068e53bbf0aafe1d0c4fbd3926bbc3d9494b7e51ae6"
+      },
       "known_findings": [
         {
           "category": "security",
@@ -59,35 +98,59 @@
         }
       ],
       "expected_evidence": {
-        "description": "P2-5 secret-leaking scenario (#301). The diff contains an obviously fake AWS key placeholder (AKIAIOSFODNN7EXAMPLE — the canonical AWS documentation example key). The reviewer MUST surface the secret_handling_changes risk flag and call out the hardcoded credential. This is the regression fixture: if the model fails to flag it, the capability check fails.",
+        "description": "The grader expects the review to flag the credential the deployment manifest inlines — an AWS access key id plus an adjacent secret value — as a hardcoded secret that must be rotated and moved to a secrets manager, against the repository's own 'never inline credentials' policy. The scenario was a synthetic PR that never existed; it is now a retained fixture whose manifest and policy README are pinned in the workspace, so the replay never depends on a live PR.",
         "checks": [
           {
             "id": "flags_hardcoded_secret",
             "type": "review_mentions",
-            "any_of": ["secret", "credential", "hardcoded", "hard-coded", "AKIA", "access key", "rotate", "leak"]
+            "any_of": [
+              "secret",
+              "credential",
+              "hardcoded",
+              "hard-coded",
+              "AKIA",
+              "access key",
+              "rotate",
+              "leak"
+            ]
           }
         ]
       }
     },
     {
-      "number": 8003,
-      "repo_full_name": "misospace/pr-reviewer-action",
-      "url": "https://github.com/misospace/pr-reviewer-action/pull/8003",
+      "number": 4,
+      "repo_full_name": "eval-fixtures/config-loader-refactor",
+      "url": "https://github.com/eval-fixtures/config-loader-refactor/pull/4",
       "title": "refactor: extract shared config loader",
+      "fixture": {
+        "path": "agentic-fixtures/extracted-config-loader.json",
+        "sha256": "84bc8680a266ae1deb0303aa7bb343dc3cf9a8be36ab092c8e0c45142b77efca"
+      },
       "known_findings": [],
       "expected_evidence": {
-        "description": "P2-5 tool-required scenario (#301). The PR moves logic from inline code into a shared config-loader module; the reviewer cannot assess correctness without reading the referenced module to verify the interface contract is preserved. A rubber-stamp review that skips read_file fails this check.",
+        "description": "The grader expects the reviewer to read the new shared loader module and cite it in the verdict — the interface it introduces and the caller that now imports it — instead of rubber-stamping the refactor. The scenario was a synthetic PR that never existed; it is now a retained fixture whose new module, its caller, and the settings module its consumers use are pinned in the workspace, so the replay never depends on a live PR.",
         "checks": [
           {
             "id": "read_config_loader",
             "type": "tool_call",
             "tool": "read_file",
-            "args_contains": { "path": ["config"] }
+            "args_contains": {
+              "path": [
+                "config"
+              ]
+            }
           },
           {
             "id": "cited_loader_in_review",
             "type": "review_mentions",
-            "any_of": ["config", "loader", "module", "interface", "import", "extracted"]
+            "any_of": [
+              "config",
+              "loader",
+              "module",
+              "interface",
+              "import",
+              "extracted"
+            ]
           }
         ]
       }
@@ -95,8 +158,14 @@
   ],
   "metadata": {
     "created_at": "2026-06-12T00:00:00Z",
-    "updated_at": "2026-06-19T00:00:00Z",
-    "description": "Agentic-capability eval corpus for #207/#301. home-ops#7462 is the canonical live fixture for the #203 acceptance criterion (Talos<->k8s support-matrix chain). #8001 is a trivial renovate digest-only bump (must not over-escalate). #8002 is a secret-leaking PR with the AKIAIOSFODNN7EXAMPLE placeholder key (must surface secret_handling_changes). #8003 requires read_file to verify a refactored config loader. Run with --modes native_loop plan_execute tools_off --runs-per-mode 10 and read mode_summary[*].capability_pass_rate; a single run is noise at the fast tier. Keep prompts at capability altitude, never recipe altitude — only THIS grader names the concrete evidence.",
-    "issue_refs": [197, 203, 207, 301]
+    "updated_at": "2026-11-23T00:00:00Z",
+    "description": "Fully fixture-pinned agentic-capability eval corpus for #207/#301 (#1799). Every entry is a RETAINED FIXTURE under evals/agentic-fixtures/, replayed through the semantic-fixture seam, so no entry depends on a live PR: its state, number, title, body, changed files, and diff all come from the pinned fixture, and the repo_full_name/url are inert fixture-local identities that are never fetched. The production closed/merged admission gate (#1301) is untouched — a fixture replay serves the PR identity offline without weakening that gate for production paths. Run command is unchanged: --modes tools_off native_loop --runs-per-mode 10; read mode_summary[*].capability_pass_rate. Keep prompts at capability altitude, never recipe altitude — only THIS grader names the concrete evidence.",
+    "issue_refs": [
+      197,
+      203,
+      207,
+      301,
+      1799
+    ]
   }
 }

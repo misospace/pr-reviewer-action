@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "scenario": 4,
+  "provenance": {
+    "historical_pr": "8003",
+    "source": "Retained fixture for the tool-required refactor scenario, carrying the new shared config loader and its caller from the synthetic misospace/pr-reviewer-action#8003 (which never existed) together with the settings module the loader's consumers use."
+  },
+  "pr_json": {
+    "number": 4,
+    "title": "refactor: extract shared config loader",
+    "body": "Moves the inline settings parsing into a shared config loader module.",
+    "state": "open",
+    "draft": false,
+    "head": {
+      "sha": "a0b1118ba08183b48d58cebc4729ece5c33c2add",
+      "ref": "refactor/shared-config-loader"
+    },
+    "base": {
+      "sha": "6dd061c0ca8a634e6ff4f9bdd88d1dae64dfa7d8",
+      "ref": "main"
+    },
+    "user": {
+      "login": "platform-team"
+    },
+    "changed_files": 2,
+    "additions": 39,
+    "deletions": 15,
+    "html_url": "https://github.com/eval-fixtures/config-loader-refactor/pull/4"
+  },
+  "diff": "diff --git a/src/app.py b/src/app.py\nindex 317242a..013d586 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -2,24 +2,11 @@\n \n from __future__ import annotations\n \n-\n-def read_settings(path: str) -> dict:\n-    \"\"\"Read ``key = value`` settings from *path*.\"\"\"\n-    settings = {}\n-    with open(path, \"r\", encoding=\"utf-8\") as handle:\n-        for raw_line in handle:\n-            line = raw_line.strip()\n-            if not line or line.startswith(\"#\"):\n-                continue\n-            if \"=\" not in line:\n-                raise ValueError(f\"malformed settings line: {raw_line!r}\")\n-            key, _, value = line.partition(\"=\")\n-            settings[key.strip()] = value.strip()\n-    return settings\n+from config_loader import load_config\n \n \n def main() -> int:\n-    settings = read_settings(\"config/settings.conf\")\n+    settings = load_config(\"config/settings.conf\")\n     print(f\"loaded {len(settings)} settings\")\n     return 0\n \ndiff --git a/src/config_loader.py b/src/config_loader.py\nnew file mode 100644\nindex 0000000..f64bdb8\n--- /dev/null\n+++ b/src/config_loader.py\n@@ -0,0 +1,37 @@\n+\"\"\"Shared configuration loading for the application.\n+\n+Reads a simple ``key = value`` configuration file and returns the parsed\n+values as a dictionary. Blank lines and ``#`` comments are ignored.\n+\"\"\"\n+\n+from __future__ import annotations\n+\n+from pathlib import Path\n+from typing import Dict\n+\n+\n+def load_config(path) -> Dict[str, str]:\n+    \"\"\"Load ``key = value`` pairs from *path*.\n+\n+    Args:\n+        path: Filesystem path of the configuration file to read.\n+\n+    Returns:\n+        A mapping of configuration keys to their string values.\n+\n+    Raises:\n+        FileNotFoundError: If *path* does not exist.\n+        ValueError: If a line is neither blank, a comment, nor a ``key = value`` pair.\n+    \"\"\"\n+    config: Dict[str, str] = {}\n+    config_path = Path(path)\n+    with config_path.open(\"r\", encoding=\"utf-8\") as handle:\n+        for line_number, raw_line in enumerate(handle, start=1):\n+            line = raw_line.strip()\n+            if not line or line.startswith(\"#\"):\n+                continue\n+            if \"=\" not in line:\n+                raise ValueError(f\"{config_path}:{line_number}: expected 'key = value'\")\n+            key, _, value = line.partition(\"=\")\n+            config[key.strip()] = value.strip()\n+    return config\n",
+  "pr_files": [
+    {
+      "filename": "src/config_loader.py",
+      "status": "A",
+      "additions": 37,
+      "deletions": 0,
+      "changes": 37
+    },
+    {
+      "filename": "src/app.py",
+      "status": "M",
+      "additions": 2,
+      "deletions": 15,
+      "changes": 17
+    }
+  ],
+  "files": [
+    {
+      "path": "src/app.py",
+      "content": "\"\"\"Application entry point.\"\"\"\n\nfrom __future__ import annotations\n\nfrom config_loader import load_config\n\n\ndef main() -> int:\n    settings = load_config(\"config/settings.conf\")\n    print(f\"loaded {len(settings)} settings\")\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"
+    },
+    {
+      "path": "src/config_loader.py",
+      "content": "\"\"\"Shared configuration loading for the application.\n\nReads a simple ``key = value`` configuration file and returns the parsed\nvalues as a dictionary. Blank lines and ``#`` comments are ignored.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom pathlib import Path\nfrom typing import Dict\n\n\ndef load_config(path) -> Dict[str, str]:\n    \"\"\"Load ``key = value`` pairs from *path*.\n\n    Args:\n        path: Filesystem path of the configuration file to read.\n\n    Returns:\n        A mapping of configuration keys to their string values.\n\n    Raises:\n        FileNotFoundError: If *path* does not exist.\n        ValueError: If a line is neither blank, a comment, nor a ``key = value`` pair.\n    \"\"\"\n    config: Dict[str, str] = {}\n    config_path = Path(path)\n    with config_path.open(\"r\", encoding=\"utf-8\") as handle:\n        for line_number, raw_line in enumerate(handle, start=1):\n            line = raw_line.strip()\n            if not line or line.startswith(\"#\"):\n                continue\n            if \"=\" not in line:\n                raise ValueError(f\"{config_path}:{line_number}: expected 'key = value'\")\n            key, _, value = line.partition(\"=\")\n            config[key.strip()] = value.strip()\n    return config\n"
+    },
+    {
+      "path": "src/settings.py",
+      "content": "\"\"\"Settings consumed by the application.\n\nThe shared loader (:mod:`config_loader`) parses the ``key = value`` files under\n``config/``; this module exposes the typed accessors the application and its\nentry points use.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Any, Dict\n\nDEFAULTS: Dict[str, str] = {\n    \"LOG_LEVEL\": \"info\",\n    \"HTTP_PORT\": \"8080\",\n    \"WORKER_CONCURRENCY\": \"4\",\n}\n\n\nclass Settings:\n    \"\"\"Read-only view over the loaded configuration values.\"\"\"\n\n    def __init__(self, values: Dict[str, Any]) -> None:\n        self._values = dict(values)\n\n    def get(self, key: str, default=None):\n        if key in self._values:\n            return self._values[key]\n        return DEFAULTS.get(key, default)\n\n    def require(self, key: str) -> str:\n        value = self.get(key)\n        if value is None:\n            raise KeyError(f\"missing required setting: {key}\")\n        return value\n"
+    }
+  ]
+}

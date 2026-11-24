@@ -896,7 +896,13 @@ const DASHBOARD_JS = `"use strict";
     setFeedback(message, failure.headline, refusalDetail(outcome, failure.fallback));
   });`;
 function serveDashboard(pathname: string): DashboardResponse | null {
-  if (pathname === "/dashboard") return { status: 200, body: DASHBOARD_HTML, contentType: "text/html; charset=utf-8", headers: DASHBOARD_HEADERS };
+  // #1768: the dashboard is ALSO the native answer at the bare root — a
+  // Gateway HTTPRoute that sends `/` to the admin listener (no URLRewrite)
+  // gets the shell directly with 200, never a redirect. The match is EXACT:
+  // `/` swallows nothing else, so `/metrics`, `/healthz`, `/admin/*`, and
+  // every unknown path keep their own treatment. `/dashboard` stays as the
+  // compatibility spelling (and the shell's own asset prefix).
+  if (pathname === "/" || pathname === "/dashboard") return { status: 200, body: DASHBOARD_HTML, contentType: "text/html; charset=utf-8", headers: DASHBOARD_HEADERS };
   if (pathname === "/dashboard/app.js") return { status: 200, body: DASHBOARD_JS, contentType: "text/javascript; charset=utf-8", headers: DASHBOARD_HEADERS };
   return null;
 }

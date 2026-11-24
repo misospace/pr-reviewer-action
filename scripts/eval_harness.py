@@ -58,6 +58,27 @@ from pr_reviewer.semantic_eval import (
 )
 
 
+class ReplayMaterializationError(ValueError):
+    """A pinned replay input could not be loaded, verified, or materialized.
+
+    A replay failure is an operational failure of the eval itself, never an
+    eval assertion: the corpus entry never reached a review, so the run says
+    nothing about review quality. Keeping the two apart is what lets a
+    weekly sweep say "the reviewer regressed" and "the sweep never ran the
+    reviewer" as different facts (#1799).
+    """
+
+
+# Stable marker on a run error so a report consumer can split replay
+# failures from other operational failures without parsing prose.
+REPLAY_FAILURE_MARKER = "replay-materialization failure"
+
+# Failure classes carried on a ReviewRun (None = the run produced a review).
+FAILURE_CLASS_REPLAY = "replay_materialization"
+FAILURE_CLASS_OPERATIONAL = "operational"
+FAILURE_CLASS_ADMISSION_SKIP = "admission_skip"
+
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -135,6 +156,14 @@ class ReviewRun:
     findings: list[dict[str, Any]] = field(default_factory=list)
     review_markdown: str = ""
     error: str | None = None
+    # #1799: how this run failed, so an operational failure of the sweep
+    # stays separable from an eval assertion (the reviewer's answer was
+    # wrong) and from an admission skip (the runtime refused to review, so
+    # no review exists). None = the run produced a review.
+    failure_class: str | None = None
+    # The runtime's admission refusal reason (e.g. "pr-closed"), when the
+    # runtime skipped the run instead of reviewing it.
+    skip_reason: str | None = None
     # Set only when the run's error is a wall-clock timeout (#840): kept
     # distinct from other error causes so a lopsided timeout loss on one
     # arm/mode is visible in the report instead of blending into "errors".
@@ -193,6 +222,12 @@ class ReviewRun:
             "deep_review": self.deep_review,
             "specialists": self.specialists,
         })
+        # Additive: the failure classification appears only on a run that
+        # failed, so a successful run keeps its historical shape (#1799).
+        if self.failure_class is not None:
+            d["failure_class"] = self.failure_class
+        if self.skip_reason is not None:
+            d["skip_reason"] = self.skip_reason
         if self.artifacts:
             d["artifacts"] = self.artifacts
         if self.primary_findings:
@@ -241,14 +276,25 @@ class BenchmarkCorpus:
             validate_semantic_corpus(semantic)
         prs = data.get("benchmark_corpus", [])
         # Entry-level retained fixtures (#712): load eagerly so a corrupt
-        # ref fails at corpus load, not mid-benchmark.
+        # ref fails at corpus load, not mid-benchmark. The fixture is
+        # integrity-checked here exactly like the real-PR corpus path
+        # (#1609): a fixture whose diff does not match its file tree would
+        # otherwise materialize a review of content nobody authored (#1799).
         pinned = [e for e in prs if isinstance(e, dict) and "fixture" in e]
         if pinned:
             fixture_root = SemanticCorpus(fixture_root=path.parent)
             for entry in pinned:
-                entry["_semantic_fixture"] = _load_semantic_fixture(
-                    fixture_root, entry["fixture"]
-                )
+                try:
+                    fixture_data, fixture_path = _load_semantic_fixture(
+                        fixture_root, entry["fixture"]
+                    )
+                    validate_semantic_fixture_integrity(fixture_data)
+                except ValueError as exc:
+                    raise ReplayMaterializationError(
+                        f"corpus entry #{entry.get('number')} pins an unusable "
+                        f"replay fixture: {exc}"
+                    ) from exc
+                entry["_semantic_fixture"] = (fixture_data, fixture_path)
         if not prs and semantic is not None:
             prs = []
             for scenario in semantic.scenarios:
@@ -1629,23 +1675,29 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
 
 def _load_semantic_fixture(corpus: SemanticCorpus, fixture_ref: dict[str, Any]) -> tuple[dict[str, Any], Path]:
     if corpus.fixture_root is None:
-        raise ValueError("semantic fixture root is unavailable")
+        raise ReplayMaterializationError("semantic fixture root is unavailable")
     fixture_name = fixture_ref.get("path")
     fixture_hash = fixture_ref.get("sha256")
     if not _safe_relative_path(fixture_name):
-        raise ValueError(f"semantic fixture path is unsafe: {fixture_name}")
+        raise ReplayMaterializationError(f"semantic fixture path is unsafe: {fixture_name}")
     if not isinstance(fixture_hash, str) or re.fullmatch(r"[0-9a-f]{64}", fixture_hash) is None:
-        raise ValueError("semantic fixture sha256 must be 64 lowercase hexadecimal characters")
+        raise ReplayMaterializationError("semantic fixture sha256 must be 64 lowercase hexadecimal characters")
     fixture_path = (corpus.fixture_root / fixture_name).resolve()
     if corpus.fixture_root.resolve() not in fixture_path.parents:
-        raise ValueError(f"semantic fixture escapes corpus root: {fixture_name}")
-    raw = fixture_path.read_bytes()
+        raise ReplayMaterializationError(f"semantic fixture escapes corpus root: {fixture_name}")
+    try:
+        raw = fixture_path.read_bytes()
+    except OSError as exc:
+        raise ReplayMaterializationError(f"semantic fixture is unreadable: {fixture_path}: {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
     if digest != fixture_hash:
-        raise ValueError(f"semantic fixture hash mismatch for {fixture_path}")
-    data = json.loads(raw.decode("utf-8"))
+        raise ReplayMaterializationError(f"semantic fixture hash mismatch for {fixture_path}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise ReplayMaterializationError(f"semantic fixture is not valid JSON: {fixture_path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"semantic fixture must be an object: {fixture_path}")
+        raise ReplayMaterializationError(f"semantic fixture must be an object: {fixture_path}")
     return data, fixture_path
 
 
@@ -2026,9 +2078,13 @@ def run_review_for_pr(
     try:
         start = time.monotonic()
 
-        # Determine tool_mode argument for the runtime invocation
+        # Determine tool_mode argument for the runtime invocation.
+        # Every arm declares its mode explicitly (#1802): the runtime's
+        # `tool-mode` input defaults to "native_loop", so an empty or unset
+        # TOOL_MODE silently turns the tools_off arm back on — the two-mode
+        # A/B (#1799) would then measure the same arm twice.
         if mode == "tools_off":
-            tool_mode_arg = ""
+            tool_mode_arg = "off"
         elif mode == "native_loop":
             tool_mode_arg = "native_loop"
         else:
@@ -2038,9 +2094,18 @@ def run_review_for_pr(
         if semantic_fixture is not None:
             repo_path = Path(tempfile.mkdtemp(prefix=f"semantic-{pr_number}-", dir=work_dir))
             fixture_data = semantic_fixture[0]
-            run.commit_sha = _materialize_semantic_fixture(
-                repo_path, fixture_data, pr_entry.get("repo_full_name")
-            )
+            try:
+                run.commit_sha = _materialize_semantic_fixture(
+                    repo_path, fixture_data, pr_entry.get("repo_full_name")
+                )
+            except Exception as exc:
+                # A pinned replay input that cannot be materialized is an
+                # operational failure of the sweep, not an eval assertion
+                # (#1799): the reviewer never saw this scenario.
+                run.error = f"{REPLAY_FAILURE_MARKER}: {exc}"
+                run.failure_class = FAILURE_CLASS_REPLAY
+                run.wall_clock_sec = time.monotonic() - start
+                return run
         else:
             repo_path = work_dir / repo_full_name.replace("/", "-")
             if not repo_path.exists():
@@ -2051,6 +2116,7 @@ def run_review_for_pr(
                 )
             if not repo_path.exists():
                 run.error = f"Repo {repo_full_name} not available locally"
+                run.failure_class = FAILURE_CLASS_OPERATIONAL
                 return run
         run.repo_path = repo_path
 
@@ -2079,6 +2145,7 @@ def run_review_for_pr(
                 ok, err = _prepare_pinned_workspace(repo_path, run_dir, sha, pr_entry.get("base_sha"))
             if not ok:
                 run.error = f"PR head not materialized: {err}"
+                run.failure_class = FAILURE_CLASS_OPERATIONAL
                 run.wall_clock_sec = time.monotonic() - start
                 return run
             run.commit_sha = sha
@@ -2175,8 +2242,10 @@ def run_review_for_pr(
             env["SEMANTIC_FIXTURE_MODE"] = "true"
             env["FORCE_REVIEW"] = "true"
             env["SKIP_IF_DIFF_UNCHANGED"] = "false"
-        if tool_mode_arg:
-            env["TOOL_MODE"] = tool_mode_arg
+        # Unconditional on purpose: the arm name in the report must match the
+        # mode the runtime actually ran (#1802). An ambient TOOL_MODE from the
+        # harness parent must not select either arm either.
+        env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
             env["DEEP_REVIEW"] = "true"
             # #635 benchmark execution shape; the default is the production
@@ -2220,14 +2289,17 @@ def run_review_for_pr(
             node = shutil.which("node")
             if node is None:
                 run.error = "node not found on PATH; the review runtime requires Node"
+                run.failure_class = FAILURE_CLASS_OPERATIONAL
             elif not entrypoint.is_file():
                 run.error = f"review runtime bundle not found at {entrypoint} (run `npm run build`)"
+                run.failure_class = FAILURE_CLASS_OPERATIONAL
             else:
                 command = [node, str(entrypoint), "run"]
         elif review_script.exists():
             command = [str(review_script)]
         else:
             run.error = f"orchestrator script not found at {review_script}"
+            run.failure_class = FAILURE_CLASS_OPERATIONAL
 
         if command is not None:
             result = subprocess.run(
@@ -2264,6 +2336,19 @@ def run_review_for_pr(
                 route = output_lines.get("review-route", output_lines.get("review_route", "")).strip()
                 if route:
                     run.route = route
+                # #1799: an admission refusal produced no review at all. The
+                # runtime reports it as should-review=false plus a skip
+                # reason; counting that as a completed run would report a
+                # healthy partial pass rate for a sweep that never reviewed
+                # anything.
+                should_review = output_lines.get(
+                    "should-review", output_lines.get("should_review", "")
+                ).strip()
+                if should_review == "false":
+                    run.failure_class = FAILURE_CLASS_ADMISSION_SKIP
+                    run.skip_reason = output_lines.get(
+                        "skip-reason", output_lines.get("skip_reason", "")
+                    ).strip() or "unspecified"
                 if run.route == "escalated":
                     run.stage = "escalation"
                 elif run.route in {"primary", "fast", "smart", "legacy"}:
@@ -2290,14 +2375,17 @@ def run_review_for_pr(
                     f"Review failed (exit {result.returncode}): "
                     f"{redact_urls_in_text(result.stderr)[:500]}"
                 )
+                run.failure_class = FAILURE_CLASS_OPERATIONAL
 
     except subprocess.TimeoutExpired:
         run.wall_clock_sec = time.monotonic() - start
         run.error = f"Review timed out after {_review_timeout_sec()}s"
         run.timed_out = True
+        run.failure_class = FAILURE_CLASS_OPERATIONAL
     except Exception as exc:
         run.wall_clock_sec = time.monotonic() - start
         run.error = f"Review error: {exc}"
+        run.failure_class = FAILURE_CLASS_OPERATIONAL
 
     return run
 
@@ -2471,6 +2559,16 @@ def generate_report(
             "recall": 0.0,
             "f1": 0.0,
             "errors": 0,
+            # #1799: the operational/assertion split. `replay_failures` are
+            # runs whose pinned replay input never materialized (the sweep
+            # never exercised the reviewer); `admission_skips` are runs the
+            # runtime's admission gate refused (no review exists);
+            # `capability_failures` are completed runs whose expected-evidence
+            # checks failed — the only one of the three that says anything
+            # about review quality.
+            "replay_failures": 0,
+            "admission_skips": 0,
+            "capability_failures": 0,
             # Capability checks (agentic-evidence-chain criterion). Counted only
             # for scenarios that declare expected_evidence; pass_rate is the
             # headline number for the home-ops#7462-style regression.
@@ -2534,7 +2632,18 @@ def generate_report(
             active_modes.add(run.mode)
             mm = mode_metrics.setdefault(run.mode, _new_mode_metrics())
             mm["runs"] += 1
-            if not run.error:
+            if run.error:
+                mm["errors"] += 1
+                if run.timed_out:
+                    mm["timeouts"] += 1
+                if run.failure_class == FAILURE_CLASS_REPLAY:
+                    mm["replay_failures"] += 1
+            elif run.failure_class == FAILURE_CLASS_ADMISSION_SKIP:
+                # The runtime refused to review: no review, no evidence.
+                # Counting it as successful would report a healthy partial
+                # pass rate for a sweep that never reviewed anything.
+                mm["admission_skips"] += 1
+            else:
                 mm["successful_runs"] += 1
                 mm["total_tokens_input"] += run.tokens_input
                 mm["total_tokens_output"] += run.tokens_output
@@ -2558,10 +2667,6 @@ def generate_report(
                     mm["specialist_request_bytes"] += _int_or_zero(
                         run.specialists.get("request_bytes_total")
                     )
-            else:
-                mm["errors"] += 1
-                if run.timed_out:
-                    mm["timeouts"] += 1
 
             cap = evaluate_capability(run, expected_evidence)
             if cap is not None:
@@ -2571,6 +2676,13 @@ def generate_report(
                 if cap["passed"]:
                     mm["capability_passes"] += 1
                     tally["passes"] += 1
+                elif not run.error and run.failure_class != FAILURE_CLASS_ADMISSION_SKIP:
+                    # An eval assertion failure: the run reviewed the
+                    # scenario and the expected evidence did not show up. A
+                    # run that failed operationally (or never reviewed
+                    # anything) is not an assertion failure, so it stays out
+                    # of this counter.
+                    mm["capability_failures"] += 1
 
             # Specialist checks (deep-review #610), by grading scope:
             # effectiveness is tallied for standard AND deep runs (the
@@ -2722,7 +2834,21 @@ def generate_report(
 
     semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
     total_runs = sum(len(bm.runs) for bm in results)
-    completed_runs = sum(1 for bm in results for r in bm.runs if not r.error)
+    completed_runs = sum(
+        1
+        for bm in results
+        for r in bm.runs
+        if not r.error and r.failure_class != FAILURE_CLASS_ADMISSION_SKIP
+    )
+    replay_failed_runs = sum(
+        1 for bm in results for r in bm.runs if r.failure_class == FAILURE_CLASS_REPLAY
+    )
+    admission_skipped_runs = sum(
+        1
+        for bm in results
+        for r in bm.runs
+        if r.failure_class == FAILURE_CLASS_ADMISSION_SKIP
+    )
     report = {
         "metadata": {
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -2734,7 +2860,21 @@ def generate_report(
             # CI job instead of publishing an empty success summary.
             "total_runs": total_runs,
             "completed_runs": completed_runs,
-            "errored_runs": total_runs - completed_runs,
+            "errored_runs": sum(1 for bm in results for r in bm.runs if r.error),
+            # #1799: the operational/assertion split, so a reader can tell
+            # "the reviewer regressed" from "the sweep never ran the
+            # reviewer". `replay_failed_runs` is a subset of `errored_runs`
+            # (the pinned replay input never materialized);
+            # `admission_skipped_runs` are runs the runtime refused to
+            # review (no review, no error);
+            # `assertion_failed_runs` are completed runs whose expected
+            # evidence did not show up — the only counter that says anything
+            # about review quality.
+            "replay_failed_runs": replay_failed_runs,
+            "admission_skipped_runs": admission_skipped_runs,
+            "assertion_failed_runs": sum(
+                mm["capability_failures"] for mm in mode_metrics.values()
+            ),
             "corpus_source": None,  # set by caller
             # #875 A/B provenance: which equivalent-paths arm produced this
             # report (None = the runtime's own default was left in force).
@@ -3610,7 +3750,18 @@ def main() -> int:
     if isinstance(peek, dict) and "real_pr_corpus" in peek:
         return _main_real_pr_corpus(args)
 
-    corpus = BenchmarkCorpus.from_file(args.corpus)
+    try:
+        corpus = BenchmarkCorpus.from_file(args.corpus)
+    except ReplayMaterializationError as exc:
+        # A pinned replay input that cannot be loaded or verified is an
+        # operational failure of the sweep: fail loudly with the reason
+        # instead of a traceback, and never start a sweep that would
+        # report a pass rate it did not measure (#1799).
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        print(f"Error: could not load corpus {args.corpus}: {exc}", file=sys.stderr)
+        return 1
     if not corpus.prs:
         print("Error: corpus is empty", file=sys.stderr)
         return 1
@@ -3704,7 +3855,15 @@ def main() -> int:
                         )
                     if run.error:
                         tag = "TIMEOUT" if run.timed_out else "ERROR"
+                        if run.failure_class == FAILURE_CLASS_REPLAY:
+                            tag = "REPLAY FAILURE"
                         print(f"    [{label}] {tag}: {run.error}", file=sys.stderr)
+                    elif run.failure_class == FAILURE_CLASS_ADMISSION_SKIP:
+                        print(
+                            f"    [{label}] SKIPPED: the runtime's admission gate "
+                            f"refused this run (skip_reason={run.skip_reason})",
+                            file=sys.stderr,
+                        )
                     else:
                         findings = extract_findings_from_review(run)
                         print(
@@ -3758,11 +3917,18 @@ def main() -> int:
     # failures stay non-fatal — those reports carry real pass rates.
     completed_runs = count_completed_runs(report)
     if completed_runs == 0:
+        total_runs = report["metadata"].get("total_runs", "unknown")
+        replay_failures = report["metadata"].get("replay_failed_runs", 0)
+        admission_skips = report["metadata"].get("admission_skipped_runs", 0)
+        if isinstance(replay_failures, int) and replay_failures == total_runs:
+            cause = "every run failed to materialize its pinned replay input"
+        elif isinstance(admission_skips, int) and admission_skips == total_runs:
+            cause = "every run was refused by the runtime's admission gate"
+        else:
+            cause = "every run errored"
         print(
-            "Error: 0 of "
-            f"{report['metadata'].get('total_runs', 'unknown')} harness runs "
-            "completed; every run errored, so no pass rates exist. "
-            "Failing (issue #711).",
+            f"Error: 0 of {total_runs} harness runs completed; {cause}, "
+            "so no pass rates exist. Failing (issue #711).",
             file=sys.stderr,
         )
         return 1

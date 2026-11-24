@@ -93,6 +93,28 @@ helm install pr-reviewer \
   images (`deploy/images/README.md`): a newly created GHCR package starts
   private — set it public or attach a pull secret.
 
+## Standard mode
+
+Use top-level exposure intent to derive the stable webhook/admin Services (ports follow the listener ports), an ordered HTTPRoute, the ServiceMonitor target port, and the gateway ingress allowance (scoped to the parentRef namespaces) when NetworkPolicy is enabled:
+
+```yaml
+webhook:
+  enabled: true
+  existingSecret: github-webhook-secret
+dashboard:
+  enabled: true
+  existingSecret: pr-reviewer-admin
+route:
+  enabled: true
+  hostnames: [pr-reviewer.example.com]
+  parentRefs: [{name: envoy-external, namespace: network}]
+monitoring:
+  serviceMonitor:
+    enabled: true
+```
+
+Standard mode routes the forge intake at `webhook.path` (default `/hook`; Gitea/GitLab instances set their canonical `/webhooks/<forge>` path here), admin and auth paths to the bearer-protected admin API, and the dashboard shell at `/` (the native answer, plus the `/dashboard` prefix the shell's own asset path needs). It never routes `/metrics` or `/healthz` — the admin listener additionally refuses dot-segment paths, so a routed prefix cannot normalize into them — and there is no catch-all rule, so unmatched paths 404 at the gateway. Advanced controller Service, listener, and route wiring remains an escape hatch, but contradictory standard and advanced settings fail rendering (including advanced secret material and Service blocks that would otherwise silently shadow a standard section).
+
 ## Values structure
 
 - `controller` — the daemon: chart-owned wiring keys
@@ -479,13 +501,23 @@ no token; every value it shows comes from the bearer-protected
 
 ## Reaching the dashboard from outside the pod
 
-The chart's values define a single Service, `controller.service.webhook`
-(port 8080 — the POST-only forge intake). The admin listener (port 8081,
-which serves the `/dashboard` shell and the `/admin/*` API) has no Service of
-its own. So `controller.admin.dashboard: true` makes the pod serve the shell,
-but nothing routes to it from outside the pod. That split is deliberate:
-whether the admin surface leaves the pod is an operator ingress decision, and
-the shell is intentionally unauthenticated because it carries no data, so
+**Standard mode (preferred).** `dashboard.enabled: true` plus
+`route.enabled: true` (with your `hostnames` and Gateway `parentRefs`)
+derives the whole public surface: the `<release>-admin` Service, an
+HTTPRoute sending `/hook` to the `<release>-webhook` Service, `/admin` and
+`/auth` to the admin API, and `/` (native — the shell answers `GET /`
+directly with 200, no redirect) plus the `/dashboard` compatibility prefix
+to the admin listener. `/metrics` and `/healthz` are never routed and no
+catch-all rule exists. When `networkPolicy.enabled: true` the chart also
+derives the gateway ingress allowance for the admin port; narrow it with
+`networkPolicy.additionalIngress`.
+
+In **advanced mode** the chart's values define only the webhook Service
+(`controller.service.webhook`, port 8080 — the POST-only forge intake);
+the admin listener (port 8081, which serves the shell and the `/admin/*`
+API) has no Service of its own. That split is deliberate: whether the
+admin surface leaves the pod is an operator ingress decision, and the
+shell is intentionally unauthenticated because it carries no data, so
 network access control is the remaining guard on who can reach it. Every
 value stays bearer-token protected regardless.
 
@@ -507,7 +539,10 @@ hand-written HTTPRoute:
 
 This Gateway route splits one hostname by path (the shape verified in the
 #725 operator pilot). It has no catch-all rule, so `/metrics` and `/healthz`
-stay off the public route and unmatched paths 404 at the gateway:
+stay off the public route and unmatched paths 404 at the gateway. Since
+#1768 the shell's native address is `GET /` — the root rule sends it to the
+admin listener WITHOUT a redirect, and the shell itself no longer needs the
+old `RequestRedirect` workaround:
 
 ```yaml
 controller:
@@ -516,7 +551,7 @@ controller:
       enabled: true
       ports:
         webhook: { port: 8080 }
-        admin: { port: 8081 } # admin listener: /dashboard and /admin/*
+        admin: { port: 8081 } # admin listener: / (native shell), /dashboard, /admin/*, /auth/*
   route:
     main:
       hostnames: ["pr-reviewer.example.com"]
@@ -528,41 +563,53 @@ controller:
         # here for those forges; any non-admin path is safe for GitHub.
         - matches: [{ path: { type: PathPrefix, value: /webhooks/forgejo } }]
           backendRefs: [{ identifier: webhook, port: 8080 }]
-        # Bearer-guarded admin API. It MUST ride the same origin as the
-        # shell: the dashboard script fetches /admin/* from the listener
-        # that served it (CSP connect-src 'self').
+        # Bearer-guarded admin API and auth flows. They MUST ride the same
+        # origin as the shell: the dashboard script fetches /admin/* and
+        # /auth/* from the listener that served it (CSP connect-src 'self').
         - matches: [{ path: { type: PathPrefix, value: /admin } }]
           backendRefs: [{ identifier: webhook, port: 8081 }]
-        # The dashboard shell and its app.js.
+        - matches: [{ path: { type: PathPrefix, value: /auth } }]
+          backendRefs: [{ identifier: webhook, port: 8081 }]
+        # The dashboard shell (compat spelling) and its app.js.
         - matches: [{ path: { type: PathPrefix, value: /dashboard } }]
           backendRefs: [{ identifier: webhook, port: 8081 }]
-        # Bare domain -> dashboard. The bjw-s route class rejects a
-        # RequestRedirect rule that also carries backendRefs, so this has none.
+        # Bare domain -> the shell natively (200 HTML, no redirect).
         - matches: [{ path: { type: Exact, value: / } }]
-          filters:
-            - type: RequestRedirect
-              requestRedirect:
-                statusCode: 301
-                path: { type: ReplaceFullPath, replaceFullPath: /dashboard }
+          backendRefs: [{ identifier: webhook, port: 8081 }]
 ```
+
+Upgrades from an older advanced-mode install need one extra step. Add the
+`Exact /` rule from the snippet above to a hand-written HTTPRoute that lacks
+it. The OIDC flow returns the browser to `/` after a successful sign-in and
+to `/?login=failed` after a failed one. Without the root rule, those
+redirects land on the gateway's 404.
 
 `backendRefs[].identifier` names the Service key under `controller.service`
 (here `webhook`), never the rendered resource name. Three rules to keep:
 
-- **Route `/admin` and `/dashboard` to the same origin** (the admin port).
-  The dashboard script only calls `/admin/*` on the origin that served the
-  shell, so splitting them across hostnames breaks every data request.
-- **Never choose `/dashboard*` or `/admin*` as the forge intake path.** The
-  GitHub intake ignores the path and the Forgejo/Gitea intake mounts a fixed
-  canonical route; either way those two prefixes belong to the admin listener
-  and must not collide with delivery.
+- **Route `/admin`, `/auth`, and `/dashboard` to the same origin** (the admin
+  port). The dashboard script only calls `/admin/*` and `/auth/*` on the
+  origin that served the shell, so splitting them across hostnames breaks
+  every data request and the sign-in flow.
+- **Never choose `/dashboard*`, `/admin*`, or `/auth*` (or anything under them)
+  as the forge intake path.** The GitHub intake ignores the path and the
+  Forgejo/Gitea intake mounts a fixed canonical route; either way those
+  prefixes belong to the admin listener and must not collide with delivery.
+  The chart refuses any value whose `PathPrefix` semantics overlap them —
+  matching is element-based and ignores a trailing `/`, so `/admin/` collides
+  exactly like `/admin` — and refuses degenerate spellings (`//`, dot
+  segments) whose rendered rule would never match.
 - **With `networkPolicy.enabled: true`, open the admin port to the gateway.**
-  The chart's default-deny ingress allows only the webhook port, plus the
-  admin port for Prometheus scrapes from the release namespace when
-  `serviceMonitor` is on — a gateway in another namespace cannot reach 8081.
-  Add a matching rule (gateway pod/namespace selector, port 8081) under
-  `networkPolicy.additionalIngress`.
+  In advanced mode the chart's default-deny ingress allows only the webhook
+  port, plus the admin port for Prometheus scrapes from the release namespace
+  when `serviceMonitor` is on — a gateway in another namespace cannot reach
+  8081. Add a matching rule (gateway pod/namespace selector, port 8081) under
+  `networkPolicy.additionalIngress`. Standard mode derives this allowance
+  (scoped to the route's `parentRefs` namespaces). Note that the kubelet's
+  HTTP liveness/readiness probes also hit the admin port from the node — on
+  CNIs that enforce node→pod traffic, add a node-source `ipBlock` exception
+  to `networkPolicy.additionalIngress` or the controller will restart-loop.
 
 To keep a browser surface off entirely, leave `controller.admin.dashboard`
-at its default `false`; then `/dashboard` answers the fixed 404 and only the
-bearer-protected admin API can be exposed the same way.
+at its default `false`; then the shell answers the fixed 404 on every path
+and only the bearer-protected admin API can be exposed the same way.

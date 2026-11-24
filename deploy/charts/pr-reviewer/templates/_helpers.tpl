@@ -140,7 +140,7 @@ Secret material uses secretKeyRef. */}}
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $sharedVolumesJson := index . "sharedVolumesJson" | default "" -}}
 {{- $v := $ctx.Values -}}
-{{- $fullname := include "pr-reviewer.fullname" $ctx -}}
+{{- $fullname := include "pr-reviewer.fullname" $ctx | lower -}}
 - name: PR_REVIEWER_INSTANCE_CONFIG
   value: /config/instance-config.yaml
 {{- if $kubeExecutor }}
@@ -310,6 +310,86 @@ readiness:
     failureThreshold: 6
 {{- end -}}
 
+{{- define "pr-reviewer.std.webhook" -}}
+{{- $std := .Values.webhook | default dict -}}
+{{- $advanced := .Values.controller.webhook | default dict -}}
+{{- if and $std.enabled $advanced.enabled -}}{{ fail "webhook.enabled conflicts with controller.webhook.enabled" }}{{- end -}}
+{{- /* #1768 review: standard mode owns webhook secret material AND the
+       webhook Service. Any advanced residue for the same concern merges
+       silently (bjw-s enables a Service whenever `enabled` is absent, and
+       the env wiring prefers existingSecret over secret), so it must fail
+       the render instead of shadowing the standard section. */ -}}
+{{- if and $std.enabled $advanced.secret -}}{{ fail "webhook.secret conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
+{{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.webhook.existingSecret.name conflicts with the standard webhook.secret/webhook.existingSecret" }}{{- end -}}
+{{- $svc := dig "service" "webhook" dict .Values.controller -}}
+{{- /* #1768 review round 2: the standard merge is authoritative for
+       enabled/type/forceRename/ports.webhook.port (it overwrites them),
+       so the guard only refuses what the merge CANNOT remove: extra
+       keys, extra ports, and explicit advanced enablement. */ -}}
+{{- if and $std.enabled (not (empty $svc)) -}}
+{{- range $key, $_ := $svc -}}{{- if not (has $key (list "enabled" "controller" "type" "ports")) -}}{{ fail (printf "controller.service.webhook.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
+{{- if dig "enabled" false $svc -}}{{ fail "webhook.enabled conflicts with controller.service.webhook.enabled" }}{{- end -}}
+{{- range $key, $_ := (dig "ports" dict $svc) -}}{{- if ne $key "webhook" -}}{{ fail (printf "controller.service.webhook.ports.%s conflicts with the standard webhook Service derivation" $key) }}{{- end -}}{{- end -}}
+{{- end -}}
+{{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "webhook.existingSecret and webhook.secret are mutually exclusive" }}{{- end -}}
+{{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "webhook.enabled requires controller.enabled" }}{{- end -}}
+{{- $intakePath := $std.path | default "/hook" -}}
+{{- /* The intake path must stay a usable HTTPRoute rule value and must
+        never collide with the reserved admin surface (a first-rule
+        PathPrefix "/" or "/admin" would swallow the dashboard and the
+        bearer-guarded API with no render-time error). The collision
+        check is semantic, not string-exact: Gateway API PathPrefix
+        matching is element-based and ignores a trailing "/", so
+        /admin/ resolves to the same rule as /admin, //admin to the
+        same rule on slash-normalizing infrastructure, and any deeper
+        path under a reserved prefix (/admin/api) matches that rule
+        too — the intake rule is emitted FIRST and would capture the
+        traffic. Trailing slashes carry no match semantics, so they
+        normalize away before comparing; duplicate slashes and dot
+        segments would render an intake rule that never matches its
+        intent (silently dead deliveries), so they refuse outright. */ -}}
+{{- if and $std.enabled (or (empty $intakePath) (not (hasPrefix "/" $intakePath))) -}}{{ fail "webhook.path must be an absolute request path starting with / (forge deliveries POST there; Gitea/GitLab instances need their canonical /webhooks/<forge> route)" }}{{- end -}}
+{{- if and $std.enabled (regexMatch "[[:space:]?#]" $intakePath) -}}{{ fail "webhook.path must not contain whitespace, ?, or # (it becomes an HTTPRoute path match verbatim)" }}{{- end -}}
+{{- $normalizedPath := regexReplaceAll "/{2,}" (regexReplaceAll "/+$" $intakePath "" | default "/") "/" -}}
+{{- if and $std.enabled (or (eq $normalizedPath "/") (regexMatch "^/(admin|auth|dashboard)(/|$)" $normalizedPath)) -}}{{ fail (printf "webhook.path %s collides with the reserved admin surface (PathPrefix matching is element-based and ignores trailing slashes, so /admin/, /admin/api, and //admin resolve to the reserved admin rules)" $intakePath) }}{{- end -}}
+{{- if and $std.enabled (regexMatch "//" $intakePath) -}}{{ fail "webhook.path must not contain empty path segments (//): PathPrefix matching splits on '/', so //hook never matches /hook and the rendered intake rule would be silently dead" }}{{- end -}}
+{{- if and $std.enabled (regexMatch "(^|/)\\.\\.?(/|$)" $intakePath) -}}{{ fail "webhook.path must not contain dot segments (. or ..): normalizing infrastructure rewrites such request paths before matching, so the rendered intake rule would be silently dead" }}{{- end -}}
+{{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
+{{- dict "enabled" ($std.enabled | default false) "port" ($advanced.port | default 8080) "path" $intakePath "secretRefName" ($std.existingSecret | default "") "secretRefKey" "webhook-secret" "inlineSecret" ($std.secret | default "") "serviceName" (printf "%s-webhook" $fullname | lower) | toYaml -}}
+{{- end -}}
+
+{{- define "pr-reviewer.std.admin" -}}
+{{- $std := .Values.dashboard | default dict -}}
+{{- $advanced := .Values.controller.admin | default dict -}}
+{{- if and $std.enabled (or $advanced.enabled $advanced.dashboard) -}}{{ fail "dashboard.enabled conflicts with controller.admin.enabled or controller.admin.dashboard" }}{{- end -}}
+{{- if and $std.enabled (eq (dig "auth" "mode" "token" $advanced) "oidc") -}}{{ fail "dashboard.enabled conflicts with controller.admin.auth.mode oidc" }}{{- end -}}
+{{- /* #1768 review: the standard section owns the admin token material —
+       advanced residue would silently shadow it (env prefers
+       existingSecret), so it fails the render. */ -}}
+{{- if and $std.enabled $advanced.token -}}{{ fail "controller.admin.token conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
+{{- if and $std.enabled (dig "existingSecret" "name" "" $advanced) -}}{{ fail "controller.admin.existingSecret.name conflicts with the standard dashboard.secret/dashboard.existingSecret" }}{{- end -}}
+{{- /* #1768 review round 2: OIDC material cannot shadow the standard
+       selection (the mode itself is refused and the merge forces token
+       auth), but a silently discarded credential is a trap — refuse it. */ -}}
+{{- if and $std.enabled (or (dig "auth" "oidc" "clientSecret" "" $advanced) (dig "auth" "oidc" "existingSecret" "name" "" $advanced)) -}}{{ fail "controller.admin.auth.oidc client material conflicts with the standard dashboard (standard mode derives token auth)" }}{{- end -}}
+{{- /* #1768 review: the standard section owns the admin Service; the
+       chart ships no default `controller.service.admin`, so ANY content
+       there is operator-authored residue that would otherwise merge
+       silently (a LoadBalancer admin Service would publish the
+       unauthenticated /metrics surface directly). */ -}}
+{{- if and $std.enabled (not (empty (dig "service" "admin" dict .Values.controller))) -}}{{ fail "controller.service.admin conflicts with the standard dashboard Service derivation" }}{{- end -}}
+{{- if and $std.enabled $std.existingSecret $std.secret -}}{{ fail "dashboard.existingSecret and dashboard.secret are mutually exclusive" }}{{- end -}}
+{{- if and $std.enabled (not .Values.controller.enabled) -}}{{ fail "dashboard.enabled requires controller.enabled" }}{{- end -}}
+{{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
+{{- dict "enabled" ($std.enabled | default false) "dashboard" ($std.enabled | default false) "port" ($advanced.port | default 8081) "tokenRefName" ($std.existingSecret | default "") "tokenRefKey" "token" "inlineToken" ($std.secret | default "") "serviceName" (printf "%s-admin" $fullname | lower) "authMode" "token" | toYaml -}}
+{{- end -}}
+
+{{- define "pr-reviewer.std.route" -}}
+{{- $webhook := include "pr-reviewer.std.webhook" . | fromYaml -}}
+{{- $admin := include "pr-reviewer.std.admin" . | fromYaml -}}
+{{- dict "webhook" $webhook "admin" $admin | toYaml -}}
+{{- end -}}
+
 {{/*
 The standard shared worker/controller storage (#1767), derived from the
 single source `controller.persistence`: one entry per standard key, in a
@@ -469,7 +549,35 @@ dict "ctx" <component context> "root" <chart root>
 {{- $kubeExecutor := index . "workerExecutorKubernetes" -}}
 {{- $workerExecutor := index . "workerExecutor" -}}
 {{- $v := $ctx.Values -}}
-{{- $fullname := include "pr-reviewer.fullname" $ctx -}}
+{{- $fullname := include "pr-reviewer.fullname" $ctx | lower -}}
+{{- $stdWebhook := include "pr-reviewer.std.webhook" $root | fromYaml -}}
+{{- $stdAdmin := include "pr-reviewer.std.admin" $root | fromYaml -}}
+{{- if $stdWebhook.enabled -}}
+{{- $_ := set $v.webhook "enabled" true -}}
+{{- /* #1768 review: the standard section owns the secret selection —
+       BOTH fields are set (one empty) so no advanced residue can
+       shadow it through the env wiring's existingSecret preference. */ -}}
+{{- if $stdWebhook.secretRefName -}}
+{{- $_ := set $v.webhook "existingSecret" (dict "name" $stdWebhook.secretRefName "key" $stdWebhook.secretRefKey) -}}
+{{- $_ := set $v.webhook "secret" "" -}}
+{{- else -}}
+{{- $_ := set $v.webhook "existingSecret" (dict "name" "" "key" $stdWebhook.secretRefKey) -}}
+{{- $_ := set $v.webhook "secret" $stdWebhook.inlineSecret -}}
+{{- end -}}
+{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "webhook" (dict "enabled" true "type" "ClusterIP" "forceRename" $stdWebhook.serviceName "controller" "main" "ports" (dict "webhook" (dict "port" $stdWebhook.port))))) -}}
+{{- end -}}
+{{- if $stdAdmin.enabled -}}
+{{- $_ := set $v.admin "enabled" true -}}{{- $_ := set $v.admin "dashboard" true -}}{{- $_ := set $v.admin.auth "mode" "token" -}}
+{{- /* #1768 review: same authority rule for the admin token material. */ -}}
+{{- if $stdAdmin.tokenRefName -}}
+{{- $_ := set $v.admin "existingSecret" (dict "name" $stdAdmin.tokenRefName "key" $stdAdmin.tokenRefKey) -}}
+{{- $_ := set $v.admin "token" "" -}}
+{{- else -}}
+{{- $_ := set $v.admin "existingSecret" (dict "name" "" "key" $stdAdmin.tokenRefKey) -}}
+{{- $_ := set $v.admin "token" $stdAdmin.inlineToken -}}
+{{- end -}}
+{{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "admin" (dict "enabled" true "forceRename" $stdAdmin.serviceName "controller" "main" "ports" (dict "admin" (dict "port" $stdAdmin.port))))) -}}
+{{- end -}}
 
 {{- /* #1762: the controller image is the chart's own default, not required
        operator boilerplate: values.yaml carries the canonical repository,

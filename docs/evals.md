@@ -8,8 +8,10 @@ The corpora are `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`,
 and `evals/corpus-specialists.json`, wired into CI by the `eval-harness`
 workflow (`.github/workflows/eval-harness.yaml`). `evals/corpus-real-prs.json`
 (real merged PRs at their pinned head, see below) is run manually for now.
-Use this page for manual runs or when triaging a failing scheduled
-regression sweep.
+Every scenario in `evals/corpus-agentic.json` replays from a pinned fixture
+(see "Agentic corpus replay" below), so the sweep never depends on a live
+pull request. Use this page for manual runs or when triaging a failing
+scheduled regression sweep.
 
 ## Prerequisites
 
@@ -17,7 +19,7 @@ regression sweep.
 |---|---|
 | Python 3.12+ | Runs `scripts/eval_harness.py` |
 | `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY` (env or repo secrets) | Target model endpoint for the review pass |
-| `GITHUB_TOKEN` (env or repo secrets) | Lets the harness fetch PR diffs from the corpus |
+| `GITHUB_TOKEN` (env or repo secrets) | Lets the harness read live pull request data. The agentic corpus does not need it, because every scenario replays from a pinned fixture |
 | A writable directory for `eval-report/eval-report.json` | Holds the JSON report (also uploaded as an Actions artifact) |
 
 ## Run locally
@@ -69,11 +71,15 @@ The `eval-harness` workflow has two triggers:
   `modes` (default `tools_off native_loop`), `runs-per-mode` (default `10`),
   `max-prs` (blank = corpus default), `deep` (choice `false` / `true` /
   `both`, default `false` — the deep-review specialist A/B; absent inputs,
-  i.e. the scheduled run, default to standard-only).
+  i.e. the scheduled run, default to standard-only), `telemetry-issue`
+  (default `1801` — the issue that receives the weekly summary).
 - **`schedule`** — weekly Monday 06:00 UTC sweep against `main`. The
   scheduled run additionally posts a Markdown summary to
-  `GITHUB_STEP_SUMMARY` and as a comment on issue #472 so regressions are
-  discoverable from the issue tracker.
+  `GITHUB_STEP_SUMMARY` and as a comment on the tracker issue, so
+  regressions are discoverable from the issue tracker. The tracker is issue
+  #1801. Issue #472 opened the workflow and closed in August 2026, so it
+  must not stay the destination for the weekly telemetry (#1799). Change the
+  destination with the `telemetry-issue` input.
 
 The JSON report is uploaded as the `eval-report` artifact on every run
 (including failed runs) so regressions can be diffed week-over-week.
@@ -377,6 +383,23 @@ report predates a field. A per-mode pass rate below `0.95` should block
 the release; inspect the artifact, reproduce locally with the command
 above, then fix the prompt or routing regression in the action before
 re-running.
+
+The report separates three ways a run can fail (#1799):
+
+- A replay failure means the pinned replay input did not materialize. The
+  reviewer never saw the scenario, so the run says nothing about review
+  quality.
+- An admission skip means the runtime's admission gate refused the run. No
+  review exists.
+- An assertion failure means the run reviewed the scenario and the expected
+  evidence did not show up. Only this failure tracks review quality.
+
+The counters live in `metadata.replay_failed_runs`,
+`metadata.admission_skipped_runs`, and `metadata.assertion_failed_runs`. Each
+mode block carries `replay_failures`, `admission_skips`, and
+`capability_failures`. A run that the gate refused never counts as a
+completed run, so a sweep that reviewed nothing fails the job instead of
+publishing a healthy partial pass rate.
 
 ## Specialist corpus & deep A/B
 
@@ -785,6 +808,87 @@ documented `--context-only` command to measure it: the fixture row reports
 `context_built: true` with the defect evidence in the assembled corpus, and
 each row without a fixture reports `context_built: false` because the gate
 refuses the merged PR.
+
+### Agentic corpus replay (#1799)
+
+`evals/corpus-agentic.json` holds the four agentic-capability scenarios. Each
+scenario replays from a pinned fixture under `evals/agentic-fixtures/`:
+
+```json
+{
+  "number": 1,
+  "repo_full_name": "eval-fixtures/talos-k8s-support",
+  "title": "fix(container): update kubernetes group (v1.36.1 -> v1.36.2)",
+  "fixture": {
+    "path": "agentic-fixtures/talos-k8s-support-matrix.json",
+    "sha256": "3b35de84975b667869ea4090d116e3f35f2fe9a933bdfa107141408d8ccb6621"
+  }
+}
+```
+
+The `path` resolves under `evals/`, and `sha256` pins the file. The harness
+loads the fixture when it loads the corpus, and it checks the integrity of the
+fixture at the same time. A broken ref fails before the sweep starts.
+
+The four scenarios used to name live pull requests. Two of them are now closed
+or merged, one number later pointed at an unrelated pull request, and two
+numbers never existed. The weekly sweep failed on every run and produced no
+signal about review quality. The pinned fixtures remove that dependency. No
+scenario reads a pull request, a repository, or a network page any more.
+
+The replay works in four steps:
+
+1. The harness creates a fresh local git repository for the fixture.
+2. It writes the fixture files into that repository and commits them.
+3. It writes the pull request identity, the diff, and the changed-file list
+   into `<repo>/.semantic-fixture/`.
+4. The runtime reads the pull request, the diff, and the file list from that
+   directory. The reviewer reads the fixture tree from the workspace.
+
+The runtime never reaches a forge in this mode, and the harness never clones a
+repository or fetches a pull request head. The production admission gate is
+unchanged. It still refuses a closed or merged pull request, and a fixture
+that states `state: closed` is still refused. Every shipped agentic fixture
+states `state: open` and `draft: false`.
+
+One scenario needed a change in its evidence source. The Talos scenario expects
+the reviewer to read the machine configuration, find the deployed Talos
+version, consult the compatibility matrix for that version, and cite the
+matrix. The matrix used to be a live web page. The fixture now carries the
+matrix as a repository document (`docs/platform/talos-support-matrix.md`), so
+the evidence chain stays the same and the replay stays deterministic. A live
+page can change or disappear, which would make the weekly rate measure the
+page instead of the reviewer.
+
+Every arm declares its tool mode to the runtime explicitly. The runtime's
+`tool-mode` input defaults to `native_loop`. If the `tools_off` arm left the
+mode unset, the runtime would turn the tool harness back on, and the weekly
+A/B would measure the same arm twice while reporting two rows. So the harness
+always sends `TOOL_MODE=off` for `tools_off` and `TOOL_MODE=native_loop` for
+`native_loop`, and never relies on the default (#1802).
+`tests/test_eval_harness_agentic_corpus.py` pins the child-environment value
+for both arms.
+
+To add a scenario or to change a fixture:
+
+1. Write the fixture file under `evals/agentic-fixtures/`. Use the shape of
+   `evals/real-pr-fixtures/pr-233.json`.
+2. Check the fixture and read its digest:
+
+   ```bash
+   mise exec python@3.14 -- python3 - <<'PY'
+   import hashlib, json, sys
+   from pathlib import Path
+   sys.path.insert(0, ".")
+   from pr_reviewer.semantic_eval import validate_semantic_fixture_integrity
+   path = Path("evals/agentic-fixtures/<file>.json")
+   validate_semantic_fixture_integrity(json.loads(path.read_text()))
+   print(hashlib.sha256(path.read_bytes()).hexdigest())
+   PY
+   ```
+
+3. Pin the digest in the corpus entry.
+4. Run the sweep locally with the command under "Run locally".
 
 ### Semantic-fixture directory placement
 

@@ -211,6 +211,7 @@ test("#1762: no example restates the controller image (zero-image upstream insta
     "deploy/charts/pr-reviewer/examples/values-controller-only.yaml",
     "deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml",
     "deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml",
+    "deploy/charts/pr-reviewer/examples/values-standard.yaml",
   ]) {
     const doc = parse(read(example)) as Record<string, unknown>;
     const controller = doc.controller as Record<string, unknown>;
@@ -244,8 +245,51 @@ test("#1762: charts.yaml pins the zero-image-config render path", () => {
   );
 });
 
-test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key, never the v1 `podOptions` spelling", () => {
+test("#1768: the derived standard HTTPRoute never rewrites paths and never routes the unauthenticated surface", () => {
+  const route = read("deploy/charts/pr-reviewer/templates/httproute.yaml");
+  // The admin listener answers /metrics, /healthz, and /readyz BEFORE its
+  // auth gate, so the public route must never carry a rule VALUE naming
+  // those paths, and a rewrite would let a prefix rule grow into one that
+  // could. The exact "/" rule is the shell's native address (no
+  // RequestRedirect fallback).
+  assert.doesNotMatch(route, /urlRewrite|RequestRedirect|RequestRedirectFilter/);
+  assert.doesNotMatch(route, /"value" "\/metrics|"value" "\/healthz|"value" "\/readyz/);
+  assert.match(route, /"Exact" "value" "\/"/, "the exact-root dashboard rule must be present");
+  // Rule order is built in one place: the intake rule (via the
+  // webhook.path knob) first, then /admin, /auth, /dashboard, and the
+  // exact root LAST.
+  const order = [...route.matchAll(/"value" "([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["/admin", "/auth", "/dashboard", "/"], `derived literal rules must be ordered /admin, /auth, /dashboard, exact /; got ${JSON.stringify(order)}`);
+  assert.ok(route.indexOf("$webhook.path") >= 0 && route.indexOf("$webhook.path") < route.indexOf('"value" "/admin"'), "the intake rule must precede the admin rules");
+  // The route's intake path comes from `webhook.path` (default /hook),
+  // never a literal /hook in the rule builder.
+  assert.match(route, /\$webhook\.path/, "the intake rule must use the webhook.path knob");
+});
+
+test("#1768: standard mode fails closed on advanced residue instead of silently merging", () => {
   const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // Advanced secret material would shadow a standard section (the env
+  // wiring prefers existingSecret over secret), and bjw-s common enables
+  // a Service whenever `enabled` is absent — so ANY advanced service or
+  // secret residue for a standard-owned concern must refuse the render.
+  for (const fragment of [
+    "conflicts with the standard webhook.secret/webhook.existingSecret",
+    "conflicts with the standard dashboard.secret/dashboard.existingSecret",
+    "conflicts with the standard webhook Service derivation",
+    "conflicts with the standard dashboard Service derivation",
+    "webhook.path must be an absolute request path",
+    "route.raw requires route.enabled: true",
+    "serviceMonitor.port must equal the admin listener port",
+  ]) {
+    assert.ok(helpers.includes(fragment) || read("deploy/charts/pr-reviewer/templates/httproute.yaml").includes(fragment) || read("deploy/charts/pr-reviewer/templates/servicemonitor.yaml").includes(fragment), `missing fail-closed guard: ${fragment}`);
+  }
+  // The standard-mode backend names are pinned (lowercased forceRename),
+  // so the HTTPRoute backendRefs and the rendered Services never diverge.
+  assert.match(helpers, /printf "%s-webhook" \$fullname \| lower/);
+  assert.match(helpers, /printf "%s-admin" \$fullname \| lower/);
+});
+
+test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key, never the v1 `podOptions` spelling", () => {  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
   // bjw-s common 5.x reads pod-level overrides from
   // `controllers.<name>.pod` (`templates/lib/pod/_getOption.tpl`);
   // `podOptions` is the v1 key and is silently ignored by the library, so

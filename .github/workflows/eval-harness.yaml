@@ -5,7 +5,10 @@ name: Eval Harness
 # surface before they ship. The harness itself lives in
 # scripts/eval_harness.py; this workflow only wires it into CI.
 #
-# Acceptance reference: issue #472.
+# Acceptance reference: issue #472 (the eval-harness CI workflow). The
+# weekly summary goes to the live tracker issue #1801; #472 closed in
+# August 2026 and must not stay the destination for the weekly telemetry
+# (#1799).
 
 on:
   workflow_dispatch:
@@ -42,6 +45,11 @@ on:
           - "false"
           - "true"
           - "both"
+      telemetry-issue:
+        description: "Issue that receives the weekly summary comment"
+        required: false
+        default: "1801"
+        type: string
   schedule:
     # Weekly Monday 06:00 UTC regression sweep on main.
     - cron: "0 6 * * 1"
@@ -55,7 +63,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  # The weekly sweep posts the #472 tracking comment
+  # The weekly sweep posts its tracking comment
   # (scripts/eval_weekly_summary.py). A comment on an issue needs
   # `issues: write`; without it the forge refuses the write and the
   # summary never reaches the tracker (#1407).
@@ -140,23 +148,28 @@ jobs:
 
       - name: Summarize weekly run
         # '!cancelled()' (not always()) so the summary still writes its step
-        # summary and #472 tracking comment — then fails via the
-        # all-runs-errored guard in scripts/eval_weekly_summary.py — when the
-        # harness step exited nonzero on an all-errored sweep (issue #711).
+        # summary and tracking comment — then fails via the all-runs-errored
+        # guard in scripts/eval_weekly_summary.py — when the harness step
+        # exited nonzero on an all-errored sweep (issue #711).
         # Cancelled runs skip it, and the schedule gate keeps manual dispatch
         # runs summary-free.
         if: ${{ !cancelled() && github.event_name == 'schedule' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: eval-report/eval-report.json
+          TELEMETRY_ISSUE: ${{ inputs.telemetry-issue || '1801' }}
         run: |
           set -euo pipefail
           # The renderer reads per-mode pass rates from the canonical
           # report["mode_summary"] shape the harness emits (#715), appends
-          # the summary to GITHUB_STEP_SUMMARY, posts the #472 tracking
-          # comment best-effort, and exits 1 after both are written when
-          # every harness run errored (issue #711). A missing report file
-          # is a skip, not a failure.
+          # the summary to GITHUB_STEP_SUMMARY, posts the tracking comment
+          # best-effort, and exits 1 after both are written when every
+          # harness run errored (issue #711). A missing report file is a
+          # skip, not a failure.
+          #
+          # The destination is a live tracker issue (#1801). Issue #472
+          # closed in August 2026, so it must not stay the permanent
+          # destination for the weekly telemetry (#1799).
           python scripts/eval_weekly_summary.py \
             --report "$REPORT_PATH" \
-            --post-issue 472
+            --post-issue "$TELEMETRY_ISSUE"
