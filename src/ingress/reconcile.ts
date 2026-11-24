@@ -35,7 +35,8 @@
  */
 
 import { DIAGNOSTIC_MAX_CHARS, maskDiagnostic } from "../context/redact.js";
-import { reconciliationPollEvent, normalizeRepoFullName } from "../events/normalize.js";
+import { reconciliationPollEvent } from "../events/normalize.js";
+import { normalizeRepoFullName } from "../platform/repo-identity.js";
 import { buildReviewJob } from "../jobs/generation.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import type { CanonicalForgeEvent } from "../events/types.js";
