@@ -673,6 +673,20 @@ test("adoption policy validates modes, identities, and bounds", () => {
   expectError({ ...baseInstance(), adoption: { mode: "allowlist", "discovered-default": "maybe" } }, "must be 'adopt' or 'skip'");
 });
 
+test("adoption list entries are case-canonicalized at validation (#1783)", () => {
+  const ok = validate({
+    ...baseInstance(),
+    adoption: { mode: "allowlist", allowlist: ["MyOrg/Repo", "a/B"], denylist: ["X/y"], "discovered-default": "adopt" },
+  });
+  // Forge events carry lowercased identities (normalizeRepoFullName); the
+  // stored policy must compare equal to them without decideAdoption changes.
+  assert.deepEqual([...ok.adoption.allowlist], ["myorg/repo", "a/b"]);
+  assert.deepEqual([...ok.adoption.denylist], ["x/y"]);
+  // Duplicate detection runs on the canonical forms, not the raw spellings.
+  expectError({ ...baseInstance(), adoption: { mode: "allowlist", allowlist: ["MyOrg/repo", "myorg/Repo"] } }, "duplicate identities");
+  expectError({ ...baseInstance(), adoption: { mode: "allowlist", denylist: ["Owner/Repo", "owner/repo"] } }, "duplicate identities");
+});
+
 test("queue and storage are bounded", () => {
   expectError({ ...baseInstance(), queue: { "max-concurrent-reviews": 0 } }, "must be between 1 and 256");
   expectError({ ...baseInstance(), queue: { "max-concurrent-reviews": 257 } }, "must be between 1 and 256");

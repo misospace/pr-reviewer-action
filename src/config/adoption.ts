@@ -30,10 +30,12 @@
  * - repository config may only ever **disable** (`enabled: false`), never
  *   force-enable an adoption the operator policy did not grant.
  *
- * Identity strings are `owner/name` validated at the instance-config layer
- * (`parseRepoRef` rules); this module treats them as opaque, comparable
- * tokens. Validation lives with the config that owns the lists, so this
- * module stays dependency-free and trivially auditable.
+ * Identity strings are `owner/name` validated AND case-canonicalized at the
+ * instance-config layer (`parseRepoRef` rules + `normalizeRepoFullName`,
+ * #1783), matching the lowercased identities forge events carry; this module
+ * treats them as opaque, comparable tokens. Validation lives with the config
+ * that owns the lists, so this module stays dependency-free and trivially
+ * auditable.
  */
 
 export type AdoptionMode = "all_allowed" | "allowlist" | "opt_in" | "opt_out";

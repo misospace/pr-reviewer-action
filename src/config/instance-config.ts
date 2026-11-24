@@ -41,6 +41,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
+import { normalizeRepoFullName } from "../events/normalize.js";
 import { parseRepoRef } from "../platform/repo-ref.js";
 import { forgeWireFamily, isForgeId, type ForgeId } from "../platform/resolve.js";
 import type { ActionContract } from "./contract.js";
@@ -744,7 +745,11 @@ function validateAdoption(value: unknown, path: string): AdoptionPolicy {
     const entries = listValue.map((entry, index) => {
       const text = stringAt(entry, `${path}.${label}[${index}]`);
       if (parseRepoRef(text) === null) fail(`${path}.${label}[${index}]`, "must be an 'owner/name' repository identity");
-      return text;
+      // Canonicalize case at the validation boundary (#1783): forge event
+      // identities are lowercased by `normalizeRepoFullName`, so a mixed-case
+      // entry must be stored in the same form to compare equal — and the
+      // duplicate check runs on the canonical forms, not the raw spellings.
+      return normalizeRepoFullName(text);
     });
     if (new Set(entries).size !== entries.length) fail(`${path}.${label}`, "contains duplicate identities");
     return Object.freeze(entries) as readonly string[];
