@@ -186,10 +186,39 @@ def test_summary_step_invokes_renderer_script() -> None:
     assert "scripts/eval_weekly_summary.py" in run_block, (
         "the summary step must invoke scripts/eval_weekly_summary.py"
     )
-    assert "--report" in run_block and "--post-issue 472" in run_block, (
-        "the summary step must point the renderer at the report and the "
-        "#472 tracking issue"
+    assert "--report" in run_block and "--post-issue" in run_block, (
+        "the summary step must point the renderer at the report and at the "
+        "tracking issue"
     )
+    # #1799: the destination must be the live tracker issue, not the closed
+    # implementation issue #472. The number comes from the workflow input so
+    # a closed tracker can be replaced without editing the run block.
+    assert "--post-issue 472" not in run_block, (
+        "the weekly summary must not post to the closed issue #472"
+    )
+    assert '"$TELEMETRY_ISSUE"' in run_block, (
+        "the weekly summary must post to the configured tracker issue"
+    )
+    assert "telemetry-issue" in workflow_text, (
+        "the workflow must expose the tracker issue as an input"
+    )
+
+
+def test_weekly_tracker_issue_is_open() -> None:
+    """The weekly summary destination must be an issue that stays open.
+
+    The tracker is a live issue (#1801). The workflow carries the number as
+    a default so the run block never hard-codes a closed implementation
+    issue again.
+    """
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"telemetry-issue:\s*\n\s*description:[^\n]*\n\s*required:[^\n]*\n\s*default:\s*\"(\d+)\"",
+        workflow_text,
+    )
+    assert match is not None, "the workflow must declare a numeric tracker default"
+    number = int(match.group(1))
+    assert number != 472, "the tracker must not be the closed issue #472"
 
 
 def test_renderer_fails_after_summary_on_all_errored() -> None:

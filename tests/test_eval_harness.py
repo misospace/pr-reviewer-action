@@ -606,8 +606,11 @@ class TestSecretLeakScenario:
         if not path.exists():
             pytest.skip("evals/corpus-agentic.json not found")
         corpus = BenchmarkCorpus.from_file(path)
-        pr = next((p for p in corpus.prs if p["number"] == 8002), None)
-        assert pr is not None, "PR 8002 not in corpus"
+        pr = next(
+            (p for p in corpus.prs if p["repo_full_name"] == "eval-fixtures/deploy-config-secret"),
+            None,
+        )
+        assert pr is not None, "the secret-leaking scenario is not in corpus"
         findings = load_known_findings(pr)
         assert len(findings) == 1
         assert findings[0].category == "security"

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "scenario": 1,
+  "provenance": {
+    "historical_pr": "7462",
+    "source": "Retained fixture for the #203 Talos/Kubernetes support-matrix acceptance criterion, carrying the Kubernetes v1.36.2 bump from the now-merged joryirving/home-ops#7462 together with a pinned copy of the repository's own Talos support matrix document."
+  },
+  "pr_json": {
+    "number": 1,
+    "title": "fix(container): update kubernetes group (v1.36.1 -> v1.36.2)",
+    "body": "Bumps the Kubernetes minor version deployed by the Talos cluster.",
+    "state": "open",
+    "draft": false,
+    "head": {
+      "sha": "7bf802545a5f98cd4ee54011b6606a0d5d2a7e52",
+      "ref": "fix/kubernetes-v1-36-2"
+    },
+    "base": {
+      "sha": "f65880c847fb1ff44bed15536f4accc1710f2a3f",
+      "ref": "main"
+    },
+    "user": {
+      "login": "joryirving"
+    },
+    "changed_files": 1,
+    "additions": 2,
+    "deletions": 2,
+    "html_url": "https://github.com/eval-fixtures/talos-k8s-support/pull/1"
+  },
+  "diff": "diff --git a/cluster/talos/machineconfig/worker.yaml b/cluster/talos/machineconfig/worker.yaml\nindex 700a61a..72ff013 100644\n--- a/cluster/talos/machineconfig/worker.yaml\n+++ b/cluster/talos/machineconfig/worker.yaml\n@@ -4,7 +4,7 @@ version: v1alpha1\n machine:\n   type: worker\n   kubelet:\n-    image: registry.k8s.io/kubelet:v1.36.1\n+    image: registry.k8s.io/kubelet:v1.36.2\n     defaultRuntimeSeccompProfileEnabled: true\n   extraKernelArgs:\n     - apparmor=0\n@@ -16,7 +16,7 @@ cluster:\n     endpoints:\n       - https://control-plane.eval-fixtures.internal:6443\n   apiServer:\n-    image: ghcr.io/siderolabs/kube-apiserver:v1.36.1\n+    image: ghcr.io/siderolabs/kube-apiserver:v1.36.2\n   network:\n     dnsDomain: cluster.local\n     podSubnets:\n",
+  "pr_files": [
+    {
+      "filename": "cluster/talos/machineconfig/worker.yaml",
+      "status": "M",
+      "additions": 2,
+      "deletions": 2,
+      "changes": 4
+    }
+  ],
+  "files": [
+    {
+      "path": "cluster/talos/machineconfig/control-plane.yaml",
+      "content": "# Talos control plane node machine configuration.\n# Talos v1.9.5\nversion: v1alpha1\nmachine:\n  type: controlplane\n  kubelet:\n    image: registry.k8s.io/kubelet:v1.36.1\n    defaultRuntimeSeccompProfileEnabled: true\n  network:\n    interfaces:\n      - interface: eth0\n        dhcp: false\n        addresses:\n          - 10.0.0.10/24\n        routes:\n          - network: 0.0.0.0/0\n            gateway: 10.0.0.1\ncluster:\n  id: eval-fixtures-talos\n  clusterName: eval-fixtures-talos\n  secretbox: $TALOS_SECRETBOX\n  controlPlane:\n    endpoints:\n      - https://control-plane.eval-fixtures.internal:6443\n  network:\n    dnsDomain: cluster.local\n    podSubnets:\n      - 10.42.0.0/16\n    serviceSubnets:\n      - 10.43.0.0/16\n"
+    },
+    {
+      "path": "cluster/talos/machineconfig/worker.yaml",
+      "content": "# Talos worker node machine configuration.\n# Talos v1.9.5 — supported Kubernetes versions live in docs/platform/talos-support-matrix.md\nversion: v1alpha1\nmachine:\n  type: worker\n  kubelet:\n    image: registry.k8s.io/kubelet:v1.36.2\n    defaultRuntimeSeccompProfileEnabled: true\n  extraKernelArgs:\n    - apparmor=0\ncluster:\n  id: eval-fixtures-talos\n  clusterName: eval-fixtures-talos\n  secretbox: $TALOS_SECRETBOX\n  controlPlane:\n    endpoints:\n      - https://control-plane.eval-fixtures.internal:6443\n  apiServer:\n    image: ghcr.io/siderolabs/kube-apiserver:v1.36.2\n  network:\n    dnsDomain: cluster.local\n    podSubnets:\n      - 10.42.0.0/16\n    serviceSubnets:\n      - 10.43.0.0/16\n"
+    },
+    {
+      "path": "docs/platform/README.md",
+      "content": "# Platform docs\n\nReference documentation for the platform layer of this repository.\n\n- [Talos ↔ Kubernetes support matrix](talos-support-matrix.md) — the pinned\n  Talos/Kubernetes compatibility table. Check it before changing a Kubernetes\n  version under `cluster/talos/machineconfig/`.\n"
+    },
+    {
+      "path": "docs/platform/talos-support-matrix.md",
+      "content": "# Talos ↔ Kubernetes support matrix\n\nPinned compatibility table for the Talos releases deployed in this cluster.\nThe Kubernetes minor version deployed on a host must fall inside the range\nlisted for the Talos version actually running on that host — the deployed\nplatform version is recorded in `cluster/talos/machineconfig/worker.yaml`.\n\n| Talos version | Supported Kubernetes versions |\n| --- | --- |\n| Talos v1.9.3 | Kubernetes v1.30 – v1.32 |\n| Talos v1.9.4 | Kubernetes v1.30 – v1.33 |\n| Talos v1.9.5 | Kubernetes v1.31 – v1.33 |\n| Talos v1.10.0 | Kubernetes v1.32 – v1.34 |\n\nA Kubernetes version outside the supported range is an unsupported\ncombination: upgrade the Talos platform version first, then the Kubernetes\nminor version.\n"
+    }
+  ]
+}
