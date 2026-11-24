@@ -74,11 +74,13 @@ test("#1708: chart release coordinates equal the application release (version, a
  * release PR, and the number of annotated fields each one carries. Since
  * #1708 the chart's own `version` is bound too: Helm OCI artifacts are
  * tagged by Chart.yaml.version, so it must equal the application release
- * alongside `appVersion`. */
+ * alongside `appVersion`. Since #1762 nothing under the examples is bound:
+ * the controller image (and the worker image before it) takes its tag from
+ * the chart's own appVersion at render time, so the examples restate no
+ * release coordinate and carry no version field for release-please to
+ * maintain. */
 const VERSION_BOUND_DEPLOY_FILES = new Map<string, number>([
   ["deploy/charts/pr-reviewer/Chart.yaml", 2],
-  ["deploy/charts/pr-reviewer/examples/values-controller-only.yaml", 1],
-  ["deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml", 1],
 ]);
 
 interface ReleasePleaseExtraFile {
@@ -161,6 +163,85 @@ test("chart default values parse with hardened security defaults", () => {
   assert.equal(networkPolicy.enabled, false);
   const serviceMonitor = values.serviceMonitor as Record<string, unknown>;
   assert.equal(serviceMonitor.enabled, false);
+});
+
+test("#1762: default values give the chart its own controller image, not required boilerplate", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as Record<string, unknown>;
+  const controller = values.controller as Record<string, unknown>;
+  const container = (
+    ((controller.controllers as Record<string, unknown>).main as Record<string, unknown>)
+      .containers as Record<string, unknown>
+  ).main as Record<string, unknown>;
+  const image = container.image as Record<string, unknown>;
+  assert.equal(
+    image.repository,
+    "ghcr.io/misospace/pr-reviewer-controller",
+    "the chart must default the controller image to the canonical upstream repository it publishes",
+  );
+  assert.equal(image.tag, "", "an empty tag is what the render-time appVersion resolution keys on");
+  assert.equal(image.digest, "", "the digest is an optional operator byte pin");
+  assert.equal(image.pullPolicy, "IfNotPresent");
+});
+
+test("#1762: the helpers resolve the appVersion tag and no longer require the repository", () => {
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  assert.ok(
+    !helpers.includes("controller.controllers.main.containers.main.image.repository is required"),
+    "the chart-owned repository required failure must be gone; the common library keeps its own fail-closed image validation",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$controllerImage := dig "controllers" "main" "containers" "main" "image" dict \$v -\}\}/,
+    "the controller image must be resolved through the single configure injection",
+  );
+  assert.match(
+    helpers,
+    /\{\{- if and \(kindIs "map" \$controllerImage\) \(empty \$controllerImage\.tag\) \(empty \$controllerImage\.digest\) -\}\}/,
+    "the tag resolution must fire only when both tag and digest are unset, and only on a map-shaped image (a string-shaped image must fail with the library's own message)",
+  );
+  assert.match(
+    helpers,
+    /\{\{- \$_ := set \$controllerImage "tag" \$ctx\.Chart\.AppVersion -\}\}/,
+    "an unset tag must resolve to Chart.AppVersion (the release coordinate — never latest, never an independent version)",
+  );
+});
+
+test("#1762: no example restates the controller image (zero-image upstream install path)", () => {
+  for (const example of [
+    "deploy/charts/pr-reviewer/examples/values-controller-only.yaml",
+    "deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml",
+    "deploy/charts/pr-reviewer/examples/values-admin-oidc.yaml",
+  ]) {
+    const doc = parse(read(example)) as Record<string, unknown>;
+    const controller = doc.controller as Record<string, unknown>;
+    assert.equal(
+      controller.controllers,
+      undefined,
+      `${example} must rely on the chart's controller image defaults instead of restating them`,
+    );
+    assert.ok(
+      !read(example).includes("x-release-please-version"),
+      `${example} must carry no release-bound version field the chart already derives`,
+    );
+  }
+});
+
+test("#1762: charts.yaml pins the zero-image-config render path", () => {
+  const workflow = read(".github/workflows/charts.yaml");
+  assert.ok(
+    workflow.includes('image: ghcr.io/misospace/pr-reviewer-controller:$app_version'),
+    "charts.yaml must pin that a render without controller image values emits the canonical repository at the release coordinate",
+  );
+  assert.ok(
+    workflow.includes("registry.internal.example/pr-reviewer-controller"),
+    "charts.yaml must pin that an operator-set repository overrides the upstream default",
+  );
+  assert.ok(
+    workflow.includes(
+      "image: ghcr.io/misospace/pr-reviewer-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ),
+    "charts.yaml must pin the digest-only operator pin (repository@digest, no restated tag)",
+  );
 });
 
 test("#1712: executor-mode token projection uses the bjw-s common 5.x `pod` key, never the v1 `podOptions` spelling", () => {

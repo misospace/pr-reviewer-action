@@ -64,14 +64,6 @@
         {
           "type": "generic",
           "path": "deploy/charts/pr-reviewer/Chart.yaml"
-        },
-        {
-          "type": "generic",
-          "path": "deploy/charts/pr-reviewer/examples/values-controller-only.yaml"
-        },
-        {
-          "type": "generic",
-          "path": "deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml"
         }
       ]
     }

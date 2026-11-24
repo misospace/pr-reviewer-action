@@ -102,6 +102,60 @@ jobs:
             exit 1
           fi
 
+      - name: Render (#1762 controller image defaults to the release coordinate)
+        run: |
+          set -euo pipefail
+          app_version="$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}' deploy/charts/pr-reviewer/Chart.yaml)"
+          example=deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+          # Zero image configuration: the example sets no controller image
+          # at all, so the main container AND the chart-owned fix-roots
+          # init container both render the canonical upstream repository
+          # at the chart's own appVersion (the release coordinate).
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$example" > /var/tmp/render-zero-image.yaml
+          image_count="$(grep -c "image: ghcr.io/misospace/pr-reviewer-controller:$app_version$" /var/tmp/render-zero-image.yaml || true)"
+          if [ "$image_count" -ne 2 ]; then
+            echo "::error::expected 2 renders of ghcr.io/misospace/pr-reviewer-controller:$app_version (main + fix-roots); found $image_count" >&2
+            exit 1
+          fi
+          if grep -E 'image: ghcr.io/misospace/pr-reviewer-controller:(latest|v?[0-9]+)$' /var/tmp/render-zero-image.yaml; then
+            echo "::error::controller image default must be the exact release coordinate, never latest or a floating major" >&2
+            exit 1
+          fi
+          # Explicit override precedence: an operator repository wins and
+          # the appVersion tag default still resolves; an explicit tag
+          # wins outright; a digest ALONE is a complete pin (rendered
+          # repository@digest, no restated tag required).
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$example" \
+            --set controller.controllers.main.containers.main.image.repository=registry.internal.example/pr-reviewer-controller \
+            > /var/tmp/render-image-mirror.yaml
+          grep -q "image: registry.internal.example/pr-reviewer-controller:$app_version$" /var/tmp/render-image-mirror.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$example" \
+            --set controller.controllers.main.containers.main.image.tag=1.2.3 \
+            > /var/tmp/render-image-tag.yaml
+          grep -q "image: ghcr.io/misospace/pr-reviewer-controller:1.2.3$" /var/tmp/render-image-tag.yaml
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$example" \
+            --set-string controller.controllers.main.containers.main.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            > /var/tmp/render-image-digest.yaml
+          grep -q "image: ghcr.io/misospace/pr-reviewer-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$" /var/tmp/render-image-digest.yaml
+          if grep -q 'image: ghcr.io/misospace/pr-reviewer-controller:' /var/tmp/render-image-digest.yaml; then
+            echo "::error::a digest-only pin must render repository@digest without a forced tag" >&2
+            exit 1
+          fi
+          # Fail-closed side: explicitly blanking the canonical repository
+          # still refuses the render (the common library's own image
+          # validation), so removing the chart-level required failure did
+          # not open a hole for invalid input.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f "$example" \
+            --set controller.controllers.main.containers.main.image.repository= >/dev/null 2>&1; then
+            echo "::error::an explicitly emptied controller image repository must still refuse the render" >&2
+            exit 1
+          fi
+
       - name: Render (dashboard knob #1621)
         run: |
           set -euo pipefail

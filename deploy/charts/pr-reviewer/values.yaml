@@ -152,12 +152,22 @@ controller:
     main:
       containers:
         main:
-          # REQUIRED: set the controller image repository (digest-pinned
-          # preferred; tag defaults to the chart's appVersion).
+          # #1762: the upstream controller image is the chart's own default.
+          # A published chart X.Y.Z renders
+          # ghcr.io/misospace/pr-reviewer-controller:X.Y.Z (the release
+          # coordinate the chart already knows) with no image values at all.
+          # Configure this section only to point at a mirror/private registry,
+          # to set an alternate tag, or to pin exact bytes with `digest`.
+          # The empty `tag` resolves to Chart.appVersion at render time
+          # (pr-reviewer.controller.configure): the bjw-s common library
+          # requires an explicit tag or digest and never consults appVersion
+          # itself. An explicit `digest` alone is a complete pin (rendered
+          # repository@digest).
           image:
-            repository: ""
+            repository: ghcr.io/misospace/pr-reviewer-controller
             pullPolicy: IfNotPresent
-            tag: ""
+            tag: "" # resolved to the chart's appVersion (the release coordinate)
+            digest: "" # optional exact-byte operator pin (sha256:...)
           # env is chart-managed (rendered from the wiring above); use
           # `controller.env` for operator additions.
           securityContext:
