@@ -41,7 +41,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
-import { normalizeRepoFullName } from "../events/normalize.js";
+import { normalizeRepoFullName } from "../platform/repo-identity.js";
 import { parseRepoRef } from "../platform/repo-ref.js";
 import { forgeWireFamily, isForgeId, type ForgeId } from "../platform/resolve.js";
 import type { ActionContract } from "./contract.js";

@@ -79,6 +79,7 @@
  */
 
 import { isPlainObject } from "../platform/jq.js";
+import { normalizeRepoFullName } from "../platform/repo-identity.js";
 import type {
   CanonicalForgeEvent,
   ForgeEventKind,
@@ -143,22 +144,6 @@ function isPrNumber(value: unknown): value is number {
 /** A PR/installation id: a positive safe integer, else the sentinel 0. */
 function asId(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
-}
-
-/** Trim, lowercase, and require exactly one "/" with both halves non-empty.
- * Exported because the reconciliation poll adapter (`src/ingress/reconcile.ts`)
- * must reject entries whose normalized target repository disagrees with
- * the configured repository it polled using the SAME definition the
- * normalizer applies — raw or ad-hoc string comparisons would let
- * malformed envelopes slip past the boundary (#1025). */
-export function normalizeRepoFullName(fullName: string): string {
-  const trimmed = fullName.trim().toLowerCase();
-  if (trimmed === "") return "";
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1 || trimmed.indexOf("/", slash + 1) !== -1) {
-    return "";
-  }
-  return trimmed;
 }
 
 /** GitLab project identity is a NESTED namespace path (#740):
