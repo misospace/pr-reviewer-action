@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { parse } from "yaml";
 import {
   buildReviewJobManifest,
   executorConformanceTests,
@@ -2791,27 +2792,69 @@ test("the analysis keeps js/file-access-to-http enabled for the whole repository
 test("the analysis runs the JS alert-suppression query so the in-source justifications take effect (#1788)", () => {
   // Without a query of kind `alert-suppression` in the analysis, the CLI
   // never reads `codeql[js/...]` comments and they stay inert: the alerts
-  // can then only be silenced by alert-level dispositions. Pin that the
-  // javascript-typescript leg adds the query (pack-root path since the
-  // codeql/javascript-queries reorganisation) and that BOTH matrix arms
-  // keep the explicit security-and-quality pin (#621).
-  const workflow = readFileSync(".github/workflows/codeql.yml", "utf8");
-  const queriesLines = [...workflow.matchAll(/^\s*queries:\s*(.+)$/gm)].map(
-    (match) => match[1],
+  // can then only be silenced by alert-level dispositions. Pin the wiring
+  // semantically: parse the workflow and resolve the init inputs for each
+  // matrix arm, so a reformat or a reordered arm cannot break the pin
+  // while a real regression can. The query must arrive through `packs`
+  // (the CLI's `scope/name:path` pack spec): the `queries` input only
+  // takes suite names, workspace paths and external-repository
+  // references, and a `pack:query.ql` entry there makes `database init`
+  // fail with "Specifier for external repository is invalid". Whether the
+  // reference itself resolves from the registry is proven by the CI
+  // Analyze (javascript-typescript) leg, not here.
+  const workflow = parse(readFileSync(".github/workflows/codeql.yml", "utf8")) as {
+    jobs: {
+      analyze: {
+        strategy: { matrix: { language: string[] } };
+        steps: { uses?: string; with?: Record<string, unknown> }[];
+      };
+    };
+  };
+  const { strategy, steps } = workflow.jobs.analyze;
+  const init = steps.find((step) => step.uses?.startsWith("github/codeql-action/init"));
+  assert.ok(init?.with, "the analyze job must run codeql-action/init with inputs");
+  const resolve = (input: string, language: string): string => {
+    if (!input.includes("${{")) return input;
+    const expr = input.replace(/^\$\{\{\s*|\s*\}\}$/g, "").trim();
+    const match =
+      /^matrix\.language == (['"])([^'"]+)\1\s*&&\s*(['"])([^'"]*)\3\s*\|\|\s*(['"])([^'"]*)\5$/.exec(
+        expr,
+      );
+    assert.ok(match, `unsupported workflow expression: ${input}`);
+    const [, , arm, , thenValue, , elseValue] = match;
+    return language === arm ? (thenValue ?? "") : (elseValue ?? "");
+  };
+  assert.deepEqual(
+    [...strategy.matrix.language].sort(),
+    ["javascript-typescript", "python"],
+    "the analysis matrix arms pinned by this test",
   );
-  assert.equal(queriesLines.length, 1, "the init step carries one queries input");
-  const [queries] = queriesLines;
-  assert.ok(queries !== undefined);
-  assert.match(
-    queries,
-    /javascript-typescript' && 'security-and-quality,codeql\/javascript-queries:AlertSuppression\.ql'/,
-    "the javascript-typescript leg must add the js alert-suppression query (#1788)",
-  );
-  assert.match(
-    queries,
-    /\|\|\s*'security-and-quality'\s*\}\}$/,
-    "the non-javascript leg must keep the security-and-quality pin",
-  );
+  for (const language of strategy.matrix.language) {
+    // BOTH arms keep the explicit security-and-quality pin (#621).
+    const queries = resolve(String(init.with.queries ?? ""), language);
+    assert.match(
+      queries,
+      /\bsecurity-and-quality\b/,
+      `the ${language} arm must keep the security-and-quality pin (#621)`,
+    );
+    // and keep it a SUITE name only: the pack reference in `queries` is the
+    // `database init` failure this fix replaced (#1788).
+    assert.doesNotMatch(
+      queries,
+      /AlertSuppression|javascript-queries/,
+      `the ${language} arm must not carry the alert-suppression pack spec in \`queries\` (#1788)`,
+    );
+    const packs = resolve(String(init.with.packs ?? ""), language);
+    if (language === "javascript-typescript") {
+      assert.equal(
+        packs,
+        "codeql/javascript-queries:AlertSuppression.ql",
+        "the javascript-typescript arm must add the js alert-suppression query through `packs` (#1788)",
+      );
+    } else {
+      assert.equal(packs, "", `the ${language} arm must add no query packs`);
+    }
+  }
 });
 
 test("the API TLS identity rule is operator-facing (#1773)", () => {
