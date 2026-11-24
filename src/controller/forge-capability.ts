@@ -305,6 +305,19 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
   };
   const bearer = (token: string): string => `Bearer ${token}`;
 
+  /** The App client for one installation, built on the composition's ONE
+   * authenticator (#1780 review): every read and write of this App — the
+   * publication gate's head read, the forced rereview's identity read, the
+   * publish write, the reconcile listing — shares its installation-token
+   * cache, so one live scoped token serves the whole publication flow
+   * instead of each client construction re-minting one. */
+  const clientFor = (installationId: string): GitHubAppCapabilityClient =>
+    new GitHubAppCapabilityClient({
+      authenticator,
+      installationId,
+      ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
+    });
+
   /** The installation the follow-up lane and the reconcile lister
    * authenticate as. The daemon's follow-up adapter is a single-capability
    * surface; deployments serving one installation set the env id, and an
@@ -331,13 +344,7 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
     installationId: string,
   ): Promise<unknown | null> => {
     if (!isValidInstallationId(installationId)) return null;
-    const client = new GitHubAppCapabilityClient({
-      apiBaseUrl,
-      appId: input.githubAppId!,
-      privateKeyPem: input.githubAppPrivateKeyPem!,
-      installationId,
-      ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-    });
+    const client = clientFor(installationId);
     const read = await client.getPullRequest(repoFullName, prNumber);
     return read.ok ? read.data : null;
   };
@@ -388,13 +395,7 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
     async publish(input_: { readonly job: ReviewJob; readonly resultPayload: string }): Promise<{
       readonly publicationId: string;
     }> {
-      const client = new GitHubAppCapabilityClient({
-        apiBaseUrl,
-        appId: input.githubAppId!,
-        privateKeyPem: input.githubAppPrivateKeyPem!,
-        installationId: input_.job.installationId,
-        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-      });
+      const client = clientFor(input_.job.installationId);
       const written = await client.upsertIssueComment(
         input_.job.repoFullName,
         input_.job.prNumber,
@@ -522,13 +523,7 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
 
   const lister = fixedInstallationId === ""
     ? null
-    : new GitHubAppCapabilityClient({
-        apiBaseUrl,
-        appId: input.githubAppId!,
-        privateKeyPem: input.githubAppPrivateKeyPem!,
-        installationId: fixedInstallationId,
-        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-      });
+    : clientFor(fixedInstallationId);
 
   return {
     platform: "github",

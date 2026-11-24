@@ -12,8 +12,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { composeForgeCapability } from "../src/controller/forge-capability.js";
+import {
+  composeForgeCapability,
+  CONTROLLER_STICKY_MARKER,
+} from "../src/controller/forge-capability.js";
+import { createDurablePublisher } from "../src/controller/publication.js";
+import {
+  executionResultPath,
+  executionRunDir,
+  executionRunId,
+} from "../src/controller/execution.js";
+import { InMemoryControlPlaneStore } from "../src/state/index.js";
+import { newJobRecord, withState } from "../src/queue/index.js";
+import type { JobRecord } from "../src/queue/types.js";
 import type { ReviewJob } from "../src/jobs/types.js";
 import type { FetchLike } from "../src/platform/http.js";
 
@@ -121,10 +136,14 @@ interface GitHubCall {
   readonly url: string;
   readonly auth: string | null;
   readonly method: string;
+  readonly body: string | null;
 }
 
 function makeGitHubFetch(
-  prResponder: () => { status: number; body: unknown },
+  prResponder: (call: { readonly url: string; readonly method: string }) => {
+    status: number;
+    body: unknown;
+  },
 ): { fetchImpl: FetchLike; calls: GitHubCall[]; prCalls: () => GitHubCall[] } {
   const calls: GitHubCall[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
@@ -134,6 +153,7 @@ function makeGitHubFetch(
       url: url.toString(),
       auth: headers.get("authorization"),
       method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : null,
     };
     calls.push(call);
     if (url.pathname.includes("/app/installations/")) {
@@ -145,7 +165,7 @@ function makeGitHubFetch(
         { status: 201 },
       );
     }
-    const served = prResponder();
+    const served = prResponder({ url: call.url, method: call.method });
     return new Response(JSON.stringify(served.body), { status: served.status });
   };
   return {
@@ -234,4 +254,156 @@ test("the head read and the identity read agree on one authenticated head (#1780
   for (const call of prCalls()) {
     assert.equal(call.auth, `Bearer ${GITHUB_INSTALLATION_TOKEN}`, "both reads authenticate the same way");
   }
+});
+
+test("head and identity reads reuse one minted installation token instead of re-minting (#1780 review)", async () => {
+  const { fetchImpl, calls } = makeGitHubFetch(() => ({ status: 200, body: prBody }));
+  const composed = githubCompose(fetchImpl);
+  const job = githubJob();
+
+  await composed.capability.currentHeadSha(job);
+  await composed.capability.currentHeadSha(job);
+  await composed.capability.readPrIdentity({
+    repoFullName: job.repoFullName,
+    prNumber: job.prNumber,
+    installationId: job.installationId,
+  });
+
+  const mints = calls.filter((call) => call.url.includes("/app/installations/"));
+  assert.equal(
+    mints.length,
+    1,
+    "the composition's authenticator cache serves every read of the same (installation, scope)",
+  );
+  // The reused mint must stay REPOSITORY-SCOPED: a shared cache that
+  // silently moved to the unscoped key would keep showing "one mint" while
+  // broadening the grant.
+  assert.deepEqual(
+    (JSON.parse(mints[0]!.body!) as { repositories?: unknown }).repositories,
+    ["private-thing"],
+    "the one cached mint carries the repository scope, never the full installation grant",
+  );
+});
+
+// ── #1780 review: the criterion the capability layer alone cannot prove ─────
+//
+// "The exact-head publication gate publishes a result for a private
+// repository's head" is an END-TO-END claim: the daemon binds
+// `createDurablePublisher`'s `currentHeadSha` and `forge` seams to THIS
+// composition (src/controller/daemon.ts), so the test wires exactly those
+// two seams from the composed GitHub capability and drives one publish.
+// It pins that the gate passes on an authenticated head (the pre-fix 404
+// read settled every attempt retry-later and never published), that the
+// sticky-comment write carries the installation credential, and — the
+// performance pin — that the whole flow mints ONE installation token.
+
+test("the durable publisher publishes a private repository's head through the composed capability (#1780 review)", async (t) => {
+  const { fetchImpl, calls } = makeGitHubFetch((call) => {
+    if (call.url === `${GITHUB_API_BASE}/app`) return { status: 200, body: { slug: "acme-reviewer" } };
+    if (call.url.includes("/pulls/")) return { status: 200, body: prBody };
+    if (call.method === "GET") return { status: 200, body: [] };
+    return { status: 201, body: { id: 555 } };
+  });
+  const composed = githubCompose(fetchImpl);
+
+  // The worker's run directory: the execution envelope naming the review
+  // artifact, exactly the layout the publication layer consumes.
+  const runsRoot = mkdtempSync(join(tmpdir(), "prv-forge-pub-"));
+  t.after(() => rmSync(runsRoot, { recursive: true, force: true }));
+  const jobId = "job-1";
+  const runDir = executionRunDir(runsRoot, jobId, 1);
+  mkdirSync(runDir, { recursive: true });
+  const review = { verdict: "issues", summary: "one finding" };
+  const reviewPath = join(runDir, "review.json");
+  writeFileSync(reviewPath, JSON.stringify(review), "utf8");
+  writeFileSync(
+    executionResultPath(runsRoot, jobId, 1),
+    JSON.stringify({
+      status: "completed",
+      runId: executionRunId(jobId, 1),
+      jobId,
+      resultHeadSha: GITHUB_HEAD_SHA,
+      failureCategory: "",
+      failureMessage: "",
+      resultArtifactPath: reviewPath,
+      diagnostics: "",
+      artifactPaths: [],
+      resourceMs: 12,
+      observedAtMs: 4000,
+    }),
+    "utf8",
+  );
+
+  // The queue record in the state the scheduler hands the publisher.
+  const job: ReviewJob = Object.freeze({
+    jobId,
+    kind: "review",
+    trigger: "webhook",
+    reason: "synchronize",
+    platform: "github",
+    installationId: GITHUB_INSTALLATION,
+    repoFullName: "acme/private-thing",
+    prNumber: 7,
+    prId: 991,
+    headSha: GITHUB_HEAD_SHA,
+    baseSha: prBody.base.sha,
+    configFingerprint: "ecfg-v1-0123456789abcdef",
+    nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
+    forgeIntegration: "",
+    fork: false,
+    deadlineAtMs: 0,
+    runId: "",
+  });
+  const started = {
+    ...withState(
+      withState(newJobRecord(job, 1000, 0), "starting", 1000),
+      "running",
+      1000,
+    ),
+    attempt: 1,
+  };
+  const record: JobRecord = { ...withState(started, "publishing", 2000), resultHeadSha: GITHUB_HEAD_SHA };
+
+  // The daemon's own binding of the two seams (src/controller/daemon.ts).
+  const store = new InMemoryControlPlaneStore();
+  const publisher = createDurablePublisher({
+    store,
+    forge: composed.capability,
+    currentHeadSha: (headJob) => composed.capability.currentHeadSha(headJob),
+    runsRoot,
+    now: () => 5000,
+  });
+
+  assert.equal(await publisher.publish(record), true, "the gate published — no retry-later");
+
+  const publication = await store.getPublication(jobId);
+  assert.notEqual(publication, null);
+  assert.equal(publication!.publicationState, "published");
+  assert.equal(publication!.publicationId, "github-comment:555");
+  assert.equal(publication!.resultPayload, JSON.stringify(review));
+
+  const writes = calls.filter(
+    (call) => call.method === "POST" && call.url.endsWith("/repos/acme/private-thing/issues/7/comments"),
+  );
+  assert.equal(writes.length, 1, "one sticky-comment write reached the forge");
+  assert.equal(writes[0]!.auth, `Bearer ${GITHUB_INSTALLATION_TOKEN}`, "the write authenticates");
+  const commentBody = (JSON.parse(writes[0]!.body!) as { body: string }).body;
+  assert.ok(commentBody.includes(CONTROLLER_STICKY_MARKER), "the body carries the managed marker");
+  assert.ok(commentBody.includes(JSON.stringify(review)), "the body carries the durable payload");
+  for (const call of calls.filter((c) => c.url.includes("/repos/"))) {
+    assert.equal(call.auth, `Bearer ${GITHUB_INSTALLATION_TOKEN}`, `${call.method} ${call.url} authenticated`);
+  }
+  const mints = calls.filter((call) => call.url.includes("/app/installations/"));
+  assert.equal(
+    mints.length,
+    1,
+    "the gate's head read and the publish write share one live installation token",
+  );
+  assert.deepEqual(
+    (JSON.parse(mints[0]!.body!) as { repositories?: unknown }).repositories,
+    ["private-thing"],
+    "the shared token is repository-scoped, never the full installation grant",
+  );
 });
