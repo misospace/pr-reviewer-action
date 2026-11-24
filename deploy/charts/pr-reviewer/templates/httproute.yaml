@@ -1,0 +1,61 @@
+{{/*
+The public HTTPRoute (#1768 standard mode).
+
+Derived mode renders the exposure contract: specific path prefixes first,
+the exact `/` dashboard rule LAST — the root swallows nothing before it.
+Paths are preserved end to end (no URLRewrite, no filters): the admin
+listener answers `/metrics`, `/healthz`, and `/readyz` BEFORE its auth
+gate, so those paths must never be routed, and the listener's dot-segment
+guard refuses normalized traversal (e.g. `/admin/../metrics`). `raw` mode
+renders a complete operator-owned manifest verbatim.
+*/}}
+{{- if and (not (empty (.Values.route.raw | default dict))) (not .Values.route.enabled) -}}
+{{- fail "route.raw requires route.enabled: true (raw manifests are rendered by this template)" }}
+{{- end -}}
+{{- if .Values.route.enabled }}
+{{- $std := include "pr-reviewer.std.route" . | fromYaml -}}
+{{- $webhook := $std.webhook -}}
+{{- $admin := $std.admin -}}
+{{- $raw := .Values.route.raw | default dict -}}
+{{- if not (empty $raw) -}}
+{{- if or .Values.route.hostnames .Values.route.parentRefs -}}{{ fail "route.raw is exclusive with route.hostnames and route.parentRefs" }}{{- end -}}
+{{- if or (empty $raw.apiVersion) (ne $raw.kind "HTTPRoute") (empty $raw.metadata.name) -}}{{ fail "route.raw requires non-empty apiVersion, kind HTTPRoute, and metadata.name" }}{{- end -}}
+---
+{{ toYaml $raw }}
+{{- else -}}
+{{- if not .Values.controller.enabled -}}{{ fail "route.enabled requires controller.enabled in derived mode" }}{{- end -}}
+{{- if empty .Values.route.hostnames -}}{{ fail "route.hostnames is required in derived mode" }}{{- end -}}
+{{- if empty .Values.route.parentRefs -}}{{ fail "route.parentRefs is required in derived mode" }}{{- end -}}
+{{- range $parent := .Values.route.parentRefs -}}{{- if empty $parent.name -}}{{ fail "every route.parentRefs item requires a non-empty name" }}{{- end -}}{{- end -}}
+{{- if not (or $webhook.enabled $admin.enabled) -}}{{ fail "route requires an enabled webhook or dashboard backend" }}{{- end -}}
+{{- $fullname := include "pr-reviewer.resource-fullname" (dict "releaseName" .Release.Name "chartName" .Chart.Name "nameOverride" .Values.controller.nameOverride "fullnameOverride" .Values.controller.fullnameOverride) -}}
+{{- $rules := list -}}
+{{- if $webhook.enabled -}}{{- $rules = append $rules (dict "matches" (list (dict "path" (dict "type" "PathPrefix" "value" $webhook.path))) "backendRefs" (list (dict "name" $webhook.serviceName "port" $webhook.port))) -}}{{- end -}}
+{{- if $admin.enabled -}}{{- $adminBackend := list (dict "name" $admin.serviceName "port" $admin.port) -}}
+{{- $rules = append $rules (dict "matches" (list (dict "path" (dict "type" "PathPrefix" "value" "/admin"))) "backendRefs" $adminBackend) -}}
+{{- $rules = append $rules (dict "matches" (list (dict "path" (dict "type" "PathPrefix" "value" "/auth"))) "backendRefs" $adminBackend) -}}
+{{- /* The /dashboard prefix is the shell's own asset path
+       (/dashboard/app.js), so it rides along whenever the dashboard is
+       served — it is compatibility-only, never a redirect target. */ -}}
+{{- if $admin.dashboard -}}{{- $rules = append $rules (dict "matches" (list (dict "path" (dict "type" "PathPrefix" "value" "/dashboard"))) "backendRefs" $adminBackend) -}}{{- end -}}
+{{- $rules = append $rules (dict "matches" (list (dict "path" (dict "type" "Exact" "value" "/"))) "backendRefs" $adminBackend) -}}
+{{- end -}}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname | lower }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  hostnames:
+{{ toYaml .Values.route.hostnames | indent 4 }}
+  parentRefs:
+{{ toYaml .Values.route.parentRefs | indent 4 }}
+  rules:
+{{ toYaml $rules | indent 4 }}
+{{- end }}
+{{- end }}

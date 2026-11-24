@@ -31,16 +31,24 @@ Default-deny network policies (#738). Two policies, one per pod family:
 {{- if and .Values.networkPolicy.workerAdditionalEgress (not $workerPolicy) }}
 {{- fail "networkPolicy.workerAdditionalEgress requires networkPolicy.enabled and workerExecutor.mode: kubernetes; without a rendered worker policy the exception would be silently dropped" }}
 {{- end }}
+{{- $stdWebhook := include "pr-reviewer.std.webhook" . | fromYaml -}}
+{{- $stdAdmin := include "pr-reviewer.std.admin" . | fromYaml -}}
+{{- /* #1768 review round 4: nil-safe lookups — an operator override
+   `monitoring: null` (or the nested `monitoring.serviceMonitor` section
+   nulled) must read as "monitor disabled" on this path, never a
+   nil-pointer template error; a plain field dereference (or a
+   `| default false` downstream of it) does not survive a nil parent. */ -}}
+{{- $monitorEnabled := or (dig "serviceMonitor" "enabled" false (.Values.monitoring | default dict)) (dig "enabled" false (.Values.serviceMonitor | default dict)) -}}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "pr-reviewer.resource-fullname" (dict
+  name: {{ (include "pr-reviewer.resource-fullname" (dict
     "releaseName" .Release.Name
     "chartName" .Chart.Name
     "nameOverride" .Values.controller.nameOverride
-    "fullnameOverride" .Values.controller.fullnameOverride) }}-controller
+    "fullnameOverride" .Values.controller.fullnameOverride) | lower) }}-controller
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
@@ -55,15 +63,48 @@ spec:
     - Ingress
     - Egress
   ingress:
-    {{- if .Values.controller.webhook.enabled }}
+    {{- if or $stdWebhook.enabled .Values.controller.webhook.enabled }}
     # The webhook intake must be reachable from the forge's delivery
     # path (typically the cluster ingress controller); any-source by
     # default — narrow it with additionalIngress.
     - ports:
         - protocol: TCP
           port: {{ .Values.controller.webhook.port }}
+    {{ end }}
+    {{- if and .Values.route.enabled $stdAdmin.enabled (empty (.Values.route.raw | default dict)) }}
+    {{- /* The public gateway path must reach the admin Service. Scoped to
+           the namespaces the route's parentRefs point at (parentRefs
+           without a namespace live in the release namespace) — NOT
+           any-source, because this port also serves the UNAUTHENTICATED
+           /metrics, /healthz, and /readyz endpoints; /admin/* stays
+           bearer-guarded. Widen via additionalIngress for hostNetwork
+           gateways AND for kubelet HTTP probes on CNIs that enforce
+           node→pod traffic (a node-source ipBlock exception) — the
+           liveness/readiness probes hit this port from the node. A raw
+           route is rendered verbatim, so this allowance is never derived
+           for it. */ -}}
+    {{- /* #1768 review round 2: seed the release namespace only when a
+           parentRef omits its namespace (parentRefs without a namespace
+           live in the release namespace) — never widen beyond what the
+           route actually points at. */ -}}
+    {{- $routeNamespaces := list -}}
+    {{- $hasLocalParent := false -}}
+    {{- range $parent := .Values.route.parentRefs -}}
+    {{- if empty $parent.namespace -}}{{- $hasLocalParent = true -}}{{- else -}}{{- $routeNamespaces = append $routeNamespaces (toString $parent.namespace) -}}{{- end -}}
+    {{- end -}}
+    {{- if $hasLocalParent -}}{{- $routeNamespaces = append $routeNamespaces (.Release.Namespace | toString) -}}{{- end -}}
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+{{ $routeNamespaces | uniq | toYaml | indent 18 }}
+      ports:
+        - protocol: TCP
+          port: {{ $stdAdmin.port }}
     {{- end }}
-    {{- if .Values.serviceMonitor.enabled }}
+    {{- if $monitorEnabled }}
     # Prometheus scrapes /metrics on the admin port; the admin surface is
     # bearer-token guarded, so namespace-scoped ingress suffices.
     - from:
@@ -107,11 +148,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "pr-reviewer.resource-fullname" (dict
+  name: {{ (include "pr-reviewer.resource-fullname" (dict
     "releaseName" .Release.Name
     "chartName" .Chart.Name
     "nameOverride" .Values.controller.nameOverride
-    "fullnameOverride" .Values.controller.fullnameOverride) }}-worker
+    "fullnameOverride" .Values.controller.fullnameOverride) | lower) }}-worker
   namespace: {{ default .Release.Namespace .Values.workerExecutor.namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}

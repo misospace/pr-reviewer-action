@@ -37,10 +37,11 @@ export interface AdminHostOptions extends AdminMetricsOptions {
   readonly requestId?: () => string;
   readonly mcp?: AdminMcpOptions;
   /** Optional #742 static dashboard shell on the SAME listener. When
-   * present, `GET /dashboard` and `GET /dashboard/app.js` are served from
-   * compile-time constants; when absent the `/dashboard` paths answer the
-   * fixed 404 like any unknown path — the surface is not part of that
-   * deployment, never open. The paths stay OUTSIDE the `/admin/`
+   * present, `GET /`, `GET /dashboard`, and `GET /dashboard/app.js` are
+   * served from compile-time constants (#1768: the bare root is the
+   * shell's native address, exact-match only); when absent those paths
+   * answer the fixed 404 like any unknown path — the surface is not part
+   * of that deployment, never open. The paths stay OUTSIDE the `/admin/`
    * namespace, so the every-admin-route-is-authenticated rule is untouched,
    * and the shell itself carries zero dynamic data: every data route stays
    * bearer-protected. */
@@ -102,6 +103,32 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       const host = request.headers.host ?? "localhost";
       let url: URL;
       try { url = new URL(request.url ?? "/", `http://${host}`); } catch { send(response, 404, NOT_FOUND); return; }
+      // Dot-segment traversal guard (#1768 review): WHATWG URL resolution
+      // collapses dot segments before dispatch, so a raw path like
+      // `/admin/../metrics` — or one that arrives through a prefix-routed
+      // Gateway HTTPRoute — would silently resolve to `/metrics` and reach
+      // the unauthenticated metrics route. The check runs on the RAW
+      // request target (pre-parse, pre-decode) and rejects any request
+      // whose path carries a WHATWG dot segment instead of guessing what
+      // it would normalize to. WHATWG's grammar: a backslash is a path
+      // separator for special schemes, and the single-dot segment is `.`
+      // or `%2e` while the double-dot segment is `..`, `.%2e`, `%2e.`, or
+      // `%2e%2e` (case-insensitive) — folding `%2e` to `.` first makes the
+      // comparison exact (`..%2e` and `%2e%2e%2e` are NOT dot segments).
+      // Legit clients never send dot segments.
+      const rawPath = (request.url ?? "/").split(/[?#]/)[0] ?? "/";
+      if (
+        rawPath
+          .replace(/\\/g, "/")
+          .split("/")
+          .some((segment) => {
+            const folded = segment.replace(/%2e/gi, ".").toLowerCase();
+            return folded === "." || folded === "..";
+          })
+      ) {
+        send(response, 404, NOT_FOUND);
+        return;
+      }
       if (!(method === "GET" || method === "POST")) { send(response, 404, NOT_FOUND); return; }
       if (url.pathname.startsWith("/auth/")) {
         if (url.pathname === "/auth/config" && method === "GET") { send(response, 200, { mode: oidcConfig === null ? "token" : "oidc" }); return; }
@@ -126,9 +153,12 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
           const created = sessions.createTransaction();
           if (!created) {
             // Pending-transaction cap full (login flood): send the browser
-            // back to the dashboard's sign-in state instead of a bare 503 —
-            // /auth/login is a top-level browser navigation.
-            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.end(); return;
+            // back to the sign-in state instead of a bare 503 — /auth/login
+            // is a top-level browser navigation. #1768: browser-return paths
+            // stay at the bare origin (`/?login=failed` serves the same
+            // shell); /dashboard is compatibility-only and must not become
+            // a redirect destination.
+            response.statusCode = 302; response.setHeader("location", "/?login=failed"); response.setHeader("cache-control", "no-store"); response.end(); return;
           }
           try {
             response.statusCode = 302; response.setHeader("location", await oidc.authorizationUrl(created.transaction, callbackUrl));
@@ -151,11 +181,14 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
             // email, the session stays subject-keyed and the dashboard falls
             // back to the subject.
             const id = sessions.create({ subject: claims.sub, email: attestedEmail(claims), groups: Array.isArray(claims.groups) ? claims.groups.filter((x): x is string => typeof x === "string").slice(0, 128) : [] }, oidcConfig.sessionTtlMs);
-            response.statusCode = 302; response.setHeader("location", "/dashboard");
+            // #1768: a successful login returns the browser to the bare
+            // origin — `/` serves the shell natively and /dashboard stays a
+            // compatibility alias, never a canonical redirect destination.
+            response.statusCode = 302; response.setHeader("location", "/");
             response.setHeader("cache-control", "no-store");
             response.setHeader("set-cookie", [buildCookie("pr_reviewer_admin_session", id, secureCookies, Math.floor(oidcConfig.sessionTtlMs / 1000)), buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)]); response.end(); return;
           } catch {
-            response.statusCode = 302; response.setHeader("location", "/dashboard?login=failed"); response.setHeader("cache-control", "no-store"); response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)); response.end(); return;
+            response.statusCode = 302; response.setHeader("location", "/?login=failed"); response.setHeader("cache-control", "no-store"); response.setHeader("set-cookie", buildCookie("pr_reviewer_oidc_tx", "", secureCookies, 0)); response.end(); return;
           }
         }
         send(response, 404, NOT_FOUND); return;
@@ -167,8 +200,9 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       // The optional #742 dashboard shell mounts on the SAME listener,
       // OUTSIDE the `/admin/` namespace: it serves compile-time constants
       // only (zero dynamic data, no request echo) and every data route the
-      // shell fetches stays bearer-protected under `/admin/*`. When not
-      // configured, `/dashboard` falls through to the fixed 404 like any
+      // shell fetches stays bearer-protected under `/admin/*`. #1768: the
+      // bare root is one of the shell's exact-match paths. When not
+      // configured, those paths fall through to the fixed 404 like any
       // unknown path — the surface is not part of that deployment, never
       // open.
       if (options.dashboard !== undefined && method === "GET") {

@@ -7,15 +7,28 @@ surface is enabled, so a Prometheus scrape can reach /metrics. The
 monitor selects pods by label via targetPort — no dedicated Service
 needed. The listener's ingress is still bounded by the NetworkPolicy.
 */}}
-{{- if .Values.serviceMonitor.enabled }}
-{{- if not .Values.controller.admin.enabled }}
-{{- fail "serviceMonitor.enabled requires controller.admin.enabled (metrics are served on the admin listener)" }}
+{{- $stdAdmin := include "pr-reviewer.std.admin" . | fromYaml -}}
+{{- /* #1768 review round 4: nil-safe lookups — `monitoring: null` (or the
+   nested `monitoring.serviceMonitor` section nulled) must read as
+   "monitor disabled" on this path, never a nil-pointer template error;
+   a `| default false` downstream of a nil parent does not help. Same
+   contract as the NetworkPolicy template. */ -}}
+{{- $monitorEnabled := or (dig "serviceMonitor" "enabled" false (.Values.monitoring | default dict)) (dig "enabled" false (.Values.serviceMonitor | default dict)) -}}
+{{- if $monitorEnabled }}
+{{- if not (or $stdAdmin.enabled .Values.controller.admin.enabled) }}
+{{- fail "monitoring.serviceMonitor.enabled or serviceMonitor.enabled requires dashboard.enabled or controller.admin.enabled (metrics are served on the admin listener)" }}
+{{- end }}
+{{- /* #1768 review: an override that disagrees with the admin listener
+       would render a ServiceMonitor Prometheus silently never scrapes
+       (the metrics are served on the admin port). */ -}}
+{{- if and .Values.serviceMonitor.port (ne (.Values.serviceMonitor.port | int) ($stdAdmin.port | int)) }}
+{{- fail (printf "serviceMonitor.port must equal the admin listener port (%v); metrics are served only there" $stdAdmin.port) }}
 {{- end }}
 {{- $fullname := include "pr-reviewer.resource-fullname" (dict
   "releaseName" .Release.Name
   "chartName" .Chart.Name
   "nameOverride" .Values.controller.nameOverride
-  "fullnameOverride" .Values.controller.fullnameOverride) }}
+  "fullnameOverride" .Values.controller.fullnameOverride) | lower }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -38,7 +51,7 @@ spec:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
-    - targetPort: {{ .Values.serviceMonitor.port }}
+    - targetPort: {{ .Values.serviceMonitor.port | default $stdAdmin.port }}
       path: {{ .Values.serviceMonitor.path }}
       interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}

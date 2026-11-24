@@ -752,18 +752,213 @@ jobs:
             exit 1
           fi
 
+      - name: Render (standard mode #1768)
+        run: |
+          set -euo pipefail
+          chart=deploy/charts/pr-reviewer
+          base=$chart/examples/values-kubernetes-executor.yaml
+          standard=$chart/examples/values-standard.yaml
+          # Every render in this step pins --namespace: without it helm
+          # renders in "default", and the #1767 namespace guard refuses the
+          # standard example (its inline config names the pr-reviewer
+          # release namespace) for the wrong reason.
+          helm lint --namespace pr-reviewer "$chart" -f "$base" -f "$standard"
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" --namespace pr-reviewer > /var/tmp/render-standard.yaml
+          awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-admin/' /var/tmp/render-standard.yaml | grep -q 'port: 8081'
+          awk 'BEGIN{RS="---"} /kind: Service/ && $0 !~ /ServiceAccount/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard.yaml | grep -q 'port: 8080'
+          grep -q 'kind: HTTPRoute' /var/tmp/render-standard.yaml
+          for path in /hook /admin /auth /dashboard; do grep -Fq "value: $path" /var/tmp/render-standard.yaml; done
+          grep -Fq 'type: Exact' /var/tmp/render-standard.yaml
+          grep -Fq 'targetPort: 8081' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_ADMIN_DASHBOARD' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-standard.yaml
+          grep -q 'PR_REVIEWER_ADMIN_PORT' /var/tmp/render-standard.yaml
+          route_doc() { awk 'BEGIN{RS="---"} /kind: HTTPRoute/' "$1"; }
+          route_doc /var/tmp/render-standard.yaml > /var/tmp/render-standard-route.yaml
+          # Rule order is contract: specific prefixes first, the Exact '/'
+          # dashboard rule LAST (the root swallows nothing before it).
+          order="$(grep -F 'value: ' /var/tmp/render-standard-route.yaml | tr -d ' ' | tr '\n' '|')"
+          if [ "$order" != "value:/hook|value:/admin|value:/auth|value:/dashboard|value:/|" ]; then
+            echo "::error::unexpected HTTPRoute rule order: $order" >&2
+            exit 1
+          fi
+          if grep -Eq 'filters:|urlRewrite|/metrics|/healthz' /var/tmp/render-standard-route.yaml; then exit 1; fi
+          # Negative cases must fail for their own deterministic guard.
+          expect_refusal() {
+            fragment=$1; shift
+            if output=$(helm template pr-reviewer "$chart" --namespace pr-reviewer -f "$base" "$@" 2>&1); then
+              echo "expected refusal: $fragment" >&2; exit 1
+            fi
+            printf '%s' "$output" | grep -Fq "$fragment"
+          }
+          expect_refusal 'webhook.enabled conflicts' -f "$standard" --set controller.webhook.enabled=true
+          expect_refusal 'dashboard.enabled conflicts' -f "$standard" --set controller.admin.enabled=true
+          # Advanced residue must never silently shadow a standard section.
+          # The standard merge overwrites enabled/type/forceRename/ports,
+          # so the guards refuse only what the merge cannot remove: extra
+          # keys, extra ports, and explicit advanced enablement.
+          expect_refusal 'controller.service.webhook.extra-key conflicts with the standard webhook Service derivation' -f "$standard" --set controller.service.webhook.extra-key=x
+          expect_refusal 'controller.service.webhook.ports.extra conflicts with the standard webhook Service derivation' -f "$standard" --set controller.service.webhook.ports.extra.port=1
+          expect_refusal 'conflicts with the standard dashboard Service derivation' -f "$standard" --set controller.service.admin.enabled=true
+          expect_refusal 'controller.webhook.existingSecret.name conflicts' -f "$standard" --set controller.webhook.existingSecret.name=other-secret
+          expect_refusal 'controller.admin.token conflicts' -f "$standard" --set controller.admin.token=other-token
+          expect_refusal 'serviceMonitor.port must equal the admin listener port' -f "$standard" --set serviceMonitor.port=9999
+          expect_refusal 'route.raw requires route.enabled: true' --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
+          expect_refusal 'route.hostnames is required' -f "$standard" --set-json route.hostnames=[]
+          expect_refusal 'route.parentRefs is required' -f "$standard" --set-json route.parentRefs=[]
+          expect_refusal 'route.raw is exclusive' -f "$standard" --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"raw"}}'
+          expect_refusal 'requires dashboard.enabled or controller.admin.enabled' --set monitoring.serviceMonitor.enabled=true
+          # monitoring stays nullable (#1768 review round 4): a null
+          # override anywhere on the monitoring/serviceMonitor path reads
+          # as "monitor disabled" — the render must succeed WITHOUT a
+          # ServiceMonitor, never a nil-pointer template error.
+          for monitor_null in monitoring=null monitoring.serviceMonitor=null; do
+            monitor_null_out="$(helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+              --namespace pr-reviewer \
+              --set "$monitor_null")"
+            if printf '%s' "$monitor_null_out" | grep -q 'kind: ServiceMonitor'; then
+              echo "::error::--set $monitor_null must render without a ServiceMonitor" >&2
+              exit 1
+            fi
+          done
+          # The advanced section stays nullable too (monitoring off by
+          # default there): `serviceMonitor: null` must render, never a
+          # nil-pointer error on the disabled path.
+          helm template pr-reviewer "$chart" \
+            -f "$chart/examples/values-controller-only.yaml" \
+            --namespace pr-reviewer \
+            --set serviceMonitor=null > /dev/null
+          # The enabled case stays first-class: standard mode renders the
+          # ServiceMonitor (target port derived from the admin listener).
+          grep -q 'kind: ServiceMonitor' /var/tmp/render-standard.yaml
+          expect_refusal 'requires an enabled webhook or dashboard backend' \
+            --set route.enabled=true \
+            --set-json 'route.hostnames=["pr-reviewer.example.com"]' \
+            --set-json 'route.parentRefs=[{"name":"envoy-external","namespace":"network"}]' \
+            --set controller.webhook.enabled=false --set controller.service.webhook.enabled=false
+          expect_refusal 'requires non-empty apiVersion, kind HTTPRoute' -f "$base" --set route.enabled=true --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","metadata":{"name":"raw"}}'
+          # The intake path is standard-mode configurable: Gitea/GitLab
+          # instances route their canonical path instead of /hook, still as
+          # the FIRST rule.
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
+            --set webhook.path=/webhooks/gitea > /var/tmp/render-standard-gitea.yaml
+          gitea_order="$(route_doc /var/tmp/render-standard-gitea.yaml | grep -F 'value: ' | tr -d ' ' | tr '\n' '|')"
+          if [ "$gitea_order" != "value:/webhooks/gitea|value:/admin|value:/auth|value:/dashboard|value:/|" ]; then
+            echo "::error::unexpected HTTPRoute rule order with webhook.path override: $gitea_order" >&2
+            exit 1
+          fi
+          if route_doc /var/tmp/render-standard-gitea.yaml | grep -Fq 'value: /hook'; then
+            echo "::error::webhook.path override must replace the /hook rule" >&2
+            exit 1
+          fi
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin
+          # Gateway API PathPrefix matching is element-based and ignores a
+          # trailing '/', so the collision check is semantic, not exact:
+          # /admin/, /auth/, /dashboard/ must refuse exactly like their
+          # reserved spellings, /admin/api is under the reserved prefix, and
+          # //admin collapses to /admin on slash-normalizing infrastructure.
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/auth/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/dashboard/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/admin/api
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=//admin
+          # The root spellings exercise the normalization's all-slash
+          # fallback ("/" must never normalize into acceptance), and the
+          # degenerate-segment spellings must refuse outright (an intake
+          # rule that never matches is silently dead deliveries).
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=/
+          expect_refusal 'collides with the reserved admin surface' -f "$standard" --set webhook.path=//
+          expect_refusal 'must not contain empty path segments' -f "$standard" --set webhook.path=//hook
+          expect_refusal 'must not contain dot segments' -f "$standard" --set webhook.path=/foo/../admin
+          expect_refusal 'conflicts with the standard dashboard (standard mode derives token auth)' -f "$standard" --set controller.admin.auth.oidc.clientSecret=leftover
+          # A listener-port override stays first-class: the derived Service
+          # port follows it (the chart's own default Service port must not
+          # trip the residue guard).
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
+            --set controller.webhook.port=9090 > /var/tmp/render-standard-port.yaml
+          awk 'BEGIN{RS="---"} /kind: Service/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard-port.yaml | grep -q 'port: 9090'
+          grep -A2 'name: PR_REVIEWER_WEBHOOK_PORT' /var/tmp/render-standard-port.yaml | grep -q 'value: "9090"'
+          awk 'BEGIN{RS="---"} /kind: Service/ && /name: pr-reviewer-webhook/' /var/tmp/render-standard-port.yaml | grep -q 'targetPort: 9090'
+          # The gateway NetworkPolicy allowance is scoped to the route's
+          # parentRef namespaces, never any-source (the port also serves
+          # the unauthenticated /metrics, /healthz, /readyz endpoints).
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
+            --set networkPolicy.enabled=true > /var/tmp/render-standard-netpol.yaml
+          netpol_doc() { awk 'BEGIN{RS="---"} /kind: NetworkPolicy/ && /-controller/' "$1"; }
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -q 'kubernetes.io/metadata.name'
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -Eq '^[[:space:]]*- network[[:space:]]*$'
+          # The gateway allowance lists ONLY the parentRef namespaces: with
+          # every parentRef carrying a namespace, the release namespace must
+          # not appear in the matchExpressions values.
+          if netpol_doc /var/tmp/render-standard-netpol.yaml | sed -n '/operator: In/,/^      ports:/p' | grep -Eq '^[[:space:]]*- (default|pr-reviewer)[[:space:]]*$'; then
+            echo "::error::gateway allowance must not include the release namespace when every parentRef names one" >&2
+            exit 1
+          fi
+          if ! netpol_doc /var/tmp/render-standard-netpol.yaml | awk '/^  ingress:/{ing=1;next} /^  egress:/{ing=0} ing && /^    - /{if (rule&&p8081&&!from) bad++; rule=1; from=($0~/^    - from:/); p8081=0; next} ing && rule && /port: 8081/{p8081=1} END{if (rule&&p8081&&!from) bad++; exit bad>0}'; then
+            echo "::error::an ingress rule exposes the admin port without a from: scope" >&2
+            exit 1
+          fi
+          # Standard mode enables the monitor, so the scrape allowance (the
+          # ONLY release-namespace matchLabels selector in the controller
+          # policy — the gateway allowance lists parentRef namespaces, the
+          # DNS egress names kube-system) renders here.
+          netpol_doc /var/tmp/render-standard-netpol.yaml | grep -q 'kubernetes.io/metadata.name: pr-reviewer'
+          # ...and a null monitoring override drops exactly that allowance
+          # while BOTH policies stay (controller + worker; nil-safe lookups,
+          # #1768 review round 4: `monitoring: null` reads as "monitor
+          # disabled", never a nil-pointer template error).
+          helm template pr-reviewer "$chart" -f "$base" -f "$standard" \
+            --namespace pr-reviewer \
+            --set monitoring=null \
+            --set networkPolicy.enabled=true > /var/tmp/render-standard-netpol-no-monitor.yaml
+          if netpol_doc /var/tmp/render-standard-netpol-no-monitor.yaml | grep -q 'kubernetes.io/metadata.name: pr-reviewer'; then
+            echo "::error::monitoring: null must drop the Prometheus scrape allowance" >&2
+            exit 1
+          fi
+          if [ "$(grep -c '^kind: NetworkPolicy$' /var/tmp/render-standard-netpol-no-monitor.yaml)" -ne 2 ]; then
+            echo "::error::monitoring: null must not drop the NetworkPolicy itself" >&2
+            exit 1
+          fi
+          # Raw passthrough positive path: the complete operator manifest
+          # renders verbatim (chart adds nothing).
+          helm template pr-reviewer "$chart" -f "$base" \
+            --namespace pr-reviewer \
+            --set route.enabled=true \
+            --set-json 'route.raw={"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"byo-route"},"spec":{"parentRefs":[{"name":"envoy-external","namespace":"network"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/webhooks/forgejo"}}],"backendRefs":[{"name":"pr-reviewer","port":8080}]}]}}' \
+            > /var/tmp/render-raw-route.yaml
+          route_doc /var/tmp/render-raw-route.yaml | grep -q 'name: byo-route'
+          route_doc /var/tmp/render-raw-route.yaml | grep -q 'backendRefs:'
+          if route_doc /var/tmp/render-raw-route.yaml | grep -q 'app.kubernetes.io/managed-by'; then
+            echo "::error::route.raw must render verbatim without injected chart labels" >&2
+            exit 1
+          fi
+
       - name: kubeconform rendered output
         # kubeconform ships no maintained GitHub action; run the pinned
-        # release binary with its CHECKSUMS-verified tarball instead.
+        # release binary with its CHECKSUMS-verified tarball instead. The
+        # default schema repo covers no CRDs, so the derived standard-mode
+        # HTTPRoute (#1768) is validated against a SHA-pinned CRD catalog
+        # instead of being skipped; ServiceMonitor stays skipped (no
+        # chart-owned schema contract).
         run: |
           set -euo pipefail
           version=v0.8.0
           checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          crd_catalog_rev=04af58d740718c4dc719441bf39fb284c784f4a8
+          crd_catalog="https://raw.githubusercontent.com/datreeio/CRDs-catalog/${crd_catalog_rev}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
           cd "$(mktemp -d)"
           curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
           echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
           tar -xzf kubeconform.tar.gz kubeconform
           ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
             -summary /var/tmp/render-controller-only.yaml
           ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
             -summary /var/tmp/render-kubernetes-executor.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -schema-location default -schema-location "$crd_catalog" \
+            -summary /var/tmp/render-standard.yaml

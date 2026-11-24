@@ -46,10 +46,11 @@ and stay on their **own public listener**. `createAdminHost`
   route.
 - `GET /metrics` — Prometheus text exposition (below).
 - `GET /admin/*` — the authenticated admin namespace.
-- Optionally (`AdminHostOptions.dashboard`), `GET /dashboard` and
-  `GET /dashboard/app.js` — the #742 static operations shell, served from
-  compile-time constants OUTSIDE the `/admin/` namespace; the shell carries
-  no dynamic data and every data route stays bearer-protected
+- Optionally (`AdminHostOptions.dashboard`), `GET /`, `GET /dashboard`,
+  and `GET /dashboard/app.js` — the #742 static operations shell (#1768:
+  the bare root is the shell's native address, exact-match only), served
+  from compile-time constants OUTSIDE the `/admin/` namespace; the shell
+  carries no dynamic data and every data route stays bearer-protected
   ([operations-dashboard.md](operations-dashboard.md)).
 
 A deployment must not mount the webhook handler behind this router and
