@@ -93,18 +93,21 @@ function readDiscoveryBytes(workspace: string, filename: string, budget: Discove
     // refused below instead of being trusted.
     const data = Buffer.alloc(info.size + 1);
     let filled = 0;
-    while (filled < data.length) {
-      const read = readSync(fd, data, filled, data.length - filled, null);
-      if (read === 0) break;
-      filled += read;
+    try {
+      while (filled < data.length) {
+        const read = readSync(fd, data, filled, data.length - filled, null);
+        if (read === 0) break;
+        filled += read;
+      }
+    } finally {
+      // Every byte the descriptor yielded is charged, including a partial
+      // fill abandoned by a throwing read or a growth-refused result.
+      budget.remaining -= filled;
     }
     if (filled > info.size) {
-      // The file grew after the fstat: refuse what was read, but still
-      // charge the scan for the bytes the descriptor actually yielded.
-      budget.remaining -= filled;
+      // The file grew after the fstat: refuse what was read.
       return null;
     }
-    budget.remaining -= filled;
     return data.subarray(0, filled);
   } catch {
     return null;

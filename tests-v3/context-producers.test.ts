@@ -144,24 +144,83 @@ test("#1784 review: oversized candidates are never read for discovery and the sc
   writeFileSync(join(binaryRoot, "binary.yaml"), Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x0a]), Buffer.from(marker)]));
   assert.deepEqual(selectChangedManifests([{ filename: "binary.yaml" }], binaryRoot), ["binary.yaml"]);
 
-  // Aggregate bound: once the scan's discovery budget is spent, later
-  // marker-bearing candidates keep the pre-fix miss while the historical
-  // name-only selection still works without reading anything, and the bytes
+  // Aggregate bound: every candidate's bytes are charged — unrelated
+  // non-marker YAML included — so noise spent up front starves later
+  // marker-bearing candidates into the pre-fix miss, while the historical
+  // name-only selection still works without reading anything and the bytes
   // actually read stay within the budget.
   const perFile = MAX_HEAD_FILE_BYTES - 100_000;
-  const files: Record<string, string> = { "oversized-first.yaml": markerFile(MAX_HEAD_FILE_BYTES + 1) };
-  const probes = Math.floor(MANIFEST_DISCOVERY_MAX_TOTAL_BYTES / perFile);
+  const noiseCount = 2;
+  const probes = Math.floor(MANIFEST_DISCOVERY_MAX_TOTAL_BYTES / perFile) - noiseCount;
+  const files: Record<string, string> = {};
+  for (let index = 0; index < noiseCount; index += 1) files[`noise-${index}.yaml`] = "kind: ConfigMap\n".padEnd(perFile, "b");
   const names = Array.from({ length: probes + 2 }, (_unused, index) => `probe-${index}.yaml`);
   for (const name of names) files[name] = markerFile(perFile);
   files["z-deployment.yaml"] = "kind: Deployment\n";
   const aggregateRoot = workspace(files);
   since = mark();
-  const order = ["oversized-first.yaml", ...names, "z-deployment.yaml"].map((filename) => ({ filename }));
+  const order = [
+    ...Array.from({ length: noiseCount }, (_unused, index) => `noise-${index}.yaml`),
+    ...names,
+    "z-deployment.yaml",
+  ].map((filename) => ({ filename }));
   assert.deepEqual(
     selectChangedManifests(order, aggregateRoot),
     [...names.slice(0, probes), "z-deployment.yaml"],
   );
+  assert.equal(readBytes(since), (noiseCount + probes) * perFile);
+
+  // Name-pattern selection never reads: a list every entry of which matches
+  // MANIFEST_NAME_RE takes the historical path with no discovery I/O at all
+  // (the discovery arm must never run for a name-matched file, whatever its
+  // content).
+  since = mark();
+  assert.deepEqual(
+    selectChangedManifests(
+      [{ filename: "x-deployment.yaml" }, { filename: "y-helmrelease.yaml" }],
+      workspace({ "x-deployment.yaml": "kind: Deployment\n", "y-helmrelease.yaml": "kind: HelmRelease\n" }),
+    ),
+    ["x-deployment.yaml", "y-helmrelease.yaml"],
+  );
+  assert.equal(readSyncSpy.mock.callCount() - since.readSync, 0);
+  assert.equal(readFileSyncSpy.mock.callCount() - since.readFileSync, 0);
+
+  // A file that grows between fstat and read is refused: mock fstat to
+  // report a smaller size than the real file, so the +1-byte read window
+  // fills past it. The marker sits at the top, inside the truncated window,
+  // so trusting the short read would select the candidate — the assertions
+  // pin the refusal and the charge for the bytes the descriptor yielded
+  // (the starved probe count below moves only if the growth read is
+  // charged).
+  const growthRoot = workspace({
+    "grew.yaml": marker + "b".repeat(perFile - marker.length - 1) + "\n",
+    ...Object.fromEntries(names.map((name) => [name, markerFile(perFile)])),
+  });
+  const realFstatSync: typeof fsModule.fstatSync = fsModule.fstatSync;
+  let growthCalls = 0;
+  const fstatSpy = t.mock.method(fsModule, "fstatSync", (fd: number) => {
+    const info = realFstatSync(fd);
+    growthCalls += 1;
+    // Only the first candidate's fstat lies (grew.yaml leads growthOrder);
+    // later probes must see the truth or they would trip the same refusal.
+    if (growthCalls === 1) {
+      const shrunken = Object.create(info) as typeof info;
+      shrunken.size = info.size - 8;
+      return shrunken;
+    }
+    return info;
+  });
+  since = mark();
+  const growthOrder = [{ filename: "grew.yaml" }, ...names.map((filename) => ({ filename }))];
+  // The refused growth read still charged perFile - 7 bytes, so exactly one
+  // fewer probe fits than in the uncharged scan above.
+  const growthCharge = perFile - 8 + 1;
+  assert.deepEqual(
+    selectChangedManifests(growthOrder, growthRoot),
+    names.slice(0, Math.floor((MANIFEST_DISCOVERY_MAX_TOTAL_BYTES - growthCharge) / perFile)),
+  );
   assert.ok(readBytes(since) <= MANIFEST_DISCOVERY_MAX_TOTAL_BYTES);
+  fstatSpy.mock.restore();
 });
 
 test("manifest context caps the running line total at 1200", () => {
