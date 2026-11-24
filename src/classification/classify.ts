@@ -2650,7 +2650,7 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   // #1379: GitHub Action ref bumps in workflow/composite-action YAML — the
   // same external-dependency shape (an upstream artifact pinned by ref).
   { kind: "action_update", matches: isActionUpdate },
-  { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
+  { kind: "k8s_manifest", matches: isK8sManifest },
   // secret handling before auth (more specific)
   { kind: "secret_handling_changes", matches: filenameMatches(SECRET_HANDLING_PATTERNS) },
   { kind: "db_or_migration_changes", matches: filenameMatches(DB_MIGRATION_PATTERNS) },
@@ -2677,6 +2677,16 @@ export const DEFAULT_PR_KIND = "app_code";
 
 function filenameMatches(patterns: readonly RegExp[]): KindPredicate {
   return (files) => files.some((file) => matchesAny(file.filename, patterns));
+}
+
+function isK8sManifest(files: readonly ChangedFile[], _diffText: string, fullDiffText: string): boolean {
+  if (files.some((file) => matchesAny(file.filename, K8S_PATTERNS))) return true;
+  // #1784: the release name misses the filename arm; reuse the #1782 Flux
+  // pair recognition. A rename keeps the prior recognition miss (the #1782
+  // set keys the `diff --git` a/-path, the changed-file list the new path);
+  // a delete is recognized from the deleted file's own diff.
+  const fluxOciFiles = fluxOciRepositorySurfaceFiles(fullDiffText.split("\n"));
+  return fluxOciFiles.size > 0 && files.some((file) => fluxOciFiles.has(file.filename));
 }
 
 /** True only when EVERY changed file is a known lockfile — guards
@@ -2998,7 +3008,8 @@ function isDependencyUpgrade(
   const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
   if (hasDepFile) {
-    const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
+    // #1784: a lockfile plus a release-named Flux manifest stays in the k8s lane.
+    const hasK8s = isK8sManifest(files, _diffText, fullDiffText);
     return !hasK8s;
   }
   // #1379: Terraform provider/module version bumps. Every changed file must
@@ -3298,9 +3309,16 @@ function isChartUpdateShape(
   // marker in a sibling file's region blesses nothing, so one chart file
   // can no longer carry an unrelated YAML `version:` change into the
   // zero-selection gate (#1336 review).
+  // #1784: the Flux pair recognizes release-named files as chart-bearing,
+  // but the strict walk below still rejects `ref.tag:` lines (not a
+  // chart-version key): the image-update kinds claim a pure `tag:` bump, so
+  // the k8s lane takes Flux manifests whose diff is not a pure
+  // image-reference change.
+  const fluxOciFiles = fluxOciRepositorySurfaceFiles(fullDiffText.split("\n"));
   const regions = diffFileRegions(fullDiffText, files);
   const chartBearing = files.every((file) => {
     if (CHART_FILE_RE.test(file.filename)) return true;
+    if (fluxOciFiles.has(file.filename)) return true;
     const region = regions.get(file.filename) ?? "";
     return CHART_PR_MARKER_RE.test(region);
   });
@@ -3368,9 +3386,16 @@ function isChartUpdate(
 ): boolean {
   if (files.length === 0) return false;
   if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  // #1784: a release-named Flux OCIRepository manifest is chart-bearing by
+  // its own #1782 marker pair. The strict walk still rejects `ref.tag:` lines
+  // (not a chart-version key): the image-update kinds claim a pure `tag:`
+  // bump; the k8s lane takes Flux manifests whose diff is not a pure
+  // image-reference change.
+  const fluxOciFiles = fluxOciRepositorySurfaceFiles(fullDiffText.split("\n"));
   const regions = diffFileRegions(fullDiffText, files);
   const chartBearing = files.every((file) => {
     if (CHART_FILE_RE.test(file.filename)) return true;
+    if (fluxOciFiles.has(file.filename)) return true;
     const region = regions.get(file.filename) ?? "";
     return CHART_PR_MARKER_RE.test(region);
   });

@@ -27,9 +27,17 @@
  *
  * #1258 (deliberate divergence from v2): the embedding fence is adaptive —
  * a delimiter longer than any backtick run in the file, floored at three.
- * The embedded bytes come from the PR's head tree, so a fixed ```yaml
+ * The embedded bytes come from the checked-out workspace, so a fixed ```yaml
  * wrapper was closable by PR-controlled manifest content; a benign manifest
- * keeps the exact v2 bytes. */
+ * keeps the exact v2 bytes.
+ *
+ * #1784 (deliberate divergence): with a workspace, selection also recognizes
+ * YAML files whose checked-out workspace content has the root-column Flux
+ * OCIRepository marker pair. Classification recognizes that pair from the
+ * file's own diff region while this selection recognizes it from the checked-out
+ * file content, so a Flux manifest whose hunk does not touch the marker lines
+ * is embedded here but keeps the pre-fix classification. Without a workspace,
+ * the historical name-only selection is unchanged. */
 
 import { readFileSync } from "node:fs";
 import { jqEach, jqField } from "../platform/jq.js";
@@ -39,18 +47,42 @@ import { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./wo
 export const MANIFEST_LINE_BUDGET = 1200;
 export const MANIFEST_NAME_RE = /(?:helmrelease|deployment|statefulset|daemonset|kustomization)\.ya?ml(?=\n?$)/iu;
 
+/** #1784: raw-file forms of the #1782 Flux markers; both must be at root
+ * column, unlike their diff-prefixed trusted-scope counterparts. Keep jq `$`
+ * consistency: it also matches before a final newline. */
+const FLUX_OCI_KIND_LINE_RE = /^kind\s*:\s*["']?OCIRepository["']?\s*$/m;
+const FLUX_SOURCE_API_VERSION_LINE_RE = /^apiVersion\s*:\s*["']?source\.toolkit\.fluxcd\.io\//m;
+const FLUX_SURFACE_FILE_RE = /\.ya?ml(?=\n?$)/i;
+
 const enc = (text: string): Buffer => Buffer.from(text, "utf8");
+
+/** #1784: true when the changed file's checked-out workspace content carries
+ * the Flux marker pair at root column. Unavailable or unsafe files retain the
+ * pre-fix recognition miss. */
+function isFluxOciRepositoryManifest(workspace: string, filename: string): boolean {
+  if (!FLUX_SURFACE_FILE_RE.test(filename)) return false;
+  if (!workspaceRegularFile(workspace, filename)) return false;
+  try {
+    const content = readFileSync(workspaceFsPath(workspace, filename));
+    const text = content.toString("utf8");
+    return FLUX_OCI_KIND_LINE_RE.test(text) && FLUX_SOURCE_API_VERSION_LINE_RE.test(text);
+  } catch {
+    return false;
+  }
+}
 
 /** The jq selection over the parsed `pr-files.raw.json`. `undefined` stands
  * for a file jq could not read (empty or invalid JSON): no output. */
-export function selectChangedManifests(prFilesRaw: unknown): string[] {
+export function selectChangedManifests(prFilesRaw: unknown, workspace?: string): string[] {
   const names: string[] = [];
   if (prFilesRaw === undefined) return names;
   try {
     for (const entry of jqEach(prFilesRaw)) {
       const filename = jqField(entry, "filename");
       if (typeof filename !== "string") return names;
-      if (MANIFEST_NAME_RE.test(filename)) names.push(filename);
+      if (MANIFEST_NAME_RE.test(filename) || (workspace !== undefined && isFluxOciRepositoryManifest(workspace, filename))) {
+        names.push(filename);
+      }
     }
   } catch {
     return names;
@@ -73,7 +105,7 @@ export interface ManifestContextResult {
 /** Build `manifest-context.md` from the PR's changed files and the
  * checked-out workspace. */
 export function buildManifestContext(prFilesRaw: unknown, workspace: string): ManifestContextResult {
-  const printed = selectChangedManifests(prFilesRaw).map((name) => `${name}\n`).join("");
+  const printed = selectChangedManifests(prFilesRaw, workspace).map((name) => `${name}\n`).join("");
   const captured = printed.replace(/\0/g, "").replace(/\n+$/, "");
   const manifests = captured === "" ? [] : captured.split("\n").filter((line) => line !== "");
   const parts: Buffer[] = [];

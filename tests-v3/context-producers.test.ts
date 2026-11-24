@@ -54,6 +54,47 @@ test("manifest selection keeps names printed before a jq error and honors jq's `
   assert.deepEqual(selectChangedManifests(null), []);
 });
 
+test("#1784: manifest context selects release-named Flux OCIRepository files by workspace content", () => {
+  const filename = "clusters/observability/prometheus-blackbox-exporter.yaml";
+  const raw = [{ filename }];
+  const flux = "apiVersion: source.toolkit.fluxcd.io/v1\nkind: OCIRepository\nspec:\n  ref:\n    tag: 11.22.0\npayload: ``````\n";
+  const root = workspace({ [filename]: flux });
+  assert.deepEqual(selectChangedManifests(raw), []);
+  assert.deepEqual(selectChangedManifests(raw, root), [filename]);
+  const { artifacts, manifests } = buildManifestContext(raw, root);
+  const artifact = text(artifacts.get("manifest-context.md"));
+  assert.deepEqual(manifests, [filename]);
+  assert.match(artifact, /## File: clusters\/observability\/prometheus-blackbox-exporter\.yaml/);
+  const emittedFence = artifact.split("\n").find((line) => /^`{3,}yaml$/.test(line));
+  assert.ok(emittedFence);
+  assert.ok(emittedFence.length > 6);
+  assert.match(artifact, new RegExp(`\\n${emittedFence.slice(0, -4)}yaml\\napiVersion: source\\.toolkit\\.fluxcd\\.io/v1`));
+  const payloadLine = artifact.split("\n").findIndex((line) => line === "payload: ``````");
+  assert.ok(payloadLine >= 0);
+  assert.ok(linesInsideCodeFences(artifact).has(payloadLine));
+  assert.doesNotMatch(artifact, /No common manifest files changed/);
+
+  for (const [name, content] of [
+    ["kind-only.yaml", "kind: OCIRepository\napiVersion: v1\n"],
+    ["helm.yaml", "apiVersion: source.toolkit.fluxcd.io/v1\nkind: HelmRelease\n"],
+    ["indented.yaml", "  apiVersion: source.toolkit.fluxcd.io/v1\n  kind: OCIRepository\n"],
+    ["markers.md", "kind: OCIRepository\napiVersion: source.toolkit.fluxcd.io/v1\n"],
+  ] as const) {
+    const candidate = workspace({ [name]: content });
+    assert.deepEqual(selectChangedManifests([{ filename: name }], candidate), []);
+  }
+  assert.deepEqual(selectChangedManifests([{ filename }], workspace({})), []);
+
+  const symlinkRoot = mkdtempSync(join(tmpdir(), "producers-flux-link-"));
+  const ws = join(symlinkRoot, "ws");
+  mkdirSync(ws, { recursive: true });
+  const outside = join(symlinkRoot, "outside.yaml");
+  writeFileSync(outside, flux);
+  symlinkSync(outside, join(ws, "linked-flux.yaml"));
+  assert.deepEqual(selectChangedManifests([{ filename: "linked-flux.yaml" }], ws), []);
+  assert.match(text(buildManifestContext([{ filename: "linked-flux.yaml" }], ws).artifacts.get("manifest-context.md")), /No common manifest files changed/);
+});
+
 test("manifest context caps the running line total at 1200", () => {
   const root = workspace({ "a/deployment.yaml": "k: v\n".repeat(1200), "b/deployment.yaml": "k: v\n" });
   const { artifacts } = buildManifestContext([{ filename: "a/deployment.yaml" }, { filename: "b/deployment.yaml" }, { filename: "gone/helmrelease.yaml" }], root);
