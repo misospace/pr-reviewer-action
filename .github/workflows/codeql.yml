@@ -78,7 +78,15 @@ jobs:
           # spec — here one query file at the codeql/javascript-queries pack
           # root, downloaded from the CodeQL registry — and pack queries run
           # alongside the pinned suite. A test pins this wiring: see
-          # tests-v3/executor-kubernetes.test.ts.
+          # tests-v3/executor-kubernetes.test.ts. The reference carries no
+          # `@version` deliberately: the pack ships on the CodeQL release
+          # train (and depends on the matching `codeql/javascript-all`), a
+          # stale hard pin would drift from action bumps while the query is
+          # still evolving upstream, and the float fails LOUD — if the query
+          # ever leaves the pack root the spec stops resolving and this leg
+          # dies at init, the same mechanism that caught the `queries:`
+          # misplacement above. It is the only float: the action is SHA-pinned
+          # and the suite name is an explicit pin.
           packs: ${{ matrix.language == 'javascript-typescript' && 'codeql/javascript-queries:AlertSuppression.ql' || '' }}
           # NO analysis-level query exclusion. The `js/file-access-to-http`
           # query ("File data in outbound network request") fires on ONE flow
