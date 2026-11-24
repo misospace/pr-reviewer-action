@@ -313,6 +313,33 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
   const fixedInstallationId = input.githubPollInstallationId ?? "";
   const installationIdOf = (_repoFullName: string): string => fixedInstallationId;
 
+  /** The authenticated PR read the publication gate's head check and the
+   * forced rereview's identity read share (#1780): the App installation
+   * client, exactly like the sibling `publish` write. A private
+   * repository's pull request is invisible to an unauthenticated read —
+   * the gate would read `null` forever, settle every durable result as
+   * unreadable, and never publish — so BOTH reads carry the installation
+   * credential and agree on ONE head. With no installation to authenticate
+   * as, this refuses rather than falling back to an unauthenticated read
+   * that could only see public repositories; the callers fail closed on
+   * `null` (the gate retries, a rereview declines). */
+  const readPullRequestAuthenticated = async (
+    repoFullName: string,
+    prNumber: number,
+    installationId: string,
+  ): Promise<unknown | null> => {
+    if (installationId === "") return null;
+    const client = new GitHubAppCapabilityClient({
+      apiBaseUrl,
+      appId: input.githubAppId!,
+      privateKeyPem: input.githubAppPrivateKeyPem!,
+      installationId,
+      ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
+    });
+    const read = await client.getPullRequest(repoFullName, prNumber);
+    return read.ok ? read.data : null;
+  };
+
   const capability: ControllerForgeCapability = {
     async mirrorFor(job: ReviewJob): Promise<MirrorCache> {
       const ref = repoRefOf(job.repoFullName);
@@ -334,18 +361,13 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
       });
     },
     async currentHeadSha(job: ReviewJob): Promise<string | null> {
-      const adapter = new GitHubAdapter({
-        repo: job.repoFullName,
-        prNumber: String(job.prNumber),
-        baseUrl: apiBaseUrl,
-        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-      });
-      const pr = await adapter.getPr();
-      if (typeof pr !== "object" || pr === null) return null;
-      const head = (pr as Record<string, unknown>).head;
-      if (typeof head !== "object" || head === null) return null;
-      const sha = (head as Record<string, unknown>).sha;
-      return typeof sha === "string" && sha !== "" ? sha : null;
+      // #1780: the minted job's installation, the same credential the
+      // publish write and the identity read use, so the publication gate
+      // passes on private repositories and every read sees one head.
+      const identity = prIdentityFromPayload(
+        await readPullRequestAuthenticated(job.repoFullName, job.prNumber, job.installationId),
+      );
+      return identity !== null && identity.headSha !== "" ? identity.headSha : null;
     },
     async readPrIdentity(target: {
       readonly repoFullName: string;
@@ -357,25 +379,9 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
       readonly baseSha: string;
       readonly fork: boolean;
     } | null> {
-      // The AUTHENTICATED capability client, exactly like the sibling
-      // `publish` write does: a private repository's pull request is
-      // invisible to an unauthenticated read, so the forced rereview
-      // must read with the App installation the daemon serves.
-      if (target.installationId === "") {
-        // No credential to read with: refuse rather than fall back to an
-        // unauthenticated read that could only see public repositories.
-        return null;
-      }
-      const client = new GitHubAppCapabilityClient({
-        apiBaseUrl,
-        appId: input.githubAppId!,
-        privateKeyPem: input.githubAppPrivateKeyPem!,
-        installationId: target.installationId,
-        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-      });
-      const read = await client.getPullRequest(target.repoFullName, target.prNumber);
-      if (!read.ok) return null;
-      return prIdentityFromPayload(read.data);
+      return prIdentityFromPayload(
+        await readPullRequestAuthenticated(target.repoFullName, target.prNumber, target.installationId),
+      );
     },
     async publish(input_: { readonly job: ReviewJob; readonly resultPayload: string }): Promise<{
       readonly publicationId: string;
