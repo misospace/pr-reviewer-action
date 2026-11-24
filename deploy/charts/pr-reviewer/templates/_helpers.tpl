@@ -579,10 +579,25 @@ dict "ctx" <component context> "root" <chart root>
 {{- $_ := set $v "service" (mustMergeOverwrite ($v.service | default dict) (dict "admin" (dict "enabled" true "forceRename" $stdAdmin.serviceName "controller" "main" "ports" (dict "admin" (dict "port" $stdAdmin.port))))) -}}
 {{- end -}}
 
-{{- /* fail closed on incomplete wiring — the daemon would refuse anyway */ -}}
-{{- if empty (dig "controllers" "main" "containers" "main" "image" "repository" "" $v) -}}
-{{- fail "controller.controllers.main.containers.main.image.repository is required" -}}
+{{- /* #1762: the controller image is the chart's own default, not required
+       operator boilerplate: values.yaml carries the canonical repository,
+       and an unset tag resolves to Chart.appVersion here because the
+       common library requires an explicit tag or digest and never consults
+       appVersion itself (its own validation still fails closed if an
+       operator blanks repository, or both tag and digest). An explicit
+       operator tag wins outright; an explicit digest alone is a complete
+       pin (the library renders repository@digest). This mirrors the
+       worker-image resolution in pr-reviewer.worker-deployment-image, and
+       runs before the common library renders, so the fix-roots init
+       container below inherits the resolved image. The map guard keeps a
+       string-shaped image (never supported) failing with the library's
+       own actionable message instead of a field access on a string. */ -}}
+{{- $controllerImage := dig "controllers" "main" "containers" "main" "image" dict $v -}}
+{{- if and (kindIs "map" $controllerImage) (empty $controllerImage.tag) (empty $controllerImage.digest) -}}
+{{- $_ := set $controllerImage "tag" $ctx.Chart.AppVersion -}}
 {{- end -}}
+
+{{- /* fail closed on incomplete wiring — the daemon would refuse anyway */ -}}
 {{- if and (empty $v.controlPlaneUrl) (empty $v.controlPlaneUrlExistingSecret.name) -}}
 {{- fail "controller.controlPlaneUrl or controller.controlPlaneUrlExistingSecret.name is required" -}}
 {{- end -}}
