@@ -55,18 +55,38 @@ export type WriteResult =
   | { readonly ok: true; readonly created: boolean; readonly id: number | null }
   | { readonly ok: false; readonly error: string };
 
-export interface GitHubAppCapabilityClientOptions {
-  /** API base (`https://api.github.com`, or a GHE `<host>/api/v3`). Validated
-   * by the authenticator's constructor before any credential is bound. */
-  readonly apiBaseUrl: string;
-  readonly appId: string;
-  readonly privateKeyPem: string;
+interface GitHubAppCapabilityClientCommonOptions {
   /** The installation whose credentials this client uses for every call. */
   readonly installationId: string;
   readonly timeoutMs?: number | undefined;
   readonly fetchImpl?: FetchLike | undefined;
-  readonly now?: (() => number) | undefined;
 }
+
+/** Either build the authenticator here (the App material), or hand in ONE
+ * existing authenticator to share.
+ *
+ * SHARING IS THE POINT (#1780 review): the installation-token cache lives on
+ * the `GitHubAppAuthenticator` instance and is keyed by (installation, scope),
+ * so a composition that built a fresh client per call silently built a fresh
+ * empty cache per call — every publication-gate attempt POSTed a new
+ * installation token. A composition holding one authenticator passes it here
+ * and every client of that App reuses the one live scoped token. Sharing
+ * weakens nothing: the cache key already carries the installation id, and the
+ * origin binding, key containment, and fixed-reason rules all live inside
+ * the authenticator being shared. */
+export type GitHubAppCapabilityClientOptions = GitHubAppCapabilityClientCommonOptions &
+  (
+    | { readonly authenticator: GitHubAppAuthenticator }
+    | {
+        /** API base (`https://api.github.com`, or a GHE `<host>/api/v3`).
+         * Validated by the authenticator's constructor before any credential
+         * is bound. */
+        readonly apiBaseUrl: string;
+        readonly appId: string;
+        readonly privateKeyPem: string;
+        readonly now?: (() => number) | undefined;
+      }
+  );
 
 /** Bounded pagination for the open-PR reconciliation listing. Mirrors
  * `api-client.ts`: a short page ends the walk, exhausting the bound FAILS
@@ -176,17 +196,22 @@ export class GitHubAppCapabilityClient {
   #fetchImpl: FetchLike | undefined;
 
   constructor(opts: GitHubAppCapabilityClientOptions) {
-    // The authenticator validates the API base FIRST (origin binding before any
-    // credential is bound); the client then reuses that one validated origin
-    // instead of validating the URL a second time.
-    this.authenticator = new GitHubAppAuthenticator({
-      apiBaseUrl: opts.apiBaseUrl,
-      appId: opts.appId,
-      privateKeyPem: opts.privateKeyPem,
-      ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
-      ...(opts.fetchImpl === undefined ? {} : { fetchImpl: opts.fetchImpl }),
-      ...(opts.now === undefined ? {} : { now: opts.now }),
-    });
+    // The authenticator validates the API base FIRST (origin binding before
+    // any credential is bound); the client then reuses that one validated
+    // origin instead of validating the URL a second time. A shared
+    // authenticator (the composition's own) carries its validated origin
+    // and its installation-token cache with it (#1780 review).
+    this.authenticator =
+      "authenticator" in opts
+        ? opts.authenticator
+        : new GitHubAppAuthenticator({
+            apiBaseUrl: opts.apiBaseUrl,
+            appId: opts.appId,
+            privateKeyPem: opts.privateKeyPem,
+            ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+            ...(opts.fetchImpl === undefined ? {} : { fetchImpl: opts.fetchImpl }),
+            ...(opts.now === undefined ? {} : { now: opts.now }),
+          });
     this.apiBase = this.authenticator.apiBase;
     this.origin = this.authenticator.origin;
     if (!isValidInstallationId(opts.installationId)) {

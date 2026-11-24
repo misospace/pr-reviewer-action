@@ -332,6 +332,11 @@ same inputs, same decision — with fixed precedence:
 4. **Repository config** may only disable (`enabled: false` → `disabled`);
    it can never force-enable an adoption the operator policy did not grant.
 
+Allowlist and denylist entries are lowercase-canonicalized during instance
+validation (`normalizeRepoFullName`, the same grammar forge events use), so a
+mixed-case entry matches the lowercased event identity, and the duplicate
+check runs on the canonical forms (#1783).
+
 Forge installation visibility is deliberately not an input: discovery is the
 controller reconciler's concern — it feeds every repository an approved
 installation can *see* into the ladder. Visibility is not adoption.

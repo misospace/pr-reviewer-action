@@ -33,14 +33,17 @@ common library templates at render time. Run
 
 ## Release version synchronization
 
-The chart's `version`, the chart's `appVersion`, and the controller/worker
-image tags in `examples/*.yaml` track the application release in
-`.release-please-manifest.json`. Each version field carries an
-`x-release-please-version` annotation and its file is listed under
+The chart's `version` and `appVersion` track the application release in
+`.release-please-manifest.json`. Both version fields carry an
+`x-release-please-version` annotation and the file is listed under
 `packages["."].extra-files` in `release-please-config.json`, so the standing
-release PR bumps all of them together. `tests-v3/deploy-packaging.test.ts`
+release PR bumps both together. `tests-v3/deploy-packaging.test.ts`
 fails when a bound field and the manifest disagree, so a release PR cannot
-land with stale deployment artifacts.
+land with stale deployment artifacts. Since #1762 the image tags in
+`examples/*.yaml` are NOT part of this set: the examples restate no
+controller image, and both controller and worker image tags derive from
+`Chart.appVersion` at render time, so there is nothing for a release PR to
+bump there.
 
 Since #1708 the chart's own `version` equals the application release
 version too (no more independent `0.1.0`): Helm OCI artifacts are tagged
@@ -73,6 +76,12 @@ helm install pr-reviewer \
   (`helm dependency build` runs in the publish job), so installation needs
   no source checkout. Installing from `deploy/charts/pr-reviewer/` in a
   checkout remains the development path, not the normal release path.
+- The chart's controller image defaults to the upstream published
+  `ghcr.io/misospace/pr-reviewer-controller` and follows `Chart.appVersion`
+  (#1762): an upstream install needs no
+  `controller.controllers.main.containers.main.image` value at all. Set
+  `repository` for a mirror/private registry, `tag` for an alternate tag,
+  or `...image.digest` for an immutable byte pin.
 - The chart's worker image defaults to the upstream published image and
   follows `Chart.appVersion`; set `workerExecutor.image.digest` for an
   immutable byte pin. An instance-config `kubernetes.image` is an explicit

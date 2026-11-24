@@ -56,16 +56,18 @@ controller:
         name: model-credentials
         key: model-key
 
-  controllers:
-    main:
-      containers:
-        main:
-          image:
-            repository: ghcr.io/example/pr-reviewer-controller
-            # Digest pin from the image-publish run summary; the tag is
-            # then only a readable label (rendered as repo:tag@digest).
-            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-            tag: "3.10.0" # x-release-please-version
+  # No controller image needed: the chart defaults to
+  # ghcr.io/misospace/pr-reviewer-controller with its own appVersion tag
+  # (#1762). Documented overrides — mirror/private registry, alternate tag,
+  # or the exact-byte digest pin (from the image-publish run summary):
+  #
+  #   controllers:
+  #     main:
+  #       containers:
+  #         main:
+  #           image:
+  #             repository: registry.internal.example/pr-reviewer-controller
+  #             digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 
   service:
     webhook:

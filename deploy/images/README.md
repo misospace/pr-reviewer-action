@@ -104,13 +104,15 @@ listener binds loopback by default and the chart sets
   stops the run (fail closed). A rerun can never move a published tag — but
   a digest is still the exact bytes the controller will execute, so pin the
   digest at both consumption points.
-- **Controller image (chart):** the `common` library chart reads the
-  image from `controller.controllers.main.containers.main.image`, and
-  its image specification accepts a `digest` field next to `repository`
-  and `tag`. Set `digest` to the value from the run summary. The chart
-  renders `repository[:tag]@digest`, and `tag` is then only a readable
-  label. Do not put `@sha256:...` into `repository`: the chart then
-  rejects the values or renders a broken reference.
+- **Controller image (chart):** the chart defaults the controller image to
+  `ghcr.io/misospace/pr-reviewer-controller` at its own release coordinate
+  (#1762), so an exact-byte pin needs only the `digest` field under
+  `controller.controllers.main.containers.main.image` — set it to the value
+  from the run summary. With a digest set, the chart renders
+  `repository@digest`; an explicit `tag` is optional and then only a
+  readable label (`repository:tag@digest`). Do not put `@sha256:...` into
+  `repository`: the chart then rejects the values or renders a broken
+  reference.
 
   ```yaml
   controller:
@@ -119,7 +121,6 @@ listener binds loopback by default and the chart sets
         containers:
           main:
             image:
-              repository: ghcr.io/misospace/pr-reviewer-controller
               digest: sha256:<digest from the run summary>
   ```
 

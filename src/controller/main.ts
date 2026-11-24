@@ -129,7 +129,7 @@ import type {
   ControllerAdminDeps,
   ReadinessComponent,
 } from "../admin/types.js";
-import { normalizeRepoFullName } from "../events/normalize.js";
+import { normalizeRepoFullName } from "../platform/repo-identity.js";
 import type { FollowUpForgeAdapter } from "../ingress/followup-host.js";
 import type { ReconcileReport } from "../ingress/reconcile.js";
 import {
