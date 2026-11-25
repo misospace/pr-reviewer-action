@@ -25,16 +25,21 @@
  * (json_object/json_schema only, OpenAI only), the prior conversation is
  * either carried through in full or collapsed into a single system note, and
  * a non-empty closing user turn is always present (Anthropic 400s otherwise).
- * The strict verdict JSON schema literal here is contractually identical to
- * `scripts/model_call.sh` and `_OPENAI_VERDICT_JSON_SCHEMA` in the Python
- * module — pinned by tests, never casually edited.
+ * The strict verdict JSON schema is the ONE definition in `./request.js`
+ * (re-exported here), contractually identical to `scripts/model_call.sh` and
+ * `_OPENAI_VERDICT_JSON_SCHEMA` in the Python module — pinned by tests, never
+ * casually edited.
  *
  * Untrusted tool output is wrapped in an untrusted-data envelope whose
  * delimiters are defanged in the content (#252): a tool result containing
  * `</untrusted_tool_result>` cannot close its own fence.
  */
 import { provenanceAttributes, type EvidenceProvenance } from "../context/evidence-provenance.js";
-import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig } from "./request.js";
+import {
+  ANTHROPIC_VERDICT_OUTPUT_FORMAT,
+  buildAnthropicOutputConfig,
+  OPENAI_VERDICT_JSON_SCHEMA,
+} from "./request.js";
 // #1678 hardening: the closing-verdict requirement-decision contract has ONE
 // owner — the shared row-rule sentence and the run-specific schema come from
 // the contract module, never restated here.
@@ -1632,167 +1637,11 @@ function toolToAnthropic(schema: ToolSchema): Record<string, unknown> {
   };
 }
 
-/** Verdict-turn JSON schema for OpenAI strict mode. Mirrors the inline schema
- * in scripts/model_call.sh (kept in lockstep; the parser tolerates
- * null/absent/malformed findings either way). Contractually identical to
- * `_OPENAI_VERDICT_JSON_SCHEMA` in pr_reviewer/conversation.py — pinned by
- * tests, never casually edited. */
-export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
-  type: "json_schema",
-  json_schema: {
-    name: "pr_review",
-    strict: true,
-    schema: {
-      type: "object",
-      properties: {
-        verdict: { type: "string", enum: ["approve", "request_changes"] },
-        review_markdown: { type: "string" },
-        // #721: the reviewer's structured request for a smart-tier second
-        // pass. Only the JSON boolean true requests one; the parser
-        // normalizes everything else to False so prose can never forge the
-        // escalation.
-        smart_review_requested: { type: "boolean" },
-        smart_review_reason: { type: ["string", "null"] },
-        // #1003: the opt-in human-review triage answer. Always in the strict
-        // schema (strict mode requires every property in `required`); the
-        // prompt only explains the fields when `review-triage` is on. The
-        // parser accepts only the three literal words and fails closed to
-        // `unknown`; triage never touches the verdict, findings, or any
-        // capability.
-        review_triage_decision: {
-          type: "string",
-          enum: ["not_required", "required", "unknown"],
-        },
-        review_triage_reason: { type: ["string", "null"] },
-        // #1005: the model emits only LOGICAL ids here. The deterministic
-        // resolver validates every id against the trusted base-ref config
-        // before any reviewer request; this pass only bounds the list. A
-        // null/empty array is the "not_required" / no-routing-configured
-        // default, so the strict-mode required entry below always permits
-        // null under OpenAI strict semantics.
-        review_triage_targets: {
-          type: ["array", "null"],
-          items: { type: "string" },
-        },
-        findings: {
-          type: ["array", "null"],
-          items: {
-            type: "object",
-            properties: {
-              severity: {
-                type: "string",
-                enum: ["blocker", "major", "minor", "info"],
-              },
-              category: { type: ["string", "null"] },
-              file: { type: ["string", "null"] },
-              line: { type: ["integer", "null"] },
-              message: { type: "string" },
-              preliminary_finding: { type: ["integer", "null"] },
-              end_line: {
-                type: ["integer", "null"],
-                description:
-                  "Inclusive last line of the affected range; use the same value as line for a single-line change, or null when the finding is not tied to a replaceable range.",
-              },
-              suggestion: {
-                type: ["string", "null"],
-                description:
-                  "Exact replacement text for the affected file lines (line through end_line), suitable for a one-click suggestion; null when you cannot provide a safe exact replacement.",
-              },
-              agent_prompt: {
-                type: ["string", "null"],
-                description:
-                  "A concise prompt a human can hand to a coding agent to make the fix; null when not applicable.",
-              },
-            },
-            required: ["severity", "category", "file", "line", "message", "preliminary_finding", "end_line", "suggestion", "agent_prompt"],
-            additionalProperties: false,
-          },
-        },
-        requirement_coverage: {
-          type: ["array", "null"],
-          items: {
-            type: "object",
-            properties: {
-              requirement_id: { type: "string" },
-              status: {
-                type: "string",
-                enum: ["satisfied", "violated", "unknown"],
-              },
-              evidence: {
-                type: ["array", "null"],
-                items: {
-                  type: "object",
-                  properties: {
-                    kind: {
-                      type: "string",
-                      enum: ["file", "test", "tool", "ci", "diff"],
-                    },
-                    ref: { type: ["string", "null"] },
-                    detail: { type: ["string", "null"] },
-                  },
-                  required: ["kind", "ref", "detail"],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ["requirement_id", "status", "evidence"],
-            additionalProperties: false,
-          },
-        },
-        // #750: one structured disposition per deterministic must_check item.
-        // Identity is the EXACT deterministic check text echoed back; the
-        // parser/coverage layers validate it against the supplied list, so
-        // the model cannot invent, omit, duplicate, or reword mandatory
-        // checks. `not_applicable` and `unmet` (#1381: a confirmed negative)
-        // must each carry a grounded rationale. When a Required Review Evidence section is present, emit one disposition per listed obligation, echoing `obligation-<n>` or the exact text as `check`, with a grounded rationale.
-        required_check_dispositions: {
-          type: ["array", "null"],
-          // #1449: the derived architectural obligation rows are disposed by
-          // their row id (`derived-<n>`), and a satisfied derived row's
-          // rationale must name one of that row's listed locations. Prose
-          // only — the schema's shape (properties, enum, required) is
-          // unchanged.
-          description:
-            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations — and risk evidence obligation rows by their row id ('risk-<n>') — a satisfied risk row's rationale must name one of that row's listed locations and state the risk-specific counterexample considered with its source or test evidence.",
-          items: {
-            type: "object",
-            // #1627/#1657: description-only annotation (no shape change) — a
-            // citation into the proof index is an optional disclosure
-            // pointer, never proof, and never one-per-disposition. Kept in
-            // lockstep with the request.ts copy.
-            description: "When the Required-Check Proof Index section is present, the rationale MAY cite one of its executed call ids (for example 'call-7') purely as a disclosure pointer to what the run actually executed. A citation is never proof of satisfaction, and one genuine acquisition may back several 'satisfied' dispositions; the deterministic layer validates objective-evidence claims against the run's own records, so an unsupported 'satisfied' on an objective check stays unresolved however well-cited the rationale is.",
-            properties: {
-              check: { type: "string" },
-              status: {
-                type: "string",
-                enum: ["satisfied", "not_applicable", "unresolved", "unmet"],
-              },
-              rationale: { type: ["string", "null"] },
-            },
-            required: ["check", "status", "rationale"],
-            additionalProperties: false,
-          },
-        },
-        // #1337: dependency-upgrade coverage accounting, one entry per
-        // closed aspect; unknown status words are parsed fail-closed to
-        // `invalid` (counted not-checked), so the wire enum mirrors the
-        // parser's accepted set.
-        dependency_coverage: {
-          type: ["array", "null"],
-          items: {
-            type: "object",
-            properties: {
-              aspect: { type: "string", enum: ["source_mapping", "release_notes", "advisories", "signature_verification", "relevance"] },
-              status: { type: "string", enum: ["checked_no_match", "finding_present", "unavailable", "not_checked", "skipped"] },
-              note: { type: ["string", "null"] },
-            },
-            required: ["aspect", "status", "note"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
-      additionalProperties: false,
-    },
-  },
-};
+/** Verdict-turn JSON schema for OpenAI strict mode — the ONE definition lives
+ * in `./request.js` and is re-exported here for the conversation builders.
+ * That object mirrors the inline schema in scripts/model_call.sh and
+ * `_OPENAI_VERDICT_JSON_SCHEMA` in pr_reviewer/conversation.py: kept in
+ * lockstep, pinned by tests, never casually edited. A second literal here
+ * could only drift from the request builder's schema, and the closing turn
+ * and the request builder must enforce the same bytes. */
+export { OPENAI_VERDICT_JSON_SCHEMA };
