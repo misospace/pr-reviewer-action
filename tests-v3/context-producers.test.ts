@@ -14,6 +14,7 @@ import {
   extractImpactTerms,
   GrepAttribution,
   LineSplitter,
+  MANIFEST_DISCOVERY_MAX_TOTAL_BYTES,
   pyInt,
   pyParseInt,
   workspaceRegularFile,
@@ -23,6 +24,7 @@ import {
   selectChangedManifests,
   xargsEcho,
 } from "../src/context/index.js";
+import { MAX_HEAD_FILE_BYTES } from "../src/context/change-anchors.js";
 import { requirementLedgerFits, requirementLedgerPresence } from "../src/requirements/index.js";
 import { requirementIdentityAttests } from "../src/precheck/linked-issues.js";
 import type { ReadResult } from "../src/platform/types.js";
@@ -52,6 +54,173 @@ test("manifest selection keeps names printed before a jq error and honors jq's `
   assert.deepEqual(selectChangedManifests([{ filename: "a/deployment.yaml" }, { filename: 7 }, { filename: "b/deployment.yaml" }]), ["a/deployment.yaml"]);
   assert.deepEqual(selectChangedManifests([{ filename: "x/Kustomization.YML\n" }, { filename: "x/deployment.yaml\nmore" }]), ["x/Kustomization.YML\n"]);
   assert.deepEqual(selectChangedManifests(null), []);
+});
+
+test("#1784: manifest context selects release-named Flux OCIRepository files by workspace content", () => {
+  const filename = "clusters/observability/prometheus-blackbox-exporter.yaml";
+  const raw = [{ filename }];
+  const flux = "apiVersion: source.toolkit.fluxcd.io/v1\nkind: OCIRepository\nspec:\n  ref:\n    tag: 11.22.0\npayload: ``````\n";
+  const root = workspace({ [filename]: flux });
+  assert.deepEqual(selectChangedManifests(raw), []);
+  assert.deepEqual(selectChangedManifests(raw, root), [filename]);
+  const { artifacts, manifests } = buildManifestContext(raw, root);
+  const artifact = text(artifacts.get("manifest-context.md"));
+  assert.deepEqual(manifests, [filename]);
+  assert.match(artifact, /## File: clusters\/observability\/prometheus-blackbox-exporter\.yaml/);
+  const emittedFence = artifact.split("\n").find((line) => /^`{3,}yaml$/.test(line));
+  assert.ok(emittedFence);
+  assert.ok(emittedFence.length > 6);
+  assert.match(artifact, new RegExp(`\\n${emittedFence.slice(0, -4)}yaml\\napiVersion: source\\.toolkit\\.fluxcd\\.io/v1`));
+  const payloadLine = artifact.split("\n").findIndex((line) => line === "payload: ``````");
+  assert.ok(payloadLine >= 0);
+  assert.ok(linesInsideCodeFences(artifact).has(payloadLine));
+  assert.doesNotMatch(artifact, /No common manifest files changed/);
+
+  for (const [name, content] of [
+    ["kind-only.yaml", "kind: OCIRepository\napiVersion: v1\n"],
+    ["helm.yaml", "apiVersion: source.toolkit.fluxcd.io/v1\nkind: HelmRelease\n"],
+    ["indented.yaml", "  apiVersion: source.toolkit.fluxcd.io/v1\n  kind: OCIRepository\n"],
+    ["markers.md", "kind: OCIRepository\napiVersion: source.toolkit.fluxcd.io/v1\n"],
+  ] as const) {
+    const candidate = workspace({ [name]: content });
+    assert.deepEqual(selectChangedManifests([{ filename: name }], candidate), []);
+  }
+  assert.deepEqual(selectChangedManifests([{ filename }], workspace({})), []);
+
+  const symlinkRoot = mkdtempSync(join(tmpdir(), "producers-flux-link-"));
+  const ws = join(symlinkRoot, "ws");
+  mkdirSync(ws, { recursive: true });
+  const outside = join(symlinkRoot, "outside.yaml");
+  writeFileSync(outside, flux);
+  symlinkSync(outside, join(ws, "linked-flux.yaml"));
+  assert.deepEqual(selectChangedManifests([{ filename: "linked-flux.yaml" }], ws), []);
+  assert.match(text(buildManifestContext([{ filename: "linked-flux.yaml" }], ws).artifacts.get("manifest-context.md")), /No common manifest files changed/);
+});
+
+test("#1784 review: oversized candidates are never read for discovery and the scan is aggregate-bounded", (t) => {
+  // The discovery claim is about reads, not selection outcomes, so the spied
+  // node:fs reads are asserted alongside them (the compiled CJS modules all
+  // resolve these functions off the same cached exports object at call time).
+  const fsModule = require("node:fs") as typeof import("node:fs");
+  const readSyncSpy = t.mock.method(fsModule, "readSync");
+  const readFileSyncSpy = t.mock.method(fsModule, "readFileSync");
+  const mark = (): { readSync: number; readFileSync: number } => ({
+    readSync: readSyncSpy.mock.callCount(),
+    readFileSync: readFileSyncSpy.mock.callCount(),
+  });
+  const readBytes = (since: { readSync: number }): number =>
+    readSyncSpy.mock.calls
+      .slice(since.readSync)
+      .reduce((total: number, call: { result: unknown }) => total + Number(call.result), 0);
+
+  const marker = "kind: OCIRepository\napiVersion: source.toolkit.fluxcd.io/v1\n";
+  // Root-column marker block as the last bytes of exactly `size` bytes.
+  const markerFile = (size: number): string => "a".repeat(size - marker.length - 1) + "\n" + marker;
+
+  // A candidate larger than the per-file discovery cap is refused wholesale
+  // by the fstat size gate: no byte of it is read (whatever its content,
+  // marker pair included) and the embed path never opens it either.
+  const oversizedRoot = workspace({ "oversized.yaml": markerFile(MAX_HEAD_FILE_BYTES + 1) });
+  let since = mark();
+  assert.deepEqual(selectChangedManifests([{ filename: "oversized.yaml" }], oversizedRoot), []);
+  assert.match(
+    text(buildManifestContext([{ filename: "oversized.yaml" }], oversizedRoot).artifacts.get("manifest-context.md")),
+    /No common manifest files changed/,
+  );
+  assert.equal(readSyncSpy.mock.callCount() - since.readSync, 0);
+  assert.equal(readFileSyncSpy.mock.callCount() - since.readFileSync, 0);
+
+  // A candidate exactly at the cap is probed to its last byte.
+  since = mark();
+  assert.deepEqual(selectChangedManifests([{ filename: "at-cap.yaml" }], workspace({ "at-cap.yaml": markerFile(MAX_HEAD_FILE_BYTES) })), ["at-cap.yaml"]);
+  assert.equal(readBytes(since), MAX_HEAD_FILE_BYTES);
+
+  // A directory named like a candidate is refused by the path guard without
+  // being read; non-UTF-8 bytes keep the pre-fix lossy decode.
+  const dirRoot = workspace({});
+  mkdirSync(join(dirRoot, "dir.yaml"));
+  assert.deepEqual(selectChangedManifests([{ filename: "dir.yaml" }], dirRoot), []);
+  const binaryRoot = workspace({});
+  writeFileSync(join(binaryRoot, "binary.yaml"), Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x0a]), Buffer.from(marker)]));
+  assert.deepEqual(selectChangedManifests([{ filename: "binary.yaml" }], binaryRoot), ["binary.yaml"]);
+
+  // Aggregate bound: every candidate's bytes are charged — unrelated
+  // non-marker YAML included — so noise spent up front starves later
+  // marker-bearing candidates into the pre-fix miss, while the historical
+  // name-only selection still works without reading anything and the bytes
+  // actually read stay within the budget.
+  const perFile = MAX_HEAD_FILE_BYTES - 100_000;
+  const noiseCount = 2;
+  const probes = Math.floor(MANIFEST_DISCOVERY_MAX_TOTAL_BYTES / perFile) - noiseCount;
+  const files: Record<string, string> = {};
+  for (let index = 0; index < noiseCount; index += 1) files[`noise-${index}.yaml`] = "kind: ConfigMap\n".padEnd(perFile, "b");
+  const names = Array.from({ length: probes + 2 }, (_unused, index) => `probe-${index}.yaml`);
+  for (const name of names) files[name] = markerFile(perFile);
+  files["z-deployment.yaml"] = "kind: Deployment\n";
+  const aggregateRoot = workspace(files);
+  since = mark();
+  const order = [
+    ...Array.from({ length: noiseCount }, (_unused, index) => `noise-${index}.yaml`),
+    ...names,
+    "z-deployment.yaml",
+  ].map((filename) => ({ filename }));
+  assert.deepEqual(
+    selectChangedManifests(order, aggregateRoot),
+    [...names.slice(0, probes), "z-deployment.yaml"],
+  );
+  assert.equal(readBytes(since), (noiseCount + probes) * perFile);
+
+  // Name-pattern selection never reads: a list every entry of which matches
+  // MANIFEST_NAME_RE takes the historical path with no discovery I/O at all
+  // (the discovery arm must never run for a name-matched file, whatever its
+  // content).
+  since = mark();
+  assert.deepEqual(
+    selectChangedManifests(
+      [{ filename: "x-deployment.yaml" }, { filename: "y-helmrelease.yaml" }],
+      workspace({ "x-deployment.yaml": "kind: Deployment\n", "y-helmrelease.yaml": "kind: HelmRelease\n" }),
+    ),
+    ["x-deployment.yaml", "y-helmrelease.yaml"],
+  );
+  assert.equal(readSyncSpy.mock.callCount() - since.readSync, 0);
+  assert.equal(readFileSyncSpy.mock.callCount() - since.readFileSync, 0);
+
+  // A file that grows between fstat and read is refused: mock fstat to
+  // report a smaller size than the real file, so the +1-byte read window
+  // fills past it. The marker sits at the top, inside the truncated window,
+  // so trusting the short read would select the candidate — the assertions
+  // pin the refusal and the charge for the bytes the descriptor yielded
+  // (the starved probe count below moves only if the growth read is
+  // charged).
+  const growthRoot = workspace({
+    "grew.yaml": marker + "b".repeat(perFile - marker.length - 1) + "\n",
+    ...Object.fromEntries(names.map((name) => [name, markerFile(perFile)])),
+  });
+  const realFstatSync: typeof fsModule.fstatSync = fsModule.fstatSync;
+  let growthCalls = 0;
+  const fstatSpy = t.mock.method(fsModule, "fstatSync", (fd: number) => {
+    const info = realFstatSync(fd);
+    growthCalls += 1;
+    // Only the first candidate's fstat lies (grew.yaml leads growthOrder);
+    // later probes must see the truth or they would trip the same refusal.
+    if (growthCalls === 1) {
+      const shrunken = Object.create(info) as typeof info;
+      shrunken.size = info.size - 8;
+      return shrunken;
+    }
+    return info;
+  });
+  since = mark();
+  const growthOrder = [{ filename: "grew.yaml" }, ...names.map((filename) => ({ filename }))];
+  // The refused growth read still charged perFile - 7 bytes, so exactly one
+  // fewer probe fits than in the uncharged scan above.
+  const growthCharge = perFile - 8 + 1;
+  assert.deepEqual(
+    selectChangedManifests(growthOrder, growthRoot),
+    names.slice(0, Math.floor((MANIFEST_DISCOVERY_MAX_TOTAL_BYTES - growthCharge) / perFile)),
+  );
+  assert.ok(readBytes(since) <= MANIFEST_DISCOVERY_MAX_TOTAL_BYTES);
+  fstatSpy.mock.restore();
 });
 
 test("manifest context caps the running line total at 1200", () => {

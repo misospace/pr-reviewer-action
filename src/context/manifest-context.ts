@@ -27,30 +27,123 @@
  *
  * #1258 (deliberate divergence from v2): the embedding fence is adaptive —
  * a delimiter longer than any backtick run in the file, floored at three.
- * The embedded bytes come from the PR's head tree, so a fixed ```yaml
+ * The embedded bytes come from the checked-out workspace, so a fixed ```yaml
  * wrapper was closable by PR-controlled manifest content; a benign manifest
- * keeps the exact v2 bytes. */
+ * keeps the exact v2 bytes.
+ *
+ * #1784 (deliberate divergence): with a workspace, selection also recognizes
+ * YAML files whose checked-out workspace content has the root-column Flux
+ * OCIRepository marker pair. Classification recognizes that pair from the
+ * file's own diff region while this selection recognizes it from the checked-out
+ * file content, so a Flux manifest whose hunk does not touch the marker lines
+ * is embedded here but keeps the pre-fix classification. Without a workspace,
+ * the historical name-only selection is unchanged. Discovery reads are
+ * bounded (#1815 review): a candidate larger than MAX_HEAD_FILE_BYTES is
+ * never read for content and the whole scan reads at most
+ * MANIFEST_DISCOVERY_MAX_TOTAL_BYTES — beyond either bound (or when the file
+ * is unavailable or unsafe) the candidate keeps the pre-fix recognition
+ * miss, and name-pattern selection still never reads. Aggregate accounting
+ * charges every byte the discovery descriptor yields, including a read
+ * refused because the file grew between fstat and read. */
 
-import { readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { jqEach, jqField } from "../platform/jq.js";
+import { MAX_HEAD_FILE_BYTES } from "./change-anchors.js";
 import { endsWithNewline, fenceDelimiterFor } from "./fence.js";
 import { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 
 export const MANIFEST_LINE_BUDGET = 1200;
 export const MANIFEST_NAME_RE = /(?:helmrelease|deployment|statefulset|daemonset|kustomization)\.ya?ml(?=\n?$)/iu;
 
+/** #1784/#1815 review: the discovery scan reads at most four candidates'
+ * worth of the readHeadLines byte cap in aggregate, whatever the changed
+ * YAML batch looks like. */
+export const MANIFEST_DISCOVERY_MAX_TOTAL_BYTES = 4 * MAX_HEAD_FILE_BYTES;
+
+/** #1784: raw-file forms of the #1782 Flux markers; both must be at root
+ * column, unlike their diff-prefixed trusted-scope counterparts. Keep jq `$`
+ * consistency: it also matches before a final newline. */
+const FLUX_OCI_KIND_LINE_RE = /^kind\s*:\s*["']?OCIRepository["']?\s*$/m;
+const FLUX_SOURCE_API_VERSION_LINE_RE = /^apiVersion\s*:\s*["']?source\.toolkit\.fluxcd\.io\//m;
+const FLUX_SURFACE_FILE_RE = /\.ya?ml(?=\n?$)/i;
+
 const enc = (text: string): Buffer => Buffer.from(text, "utf8");
+
+/** #1784: bytes of the discovery scan still allowed to be read. */
+interface DiscoveryBudget {
+  remaining: number;
+}
+
+/** #1784: the checked-out file's bytes, or null. The readHeadLines
+ * convention (change-anchors/related-context): O_NOFOLLOW open, fstat size
+ * gate against MAX_HEAD_FILE_BYTES and the scan's remaining budget, bounded
+ * readSync, and a post-read re-check against a file that grew between fstat
+ * and read. Oversized and exhausted scans never read file content. */
+function readDiscoveryBytes(workspace: string, filename: string, budget: DiscoveryBudget): Buffer | null {
+  let fd: number;
+  try {
+    fd = openSync(workspaceFsPath(workspace, filename), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_HEAD_FILE_BYTES || info.size > budget.remaining) return null;
+    // +1 byte: a file that grew after the fstat fills the extra byte and is
+    // refused below instead of being trusted.
+    const data = Buffer.alloc(info.size + 1);
+    let filled = 0;
+    try {
+      while (filled < data.length) {
+        const read = readSync(fd, data, filled, data.length - filled, null);
+        if (read === 0) break;
+        filled += read;
+      }
+    } finally {
+      // Every byte the descriptor yielded is charged, including a partial
+      // fill abandoned by a throwing read or a growth-refused result.
+      budget.remaining -= filled;
+    }
+    if (filled > info.size) {
+      // The file grew after the fstat: refuse what was read.
+      return null;
+    }
+    return data.subarray(0, filled);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** #1784: true when the changed file's checked-out workspace content carries
+ * the Flux marker pair at root column. Unavailable, unsafe, oversized or
+ * over-budget files retain the pre-fix recognition miss. */
+function isFluxOciRepositoryManifest(workspace: string, filename: string, budget: DiscoveryBudget): boolean {
+  if (!FLUX_SURFACE_FILE_RE.test(filename)) return false;
+  if (!workspaceRegularFile(workspace, filename)) return false;
+  const content = readDiscoveryBytes(workspace, filename, budget);
+  if (content === null) return false;
+  const text = content.toString("utf8");
+  return FLUX_OCI_KIND_LINE_RE.test(text) && FLUX_SOURCE_API_VERSION_LINE_RE.test(text);
+}
 
 /** The jq selection over the parsed `pr-files.raw.json`. `undefined` stands
  * for a file jq could not read (empty or invalid JSON): no output. */
-export function selectChangedManifests(prFilesRaw: unknown): string[] {
+export function selectChangedManifests(prFilesRaw: unknown, workspace?: string): string[] {
   const names: string[] = [];
   if (prFilesRaw === undefined) return names;
+  const budget: DiscoveryBudget = { remaining: MANIFEST_DISCOVERY_MAX_TOTAL_BYTES };
   try {
     for (const entry of jqEach(prFilesRaw)) {
       const filename = jqField(entry, "filename");
       if (typeof filename !== "string") return names;
-      if (MANIFEST_NAME_RE.test(filename)) names.push(filename);
+      if (
+        MANIFEST_NAME_RE.test(filename) ||
+        (workspace !== undefined && isFluxOciRepositoryManifest(workspace, filename, budget))
+      ) {
+        names.push(filename);
+      }
     }
   } catch {
     return names;
@@ -73,7 +166,7 @@ export interface ManifestContextResult {
 /** Build `manifest-context.md` from the PR's changed files and the
  * checked-out workspace. */
 export function buildManifestContext(prFilesRaw: unknown, workspace: string): ManifestContextResult {
-  const printed = selectChangedManifests(prFilesRaw).map((name) => `${name}\n`).join("");
+  const printed = selectChangedManifests(prFilesRaw, workspace).map((name) => `${name}\n`).join("");
   const captured = printed.replace(/\0/g, "").replace(/\n+$/, "");
   const manifests = captured === "" ? [] : captured.split("\n").filter((line) => line !== "");
   const parts: Buffer[] = [];

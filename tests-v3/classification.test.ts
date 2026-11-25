@@ -5020,6 +5020,59 @@ test("#1763: a Flux OCIRepository manifest named after the release is recognized
   assert.deepEqual(parseDependencyScope(unresolvableHeader("diff --git a/apps/flux/oci repo.yaml b/apps/flux/oci repo.yaml")), { available: false });
 });
 
+test("#1784: release-named Flux OCIRepository manifests enter the k8s lane", () => {
+  const filename = "clusters/observability/prometheus-blackbox-exporter.yaml";
+  const lockfile = "package-lock.json";
+  const filesWithCounts = (entries: { filename: string; status?: string; additions: number; deletions: number }[]) =>
+    entries.map(({ filename: name, status = "modified", additions, deletions }) => canonicalChangedFile({
+      filename: name, status, additions, deletions, changes: additions + deletions,
+    }));
+  const classify = (diffText: string, entries: { filename: string; status?: string; additions: number; deletions: number }[], extra: { prAuthor?: string } = {}) => classifyPr({
+    prFiles: filesWithCounts(entries), authoritativeChangedFiles: entries.length, diffText, fullDiffText: diffText, ...extra,
+  });
+  const fluxDiff = (body: string, path = filename) =>
+    `diff --git a/${path} b/${path}\n@@ -1,8 +1,8 @@\n` +
+    " apiVersion: source.toolkit.fluxcd.io/v1\n" +
+    " kind: OCIRepository\n" +
+    " metadata:\n" +
+    "   name: prometheus-blackbox-exporter\n" +
+    " spec:\n" + body;
+  const pureTag = fluxDiff("   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n");
+  const oneFile = [{ filename, additions: 1, deletions: 1 }];
+  assert.equal(classify(pureTag, oneFile).prKind, "image_update");
+  assert.equal(classify(pureTag, oneFile, { prAuthor: "renovate[bot]" }).prKind, "renovate_image_update");
+
+  const urlAndTag = fluxDiff("-  url: oci://ghcr.io/example/old\n+  url: oci://ghcr.io/example/new\n   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n");
+  const twoLinesEach = [{ filename, additions: 2, deletions: 2 }];
+  assert.equal(classify(urlAndTag, twoLinesEach).prKind, "k8s_manifest");
+  assert.equal(classify(urlAndTag, twoLinesEach, { prAuthor: "renovate[bot]" }).prKind, "k8s_manifest");
+
+  const lockDiff = `diff --git a/${lockfile} b/${lockfile}\n@@ -1 +1 @@\n-  "version": "1.0.0"\n+  "version": "1.0.1"\n`;
+  assert.equal(classify(lockDiff + pureTag, [
+    { filename: lockfile, additions: 1, deletions: 1 }, ...oneFile,
+  ]).prKind, "k8s_manifest");
+  const unmarked = fluxDiff("   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n").replace(" kind: OCIRepository\n", " kind: HelmRelease\n");
+  assert.equal(classify(lockDiff + unmarked, [
+    { filename: lockfile, additions: 1, deletions: 1 }, ...oneFile,
+  ]).prKind, "dependency_upgrade");
+
+  const deletedDiff = pureTag.replace(`diff --git a/${filename} b/${filename}`, `diff --git a/${filename} b/${filename}\ndeleted file mode 100644`);
+  assert.equal(classify(deletedDiff, [{ filename, status: "deleted", additions: 1, deletions: 1 }]).prKind, "k8s_manifest");
+
+  const oldPath = "clusters/observability/old-name.yaml";
+  const renamedPath = filename;
+  const renamedDiff = `diff --git a/${oldPath} b/${renamedPath}\nsimilarity index 90%\nrename from ${oldPath}\nrename to ${renamedPath}\n` +
+    "@@ -1,8 +1,8 @@\n apiVersion: source.toolkit.fluxcd.io/v1\n kind: OCIRepository\n" +
+    " metadata:\n   name: prometheus-blackbox-exporter\n spec:\n   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n";
+  // The #1782 recognition miss on rename is fail-open at recognition only.
+  assert.equal(classify(renamedDiff, [{ filename: renamedPath, status: "renamed", additions: 1, deletions: 1 }]).prKind, "app_code");
+
+  const wrongKind = fluxDiff("   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n").replace(" kind: OCIRepository\n", " kind: HelmRelease\n");
+  const wrongApi = fluxDiff("   ref:\n-    tag: 11.21.3\n+    tag: 11.22.0\n").replace(" apiVersion: source.toolkit.fluxcd.io/v1\n", " apiVersion: v1\n");
+  assert.notEqual(classify(wrongKind, oneFile).prKind, "k8s_manifest");
+  assert.notEqual(classify(wrongApi, oneFile).prKind, "k8s_manifest");
+});
+
 test("#1763: Dockerfile FROM lines canonicalize to docker.io slugs with library/ stripped", () => {
   const alpine =
     "diff --git a/Dockerfile b/Dockerfile\n" +

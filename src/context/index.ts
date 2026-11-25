@@ -173,6 +173,7 @@ export {
 } from "./change-anchors.js";
 export { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 export {
+  MANIFEST_DISCOVERY_MAX_TOTAL_BYTES,
   MANIFEST_LINE_BUDGET,
   MANIFEST_NAME_RE,
   buildManifestContext,
