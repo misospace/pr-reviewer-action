@@ -248,8 +248,9 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 - **everything else stays unresolved** with a bounded reason code
   (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
   `-no-matching-test-check` — including a check whose scope does not prove
-  the ask, `-test-check-not-success`): capability, missing-source, transport,
-  budget and timeout shaped failures are coverage, never satisfaction.
+  the ask, `-configured-test-job-missing` (#1820), `-test-check-not-success`):
+  capability, missing-source, transport, budget and timeout shaped failures
+  are coverage, never satisfaction.
 - **derived rows and `unmet` (forcing) rows are never reconciled** by CI
   evidence (#1449/#1505/#1381 semantics unchanged — discharge only from
   validated evidence, contradiction only strengthens the approval fence).
@@ -276,6 +277,69 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   instead of recomputing the raw #750 coverage — which would re-list a
   CI-discharged row as unresolved and omit a contradicted one. A run dir
   without the artifact keeps the pre-#1594 recompute exactly.
+
+## Trusted explicit CI test-job identities (#1820)
+
+Name heuristics read the check NAME. Some real full-suite jobs do not carry a
+test word — this repository's own `validate-typescript` and
+`validate-runtime-floor` — so their green runs could not discharge a
+full-suite ask. #1820 adds a trusted way to name those jobs; the
+reconciliation above is unchanged for every repository that does not opt in.
+
+- **Where**: an optional repository-owned file, read from the PR's base ref
+  (never the PR head) with the same trust rules as repository config:
+  `.github/pr-reviewer-ci-tests.yml`, then `.pr-reviewer-ci-tests.yml`.
+  Implementation: `src/config/ci-test-jobs.ts`. A PR cannot declare its own
+  job trusted. For PRs into the protected default branch, only a change
+  merged there can alter the file; for PRs into other branches, whoever can
+  push the target branch controls it — the same base-ref trust every
+  repository-config file already has.
+- **Shape**: a `test-jobs` mapping from the check identity to the scope it
+  proves. The identity is the check name the forge exposes, matched exactly
+  (after trimming; case-sensitive — a mismatch stays unresolved, the
+  conservative side):
+
+  ```yaml
+  test-jobs:
+    validate-typescript: full-suite
+    validate-runtime-floor: full-suite
+  ```
+
+- **Scopes**: `full-suite`, or one narrow scope (`unit`, `integration`,
+  `e2e`, `smoke`, `acceptance`, `contract`, `regression`, `performance`,
+  `load`, `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) — the
+  same scope vocabulary the name heuristics use.
+- **Authority**: for a configured check, the configured scope replaces the
+  name-derived scope entirely. Unconfigured checks keep the name heuristics.
+- **The declared set defines the suite**: when a full-suite ask is settled
+  against a config that declares `full-suite` jobs, EVERY configured
+  `full-suite` identity must appear in the head-bound evidence and be green.
+  One missing leg keeps the row unresolved (`configured-test-job-missing`) —
+  even when an unrelated heuristic-matched `Tests` job is green. A red
+  configured leg still contradicts (failure-first, unchanged); a pending or
+  skipped-collapsed leg still blocks (unchanged).
+- **Narrow and generic asks** discharge from a configured job only for its
+  configured scope: a `full-suite` job proves a generic "run tests" ask, not
+  a narrow `run integration tests` ask; a narrow-declared job proves only
+  asks for its own scope.
+- **Declare only jobs that run on every PR.** A configured `full-suite`
+  identity that is absent from the evidence (a scheduled, path-filtered, or
+  removed job — or a mis-declared name) keeps every full-suite ask
+  unresolved, and an unresolved `must_check` row withholds the trusted
+  native approve. The same holds on check-heavy repos: the gate retains
+  every test-named row but may trim other context rows past its 50-row /
+  16,384-character bounds, and a configured identity is normally not
+  test-named — so declare few, stable, always-on identities.
+- **What the trusted path does not change**: the evidence is still bound to
+  the exact reviewed head, still produced only by the CI gate's own platform
+  reads, and still requires explicit `success` conclusions. The config
+  upgrades scope authority from name guessing to operator declaration; it
+  does not certify that a same-named green check came from the configured
+  workflow — a PR that can run its own workflows can mint a same-named job,
+  exactly as it could mint a `Tests`-named job before #1820. Repositories
+  that need workflow-level identity must get it from the forge's stable
+  identifiers where exposed; this config documents the identity the forge
+  already exposes.
 
 ## Evidence classes and objective provenance (#1657)
 

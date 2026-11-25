@@ -1,0 +1,150 @@
+/** #1820: trusted explicit CI test-job identities. A small optional YAML file
+ * maps CI check identities (the check name the forge exposes for a job) to
+ * the test scope they prove. Trust model identical to `reviewer-routing.ts` /
+ * `repository-config.ts`: read from the PR's BASE ref via git show, never the
+ * PR head, so a contributor cannot declare their own job trusted on their own
+ * branch. Absence is fine (pre-#1820 behavior); a read failure degrades to
+ * "no jobs" with a surfaced warning, never silently treated as absence by the
+ * caller. Individual invalid entries are dropped with a warning; a malformed
+ * file is ignored in its entirety. The configured scope REPLACES job-name
+ * scope heuristics for configured checks (the operator's declaration is the
+ * authority). Identity matching is exact and case-sensitive after trimming:
+ * only an unambiguous configured identity matches; a case/spacing mismatch
+ * fails conservative to unresolved.
+ *
+ * File shape (top-level `test-jobs` mapping):
+ *
+ * ```yaml
+ * test-jobs:
+ *   validate-typescript: full-suite
+ *   validate-runtime-floor: full-suite
+ * ```
+ */
+
+import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
+import { RepositoryConfigError, verifyBaseRef } from "./repository-config.js";
+import { isPlainObject } from "../platform/jq.js";
+
+/** Candidate config paths, in precedence order. */
+export const CI_TEST_JOBS_CANDIDATE_PATHS = [".github/pr-reviewer-ci-tests.yml", ".pr-reviewer-ci-tests.yml"] as const;
+export const MAX_CI_TEST_JOBS_FILE_BYTES = 32_768;
+/** Mirrors the evidence artifact's MAX_EVIDENCE_CHECKS; kept independent to avoid an enforcement dependency. */
+export const MAX_CI_TEST_JOB_IDENTITIES = 50;
+/** Mirrors MAX_EVIDENCE_FIELD_LENGTH; longer identities cannot match bounded evidence names. */
+export const MAX_CI_TEST_JOB_IDENTITY_CHARS = 200;
+/** Keep canonical scopes in sync with TEST_SCOPE_ALIASES in required-check-ci.ts. */
+export const CI_TEST_SCOPES = ["full-suite", "unit", "integration", "e2e", "smoke", "acceptance", "contract", "regression", "performance", "load", "browser", "ui", "api", "functional", "mutation", "fuzz"] as const;
+export type TrustedCiTestScope = (typeof CI_TEST_SCOPES)[number];
+
+const DEFAULT_GIT_TIMEOUT_SEC = 10;
+
+export interface TrustedCiTestJobs {
+  readonly jobs: ReadonlyMap<string, TrustedCiTestScope>;
+}
+
+export interface CiTestJobsFile {
+  readonly path: string;
+  readonly text: string;
+}
+
+/** Read the optional config from the trusted base ref via `git show`. */
+export function readCiTestJobsFromRef(
+  ref: string,
+  workspace?: string | null,
+  options: { gitTimeoutSec?: number } = {},
+): CiTestJobsFile | undefined {
+  if (ref === "") throw new RepositoryConfigError("readCiTestJobsFromRef requires a non-empty ref");
+  const cwd = workspace ?? process.cwd();
+  const timeoutSec = options.gitTimeoutSec ?? DEFAULT_GIT_TIMEOUT_SEC;
+  verifyBaseRef(ref, cwd, timeoutSec);
+  for (const path of CI_TEST_JOBS_CANDIDATE_PATHS) {
+    let stdout: Buffer;
+    try {
+      stdout = execFileSync("git", ["show", `${ref}:${path}`], {
+        cwd,
+        timeout: timeoutSec * 1000,
+        maxBuffer: MAX_CI_TEST_JOBS_FILE_BYTES * 4,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+      if (typeof err.code === "string" && err.code === "ENOENT") throw new RepositoryConfigError("git executable not found");
+      if (err.killed || err.signal) throw new RepositoryConfigError(`git show timed out after ${timeoutSec}s reading ${path} at ${ref}`);
+      continue;
+    }
+    return { path, text: stdout.toString("utf8") };
+  }
+  return undefined;
+}
+
+/** Parse trusted CI job identities; malformed YAML is rejected as a whole. */
+export function parseCiTestJobsText(
+  text: string,
+  path: string,
+): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[] } | { malformed: true; warning: string } {
+  if (Buffer.byteLength(text, "utf8") > MAX_CI_TEST_JOBS_FILE_BYTES) {
+    return { malformed: true, warning: `CI test jobs '${path}' exceeds the ${MAX_CI_TEST_JOBS_FILE_BYTES}-byte cap; ignoring it.` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(text);
+  } catch {
+    return { malformed: true, warning: `CI test jobs '${path}' is not valid YAML; ignoring it.` };
+  }
+  if (parsed === null || parsed === undefined) return { jobs: new Map(), warnings: [] };
+  if (!isPlainObject(parsed)) return { malformed: true, warning: `CI test jobs '${path}' must parse to a mapping; ignoring it.` };
+  const rawJobs = parsed["test-jobs"];
+  if (!isPlainObject(rawJobs)) return { malformed: true, warning: `CI test jobs '${path}' has no 'test-jobs' mapping; ignoring it.` };
+  const jobs = new Map<string, TrustedCiTestScope>();
+  const warnings: string[] = [];
+  const scopes: ReadonlySet<string> = new Set(CI_TEST_SCOPES);
+  let entries = 0;
+  for (const [rawIdentity, rawScope] of Object.entries(rawJobs)) {
+    entries += 1;
+    if (entries > MAX_CI_TEST_JOB_IDENTITIES) {
+      if (entries === MAX_CI_TEST_JOB_IDENTITIES + 1) warnings.push(`CI test jobs '${path}' exceeds ${MAX_CI_TEST_JOB_IDENTITIES} identities; extra entries ignored.`);
+      continue;
+    }
+    const identity = rawIdentity.trim();
+    if (identity === "" || identity.length > MAX_CI_TEST_JOB_IDENTITY_CHARS) {
+      warnings.push(`CI test jobs '${path}' has an empty or overlong identity; ignoring it.`);
+      continue;
+    }
+    if (jobs.has(identity)) {
+      warnings.push(`CI test jobs '${path}' has duplicate identity '${identity}' after trimming; ignoring the later entry.`);
+      continue;
+    }
+    if (typeof rawScope !== "string" || !scopes.has(rawScope)) {
+      warnings.push(`CI test jobs '${path}' identity '${identity}' has an invalid scope; ignoring it.`);
+      continue;
+    }
+    jobs.set(identity, rawScope as TrustedCiTestScope);
+  }
+  return { jobs, warnings };
+}
+
+/** Read and parse base-ref config; failures are surfaced by the resolver. */
+export function resolveCiTestJobsFromRef(options: {
+  baseRef: string;
+  workspace?: string | null | undefined;
+  gitTimeoutSec?: number | undefined;
+}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null } {
+  // No trusted ref is a normal no-config state; avoid an unnecessary git call.
+  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null };
+  let file: CiTestJobsFile | undefined;
+  try {
+    file = readCiTestJobsFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
+  } catch (error) {
+    return {
+      jobs: new Map(),
+      warnings: [`CI test jobs could not be read from the base ref: ${error instanceof Error ? error.message : "unknown error"}; ignoring it.`],
+      sourcePath: null,
+    };
+  }
+  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null };
+  const parsed = parseCiTestJobsText(file.text, file.path);
+  if ("malformed" in parsed) return { jobs: new Map(), warnings: [parsed.warning], sourcePath: null };
+  return { jobs: parsed.jobs, warnings: parsed.warnings, sourcePath: file.path };
+}

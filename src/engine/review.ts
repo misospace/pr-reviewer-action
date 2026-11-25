@@ -2,6 +2,8 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { AI_MAX_TOKENS_DEFAULT, validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
+import { resolveCiTestJobsFromRef } from "../config/ci-test-jobs.js";
+import type { TrustedCiTestScope } from "../config/ci-test-jobs.js";
 import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope, type CancellationScope } from "../runtime/signals.js";
@@ -601,6 +603,7 @@ function resolveReviewObligations(
   validateRequiredChecks: string | undefined,
   derivedEnabled: boolean,
   ciEvidence: HeadBoundCiEvidence | null,
+  trustedCiJobs: ReadonlyMap<string, TrustedCiTestScope> | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
 ): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; ledger: EvidenceLedger } {
@@ -780,7 +783,7 @@ function resolveReviewObligations(
     obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
   ));
   return {
-    obligations: reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha),
+    obligations: reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha, trustedCiJobs),
     derived,
     // #1577: the risk rows already ride `obligations` and the
     // required-evidence state; the scan's own coverage answer needs no
@@ -1150,6 +1153,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     for (const warning of resolution.warnings) errorLog(`repository config: ${warning}`);
     effectiveRaw = resolution.raw;
   }
+  const ciTestJobs = baseRef !== ""
+    ? resolveCiTestJobsFromRef({ baseRef, workspace: dependencies.workspace })
+    : { jobs: new Map<string, TrustedCiTestScope>(), warnings: [], sourcePath: null };
+  for (const warning of ciTestJobs.warnings) errorLog(`ci test jobs: ${warning}`);
+  // Applied-config visibility (#1820 review): the reason codes alone should
+  // not be the only trace of a trusted config that failed to match.
+  if (ciTestJobs.sourcePath !== null) errorLog(`ci test jobs: applied ${ciTestJobs.sourcePath} (${ciTestJobs.jobs.size} identities)`);
   const config = loadConfig(contract, effectiveRaw);
   // Assigned unconditionally below, once the resolved fork flag is known —
   // skill discovery must wait for the fail-closed fork gate (#1043 review:
@@ -2555,6 +2565,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // trusted producer tags the #1381 fold carries — never from prose.
     mustCheckEvidence: checkEvidenceTagsFromArtifact(classificationArtifact.must_check_evidence),
     ciEvidence: ciGateEvidence,
+    trustedCiJobs: ciTestJobs.jobs,
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
   const enforcementInputs: EnforcementInputs = {
@@ -2616,6 +2627,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     env.VALIDATE_REQUIRED_CHECKS,
     derivedObligationsEnabled,
     ciGateEvidence,
+    ciTestJobs.jobs,
     completenessBaseOptions.reviewedHeadSha,
     riskObligationsEnabled,
   );

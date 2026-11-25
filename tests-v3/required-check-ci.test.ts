@@ -15,6 +15,7 @@ import {
 import { evaluateRequiredCheckCoverage, type RequiredCheckRow } from "../src/enforcement/required-checks.js";
 import { reviewObligationsFromArtifact, reviewObligationsToArtifact, type ReviewObligation } from "../src/enforcement/review-obligations.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
+import type { TrustedCiTestScope } from "../src/config/ci-test-jobs.js";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const STALE = "aabbccddeeff00112233445566778899aabbccdd";
@@ -524,6 +525,92 @@ test("#1594 artifact round-trip: resolved_by survives serialization; malformed r
     (polluted.obligations as Record<string, unknown>[])[0]!.resolved_by = bad;
     assert.equal(reviewObligationsFromArtifact(polluted), null, JSON.stringify(bad));
   }
+});
+
+test("#1820 trusted configured CI identities define full-suite proof and required legs", () => {
+  const ask = "run full test suite after upgrade";
+  const integrationAsk = "run integration tests after upgrade";
+  const configured = new Map<string, TrustedCiTestScope>([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
+  const green = evidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+    { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+    { name: "validate-static", state: "success", conclusion: "success" },
+  ], "8f819a82486df059e75d4c17b3e50f74d9c017d9");
+  const head = green.headSha;
+  assert.equal(ciDischargeForCheckText(ask, green, head, configured).outcome, "satisfied");
+  const coverage = evaluateRequiredCheckCoverage([ask], null);
+  const rows = reconcileRequiredCheckRows(coverage.checks, green, head, configured);
+  assert.equal(rows.rows[0]!.status, "satisfied");
+  assert.equal(rows.rows[0]!.reason, "ci-evidence");
+  const obligations = reconcileObligationsWithCiEvidence([
+    { id: "obligation-1", source: "must_check", text: ask, status: "unresolved", cause: null },
+  ], green, head, configured);
+  assert.equal(obligations[0]!.status, "satisfied");
+  assert.deepEqual(obligations[0]!.resolvedBy, { kind: "ci-evidence", check: "validate-typescript", headSha: head });
+
+  assert.equal(ciDischargeForCheckText(ask, green, head).reason, "no-matching-test-check");
+  assert.equal(ciDischargeForCheckText(ask, green, head, new Map()).reason, "no-matching-test-check");
+  const unrelated = evidence("success", [{ name: "validate-static", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText(ask, unrelated, head, configured).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText(ask, green, STALE, configured).reason, "head-mismatch");
+  const failed = evidence("failure", [
+    { name: "validate-typescript", state: "failure", conclusion: "failure" },
+    { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, failed, head, configured).reason, "test-check-contradicted");
+  for (const check of [
+    { name: "validate-typescript", state: "pending" },
+    { name: "validate-typescript", state: "success", conclusion: "skipped" },
+  ]) {
+    const pending = evidence("success", [check, { name: "validate-runtime-floor", state: "success", conclusion: "success" }], head);
+    assert.equal(ciDischargeForCheckText(ask, pending, head, configured).reason, "test-check-not-success");
+  }
+  const oneLeg = evidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText(ask, oneLeg, head, configured).reason, "configured-test-job-missing");
+  const heuristicAndMissing = evidence("success", [
+    { name: "Tests", state: "success", conclusion: "success" },
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, heuristicAndMissing, head, configured).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText(integrationAsk, green, head, configured).reason, "no-matching-test-check");
+  assert.equal(ciDischargeForCheckText("run the tests", green, head, configured).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText(ask, evidence("success", [
+    { name: "Validate-Typescript", state: "success", conclusion: "success" },
+    { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+  ], head), head, configured).reason, "configured-test-job-missing");
+  assert.equal(reconcileRequiredCheckRows(coverage.checks, null, head, configured).discharged, 0);
+  assert.deepEqual(reconcileObligationsWithCiEvidence(obligations, null, head, configured), obligations);
+});
+
+test("#1820 a narrow-declared scope proves exactly its own ask, never a generic or full-suite ask", () => {
+  const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
+  const narrow = new Map<string, TrustedCiTestScope>([["unit-tests", "unit"]]);
+  const unitGreen = evidence("success", [{ name: "unit-tests", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText("run unit tests after upgrade", unitGreen, head, narrow).outcome, "satisfied");
+  // M1 #1820 review: the operator's declared scope is authoritative — a
+  // unit-declared job must not widen itself into a generic discharge.
+  assert.equal(ciDischargeForCheckText("run the tests", unitGreen, head, narrow).reason, "no-matching-test-check");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", unitGreen, head, narrow).reason, "no-matching-test-check");
+  // Legacy name-derived behavior is untouched: a heuristic unit-named check
+  // still discharges a generic ask.
+  const heuristicUnit = evidence("success", [{ name: "Unit Tests", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText("run the tests", heuristicUnit, head, narrow).outcome, "satisfied");
+});
+
+test("#1820 the missing-leg reason refines unresolved obligation rows on both folds", () => {
+  const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
+  const configured = new Map<string, TrustedCiTestScope>([["validate-typescript", "full-suite"]]);
+  const ask = "run full test suite after upgrade";
+  const unrelated = evidence("success", [{ name: "validate-static", state: "success", conclusion: "success" }], head);
+  const coverage = evaluateRequiredCheckCoverage([ask], null);
+  const rows = reconcileRequiredCheckRows(coverage.checks, unrelated, head, configured);
+  assert.equal(rows.rows[0]!.status, "unresolved");
+  assert.equal(rows.rows[0]!.reason, "ci-evidence-configured-test-job-missing");
+  const obligations = reconcileObligationsWithCiEvidence([
+    { id: "obligation-1", source: "must_check", text: ask, status: "unresolved", cause: null, reason: "no-disposition" },
+  ], unrelated, head, configured);
+  assert.equal(obligations[0]!.status, "unresolved");
+  assert.equal(obligations[0]!.reason, "ci-evidence-configured-test-job-missing");
 });
 
 test("#1594 rows helper: reconcile leaves no-evidence coverage rows byte-shape-identical", () => {

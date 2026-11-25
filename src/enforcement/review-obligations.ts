@@ -143,7 +143,9 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  * - `ci-evidence-<code>` — #1726 (mirror of the #1594 coverage-side
  *   refinement, now also written on the obligation side): an unresolved
  *   test-run row the CI evidence answers — `ci-evidence-head-mismatch`,
- *   `ci-evidence-no-matching-test-check`, `ci-evidence-test-check-not-success`,
+ *   `ci-evidence-no-matching-test-check`,
+ *   `ci-evidence-configured-test-job-missing` (#1820),
+ *   `ci-evidence-test-check-not-success`,
  *   `ci-evidence-test-check-contradicted` — so the obligation artifact says
  *   exactly WHY the row stayed open instead of the generic answer-level
  *   reason, and the two folds agree row-for-row.
@@ -169,6 +171,7 @@ export type ReviewObligationReason =
   | "dependency-evidence"
   | "ci-evidence-head-mismatch"
   | "ci-evidence-no-matching-test-check"
+  | "ci-evidence-configured-test-job-missing"
   | "ci-evidence-test-check-not-success"
   | "ci-evidence-test-check-contradicted";
 
@@ -1314,7 +1317,8 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   // the obligation-side CI-evidence reason refinement.
   "dependency-evidence",
   "ci-evidence-head-mismatch", "ci-evidence-no-matching-test-check",
-  "ci-evidence-test-check-not-success", "ci-evidence-test-check-contradicted",
+  "ci-evidence-configured-test-job-missing", "ci-evidence-test-check-not-success",
+  "ci-evidence-test-check-contradicted",
   // Retired #1627/#1634 vocabulary — accepted for backward compatibility only.
   "uncited-satisfaction", "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",
 ]);

@@ -23,6 +23,14 @@ The first of these that exists at the trusted ref wins:
 Neither is required. A repository with no config file is reviewed entirely
 under the operator's workflow inputs, unchanged from today.
 
+Two optional sibling files share this trust model (base-ref read, bounded
+parse, malformed = ignore with a surfaced warning): the boundary-ownership
+file below, and `.github/pr-reviewer-ci-tests.yml` (#1820 — trusted explicit
+CI test-job identities that let head-bound CI evidence settle test-run
+obligations; shape and semantics in
+[required-checks.md](required-checks.md#trusted-explicit-ci-test-job-identities-1820),
+implementation in `src/config/ci-test-jobs.ts`).
+
 ## Trust: read from the base ref, never the PR head
 
 The file (and its content) is resolved from the PR's **base / merge-base

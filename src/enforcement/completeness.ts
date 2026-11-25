@@ -21,6 +21,7 @@
  * consequences.
  */
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
+import type { TrustedCiTestScope } from "../config/ci-test-jobs.js";
 import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
@@ -83,6 +84,7 @@ export function applyRequiredCheckValidation(
     /** #1594: the CI gate's head-bound check evidence (null/absent = no
      * reconciliation, byte-identical pre-#1594 behavior). */
     ciEvidence?: HeadBoundCiEvidence | null;
+    trustedCiJobs?: ReadonlyMap<string, TrustedCiTestScope> | null;
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
     /** #1657: the evidence-receipt ledger (native tool-loop surface).
@@ -128,7 +130,7 @@ export function applyRequiredCheckValidation(
     // model `satisfied`. With no evidence nothing runs and the pass stays
     // byte-identical to pre-#1594.
     if (options.ciEvidence !== null && options.ciEvidence !== undefined) {
-      const reconciled = reconcileRequiredCheckRows(coverage.checks, options.ciEvidence, options.reviewedHeadSha ?? "");
+      const reconciled = reconcileRequiredCheckRows(coverage.checks, options.ciEvidence, options.reviewedHeadSha ?? "", options.trustedCiJobs);
       // The `none` status means the fold never ran (zero checks) and stays
       // preserved; otherwise the status recomputes over the reconciled
       // rows: clean iff every OBJECTIVE row is satisfied/not_applicable

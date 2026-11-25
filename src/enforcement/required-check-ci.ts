@@ -6,7 +6,11 @@
  * check list the CI gate (`src/gates/ci-wait.ts`) already read for the exact
  * reviewed head and recorded in its gate-output file. Success of an
  * arbitrary check is insufficient: the check name must genuinely denote a
- * test execution, and the evidence must be bound to the exact head.
+ * test execution, unless a trusted base-ref config explicitly identifies it;
+ * the evidence must be bound to the exact head. Configured scopes replace
+ * name-derived scopes for those identities; unconfigured checks retain the
+ * existing heuristic behavior. Configured full-suite identities define the
+ * required suite legs for full-suite asks.
  *
  * Authority model (this is deterministic policy, not a model verdict):
  * - the evidence artifact is code-generated from platform reads by the CI
@@ -39,6 +43,7 @@
  * erring toward NOT discharging (a missed discharge costs a revision cycle;
  * a false discharge would certify an untested claim).
  */
+import type { TrustedCiTestScope } from "../config/ci-test-jobs.js";
 import type { RequiredCheckRow } from "./required-checks.js";
 import type { ReviewObligation, ReviewObligationReason } from "./review-obligations.js";
 import type { RowEvidenceState } from "./evidence-receipts.js";
@@ -267,6 +272,7 @@ function bareSuiteCandidateIsClean(candidate: string): boolean {
  * the suite runs under a non-test name or outside CI. Deliberate trade:
  * the alternative demanded repos rename their job to `Full Test Suite`
  * to be recognized (#1702). */
+/** Name-derived full-suite proof remains authoritative only for unconfigured checks. */
 function nameProvesFullSuite(name: string): boolean {
   if (FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name))) return true;
   if (testScopesIn(name).length > 0) return false;
@@ -284,20 +290,28 @@ type ScopeMatchMode = "discharge" | "contradiction";
  * identity in the name (see `nameProvesFullSuite`: an explicit marker like
  * `test suite`/`all tests`, or the conventional bare-suite name `Tests`/
  * `test (24)` per #1702) with no narrow scope. A generic ask accepts any
- * test execution. */
+ * test execution. #1820: a trusted configured scope is authoritative — a
+ * configured check proves exactly its declared scope (only a
+ * `full-suite`-declared job proves a full-suite or generic ask), while an
+ * unconfigured check keeps the name-derived behavior. */
 function checkCoversRequestedScope(
   name: string,
   requestedScopes: readonly string[],
   fullSuite: boolean,
   mode: ScopeMatchMode,
+  override: { provided: readonly string[]; provesFullSuite: boolean } | null = null,
 ): boolean {
-  const provided = testScopesIn(name);
+  const provided = override?.provided ?? testScopesIn(name);
   if (requestedScopes.length > 0) {
     return mode === "contradiction"
       ? requestedScopes.some((scope) => provided.includes(scope))
       : requestedScopes.every((scope) => provided.includes(scope));
   }
   if (mode === "contradiction") return true;
+  // #1820: a configured check proves exactly its declared scope — the
+  // operator's declaration is the authority, so a narrow-declared job never
+  // widens itself into a generic or full-suite discharge (M1 #1820 review).
+  if (override !== null) return override.provesFullSuite;
   if (!fullSuite) return true;
   return provided.length === 0 && nameProvesFullSuite(name);
 }
@@ -322,6 +336,7 @@ export type CiDischargeReason =
   | "no-ci-evidence"
   | "head-mismatch"
   | "no-matching-test-check"
+  | "configured-test-job-missing"
   | "test-check-not-success"
   | "test-check-succeeded"
   | "test-check-contradicted";
@@ -349,6 +364,7 @@ export function ciDischargeForCheckText(
   checkText: string,
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
+  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
 ): CiDischarge {
   if (!isTestExecutionObligation(checkText)) return NOT_APPLICABLE;
   if (evidence === null) return { applies: true, outcome: "unresolved", reason: "no-ci-evidence", check: null };
@@ -357,22 +373,33 @@ export function ciDischargeForCheckText(
   }
   const requestedScopes = testScopesIn(checkText);
   const fullSuite = asksForFullTestSuite(checkText);
-  const matching = evidence.checks.filter((check) => isTestExecutionCheckName(check.name));
-  if (matching.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
-  // Precedence is failure-first: an in-scope test-named check that went RED
-  // on the exact head refutes discharge even when a sibling matrix leg is
-  // green — one red leg of a test matrix means the suite did not pass.
-  const inScope = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction"));
+  const configured = trustedJobs ?? new Map<string, TrustedCiTestScope>();
+  const scopeOverride = (check: CiEvidenceCheck): { provided: readonly string[]; provesFullSuite: boolean } | null => {
+    const scope = configured.get(check.name.trim());
+    return scope === undefined ? null : { provided: scope === "full-suite" ? [] : [scope], provesFullSuite: scope === "full-suite" };
+  };
+  const matching = evidence.checks.filter((check) => isTestExecutionCheckName(check.name) || scopeOverride(check) !== null);
+  // Precedence is failure-first: an in-scope test-named or configured check
+  // that went RED on the exact head refutes discharge even when a sibling is
+  // green — one red leg means the suite did not pass.
+  const inScope = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction", scopeOverride(check)));
   const failed = inScope.find((check) => check.state === "failure");
   if (failed !== undefined) return { applies: true, outcome: "contradicted", reason: "test-check-contradicted", check: failed };
   // A full-suite ask needs every in-scope test check settled green: a
   // pending leg, or a `skipped`/`neutral` leg collapsed to state success,
   // means the suite did not (fully) run. A narrow ask only waits on its own
   // scope, so an unrelated pending/red leg neither blocks nor refutes it.
+  if (fullSuite) {
+    const configuredFullSuite = [...configured.entries()].filter(([, scope]) => scope === "full-suite").map(([identity]) => identity);
+    if (configuredFullSuite.some((identity) => !evidence.checks.some((check) => check.name.trim() === identity))) {
+      return { applies: true, outcome: "unresolved", reason: "configured-test-job-missing", check: null };
+    }
+  }
+  if (matching.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
   const unsettled = inScope.find((check) => check.state !== "success"
     || (check.conclusion !== null && check.conclusion !== "success"));
   if (unsettled !== undefined) return { applies: true, outcome: "unresolved", reason: "test-check-not-success", check: null };
-  const dischargeable = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "discharge"));
+  const dischargeable = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "discharge", scopeOverride(check)));
   if (dischargeable.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
   const succeeded = dischargeable.find((check) => check.state === "success"
     && (check.conclusion === null || check.conclusion === "success"));
@@ -403,6 +430,7 @@ export function reconcileRequiredCheckRows(
   rows: readonly RequiredCheckRow[],
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
+  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
 ): { rows: RequiredCheckRow[]; discharged: number; contradicted: number } {
   // No evidence means NO reconciliation at all: every row keeps its exact
   // pre-#1594 shape (the `no-ci-evidence` discharge reason exists for
@@ -411,7 +439,7 @@ export function reconcileRequiredCheckRows(
   let discharged = 0;
   let contradicted = 0;
   const reconciled = rows.map((row) => {
-    const discharge = ciDischargeForCheckText(row.check, evidence, reviewedHeadSha);
+    const discharge = ciDischargeForCheckText(row.check, evidence, reviewedHeadSha, trustedJobs);
     if (row.status === "unresolved" && discharge.outcome === "satisfied" && discharge.check !== null) {
       discharged += 1;
       return {
@@ -454,10 +482,11 @@ export function reconcileObligationsWithCiEvidence(
   obligations: readonly ReviewObligation[],
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
+  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
 ): ReviewObligation[] {
   return obligations.map((obligation) => {
     if (obligation.source !== "must_check" && obligation.source !== "trusted_base_guidance") return obligation;
-    const discharge = ciDischargeForCheckText(obligation.text, evidence, reviewedHeadSha);
+    const discharge = ciDischargeForCheckText(obligation.text, evidence, reviewedHeadSha, trustedJobs);
     if (obligation.status === "unresolved" && discharge.outcome === "satisfied" && discharge.check !== null && evidence !== null) {
       // #1657: the CI discharge is itself receipt-backed provenance — stamp
       // the row's evidence state so the obligation artifact and the ledger's
