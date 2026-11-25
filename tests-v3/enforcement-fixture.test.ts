@@ -276,6 +276,7 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
         ],
       },
       ci_test_jobs: { text: "test-jobs:\n  validate-typescript: full-suite\n  validate-runtime-floor: full-suite\n" },
+      ci_workflow_surface_trusted: true,
       reviewed_head_sha: CI_HEAD_1820,
       config: { verdict_policy: "strict" },
     };
@@ -286,6 +287,16 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
     assert.deepEqual(completeness.missing, []);
     assert.equal(completeness.checks[0].status, "satisfied");
     assert.equal(completeness.checks[0].reason, "ci-evidence");
+
+    const fencedByDefault = runEnforcementFixture(writeJson(dir, "configured-fenced-default.json", {
+      ...base,
+      ci_workflow_surface_trusted: undefined,
+    }));
+    assert.equal(fencedByDefault.ok, true);
+    const fencedCompleteness = JSON.parse(fencedByDefault.values!.completeness_result!);
+    assert.equal(fencedCompleteness.status, "incomplete");
+    assert.equal(fencedCompleteness.checks[0].status, "unresolved");
+    assert.equal(fencedCompleteness.checks[0].reason, "ci-evidence-ci-workflow-surface-untrusted");
 
     const unavailable = runEnforcementFixture(writeJson(dir, "configured-no-evidence.json", {
       ...base,

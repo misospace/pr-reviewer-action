@@ -248,7 +248,9 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 - **everything else stays unresolved** with a bounded reason code
   (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
   `-no-matching-test-check` — including a check whose scope does not prove
-  the ask, `-configured-test-job-missing` (#1820), `-test-check-not-success`):
+  the ask, `-configured-test-job-missing` (#1820),
+  `-ci-workflow-surface-untrusted` (#1820 masquerade fence),
+  `-test-check-not-success`):
   capability, missing-source, transport, budget and timeout shaped failures
   are coverage, never satisfaction.
 - **derived rows and `unmet` (forcing) rows are never reconciled** by CI
@@ -314,10 +316,13 @@ reconciliation above is unchanged for every repository that does not opt in.
 - **The declared set defines the suite**: when a full-suite ask is settled
   against a config that declares `full-suite` jobs, EVERY configured
   `full-suite` identity must appear in the head-bound evidence and be green.
-  One missing leg keeps the row unresolved (`configured-test-job-missing`) —
-  even when an unrelated heuristic-matched `Tests` job is green. A red
-  configured leg still contradicts (failure-first, unchanged); a pending or
-  skipped-collapsed leg still blocks (unchanged).
+  This every-declared-leg rule also applies to generic asks (every
+  `full-suite`-declared leg) and narrow asks (every leg declaring one of the
+  requested scopes), not only full-suite asks. One missing leg keeps the row
+  unresolved (`configured-test-job-missing`) — even when an unrelated
+  heuristic-matched `Tests` job is green. A red configured leg still
+  contradicts (failure-first, unchanged); a pending or skipped-collapsed leg
+  still blocks (unchanged).
 - **Narrow and generic asks** discharge from a configured job only for its
   configured scope: a `full-suite` job proves a generic "run tests" ask, not
   a narrow `run integration tests` ask; a narrow-declared job proves only
@@ -330,16 +335,37 @@ reconciliation above is unchanged for every repository that does not opt in.
   every test-named row but may trim other context rows past its 50-row /
   16,384-character bounds, and a configured identity is normally not
   test-named — so declare few, stable, always-on identities.
-- **What the trusted path does not change**: the evidence is still bound to
-  the exact reviewed head, still produced only by the CI gate's own platform
-  reads, and still requires explicit `success` conclusions. The config
-  upgrades scope authority from name guessing to operator declaration; it
-  does not certify that a same-named green check came from the configured
-  workflow — a PR that can run its own workflows can mint a same-named job,
-  exactly as it could mint a `Tests`-named job before #1820. Repositories
-  that need workflow-level identity must get it from the forge's stable
-  identifiers where exposed; this config documents the identity the forge
-  already exposes.
+- **Workflow-surface masquerade fence (#1820)**: configured identities exist
+  and the PR leaves the supported forges' CI workflow surface unchanged
+  relative to the merge-base of the trusted base ref before any CI evidence
+  can settle a test-run ask. If a PR adds or edits a workflow file there —
+  `.github/workflows`, `.forgejo/workflows`, `.gitea/workflows`, or
+  `.gitlab-ci.yml` — or the surface cannot be verified (git failure or
+  missing head) while the identities were readable, every test-run row stays
+  unresolved that run with `ci-evidence-ci-workflow-surface-untrusted`. A red
+  relevant leg still contradicts (failure-first). Repositories without
+  configured identities retain the pre-#1820 name-heuristic behavior. The
+  merge-base anchor is deliberate: for PR events the effective workflow set
+  is the merge commit, so the attacker-controlled delta is exactly the
+  merge-base diff; a two-dot diff would fence benign PRs whenever the trusted
+  base advances its own workflows. Verification requires the base ref and its
+  merge-base with the head locally. A shallow checkout (`fetch-depth: 1`)
+  cannot resolve the base ref at all, so the identities are unreadable and
+  the fence is inert — the pre-#1820 name heuristics stay in force, which is
+  weaker than the fence but unchanged from before; the fork lane's base-only
+  checkout keeps the identities readable, so there the fence stays closed and
+  configured discharge is inert rather than weakened. CI evidence never
+  certifies what tests DO: a PR can alter test content (`scripts`,
+  `package.json`, `Makefile`) without touching a workflow file. The fence
+  narrows the masquerade surface but does not attempt content certification.
+  `full-suite` covers full-suite and generic asks only, never a narrow scope
+  ask — declare `unit` (or the desired narrow scope) if a configured job is
+  meant to prove it. The fence covers standard workflow-definition paths;
+  external CI systems (CircleCI, Jenkins, Azure Pipelines, Travis, Buildkite)
+  report commit-status contexts without any listed file, and a GitLab
+  `include:` chain can define jobs outside `.gitlab-ci.yml` — a PR editing
+  those configs can still mint a heuristic-accepted name for a narrow ask, so
+  the residual risk is narrower than unfenced name matching but not zero.
 
 ## Evidence classes and objective provenance (#1657)
 

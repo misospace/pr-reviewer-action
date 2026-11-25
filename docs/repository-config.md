@@ -27,7 +27,10 @@ Two optional sibling files share this trust model (base-ref read, bounded
 parse, malformed = ignore with a surfaced warning): the boundary-ownership
 file below, and `.github/pr-reviewer-ci-tests.yml` (#1820 — trusted explicit
 CI test-job identities that let head-bound CI evidence settle test-run
-obligations; shape and semantics in
+obligations only when the repository declared identities and the PR's CI
+workflow surface is verifiably unchanged from the base's merge-base;
+otherwise no test-run ask is settled by CI evidence that run; shape and
+semantics are in
 [required-checks.md](required-checks.md#trusted-explicit-ci-test-job-identities-1820),
 implementation in `src/config/ci-test-jobs.ts`).
 

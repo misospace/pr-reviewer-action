@@ -10,7 +10,11 @@
  * scope heuristics for configured checks (the operator's declaration is the
  * authority). Identity matching is exact and case-sensitive after trimming:
  * only an unambiguous configured identity matches; a case/spacing mismatch
- * fails conservative to unresolved.
+ * fails conservative to unresolved. Discharge from configured identities is
+ * fenced: a PR that changed a supported CI workflow file relative to the
+ * trusted base's merge-base (or whose surface could not be verified) cannot
+ * have same-named jobs discharge (#1820). This is the conservative substitute
+ * where a forge does not expose workflow identity per check run.
  *
  * File shape (top-level `test-jobs` mapping):
  *
@@ -37,11 +41,17 @@ export const MAX_CI_TEST_JOB_IDENTITY_CHARS = 200;
 export const CI_TEST_SCOPES = ["full-suite", "unit", "integration", "e2e", "smoke", "acceptance", "contract", "regression", "performance", "load", "browser", "ui", "api", "functional", "mutation", "fuzz"] as const;
 export type TrustedCiTestScope = (typeof CI_TEST_SCOPES)[number];
 
-const DEFAULT_GIT_TIMEOUT_SEC = 10;
-
-export interface TrustedCiTestJobs {
+export interface TrustedCiJobs {
   readonly jobs: ReadonlyMap<string, TrustedCiTestScope>;
+  /** Authoritative only when jobs is nonempty: true means no identities are
+   * configured or the surface was verified unchanged; false means configured
+   * and changed or unverifiable. With no jobs, this flag is moot. */
+  readonly workflowSurfaceTrusted: boolean;
 }
+
+export const CI_WORKFLOW_SURFACE_PATHS = [".github/workflows", ".forgejo/workflows", ".gitea/workflows", ".gitlab-ci.yml"] as const;
+
+const DEFAULT_GIT_TIMEOUT_SEC = 10;
 
 export interface CiTestJobsFile {
   readonly path: string;
@@ -125,14 +135,46 @@ export function parseCiTestJobsText(
   return { jobs, warnings };
 }
 
+/** Compare workflow paths from the repository root, regardless of workspace cwd. */
+export function ciWorkflowSurfaceChangedFromBase(options: {
+  baseRef: string;
+  headRef: string;
+  workspace?: string | null;
+  gitTimeoutSec?: number;
+}): { changed: boolean; warning: string | null } {
+  const timeoutSec = options.gitTimeoutSec ?? DEFAULT_GIT_TIMEOUT_SEC;
+  if (options.baseRef === "" || options.headRef === "") {
+    return { changed: true, warning: "CI workflow surface could not be verified against the base ref: base or head ref is empty." };
+  }
+  try {
+    const stdout = execFileSync("git", ["diff", "--name-only", `${options.baseRef}...${options.headRef}`, "--", ...CI_WORKFLOW_SURFACE_PATHS.map((path) => `:(top)${path}`)], {
+      cwd: options.workspace ?? process.cwd(),
+      timeout: timeoutSec * 1000,
+      maxBuffer: MAX_CI_TEST_JOBS_FILE_BYTES * 4,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    return { changed: stdout.toString("utf8").trim() !== "", warning: null };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+    const detail = typeof err.code === "string" && err.code === "ENOENT"
+      ? "git executable not found"
+      : err.killed || err.signal
+        ? `git diff timed out after ${timeoutSec}s`
+        : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
+    return { changed: true, warning: `CI workflow surface could not be verified against the base ref: ${detail}.` };
+  }
+}
+
 /** Read and parse base-ref config; failures are surfaced by the resolver. */
 export function resolveCiTestJobsFromRef(options: {
   baseRef: string;
+  headRef?: string | undefined;
   workspace?: string | null | undefined;
   gitTimeoutSec?: number | undefined;
-}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null } {
+}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null; workflowSurfaceTrusted: boolean } {
   // No trusted ref is a normal no-config state; avoid an unnecessary git call.
-  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null };
+  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null, workflowSurfaceTrusted: true };
   let file: CiTestJobsFile | undefined;
   try {
     file = readCiTestJobsFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
@@ -141,10 +183,24 @@ export function resolveCiTestJobsFromRef(options: {
       jobs: new Map(),
       warnings: [`CI test jobs could not be read from the base ref: ${error instanceof Error ? error.message : "unknown error"}; ignoring it.`],
       sourcePath: null,
+      workflowSurfaceTrusted: false,
     };
   }
-  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null };
+  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null, workflowSurfaceTrusted: true };
   const parsed = parseCiTestJobsText(file.text, file.path);
-  if ("malformed" in parsed) return { jobs: new Map(), warnings: [parsed.warning], sourcePath: null };
-  return { jobs: parsed.jobs, warnings: parsed.warnings, sourcePath: file.path };
+  if ("malformed" in parsed) return { jobs: new Map(), warnings: [parsed.warning], sourcePath: null, workflowSurfaceTrusted: true };
+  const warnings = [...parsed.warnings];
+  if (parsed.jobs.size === 0) return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+  if (options.headRef === undefined || options.headRef === "") {
+    warnings.push("CI workflow surface could not be verified against the base ref: head ref is missing.");
+    return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: false };
+  }
+  const surface = ciWorkflowSurfaceChangedFromBase({
+    baseRef: options.baseRef,
+    headRef: options.headRef,
+    ...(options.workspace !== undefined ? { workspace: options.workspace } : {}),
+    ...(options.gitTimeoutSec !== undefined ? { gitTimeoutSec: options.gitTimeoutSec } : {}),
+  });
+  if (surface.warning !== null) warnings.push(surface.warning);
+  return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: !surface.changed };
 }

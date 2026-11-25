@@ -21,7 +21,7 @@
  * consequences.
  */
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
-import type { TrustedCiTestScope } from "../config/ci-test-jobs.js";
+import type { TrustedCiJobs } from "../config/ci-test-jobs.js";
 import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
@@ -84,7 +84,7 @@ export function applyRequiredCheckValidation(
     /** #1594: the CI gate's head-bound check evidence (null/absent = no
      * reconciliation, byte-identical pre-#1594 behavior). */
     ciEvidence?: HeadBoundCiEvidence | null;
-    trustedCiJobs?: ReadonlyMap<string, TrustedCiTestScope> | null;
+    trustedCiJobs?: TrustedCiJobs | null;
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
     /** #1657: the evidence-receipt ledger (native tool-loop surface).

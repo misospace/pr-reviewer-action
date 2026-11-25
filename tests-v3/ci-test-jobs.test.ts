@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CI_TEST_JOBS_CANDIDATE_PATHS,
+  ciWorkflowSurfaceChangedFromBase,
   MAX_CI_TEST_JOB_IDENTITIES,
   MAX_CI_TEST_JOB_IDENTITY_CHARS,
   MAX_CI_TEST_JOBS_FILE_BYTES,
@@ -92,6 +93,7 @@ test("#1820 resolves only the trusted base tree and handles absent/unreadable re
   assert.throws(() => readCiTestJobsFromRef("", root), RepositoryConfigError);
   const bad = resolveCiTestJobsFromRef({ baseRef: "HEAD", workspace: tmpdir() });
   assert.equal(bad.jobs.size, 0);
+  assert.equal(bad.workflowSurfaceTrusted, false);
   assert.ok(bad.warnings.length > 0);
   assert.deepEqual(resolveCiTestJobsFromRef({ baseRef: "" }).warnings, []);
 });
@@ -108,6 +110,80 @@ test("#1820 resolver degrades a malformed trusted file to no jobs with a surface
   assert.ok(resolved.warnings.some((warning) => /not valid YAML/.test(warning)));
 });
 
+test("#1820 workflow surface fence tracks only changes introduced by the PR", () => {
+  const root = initRepo();
+  writeFileSync(join(root, "README"), "seed");
+  writeConfig(root, PATH, BASE);
+  const base = commit(root, "base config");
+  writeFileSync(join(root, "ordinary.txt"), "unchanged workflow surface\n");
+  const unchangedHead = commit(root, "unchanged head");
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: unchangedHead, workspace: root }), { changed: false, warning: null });
+  const subdirectory = join(root, "nested", "workspace");
+  mkdirSync(subdirectory, { recursive: true });
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: unchangedHead, workspace: subdirectory }), { changed: false, warning: null });
+  const unchanged = resolveCiTestJobsFromRef({ baseRef: base, headRef: unchangedHead, workspace: root });
+  assert.equal(unchanged.workflowSurfaceTrusted, true);
+
+  writeConfig(root, ".github/workflows/evil.yml", "name: evil\n");
+  const workflowHead = commit(root, "add workflow");
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: workflowHead, workspace: root }), { changed: true, warning: null });
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: workflowHead, workspace: subdirectory }), { changed: true, warning: null });
+  const changed = resolveCiTestJobsFromRef({ baseRef: base, headRef: workflowHead, workspace: root });
+  assert.equal(changed.workflowSurfaceTrusted, false);
+  assert.equal(changed.warnings.length, 0);
+
+  const branchRoot = initRepo();
+  writeFileSync(join(branchRoot, "README"), "seed");
+  writeConfig(branchRoot, PATH, BASE);
+  const forkPoint = commit(branchRoot, "base config");
+  execFileSync("git", ["-C", branchRoot, "checkout", "-q", "-b", "pr"], { env: GIT_ENV });
+  writeFileSync(join(branchRoot, "pr.txt"), "pr");
+  const prHead = commit(branchRoot, "pr change");
+  execFileSync("git", ["-C", branchRoot, "checkout", "-q", "main"], { env: GIT_ENV });
+  writeConfig(branchRoot, ".github/workflows/base-only.yml", "name: base\n");
+  commit(branchRoot, "base workflow advances");
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: "main", headRef: prHead, workspace: branchRoot }), { changed: false, warning: null });
+  assert.equal(forkPoint.length > 0, true);
+
+  const gitlabRoot = initRepo();
+  writeFileSync(join(gitlabRoot, "README"), "seed");
+  const gitlabBase = commit(gitlabRoot, "seed");
+  writeFileSync(join(gitlabRoot, ".gitlab-ci.yml"), "stages: [test]\n");
+  const gitlabHead = commit(gitlabRoot, "edit gitlab workflow");
+  assert.equal(ciWorkflowSurfaceChangedFromBase({ baseRef: gitlabBase, headRef: gitlabHead, workspace: gitlabRoot }).changed, true);
+});
+
+test("#1820 workflow surface verification fails closed and resolver reports missing refs", () => {
+  const root = initRepo();
+  writeFileSync(join(root, "README"), "seed");
+  writeConfig(root, PATH, BASE);
+  const base = commit(root, "base config");
+  const unknownHead = "0000000000000000000000000000000000000000";
+  const failed = ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: unknownHead, workspace: root });
+  assert.equal(failed.changed, true);
+  assert.ok(failed.warning?.includes("could not be verified"));
+  const resolvedFailed = resolveCiTestJobsFromRef({ baseRef: base, headRef: unknownHead, workspace: root });
+  assert.equal(resolvedFailed.workflowSurfaceTrusted, false);
+  assert.ok(resolvedFailed.warnings.some((warning) => warning.includes("could not be verified")));
+
+  const noHead = resolveCiTestJobsFromRef({ baseRef: base, workspace: root });
+  assert.equal(noHead.workflowSurfaceTrusted, false);
+  assert.ok(noHead.warnings.some((warning) => warning.includes("could not be verified")));
+  const emptyHead = resolveCiTestJobsFromRef({ baseRef: base, headRef: "", workspace: root });
+  assert.equal(emptyHead.workflowSurfaceTrusted, false);
+  assert.ok(emptyHead.warnings.some((warning) => warning.includes("could not be verified")));
+  const nulHead = resolveCiTestJobsFromRef({ baseRef: base, headRef: "bad\u0000ref", workspace: root });
+  assert.equal(nulHead.workflowSurfaceTrusted, false);
+  assert.ok(nulHead.warnings.some((warning) => warning.includes("could not be verified")));
+
+  const noConfigRoot = initRepo();
+  writeFileSync(join(noConfigRoot, "README"), "seed");
+  const noConfigBase = commit(noConfigRoot, "no config");
+  const noConfig = resolveCiTestJobsFromRef({ baseRef: noConfigBase, workspace: noConfigRoot });
+  assert.equal(noConfig.workflowSurfaceTrusted, true);
+  assert.deepEqual(noConfig.warnings, []);
+});
+
 test("#1820 engine wiring: the base-ref resolution precedes both enforcement folds that consume it", () => {
   const engine = readFileSync("src/engine/review.ts", "utf8");
   const resolution = engine.indexOf("resolveCiTestJobsFromRef({ baseRef");
@@ -116,10 +192,10 @@ test("#1820 engine wiring: the base-ref resolution precedes both enforcement fol
     engine.indexOf("resolveRepositoryConfig(contract, raw") < resolution,
     "trusted CI jobs resolve beside repository config, after the base ref is known",
   );
-  const baseOptions = engine.indexOf("trustedCiJobs: ciTestJobs.jobs");
-  assert.ok(baseOptions > resolution, "completenessBaseOptions consumes the resolved map");
-  const obligationsCall = engine.indexOf("ciTestJobs.jobs,", baseOptions);
-  assert.ok(obligationsCall > baseOptions, "resolveReviewObligations consumes the resolved map");
+  const baseOptions = engine.indexOf("trustedCiJobs: { jobs: ciTestJobs.jobs");
+  assert.ok(baseOptions > resolution, "completenessBaseOptions consumes the resolved jobs and fence");
+  const obligationsCall = engine.indexOf("{ jobs: ciTestJobs.jobs", baseOptions + 1);
+  assert.ok(obligationsCall > baseOptions, "resolveReviewObligations consumes the resolved jobs and fence");
   assert.ok(
     engine.includes("reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha, trustedCiJobs)"),
     "the obligation fold receives the trusted jobs",

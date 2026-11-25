@@ -15,13 +15,17 @@ import {
 import { evaluateRequiredCheckCoverage, type RequiredCheckRow } from "../src/enforcement/required-checks.js";
 import { reviewObligationsFromArtifact, reviewObligationsToArtifact, type ReviewObligation } from "../src/enforcement/review-obligations.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
-import type { TrustedCiTestScope } from "../src/config/ci-test-jobs.js";
+import type { TrustedCiJobs, TrustedCiTestScope } from "../src/config/ci-test-jobs.js";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const STALE = "aabbccddeeff00112233445566778899aabbccdd";
 
 function evidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<Omit<CiEvidenceCheck, "conclusion"> & { conclusion?: string | null }>, headSha = HEAD): HeadBoundCiEvidence {
   return { headSha, finalState, checks: checks.map((check) => ({ name: check.name, state: check.state, conclusion: check.conclusion ?? null })) };
+}
+
+function configuredJobs(jobs: [string, TrustedCiTestScope][], workflowSurfaceTrusted = true): TrustedCiJobs {
+  return { jobs: new Map(jobs), workflowSurfaceTrusted };
 }
 
 function d(check: string, status: string, rationale?: string | null): NormalizedRequiredCheckDisposition {
@@ -530,7 +534,7 @@ test("#1594 artifact round-trip: resolved_by survives serialization; malformed r
 test("#1820 trusted configured CI identities define full-suite proof and required legs", () => {
   const ask = "run full test suite after upgrade";
   const integrationAsk = "run integration tests after upgrade";
-  const configured = new Map<string, TrustedCiTestScope>([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
+  const configured = configuredJobs([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
   const green = evidence("success", [
     { name: "validate-typescript", state: "success", conclusion: "success" },
     { name: "validate-runtime-floor", state: "success", conclusion: "success" },
@@ -549,7 +553,7 @@ test("#1820 trusted configured CI identities define full-suite proof and require
   assert.deepEqual(obligations[0]!.resolvedBy, { kind: "ci-evidence", check: "validate-typescript", headSha: head });
 
   assert.equal(ciDischargeForCheckText(ask, green, head).reason, "no-matching-test-check");
-  assert.equal(ciDischargeForCheckText(ask, green, head, new Map()).reason, "no-matching-test-check");
+  assert.equal(ciDischargeForCheckText(ask, green, head, configuredJobs([])).reason, "no-matching-test-check");
   const unrelated = evidence("success", [{ name: "validate-static", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText(ask, unrelated, head, configured).reason, "configured-test-job-missing");
   assert.equal(ciDischargeForCheckText(ask, green, STALE, configured).reason, "head-mismatch");
@@ -582,9 +586,75 @@ test("#1820 trusted configured CI identities define full-suite proof and require
   assert.deepEqual(reconcileObligationsWithCiEvidence(obligations, null, head, configured), obligations);
 });
 
+test("#1820 a closed workflow fence refuses every CI-evidence settlement of a test-run ask", () => {
+  const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
+  const ask = "run full test suite after upgrade";
+  const configured = configuredJobs([["validate-typescript", "full-suite"]], false);
+  const sameName = evidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
+  const fenced = ciDischargeForCheckText(ask, sameName, head, configured);
+  assert.equal(fenced.outcome, "unresolved");
+  assert.equal(fenced.reason, "ci-workflow-surface-untrusted");
+  const withLegacySuite = evidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+    { name: "Tests", state: "success", conclusion: "success" },
+  ], head);
+  const heuristic = ciDischargeForCheckText(ask, withLegacySuite, head, configured);
+  assert.equal(heuristic.outcome, "unresolved");
+  assert.equal(heuristic.reason, "ci-workflow-surface-untrusted");
+
+  const red = evidence("failure", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
+  assert.equal(ciDischargeForCheckText(ask, red, head, configured).reason, "test-check-contradicted");
+  const emptyConfigured = ciDischargeForCheckText(ask, evidence("success", [
+    { name: "Tests", state: "success", conclusion: "success" },
+  ], head), head, configuredJobs([], false));
+  assert.equal(emptyConfigured.outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText(ask, evidence("success", [
+    { name: "Tests", state: "success", conclusion: "success" },
+  ], head), head).outcome, "satisfied");
+
+  const coverage = evaluateRequiredCheckCoverage([ask], null);
+  const fencedCoverage = reconcileRequiredCheckRows(coverage.checks, sameName, head, configured);
+  assert.equal(fencedCoverage.rows[0]!.reason, "ci-evidence-ci-workflow-surface-untrusted");
+  const fencedObligation = reconcileObligationsWithCiEvidence([
+    { id: "obligation-1", source: "must_check", text: ask, status: "unresolved", cause: null, reason: "no-disposition" },
+  ], sameName, head, configured);
+  assert.equal(fencedObligation[0]!.reason, "ci-evidence-ci-workflow-surface-untrusted");
+});
+
+test("#1820 every declared leg is required for generic and narrow asks, with failure-first precedence", () => {
+  const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
+  const fullSuiteJobs = configuredJobs([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
+  const onlyTypeScript = evidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText("run the tests", onlyTypeScript, head, fullSuiteJobs).reason, "configured-test-job-missing");
+  const fullSuiteGreen = evidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+    { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText("run the tests", fullSuiteGreen, head, fullSuiteJobs).outcome, "satisfied");
+
+  const unitJobs = configuredJobs([["unit-one", "unit"], ["unit-two", "unit"]]);
+  const oneUnit = evidence("success", [{ name: "unit-one", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText("run unit tests after upgrade", oneUnit, head, unitJobs).reason, "configured-test-job-missing");
+  const bothUnits = evidence("success", [
+    { name: "unit-one", state: "success", conclusion: "success" },
+    { name: "unit-two", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText("run unit tests after upgrade", bothUnits, head, unitJobs).outcome, "satisfied");
+
+  const redAndMissing = evidence("success", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
+  assert.equal(ciDischargeForCheckText("run the tests", redAndMissing, head, fullSuiteJobs).reason, "test-check-contradicted");
+
+  const mixedJobs = configuredJobs([
+    ["unit-tests", "unit"],
+    ["validate-typescript", "full-suite"],
+    ["validate-runtime-floor", "full-suite"],
+  ]);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", fullSuiteGreen, head, mixedJobs).outcome, "satisfied");
+});
+
 test("#1820 a narrow-declared scope proves exactly its own ask, never a generic or full-suite ask", () => {
   const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
-  const narrow = new Map<string, TrustedCiTestScope>([["unit-tests", "unit"]]);
+  const narrow = configuredJobs([["unit-tests", "unit"]]);
   const unitGreen = evidence("success", [{ name: "unit-tests", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText("run unit tests after upgrade", unitGreen, head, narrow).outcome, "satisfied");
   // M1 #1820 review: the operator's declared scope is authoritative — a
@@ -599,7 +669,7 @@ test("#1820 a narrow-declared scope proves exactly its own ask, never a generic 
 
 test("#1820 the missing-leg reason refines unresolved obligation rows on both folds", () => {
   const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
-  const configured = new Map<string, TrustedCiTestScope>([["validate-typescript", "full-suite"]]);
+  const configured = configuredJobs([["validate-typescript", "full-suite"]]);
   const ask = "run full test suite after upgrade";
   const unrelated = evidence("success", [{ name: "validate-static", state: "success", conclusion: "success" }], head);
   const coverage = evaluateRequiredCheckCoverage([ask], null);

@@ -8,9 +8,13 @@
  * arbitrary check is insufficient: the check name must genuinely denote a
  * test execution, unless a trusted base-ref config explicitly identifies it;
  * the evidence must be bound to the exact head. Configured scopes replace
- * name-derived scopes for those identities; unconfigured checks retain the
- * existing heuristic behavior. Configured full-suite identities define the
- * required suite legs for full-suite asks.
+ *   name-derived scopes for those identities; unconfigured checks retain the
+ *   existing heuristic behavior. A closed workflow-surface fence refuses
+ *   every test-run discharge for that run (`ci-workflow-surface-untrusted`),
+ *   retaining failure-first contradiction (#1820 masquerade fence). Repos
+ *   without configured identities keep the pre-#1820 name-heuristic behavior.
+ *   The every-declared-leg rule covers generic and narrow asks as well as
+ *   full-suite asks.
  *
  * Authority model (this is deterministic policy, not a model verdict):
  * - the evidence artifact is code-generated from platform reads by the CI
@@ -43,7 +47,7 @@
  * erring toward NOT discharging (a missed discharge costs a revision cycle;
  * a false discharge would certify an untested claim).
  */
-import type { TrustedCiTestScope } from "../config/ci-test-jobs.js";
+import type { TrustedCiJobs, TrustedCiTestScope } from "../config/ci-test-jobs.js";
 import type { RequiredCheckRow } from "./required-checks.js";
 import type { ReviewObligation, ReviewObligationReason } from "./review-obligations.js";
 import type { RowEvidenceState } from "./evidence-receipts.js";
@@ -337,6 +341,7 @@ export type CiDischargeReason =
   | "head-mismatch"
   | "no-matching-test-check"
   | "configured-test-job-missing"
+  | "ci-workflow-surface-untrusted"
   | "test-check-not-success"
   | "test-check-succeeded"
   | "test-check-contradicted";
@@ -349,6 +354,7 @@ export interface CiDischarge {
 }
 
 const NOT_APPLICABLE: CiDischarge = { applies: false, outcome: "none", reason: null, check: null };
+const NO_CONFIGURED_JOBS: ReadonlyMap<string, TrustedCiTestScope> = new Map();
 
 /**
  * The single disposition for one check text against head-bound evidence.
@@ -364,7 +370,7 @@ export function ciDischargeForCheckText(
   checkText: string,
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
-  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
+  trustedJobs?: TrustedCiJobs | null,
 ): CiDischarge {
   if (!isTestExecutionObligation(checkText)) return NOT_APPLICABLE;
   if (evidence === null) return { applies: true, outcome: "unresolved", reason: "no-ci-evidence", check: null };
@@ -373,7 +379,8 @@ export function ciDischargeForCheckText(
   }
   const requestedScopes = testScopesIn(checkText);
   const fullSuite = asksForFullTestSuite(checkText);
-  const configured = trustedJobs ?? new Map<string, TrustedCiTestScope>();
+  // No configured identities means the legacy name heuristics remain active.
+  const configured = trustedJobs?.jobs ?? NO_CONFIGURED_JOBS;
   const scopeOverride = (check: CiEvidenceCheck): { provided: readonly string[]; provesFullSuite: boolean } | null => {
     const scope = configured.get(check.name.trim());
     return scope === undefined ? null : { provided: scope === "full-suite" ? [] : [scope], provesFullSuite: scope === "full-suite" };
@@ -385,17 +392,31 @@ export function ciDischargeForCheckText(
   const inScope = matching.filter((check) => checkCoversRequestedScope(check.name, requestedScopes, fullSuite, "contradiction", scopeOverride(check)));
   const failed = inScope.find((check) => check.state === "failure");
   if (failed !== undefined) return { applies: true, outcome: "contradicted", reason: "test-check-contradicted", check: failed };
-  // A full-suite ask needs every in-scope test check settled green: a
-  // pending leg, or a `skipped`/`neutral` leg collapsed to state success,
-  // means the suite did not (fully) run. A narrow ask only waits on its own
-  // scope, so an unrelated pending/red leg neither blocks nor refutes it.
-  if (fullSuite) {
-    const configuredFullSuite = [...configured.entries()].filter(([, scope]) => scope === "full-suite").map(([identity]) => identity);
-    if (configuredFullSuite.some((identity) => !evidence.checks.some((check) => check.name.trim() === identity))) {
-      return { applies: true, outcome: "unresolved", reason: "configured-test-job-missing", check: null };
-    }
+  // #1820 acceptance: when the repo opted in with configured identities but
+  // the PR changed the CI workflow surface (or it could not be verified), the
+  // PR can mint ANY new job name — a same-named trusted identity and a
+  // bare-suite heuristic name alike — so no head-bound CI evidence settles a
+  // test-run ask this run. Failure-first stays ahead of this fence: a red
+  // relevant leg still contradicts.
+  if (trustedJobs !== null && trustedJobs !== undefined && trustedJobs.jobs.size > 0 && !trustedJobs.workflowSurfaceTrusted) {
+    return { applies: true, outcome: "unresolved", reason: "ci-workflow-surface-untrusted", check: null };
+  }
+  // #1820: every configured identity the ask would be discharged BY must be
+  // present in the evidence — a full-suite or generic ask needs every
+  // full-suite-declared leg, a narrow ask every leg declaring one of its
+  // requested scopes. One green leg cannot settle an ask another declared
+  // leg also covers.
+  const requiredLegMissing = [...configured.entries()]
+    .filter(([, scope]) => (requestedScopes.length > 0 ? requestedScopes.includes(scope) : scope === "full-suite"))
+    .some(([identity]) => !evidence.checks.some((check) => check.name.trim() === identity));
+  if (requiredLegMissing) {
+    return { applies: true, outcome: "unresolved", reason: "configured-test-job-missing", check: null };
   }
   if (matching.length === 0) return { applies: true, outcome: "unresolved", reason: "no-matching-test-check", check: null };
+  // Every in-scope test check must be settled green: a pending leg, or a
+  // `skipped`/`neutral` leg collapsed to state success, means the suite did
+  // not (fully) run. A narrow ask only waits on its own scope, so an
+  // unrelated pending/red leg neither blocks nor refutes it.
   const unsettled = inScope.find((check) => check.state !== "success"
     || (check.conclusion !== null && check.conclusion !== "success"));
   if (unsettled !== undefined) return { applies: true, outcome: "unresolved", reason: "test-check-not-success", check: null };
@@ -430,7 +451,7 @@ export function reconcileRequiredCheckRows(
   rows: readonly RequiredCheckRow[],
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
-  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
+  trustedJobs?: TrustedCiJobs | null,
 ): { rows: RequiredCheckRow[]; discharged: number; contradicted: number } {
   // No evidence means NO reconciliation at all: every row keeps its exact
   // pre-#1594 shape (the `no-ci-evidence` discharge reason exists for
@@ -482,7 +503,7 @@ export function reconcileObligationsWithCiEvidence(
   obligations: readonly ReviewObligation[],
   evidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
-  trustedJobs?: ReadonlyMap<string, TrustedCiTestScope> | null,
+  trustedJobs?: TrustedCiJobs | null,
 ): ReviewObligation[] {
   return obligations.map((obligation) => {
     if (obligation.source !== "must_check" && obligation.source !== "trusted_base_guidance") return obligation;
@@ -524,7 +545,7 @@ export function reconcileObligationsWithCiEvidence(
       && discharge.reason !== null
       && discharge.reason !== "no-ci-evidence"
       && (obligation.reason === "no-disposition" || obligation.reason === "no-structured-dispositions")) {
-      // The outcome guard bounds the discharge reason to the four
+      // The outcome guard bounds the discharge reason to the five
       // unresolved/contradicted codes, all in the closed
       // `ReviewObligationReason` vocabulary (`test-check-succeeded` rides
       // the satisfied arm above; `no-ci-evidence` is excluded because null
