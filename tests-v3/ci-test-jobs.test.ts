@@ -61,7 +61,7 @@ function commit(root: string, message: string): string {
   return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { env: GIT_ENV }).toString("utf8").trim();
 }
 function initRepo(): string {
-  const root = mkdtempSync(join("/var/tmp/courier-scratch", "ci-test-jobs-"));
+  const root = mkdtempSync(join(tmpdir(), "ci-test-jobs-"));
   execFileSync("git", ["-c", "init.defaultBranch=main", "init", "-q", root], { env: GIT_ENV });
   return root;
 }
@@ -90,7 +90,7 @@ test("#1820 resolves only the trusted base tree and handles absent/unreadable re
   assert.equal(absent.jobs.size, 0);
   assert.deepEqual(absent.warnings, []);
   assert.throws(() => readCiTestJobsFromRef("", root), RepositoryConfigError);
-  const bad = resolveCiTestJobsFromRef({ baseRef: "HEAD", workspace: "/var/tmp/courier-scratch" });
+  const bad = resolveCiTestJobsFromRef({ baseRef: "HEAD", workspace: tmpdir() });
   assert.equal(bad.jobs.size, 0);
   assert.ok(bad.warnings.length > 0);
   assert.deepEqual(resolveCiTestJobsFromRef({ baseRef: "" }).warnings, []);
