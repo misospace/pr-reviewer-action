@@ -80,6 +80,21 @@ test("registry URL builders encode scoped names canonically and refuse junk", ()
   assert.equal(registryVersionDocUrl("lodash", "latest"), null);
 });
 
+test("an uppercase version spelling is refused, never case-folded into a comparison (#1821 review round 3)", async () => {
+  // The dependency-scope parse lowercases version tokens, so an
+  // uppercase-prerelease manifest spelling (`1.0.0-RC1`) arrives lowercased.
+  // The exact-version grammar refuses the raw uppercase spelling outright...
+  assert.equal(registryVersionDocUrl("types/node", "1.0.0-RC1"), null);
+  // ...and a lowercased token whose registry document spells the version with
+  // uppercase fails the exact identity re-check instead of matching
+  // case-insensitively — the bump resolves UNRESOLVED, never compared.
+  const reasons = await failureReason("types/node", "1.0.0-rc1", "2.0.0", {
+    "1.0.0-rc1": { name: "@types/node", version: "1.0.0-RC1", dist: { tarball: `${NPM_REGISTRY_ORIGIN}/x/-/x.tgz`, integrity: "sha512-AAAA" } },
+    "2.0.0": { name: "@types/node", version: "2.0.0", dist: { tarball: `${NPM_REGISTRY_ORIGIN}/x/-/x.tgz`, integrity: "sha512-BBBB" } },
+  });
+  assert.ok(reasons.includes("registry-version-mismatch"), `expected version mismatch, got ${reasons.join(",")}`);
+});
+
 // ── extractPackageTree: the safe-unpack boundary ────────────────────────────
 
 test("extractPackageTree reads a clean npm tree, strips the package/ root, keys by path", () => {

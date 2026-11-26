@@ -88,7 +88,7 @@ type Routes = (request: ExchangeRequest) => ExchangeResponse;
 
 function npmHarness(
   routes: Routes,
-  options: { allowedHosts?: ReadonlySet<string>; dns?: Record<string, string[]> } = {},
+  options: { allowedHosts?: ReadonlySet<string>; dns?: Record<string, string[]>; deadline?: number | null } = {},
 ): { exchanged: ExchangeRequest[]; lookups: string[]; fetches: ReturnType<typeof createNpmFetches> } {
   const exchanged: ExchangeRequest[] = [];
   const lookups: string[] = [];
@@ -104,6 +104,7 @@ function npmHarness(
     allowedHosts: options.allowedHosts ?? REGISTRY_HOSTS,
     resolver,
     exchange,
+    ...(options.deadline !== undefined ? { deadline: options.deadline } : {}),
   });
   return { exchanged, lookups, fetches };
 }
@@ -223,6 +224,40 @@ test("a failed or non-2xx read surfaces as the seam contract: fetchJson throws, 
   });
   await assert.rejects(broken.fetches.fetchJson(DOC), /version document read failed/);
   assert.equal(await broken.fetches.fetchBytes(TARBALL), null);
+});
+
+test("budget deadline: past it both seams refuse before any connection or lookup", async () => {
+  const harness = npmHarness(
+    () => {
+      throw new Error("no request may be issued once the npm package budget deadline has passed");
+    },
+    { deadline: Date.now() - 1 },
+  );
+  await assert.rejects(harness.fetches.fetchJson(DOC), /budget deadline passed/);
+  assert.equal(await harness.fetches.fetchBytes(TARBALL), null);
+  assert.equal(harness.exchanged.length, 0);
+  assert.deepEqual(harness.lookups, []);
+});
+
+test("budget deadline clamps an in-flight read to the time left, not the 40s whole-request bound", async () => {
+  // The reviewer-identified overshoot: a request started just before the
+  // deadline must abort AT the deadline, not run out the full per-request
+  // timeout. fetchImpl never answers; only the composed deadline signal can
+  // end the read.
+  let sawSignal: AbortSignal | undefined;
+  const fetchImpl = (_input: string | URL, init?: RequestInit): Promise<Response> =>
+    new Promise<Response>((_resolve, reject) => {
+      sawSignal = init?.signal ?? undefined;
+      const abort = (): void => reject(sawSignal?.reason ?? new Error("aborted"));
+      if (sawSignal?.aborted === true) abort();
+      else sawSignal?.addEventListener("abort", abort, { once: true });
+    });
+  const fetches = createNpmFetches({ allowedHosts: REGISTRY_HOSTS, fetchImpl, deadline: Date.now() + 25 });
+  const started = Date.now();
+  await assert.rejects(fetches.fetchJson(DOC));
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5_000, `read ran ${elapsed}ms — the deadline did not clamp it`);
+  assert.equal(sawSignal?.aborted, true, "the composed deadline signal fired");
 });
 
 test("npmPackageDeadline parses like imageDigestDeadline (default 60, <=0 disables)", () => {

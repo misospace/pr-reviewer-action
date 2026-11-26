@@ -418,14 +418,19 @@ export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: s
   const changes = comparable.slice(0, MAX_NPM_COMPARISONS);
   const skipped = comparable.slice(MAX_NPM_COMPARISONS);
   const allowedHosts = parseAllowedHosts(env.ALLOWED_SOURCE_HOSTS ?? "");
+  // One deadline, computed once (#1821 review round 3): the phase stops
+  // starting new reads past it, and the transport additionally clamps every
+  // in-flight read to the time left under it.
+  const deadline = npmPackageDeadline(env as NodeJS.ProcessEnv);
   const { fetchJson, fetchBytes } = createNpmFetches({
     allowedHosts,
+    deadline,
     ...(signal !== undefined ? { signal } : {}),
   });
   const { markdown } = await buildNpmPackageProvenance(changes, {
     fetchJson,
     fetchBytes,
-    deadline: npmPackageDeadline(env as NodeJS.ProcessEnv),
+    deadline,
   }, skipped);
   ws.write("npm-package-provenance.md", markdown);
   return markdown;

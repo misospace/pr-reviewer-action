@@ -12,7 +12,10 @@
  * - responses are capped: version documents at `MAX_NPM_JSON_BYTES`, tarballs
  *   at `MAX_NPM_TARBALL_BYTES`. The tarball is fetched as raw bytes (not
  *   decoded), and integrity verification in the comparison layer is the final
- *   authority on what the bytes mean.
+ *   authority on what the bytes mean;
+ * - every in-flight read is clamped to the time left under the caller's
+ *   `deadline` (`npm-package-budget-sec`), so the run never overshoots the
+ *   ceiling by a whole per-request timeout (#1821 review round 3).
  *
  * Refusals surface as `null` from `fetchBytes` / a throw from `fetchJson`, both
  * recorded by the comparison layer as an unresolved version — never a guess. */
@@ -108,6 +111,12 @@ export interface NpmTransportOptions {
   maxTimeMs?: number;
   /** Caller-owned abort, composed with the per-request deadline. */
   signal?: AbortSignal;
+  /** A `Date.now()`-milliseconds deadline (#1821 review round 3): an in-flight
+   * read is clamped to the time left under it — never the full per-request
+   * timeout — and past it no request is issued at all, so the run cannot
+   * overshoot the `npm-package-budget-sec` ceiling. Absent leaves only the
+   * per-request bound. */
+  deadline?: number | null;
 }
 
 export interface NpmFetches {
@@ -127,6 +136,19 @@ export function createNpmFetches(options: NpmTransportOptions): NpmFetches {
       timeoutMs: Math.min(NPM_FETCH_MAX_TIME_MS, options.maxTimeMs ?? NPM_FETCH_MAX_TIME_MS),
     });
   const maxTimeMs = options.maxTimeMs ?? NPM_FETCH_MAX_TIME_MS;
+  // #1821 review round 3: the per-run budget deadline clamps EACH request to
+  // the time left under it (never the full 40s whole-request bound), so one
+  // in-flight read can no longer run past `npm-package-budget-sec`. Past the
+  // deadline the seams refuse before any request.
+  const deadlinePast = (): boolean =>
+    options.deadline !== undefined && options.deadline !== null && Date.now() >= options.deadline;
+  const requestSignal = (): AbortSignal => {
+    const remaining = options.deadline !== undefined && options.deadline !== null
+      ? Math.min(maxTimeMs, options.deadline - Date.now())
+      : maxTimeMs;
+    const timeout = AbortSignal.timeout(Math.max(0, remaining));
+    return options.signal !== undefined ? AbortSignal.any([timeout, options.signal]) : timeout;
+  };
 
   const readOnce = async (
     url: string,
@@ -175,20 +197,16 @@ export function createNpmFetches(options: NpmTransportOptions): NpmFetches {
     if (!npmTransportAllowsVersionDoc(url, options.allowedHosts)) {
       throw new Error(`npm package transport: refusing ${url}: outside the registry document allowlist`);
     }
-    const signal = options.signal !== undefined
-      ? AbortSignal.any([AbortSignal.timeout(maxTimeMs), options.signal])
-      : AbortSignal.timeout(maxTimeMs);
-    const response = await readOnce(url, MAX_NPM_JSON_BYTES, signal);
+    if (deadlinePast()) throw new Error("npm package transport: version document read refused: budget deadline passed");
+    const response = await readOnce(url, MAX_NPM_JSON_BYTES, requestSignal());
     if (response === null) throw new Error("npm package transport: version document read failed");
     return JSON.parse(new TextDecoder("utf8", { fatal: false }).decode(response.bytes));
   };
 
   const fetchBytes: NpmFetchBytes = async (url) => {
     if (!npmTransportAllowsTarball(url, options.allowedHosts)) return null;
-    const signal = options.signal !== undefined
-      ? AbortSignal.any([AbortSignal.timeout(maxTimeMs), options.signal])
-      : AbortSignal.timeout(maxTimeMs);
-    const response = await readOnce(url, MAX_NPM_TARBALL_BYTES, signal);
+    if (deadlinePast()) return null;
+    const response = await readOnce(url, MAX_NPM_TARBALL_BYTES, requestSignal());
     if (response === null) return null;
     return response.bytes;
   };

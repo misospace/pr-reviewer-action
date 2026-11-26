@@ -167,7 +167,15 @@ export function registryEncodedName(slug: string): string | null {
 }
 
 /** The exact-version document URL for a slug at a version. Returns `null` for
- * a slug the grammar refuses. */
+ * a slug the grammar refuses.
+ *
+ * Version case is part of this grammar by design (#1821 review round 3): the
+ * dependency-scope parse lowercases every version token, so a manifest
+ * spelling with uppercase (e.g. a prerelease `1.0.0-RC1`) arrives here already
+ * lowercased and either misses the (case-sensitive) registry document or fails
+ * the exact `doc.version !== version` re-check below. Such a bump resolves
+ * UNRESOLVED and is never case-folded into a comparison — fail closed rather
+ * than a guessed identity. */
 export function registryVersionDocUrl(slug: string, version: string): string | null {
   const encoded = registryEncodedName(slug);
   if (encoded === null) return null;
