@@ -451,10 +451,10 @@ reconciliation above is unchanged for every repository that does not opt in.
   the same holds when NO identity survived, because refusing declarations
   must not silently reopen the heuristic channel under an ask the operator's
   declaration covers. Pre-#1820 name heuristics therefore settle an ask only
-  when no declaration covers it: no config file, or entries that never
-  declared a usable scope (one a required leg could be built for). One
-  missing leg keeps the row
-  unresolved (`configured-test-job-missing`) — even when an unrelated
+  when no declaration covers it: no config file, or only entries that never
+  declared a usable scope (no scope a required leg could be built from). One
+  missing leg keeps the row unresolved
+  (`configured-test-job-missing`) — even when an unrelated
   heuristic-matched `Tests` job is green. A red configured leg still
   contradicts (failure-first, unchanged); a pending or skipped-collapsed leg
   still blocks (unchanged).
