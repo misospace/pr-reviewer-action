@@ -14,7 +14,10 @@
  * retaining failure-first contradiction (#1820 masquerade fence). Repos
  * without configured identities keep the pre-#1820 name-heuristic behavior.
  * The every-declared-leg rule covers generic and narrow asks as well as
- * full-suite asks.
+ * full-suite asks, and a declaration refused at config load (matrix-origin,
+ * ambiguous, or naming no static job) remains a required leg for its scope:
+ * it can never match evidence, so the ask stays unresolved instead of letting
+ * a surviving green identity settle it (#1820 re-review).
  *
  * Authority model (this is deterministic policy, not a model verdict):
  * - the evidence artifact is code-generated from platform reads by the CI
@@ -391,6 +394,7 @@ export function ciDischargeForCheckText(
   const fullSuite = asksForFullTestSuite(checkText);
   // No configured identities means the legacy name heuristics remain active.
   const configured = trustedJobs?.jobs ?? NO_CONFIGURED_JOBS;
+  const refused = trustedJobs?.refusedJobs ?? NO_CONFIGURED_JOBS;
   const scopeOverride = (check: CiEvidenceCheck): { provided: readonly string[]; provesFullSuite: boolean } | null => {
     if (check.origin !== "actions" || check.clipped === true) return null;
     const scope = configured.get(check.name.trim());
@@ -420,8 +424,13 @@ export function ciDischargeForCheckText(
   // present in the evidence — a full-suite or generic ask needs every
   // full-suite-declared leg, a narrow ask every leg declaring one of its
   // requested scopes. One green leg cannot settle an ask another declared
-  // leg also covers.
-  const requiredLegs = [...configured.entries()]
+  // leg also covers. A declaration refused at config load is still DECLARED:
+  // keeping it in this set (it can never match evidence) makes the ask stay
+  // unresolved instead of letting a surviving green identity outvote it
+  // (#1820 re-review). When no identity survived at all, the pre-#1820
+  // heuristic path applies unchanged (configured.size === 0).
+  const declaredLegs = configured.size > 0 ? new Map([...refused, ...configured]) : configured;
+  const requiredLegs = [...declaredLegs.entries()]
     .filter(([, scope]) => (requestedScopes.length > 0 ? requestedScopes.includes(scope) : scope === "full-suite"));
   const requiredLegMissing = requiredLegs.some(([identity]) => !evidence.checks.some((check) =>
     check.name.trim() === identity && scopeOverride(check) !== null));

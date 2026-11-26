@@ -308,6 +308,18 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
     assert.equal(fencedCompleteness.checks[0].status, "unresolved");
     assert.equal(fencedCompleteness.checks[0].reason, "ci-evidence-ci-workflow-surface-untrusted");
 
+    // A declaration the resolver refused (matrix-origin) stays a required
+    // leg: the surviving green identity cannot settle the ask (#1820 re-review).
+    const partiallyRefused = runEnforcementFixture(writeJson(dir, "configured-partially-refused.json", {
+      ...base,
+      ci_test_jobs: { text: "test-jobs:\n  validate-typescript: full-suite\n" },
+      ci_refused_test_jobs: { "validate-runtime-floor": "full-suite" },
+    }));
+    assert.equal(partiallyRefused.ok, true);
+    const partiallyRefusedCompleteness = JSON.parse(partiallyRefused.values!.completeness_result!);
+    assert.equal(partiallyRefusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(partiallyRefusedCompleteness.checks[0].reason, "ci-evidence-configured-test-job-missing");
+
     const unavailable = runEnforcementFixture(writeJson(dir, "configured-no-evidence.json", {
       ...base,
       ci_evidence: undefined,

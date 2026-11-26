@@ -7,8 +7,11 @@
  * "no jobs" with a surfaced warning, never silently treated as absence by the
  * caller. Individual invalid entries are dropped with a warning; malformed
  * files and mappings whose entries are all dropped report declared identities
- * as refused, keeping the workflow-surface masquerade fence armed. The configured
- * scope REPLACES job-name
+ * as refused, keeping the workflow-surface masquerade fence armed. A
+ * declaration that survives parsing but is refused during surface validation
+ * stays in `refusedJobs`, so it remains a REQUIRED leg for its declared scope:
+ * a surviving green identity cannot settle an ask the refused declaration
+ * also covers (#1820 re-review). The configured scope REPLACES job-name
  * scope heuristics for configured checks (the operator's declaration is the
  * authority). Identity matching is exact and case-sensitive after trimming:
  * only an unambiguous configured identity matches; a case/spacing mismatch
@@ -64,6 +67,13 @@ export interface CiSurfaceIdentities {
 
 export interface TrustedCiJobs {
   readonly jobs: ReadonlyMap<string, TrustedCiTestScope>;
+  /** Identities declared with a valid scope that were NOT honored this run
+   * (matrix-origin, ambiguous, absent from the trusted surface, or refused
+   * with the whole surface). They can never be matched by evidence, but they
+   * stay DECLARED: the every-declared-leg rule requires them for their scope,
+   * so a surviving green identity cannot settle an ask a refused declaration
+   * also covers (#1820 re-review). */
+  readonly refusedJobs: ReadonlyMap<string, TrustedCiTestScope>;
   /** True when config declared identities but none were honored this run
    * (surface refused them, the surface could not be read, or none validated).
    * Consumers must keep the masquerade fence armed when the surface is not
@@ -546,9 +556,9 @@ export function resolveCiTestJobsFromRef(options: {
   headRef?: string | undefined;
   workspace?: string | null | undefined;
   gitTimeoutSec?: number | undefined;
-}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null; identitiesRefused: boolean; workflowSurfaceTrusted: boolean } {
+}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; refusedJobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null; identitiesRefused: boolean; workflowSurfaceTrusted: boolean } {
   // No trusted ref is a normal no-config state; avoid an unnecessary git call.
-  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
+  if (options.baseRef === "") return { jobs: new Map(), refusedJobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
   const surfaceState = (): { trusted: boolean; warning: string | null } => {
     if (options.headRef === undefined || options.headRef === "") {
       return { trusted: false, warning: "CI workflow surface could not be verified against the base ref: head ref is missing." };
@@ -568,63 +578,70 @@ export function resolveCiTestJobsFromRef(options: {
     const warnings = [`CI test jobs could not be read from the base ref: ${error instanceof Error ? error.message : "unknown error"}; ignoring it.`];
     const surface = surfaceState();
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: new Map(), warnings, sourcePath: null, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: new Map(), refusedJobs: new Map(), warnings, sourcePath: null, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
-  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
+  if (file === undefined) return { jobs: new Map(), refusedJobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
   const parsed = parseCiTestJobsText(file.text, file.path);
   if ("malformed" in parsed) {
     const warnings = [parsed.warning];
     const surface = parsed.declaredCount > 0 ? surfaceState() : { trusted: true, warning: null };
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: new Map(), warnings, sourcePath: null, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: new Map(), refusedJobs: new Map(), warnings, sourcePath: null, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
   }
   const warnings = [...parsed.warnings];
   if (parsed.jobs.size === 0) {
     const surface = parsed.declaredCount > 0 ? surfaceState() : { trusted: true, warning: null };
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: parsed.jobs, warnings, sourcePath: file.path, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: parsed.jobs, refusedJobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
   }
   const identities = ciJobIdentitiesFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
   if (identities.prMintable) {
     warnings.push(identities.warning ?? "CI workflow surface contains a PR-author-controlled job display name; configured test-job identities are refused.");
     const surface = surfaceState();
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: new Map(), refusedJobs: parsed.jobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   if (identities.warning !== null) {
     warnings.push(identities.warning);
     const surface = surfaceState();
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: new Map(), refusedJobs: parsed.jobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   if (identities.unenumeratedDynamicNames) {
     warnings.push("CI workflow surface contains a matrix-interpolating job display name whose rendered names cannot be statically enumerated; configured test-job identities are refused.");
     const surface = surfaceState();
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: new Map(), refusedJobs: parsed.jobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   const validatedJobs = new Map<string, TrustedCiTestScope>();
+  const refusedJobs = new Map<string, TrustedCiTestScope>();
   for (const [identity, scope] of parsed.jobs) {
     const plain = identities.staticNames.get(identity) ?? 0;
     const matrix = identities.matrixJobNames.get(identity) ?? 0;
     const rendered = identities.dynamicRenderedNames.get(identity) ?? 0;
     const total = plain + matrix + rendered;
     if (total === 0) {
+      // Kept as a declared-but-refused leg: the operator declared this scope,
+      // and evidence can never prove it, so an ask it covers must stay
+      // unresolved rather than being settled by a surviving green identity.
+      refusedJobs.set(identity, scope);
       warnings.push(`CI test jobs '${file.path}' identity '${identity}' does not name a static job in the base ref's GitHub workflows; ignoring it.`);
     } else if (total > 1) {
+      refusedJobs.set(identity, scope);
       warnings.push(`CI test jobs '${file.path}' identity '${identity}' names more than one job in the base ref's GitHub workflows; refusing the ambiguous identity.`);
     } else if (plain === 1) {
       validatedJobs.set(identity, scope);
     } else {
+      refusedJobs.set(identity, scope);
       warnings.push(`CI test jobs '${file.path}' identity '${identity}' names a matrix job (or a matrix-rendered display name); a check-run payload cannot prove every leg of that job ran, so the identity is refused.`);
     }
   }
   if (validatedJobs.size === 0) {
     const surface = surfaceState();
     if (surface.warning !== null) warnings.push(surface.warning);
-    return { jobs: validatedJobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
+    return { jobs: validatedJobs, refusedJobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   const surface = surfaceState();
   if (surface.warning !== null) warnings.push(surface.warning);
-  return { jobs: validatedJobs, warnings, sourcePath: file.path, identitiesRefused: false, workflowSurfaceTrusted: surface.trusted };
+  return { jobs: validatedJobs, refusedJobs, warnings, sourcePath: file.path, identitiesRefused: false, workflowSurfaceTrusted: surface.trusted };
 }

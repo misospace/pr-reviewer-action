@@ -26,8 +26,13 @@ function evidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<O
   return { headSha, finalState, checks: checks.map((check) => ({ ...check, conclusion: check.conclusion ?? null })) };
 }
 
-function configuredJobs(jobs: [string, TrustedCiTestScope][], workflowSurfaceTrusted = true, identitiesRefused = false): TrustedCiJobs {
-  return { jobs: new Map(jobs), identitiesRefused, workflowSurfaceTrusted };
+function configuredJobs(
+  jobs: [string, TrustedCiTestScope][],
+  workflowSurfaceTrusted = true,
+  identitiesRefused = false,
+  refusedJobs: [string, TrustedCiTestScope][] = [],
+): TrustedCiJobs {
+  return { jobs: new Map(jobs), refusedJobs: new Map(refusedJobs), identitiesRefused, workflowSurfaceTrusted };
 }
 
 function actionsEvidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<Omit<CiEvidenceCheck, "conclusion" | "origin"> & { conclusion?: string | null }>, headSha = HEAD): HeadBoundCiEvidence {
@@ -678,6 +683,67 @@ test("#1820 a refused matrix identity leaves only the pre-#1820 heuristics for i
     { name: "test", state: "success", conclusion: "success" },
   ], head);
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", bareSuite, head, refusedMatrix).outcome, "satisfied");
+});
+
+test("#1820 a refused declared identity stays required and cannot be outvoted by a surviving green leg", () => {
+  const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
+  const ask = "run full test suite after upgrade";
+  // The resolver honored validate-typescript and refused the matrix-origin
+  // validate-runtime-floor. The refused declaration is still part of the
+  // declared set, so it can never be satisfied by a same-named green row.
+  const mixed = configuredJobs(
+    [["validate-typescript", "full-suite"]],
+    true,
+    false,
+    [["validate-runtime-floor", "full-suite"]],
+  );
+  const oneGreen = actionsEvidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, oneGreen, head, mixed).reason, "configured-test-job-missing");
+  const bothGreen = actionsEvidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+    { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, bothGreen, head, mixed).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText("run the tests", bothGreen, head, mixed).reason, "configured-test-job-missing");
+  // A heuristic bare-suite row cannot route around the refused declaration
+  // either: the missing declared leg is checked before matching/discharge.
+  const heuristic = actionsEvidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+    { name: "Tests", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, heuristic, head, mixed).reason, "configured-test-job-missing");
+  assert.equal(reconcileRequiredCheckRows(evaluateRequiredCheckCoverage([ask], null).checks, bothGreen, head, mixed).rows[0]?.reason, "ci-evidence-configured-test-job-missing");
+  assert.equal(reconcileObligationsWithCiEvidence([
+    { id: "obligation-1", source: "must_check", text: ask, status: "unresolved", cause: null, reason: "no-disposition" },
+  ], bothGreen, head, mixed)[0]?.reason, "ci-evidence-configured-test-job-missing");
+
+  // Scope precision: a refused unit leg does not block an unrelated
+  // full-suite ask, but it does block a unit ask even when a surviving unit
+  // identity is green.
+  const mixedScopes = configuredJobs(
+    [["unit-one", "unit"], ["validate-typescript", "full-suite"]],
+    true,
+    false,
+    [["unit-two", "unit"]],
+  );
+  const unitGreen = actionsEvidence("success", [
+    { name: "unit-one", state: "success", conclusion: "success" },
+    { name: "unit-two", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText("run unit tests after upgrade", unitGreen, head, mixedScopes).reason, "configured-test-job-missing");
+  const fullGreen = actionsEvidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText(ask, fullGreen, head, mixedScopes).outcome, "satisfied");
+
+  // No honored identity at all keeps the pre-#1820 heuristic fallback: the
+  // refused declaration is not a required leg when the configured path is
+  // entirely inactive.
+  const allRefused = configuredJobs([], true, true, [["validate-typescript", "full-suite"]]);
+  const bareSuite = actionsEvidence("success", [{ name: "Tests", state: "success", conclusion: "success" }], head);
+  assert.equal(ciDischargeForCheckText(ask, bareSuite, head, allRefused).outcome, "satisfied");
 });
 
 test("#1820 evidence parser validates provenance while retaining old heuristic artifacts", () => {

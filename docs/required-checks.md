@@ -338,7 +338,11 @@ reconciliation above is unchanged for every repository that does not opt in.
   job trusted. For PRs into the protected default branch, only a change
   merged there can alter the file; for PRs into other branches, whoever can
   push the target branch controls it — the same base-ref trust every
-  repository-config file already has.
+  repository-config file already has. Both the config and the workflow-surface
+  scan read only Git objects of that ref (`git show` / `git ls-tree`), never
+  the checked-out working tree, so a head that replaces these paths with
+  symlinks to content outside the repository cannot redirect the configuration
+  or mint a job identity.
 - **Shape**: a `test-jobs` mapping from the check identity to the scope it
   proves. The identity is the check name the forge exposes, matched exactly
   (after trimming; case-sensitive — a mismatch stays unresolved, the
@@ -414,7 +418,14 @@ reconciliation above is unchanged for every repository that does not opt in.
   settings, not the PR. Any dynamic name on a reusable-workflow call (`uses:`)
   is PR-mintable regardless of what it interpolates (#1820 re-review). A
   PR-mintable name or an unreadable surface refuses ALL configured discharge;
-  an identity that names no single static job is refused individually. When every declared identity ends up
+  an identity that names no single static job is refused individually, but
+  remains DECLARED: it stays a required leg for its declared scope, and
+  because evidence can never match a refused identity the ask stays
+  unresolved instead of a surviving green identity settling it (#1820
+  re-review). Only an entry that never declared a usable scope (an invalid
+  scope value, an empty or overlong identity, a cap overflow, or a duplicate)
+  disappears without trace beyond its warning, because there is no scope to
+  require. When every declared identity ends up
   unhonored — a refused surface, malformed YAML that still declares entries,
   or declarations that all failed validation — the resolver computes the real
   workflow-surface state, reports the identities as refused, and the
@@ -433,7 +444,11 @@ reconciliation above is unchanged for every repository that does not opt in.
   `full-suite` identity must appear in the head-bound evidence and be green.
   This every-declared-leg rule also applies to generic asks (every
   `full-suite`-declared leg) and narrow asks (every leg declaring one of the
-  requested scopes), not only full-suite asks. One missing leg keeps the row
+  requested scopes), not only full-suite asks. A declaration refused at
+  config load (matrix-origin, ambiguous, or naming no static job) is still a
+  declared leg for its scope: it can never be satisfied, so the ask stays
+  unresolved rather than being outvoted by a surviving green identity. One
+  missing leg keeps the row
   unresolved (`configured-test-job-missing`) — even when an unrelated
   heuristic-matched `Tests` job is green. A red configured leg still
   contradicts (failure-first, unchanged); a pending or skipped-collapsed leg

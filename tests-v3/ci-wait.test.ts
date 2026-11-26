@@ -16,7 +16,7 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../src/platform
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function configuredJobs(jobs: [string, "full-suite"][]): import("../src/config/ci-test-jobs.js").TrustedCiJobs {
-  return { jobs: new Map(jobs), identitiesRefused: false, workflowSurfaceTrusted: true };
+  return { jobs: new Map(jobs), refusedJobs: new Map(), identitiesRefused: false, workflowSurfaceTrusted: true };
 }
 
 type Reply = { status?: number; body?: unknown; raw?: string; transport?: boolean };

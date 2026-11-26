@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
   resolveCiTestJobsFromRef,
 } from "../src/config/ci-test-jobs.js";
 import { RepositoryConfigError } from "../src/config/repository-config.js";
+import { ciDischargeForCheckText, type HeadBoundCiEvidence } from "../src/enforcement/required-check-ci.js";
 
 const PATH = CI_TEST_JOBS_CANDIDATE_PATHS[0];
 const BASE = "test-jobs:\n  validate-typescript: full-suite\n";
@@ -113,6 +114,41 @@ test("#1820 resolves only the trusted base tree and handles absent/unreadable re
   assert.equal(bad.workflowSurfaceTrusted, false);
   assert.ok(bad.warnings.length > 0);
   assert.deepEqual(resolveCiTestJobsFromRef({ baseRef: "" }).warnings, []);
+});
+
+test("#1820 trusted reads come from the base ref's object store, never the working tree", () => {
+  // The checkout a review runs in is not trusted: config and the workflow
+  // surface are read from the base ref's Git objects only. A hostile head
+  // that replaces the tracked paths with symlinks to content outside the
+  // repository therefore cannot redirect what becomes configuration, and
+  // cannot mint a job identity.
+  const root = initRepo();
+  writeFileSync(join(root, "README"), "seed");
+  writeConfig(root, PATH, BASE);
+  writeConfig(root, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
+  const base = commit(root, "base config");
+
+  const outside = mkdtempSync(join(tmpdir(), "ci-test-jobs-outside-"));
+  writeConfig(outside, "evil-config.yml", "test-jobs:\n  attacker: full-suite\n");
+  mkdirSync(join(outside, "evil-workflows"), { recursive: true });
+  writeFileSync(join(outside, "evil-workflows", "evil.yml"), "jobs:\n  attacker:\n    runs-on: ubuntu-latest\n");
+
+  rmSync(join(root, PATH));
+  symlinkSync(join(outside, "evil-config.yml"), join(root, PATH));
+  rmSync(join(root, ".github", "workflows"), { recursive: true, force: true });
+  symlinkSync(join(outside, "evil-workflows"), join(root, ".github", "workflows"));
+
+  const identities = ciJobIdentitiesFromRef(base, root);
+  assert.equal(identities.staticNames.get("validate-typescript"), 1);
+  assert.equal(identities.staticNames.has("attacker"), false);
+  assert.equal(identities.prMintable, false);
+  assert.equal(identities.warning, null);
+
+  const resolved = resolveCiTestJobsFromRef({ baseRef: base, headRef: base, workspace: root });
+  assert.deepEqual([...resolved.jobs], [["validate-typescript", "full-suite"]]);
+  assert.equal(resolved.jobs.has("attacker"), false);
+  assert.equal(resolved.identitiesRefused, false);
+  assert.equal(resolved.workflowSurfaceTrusted, true);
 });
 
 test("#1820 resolver validates configured identities against the complete base workflow surface", () => {
@@ -414,6 +450,35 @@ test("#1820 resolver validates configured identities against the complete base w
   assert.ok(failed.warning?.includes("could not be read"));
 });
 
+test("#1820 a partially refused declaration stays in the resolved required set", () => {
+  // One honored static identity and one matrix-origin identity refused at
+  // config load. The refused declaration must not disappear from the
+  // effective set: the every-declared-leg rule keeps the full-suite ask
+  // unresolved even when the surviving identity (and a same-named green row)
+  // would otherwise settle it.
+  const mixed = resolverFixture({
+    "static.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n",
+    "matrix.yml": "jobs:\n  suite:\n    name: validate-runtime-floor\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n",
+  }, ["validate-typescript", "validate-runtime-floor"]);
+  const resolved = resolveCiTestJobsFromRef({ baseRef: mixed.base, headRef: mixed.base, workspace: mixed.root });
+  assert.deepEqual([...resolved.jobs], [["validate-typescript", "full-suite"]]);
+  assert.deepEqual([...resolved.refusedJobs], [["validate-runtime-floor", "full-suite"]]);
+  assert.equal(resolved.identitiesRefused, false);
+  assert.ok(resolved.warnings.some((warning) => /matrix job/.test(warning)));
+
+  const head = mixed.base;
+  const evidence: HeadBoundCiEvidence = {
+    headSha: head,
+    finalState: "success",
+    checks: [
+      { name: "validate-typescript", state: "success", conclusion: "success", origin: "actions" },
+      { name: "validate-runtime-floor", state: "success", conclusion: "success", origin: "actions" },
+    ],
+  };
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", evidence, head, resolved).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", { ...evidence, checks: evidence.checks.slice(0, 1) }, head, resolved).reason, "configured-test-job-missing");
+});
+
 test("#1820 resolver degrades a malformed trusted file to no jobs with a surfaced warning", () => {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
@@ -556,6 +621,11 @@ test("#1820 engine wiring: the base-ref resolution precedes both enforcement fol
   assert.ok(baseOptions > resolution, "completenessBaseOptions consumes the resolved jobs and fence");
   const obligationsCall = engine.indexOf("{ jobs: ciTestJobs.jobs", baseOptions + 1);
   assert.ok(obligationsCall > baseOptions, "resolveReviewObligations consumes the resolved jobs and fence");
+  assert.equal(
+    (engine.match(/refusedJobs: ciTestJobs\.refusedJobs/g) ?? []).length,
+    2,
+    "both enforcement folds receive the refused declarations as required legs",
+  );
   assert.ok(
     engine.includes("reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha, trustedCiJobs)"),
     "the obligation fold receives the trusted jobs",
