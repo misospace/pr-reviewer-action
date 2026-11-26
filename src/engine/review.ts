@@ -732,6 +732,8 @@ function resolveReviewObligations(
     rawDiff: ws.readText("pr.diff"),
     candidatePaths,
     ciEvidence,
+    // #1821: this run's code-owned npm published-package comparison facts.
+    npmPackageComparisons: safeJson(ws.read("npm-package-comparisons.json")),
     reviewedHeadSha,
   });
   // #1577 (review fix): the risk discharge must be backed by the run's OWN
@@ -1623,6 +1625,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const npmPackagePromise = runNpmPackageProvenancePhase(ws, diffText, env, cancellation.scope.signal).catch((cause: unknown) => {
     errorLog(`npm package comparison failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("npm-package-provenance.md", "npm published-package comparison failed for this run.\n");
+    // The settlement artifact is cleared on the failure path too: nothing
+    // this run did not verify may credit the ledger from a prior derivation.
+    ws.write("npm-package-comparisons.json", "");
     return null;
   });
   const evidencePromise = runEvidencePhase(ws, env, forkFlag, runDir, log, cancellation.scope.signal).catch((cause: unknown) => {

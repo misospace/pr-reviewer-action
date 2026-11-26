@@ -87,6 +87,7 @@ import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { FORGE_READ_TOOL } from "../platform/endpoint.js";
 import { authoritativeRegistryPackageSlug, canonicalRegistryCatalogImageIdentity, dependencyEvidenceObligationsForCall, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, registryRedirectSourceMapping, sourceRepoSurfaceIdentity, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+import { MAX_NPM_COMPARISONS, NPM_COMPARISONS_ARTIFACT_SCHEMA, registryVersionDocUrl } from "../context/npm-package-provenance.js";
 
 export type { DependencyEvidenceObligation };
 
@@ -221,6 +222,11 @@ export interface EvidenceLedgerInput {
   candidatePaths?: readonly string[];
   /** The CI gate's head-bound evidence (null/absent = no CI receipts). */
   ciEvidence?: HeadBoundCiEvidence | null;
+  /** #1821: the parsed `npm-package-comparisons.json` artifact — the run's
+   * code-owned exact-published-package comparison facts (schema
+   * `npm-package-comparisons/v1`). Anything the strict reader does not accept
+   * contributes NOTHING (absent, never a guess). */
+  npmPackageComparisons?: unknown;
   /** The exact head this review is bound to. */
   reviewedHeadSha?: string;
 }
@@ -981,7 +987,84 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
       });
     }
   }
+  // #1821 (independent review): code-owned exact-published-package comparison
+  // receipts. The npm provenance phase compared both integrity- and manifest-
+  // verified published trees for a slug's exact old→new transition WITHOUT a
+  // Git tag; that fact must reach the settlement contract, not just the
+  // advisory corpus section (organic #1819: exact version documents and a
+  // successful tarball comparison, no tag/compare, and the mandatory
+  // release-delta row stayed unsettled because ordinary version-doc fetches
+  // attribute provenance only). Each verified comparison contributes one
+  // receipt per exact version document, targeting the canonical registry URL
+  // the run actually read — the #1748 authoritative-document identity for the
+  // slug — attributed `release_delta` because the CODE (not a lexical URL
+  // guess) established the compared old→new pair. Failed, mismatched, or
+  // partial comparisons are absent from the artifact and credit nothing;
+  // `security_advisory` is never attributed (no advisory was checked).
+  for (const receipt of npmComparisonReceipts(input.npmPackageComparisons)) {
+    if (receipts.some((existing) => existing.id === receipt.id)) continue;
+    if (receipts.length >= MAX_EXECUTED_CALL_INDEX + MAX_CORPUS_DIFF_RECEIPTS + MAX_CI_RECEIPTS + MAX_NPM_COMPARISON_RECEIPTS) break;
+    receipts.push(receipt);
+  }
   return { state: "valid", receipts };
+}
+
+/** Derived-receipt bound for the code-owned npm comparison class: the phase
+ * caps comparisons at `MAX_NPM_COMPARISONS` and each verified comparison
+ * yields at most two version-document receipts; the cap keeps a pathological
+ * artifact bounded. */
+export const MAX_NPM_COMPARISON_RECEIPTS = 2 * MAX_NPM_COMPARISONS;
+const MAX_NPM_RECEIPT_SLUG_LENGTH = 214;
+const MAX_NPM_RECEIPT_VERSION_LENGTH = 100;
+
+/** Strict reader for the `npm-package-comparisons/v1` artifact → code-owned
+ * receipts. Total and fail-closed: anything outside the exact schema (wrong
+ * schema id, non-array `verified`, a non-object entry, an over-cap or
+ * grammar-refused slug/version) is skipped — contributes nothing, never
+ * refuses the ledger (the artifact is this runtime's own record; the trace
+ * refusal rule belongs to the trace). */
+function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const record = value as Record<string, unknown>;
+  if (record.schema !== NPM_COMPARISONS_ARTIFACT_SCHEMA) return [];
+  const verified = record.verified;
+  if (!Array.isArray(verified)) return [];
+  const receipts: EvidenceReceipt[] = [];
+  const seen = new Set<string>();
+  for (const raw of verified) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    const slug = typeof entry.slug === "string" ? entry.slug.trim().toLowerCase() : "";
+    const oldVersion = typeof entry.oldVersion === "string" ? entry.oldVersion.trim().toLowerCase() : "";
+    const newVersion = typeof entry.newVersion === "string" ? entry.newVersion.trim().toLowerCase() : "";
+    if (slug === "" || oldVersion === "" || newVersion === "") continue;
+    if (slug.length > MAX_NPM_RECEIPT_SLUG_LENGTH || oldVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH || newVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH) continue;
+    // Receipts ride the SAME canonical version-document grammar the phase
+    // fetched through: anything it refuses produced no read and credits
+    // nothing.
+    const oldUrl = registryVersionDocUrl(slug, oldVersion);
+    const newUrl = registryVersionDocUrl(slug, newVersion);
+    if (oldUrl === null || newUrl === null) continue;
+    for (const [version, url] of [[oldVersion, oldUrl], [newVersion, newUrl]] as const) {
+      if (receipts.length >= MAX_NPM_COMPARISON_RECEIPTS) break;
+      const id = `npm-compare:${slug}@${version}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      receipts.push({
+        id,
+        kind: "web-fetch",
+        capability: "acquisition",
+        acquired: true,
+        complete: true,
+        // The registry answered at read time: upstream web state, not an
+        // exact-head acquisition — the same freshness every web receipt has.
+        freshness: "unbound",
+        trust: "web",
+        subject: { url, obligations: ["provenance", "release_delta"] },
+      });
+    }
+  }
+  return receipts;
 }
 
 // ---------------------------------------------------------------------------

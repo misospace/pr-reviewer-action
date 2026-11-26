@@ -24,7 +24,16 @@
  * - The unpack is bounded on every axis (compressed bytes, decompressed bytes,
  *   entry count, per-entry bytes) and rejects traversal, absolute paths, and
  *   every non-regular entry (symlink, hardlink, device, fifo, pax/global
- *   headers) and any malformed/truncated archive outright.
+ *   headers) and any malformed/truncated archive outright. Termination is
+ *   strict: the archive ends at TWO consecutive all-zero blocks (a single one
+ *   is a truncated terminator, a member after one is corruption), and only
+ *   zero padding may follow it (#1821 independent review).
+ * - The published manifest is content-checked, not merely present: the
+ *   integrity-verified `package/package.json` must parse and carry EXACTLY the
+ *   `name`/`version` the authoritative registry document declared, so a
+ *   registry response naming one version while its hashed tarball ships a
+ *   different manifest resolves UNRESOLVED instead of diffing an identity
+ *   nothing vouched for (#1821 independent review; AC3 "wrong package/version").
  * - A package-version delta is NOT a source-commit delta: this section never
  *   names a Git revision and never claims a clean semantic review from equal
  *   or differing published bytes.
@@ -62,6 +71,11 @@ export const MAX_NPM_TARBALL_BYTES = 16 * 1024 * 1024;
 export const MAX_NPM_EXTRACTED_BYTES = 32 * 1024 * 1024;
 export const MAX_NPM_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_NPM_ENTRIES = 20000;
+/** The published manifest is read as content (identity + declared
+ * dependencies), bounded: a `package/package.json` beyond this cap is not
+ * read at all — fail closed rather than parse a pathologically large untrusted
+ * document. Real published manifests are far below it. */
+export const MAX_NPM_MANIFEST_BYTES = 1024 * 1024;
 /** The rendered section is byte-capped so a single huge delta cannot dominate
  * the corpus; over-cap is truncated on a row boundary with a disclosure line. */
 export const MAX_NPM_SECTION_BYTES = 60 * 1024;
@@ -73,11 +87,25 @@ export const MAX_NPM_COMPARISONS = 12;
 /** The number of delta rows itemized before the rest is summarized. */
 export const MAX_NPM_DELTA_ROWS = 40;
 
+/** The published manifest's bounded, structured content: the identity fields
+ * verified against the registry document, plus the production dependency
+ * declarations as published (name → declared range) — the decision-relevant
+ * "changed declarations" a file-hash delta cannot show. */
+export interface PackageManifest {
+  name: string;
+  version: string;
+  dependencies: Record<string, string>;
+}
+
 /** A package's published contents reduced to a path → content-sha256 map. */
 export interface PackageTree {
   /** Paths are relative to the package root (the `package/` member prefix is
    * stripped); always safe, traversal-free, slash-separated. */
   files: Map<string, string>;
+  /** The parsed `package/package.json`, or `null` when the archive carries no
+   * manifest at all (presence is the `package-manifest-missing` boundary; a
+   * malformed or non-object manifest never reaches here — it throws). */
+  manifest: PackageManifest | null;
 }
 
 /** Why a single published version could not be read and compared. A closed
@@ -99,7 +127,9 @@ export type NpmUnresolvedReason =
   | "archive-entry-rejected"
   | "archive-too-large"
   | "archive-too-many-entries"
-  | "package-manifest-missing";
+  | "package-manifest-missing"
+  | "package-manifest-invalid"
+  | "package-manifest-mismatch";
 
 export interface NpmPackageFailure {
   version: string;
@@ -112,12 +142,29 @@ export interface NpmPackageDelta {
   changed: string[];
 }
 
+/** Published production-dependency declarations compared old→new — the
+ * "changed declarations" a file-hash delta cannot show (#1821 independent
+ * review). Entries are registry-controlled untrusted strings; they render
+ * only through `safeInline`. */
+export interface NpmDependencyDelta {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
 export interface NpmPackageComparison {
   slug: string;
   oldVersion: string;
   newVersion: string;
   /** Set only when BOTH versions were read, verified, and unpacked cleanly. */
   delta: NpmPackageDelta | null;
+  /** Published `dependencies` declarations compared, same condition as `delta`. */
+  dependencyDelta: NpmDependencyDelta | null;
+  /** The `repository.url` each version's authoritative registry document
+   * declared (the registry's own source metadata; null when absent or on a
+   * failed read). */
+  oldSourceRepository: string | null;
+  newSourceRepository: string | null;
   /** Per-version failures (old first, then new); empty when both succeeded. */
   failures: NpmPackageFailure[];
 }
@@ -129,6 +176,10 @@ interface VersionDocument {
   integrity: string | null;
   shasum: string | null;
   tarball: string | null;
+  /** The `repository.url` the registry document itself declares — the
+   * registry-side source metadata the rendered section surfaces alongside the
+   * delta (#1821 independent review: the section dropped it entirely). */
+  repository: string | null;
 }
 
 /** An internal fail-closed signal carrying the closed unresolved reason. */
@@ -192,12 +243,16 @@ function readVersionDocument(raw: unknown): VersionDocument {
   const dist = (doc.dist !== null && typeof doc.dist === "object" && !Array.isArray(doc.dist))
     ? doc.dist as Record<string, unknown>
     : {};
+  const repository = (doc.repository !== null && typeof doc.repository === "object" && !Array.isArray(doc.repository))
+    ? ((doc.repository as Record<string, unknown>).url ?? null)
+    : (typeof doc.repository === "string" ? doc.repository : null);
   return {
     name,
     version,
     integrity: typeof dist.integrity === "string" ? dist.integrity : null,
     shasum: typeof dist.shasum === "string" ? dist.shasum : null,
     tarball: typeof dist.tarball === "string" ? dist.tarball : null,
+    repository: typeof repository === "string" ? repository : null,
   };
 }
 
@@ -298,6 +353,7 @@ export function extractPackageTree(tarball: Uint8Array): PackageTree {
   }
   const files = new Map<string, string>();
   const seen = new Set<string>();
+  let manifestBytes: Buffer | null = null;
   let offset = 0;
   let entries = 0;
   let extractedBytes = 0;
@@ -319,9 +375,19 @@ export function extractPackageTree(tarball: Uint8Array): PackageTree {
       throw new UnresolvedError("archive-truncated");
     }
     const block = tar.subarray(offset, offset + 512);
-    // Two consecutive all-zero blocks terminate the archive; an all-zero first
-    // block of a pair is a clean end.
+    // Strict POSIX terminator (#1821 independent review): the archive ends at
+    // TWO consecutive all-zero blocks. A single all-zero block with fewer than
+    // 512 bytes left is a truncated terminator; a member/header following one
+    // is a corrupt stream (real tar writers never emit data after the
+    // terminator). After the pair, only zero padding may follow.
     if (block.every((byte) => byte === 0)) {
+      if (offset + 2 * 512 > tar.length) throw new UnresolvedError("archive-truncated");
+      if (!tar.subarray(offset + 512, offset + 1024).every((byte) => byte === 0)) {
+        throw new UnresolvedError("archive-malformed");
+      }
+      for (let tail = offset + 1024; tail < tar.length; tail += 1) {
+        if (tar[tail] !== 0) throw new UnresolvedError("archive-malformed");
+      }
       break;
     }
     if (!headerChecksumOk(block)) throw new UnresolvedError("archive-malformed");
@@ -378,16 +444,60 @@ export function extractPackageTree(tarball: Uint8Array): PackageTree {
     seen.add(key);
     const content = tar.subarray(dataStart, dataStart + size);
     files.set(key, createHash("sha256").update(content).digest("hex"));
+    if (key === "package.json") {
+      // The manifest is read as CONTENT (identity + declared dependencies),
+      // bounded (#1821 independent review: presence alone accepted a tarball
+      // shipping a manifest that contradicts the version document).
+      if (size > MAX_NPM_MANIFEST_BYTES) throw new UnresolvedError("package-manifest-invalid");
+      manifestBytes = Buffer.from(content);
+    }
   }
-  return { files };
+  return { files, manifest: parsePublishedManifest(manifestBytes) };
 }
 
-/** Confirm an unpacked tree carries the published manifest. The package
- * identity (name + version) is bound by the registry version document, which
- * the integrity-verified tarball is pinned to, so the manifest's presence is
- * the remaining structural requirement here. */
-function verifyPackageManifest(tree: PackageTree): NpmUnresolvedReason | null {
+/** Parse the integrity-verified `package/package.json`. A missing manifest is
+ * `null` (the `package-manifest-missing` boundary); anything present but not
+ * a JSON object with string `name`/`version` is malformed content and fails
+ * closed as `package-manifest-invalid`. `dependencies` keeps only string →
+ * string entries from an object-valued field; anything else is nothing. */
+function parsePublishedManifest(raw: Buffer | null): PackageManifest | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString("utf8"));
+  } catch {
+    throw new UnresolvedError("package-manifest-invalid");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new UnresolvedError("package-manifest-invalid");
+  }
+  const doc = parsed as Record<string, unknown>;
+  const name = typeof doc.name === "string" ? doc.name : "";
+  const version = typeof doc.version === "string" ? doc.version : "";
+  if (name === "" || version === "") throw new UnresolvedError("package-manifest-invalid");
+  const dependencies: Record<string, string> = {};
+  if (doc.dependencies !== null && typeof doc.dependencies === "object" && !Array.isArray(doc.dependencies)) {
+    for (const [dep, range] of Object.entries(doc.dependencies as Record<string, unknown>)) {
+      if (typeof range === "string") dependencies[dep] = range;
+    }
+  }
+  return { name, version, dependencies };
+}
+
+/** Confirm an unpacked tree carries the published manifest AND that its
+ * content speaks about exactly the identity the authoritative registry
+ * version document declared (#1821 independent review: a registry response
+ * naming the requested version must not ship a tarball whose manifest claims
+ * a different package/version — the integrity pin binds the BYTES, and this
+ * binds what those bytes say they are). The comparison's identity authority
+ * is the version document, so the manifest must agree with it, and the
+ * normalized-slug spelling matches the document check in `acquireVersion`. */
+function verifyPackageManifest(tree: PackageTree, slug: string, version: string): NpmUnresolvedReason | null {
   if (tree.files.get("package.json") === undefined) return "package-manifest-missing";
+  const manifest = tree.manifest;
+  if (manifest === null) return "package-manifest-missing";
+  if (scopeNormalizedSlug(manifest.name) !== slug) return "package-manifest-mismatch";
+  if (manifest.version !== version) return "package-manifest-mismatch";
   return null;
 }
 
@@ -395,13 +505,20 @@ function verifyPackageManifest(tree: PackageTree): NpmUnresolvedReason | null {
 // Per-version acquisition
 // ---------------------------------------------------------------------------
 
+interface AcquiredVersion {
+  tree: PackageTree;
+  /** The `repository.url` the authoritative document declared (bounded at
+   * render; never trusted beyond being the document's own claim). */
+  repository: string | null;
+}
+
 async function acquireVersion(
   slug: string,
   version: string,
   fetchJson: NpmFetchJson,
   fetchBytes: NpmFetchBytes,
   deadline: number | null,
-): Promise<PackageTree> {
+): Promise<AcquiredVersion> {
   if (deadline !== null && Date.now() >= deadline) throw new UnresolvedError("registry-fetch-failed");
   const docUrl = registryVersionDocUrl(slug, version);
   if (docUrl === null) throw new UnresolvedError("registry-url-refused");
@@ -425,12 +542,13 @@ async function acquireVersion(
   if (integrityFailure !== null) throw new UnresolvedError(integrityFailure);
 
   const tree = extractPackageTree(tarball);
-  const manifestFailure = verifyPackageManifest(tree);
+  const manifestFailure = verifyPackageManifest(tree, slug, version);
   if (manifestFailure !== null) throw new UnresolvedError(manifestFailure);
   // The published manifest is integrity-bound to the registry version document
-  // (whose `name`/`version` we matched above), so that document is the identity
-  // authority; the tree is the content this section diffs.
-  return tree;
+  // (whose `name`/`version` we matched above) AND content-checked against it
+  // (`verifyPackageManifest`), so that document is the identity authority and
+  // the tree is the content this section diffs.
+  return { tree, repository: doc.repository };
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +566,30 @@ function computeDelta(oldTree: PackageTree, newTree: PackageTree): NpmPackageDel
     if (before === undefined) added.push(path);
     else if (after === undefined) removed.push(path);
     else if (before !== after) changed.push(path);
+  }
+  added.sort();
+  removed.sort();
+  changed.sort();
+  return { added, removed, changed };
+}
+
+/** Compare the two published manifests' production dependency declarations.
+ * `added`/`removed` entries read `name@range`; `changed` reads
+ * `name: old → new`. */
+function computeDependencyDelta(
+  oldManifest: PackageManifest,
+  newManifest: PackageManifest,
+): NpmDependencyDelta {
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
+  const names = new Set<string>([...Object.keys(oldManifest.dependencies), ...Object.keys(newManifest.dependencies)]);
+  for (const name of names) {
+    const before = oldManifest.dependencies[name];
+    const after = newManifest.dependencies[name];
+    if (before === undefined) added.push(`${name}@${after}`);
+    else if (after === undefined) removed.push(`${name}@${before}`);
+    else if (before !== after) changed.push(`${name}: ${before} → ${after}`);
   }
   added.sort();
   removed.sort();
@@ -477,20 +619,32 @@ export async function compareNpmPackage(
 ): Promise<NpmPackageComparison> {
   const deadline = options.deadline ?? null;
   const failures: NpmPackageFailure[] = [];
-  let oldTree: PackageTree | null = null;
-  let newTree: PackageTree | null = null;
+  let oldAcquired: AcquiredVersion | null = null;
+  let newAcquired: AcquiredVersion | null = null;
   try {
-    oldTree = await acquireVersion(slug, oldVersion, options.fetchJson, options.fetchBytes, deadline);
+    oldAcquired = await acquireVersion(slug, oldVersion, options.fetchJson, options.fetchBytes, deadline);
   } catch (error) {
     failures.push({ version: oldVersion, reason: reasonOf(error) });
   }
   try {
-    newTree = await acquireVersion(slug, newVersion, options.fetchJson, options.fetchBytes, deadline);
+    newAcquired = await acquireVersion(slug, newVersion, options.fetchJson, options.fetchBytes, deadline);
   } catch (error) {
     failures.push({ version: newVersion, reason: reasonOf(error) });
   }
-  const delta = oldTree !== null && newTree !== null ? computeDelta(oldTree, newTree) : null;
-  return { slug, oldVersion, newVersion, delta, failures };
+  const dependencyDelta = oldAcquired !== null && newAcquired !== null
+    // Both manifests passed `verifyPackageManifest`, so neither is null here.
+    ? computeDependencyDelta(oldAcquired.tree.manifest!, newAcquired.tree.manifest!)
+    : null;
+  return {
+    slug,
+    oldVersion,
+    newVersion,
+    delta: oldAcquired !== null && newAcquired !== null ? computeDelta(oldAcquired.tree, newAcquired.tree) : null,
+    dependencyDelta,
+    oldSourceRepository: oldAcquired?.repository ?? null,
+    newSourceRepository: newAcquired?.repository ?? null,
+    failures,
+  };
 }
 
 function reasonOf(error: unknown): NpmUnresolvedReason {
@@ -531,6 +685,8 @@ const REASON_TEXT: Record<NpmUnresolvedReason, string> = {
   "archive-too-large": "the published archive exceeded a decompressed or per-file size bound",
   "archive-too-many-entries": "the published archive exceeded the entry-count bound",
   "package-manifest-missing": "the published archive contained no package/package.json manifest",
+  "package-manifest-invalid": "the published package/package.json was not readable as a manifest (not a JSON object with string name and version, or over the manifest size bound)",
+  "package-manifest-mismatch": "the manifest inside the published tarball names a different package/version than the registry document declares (fail closed)",
 };
 
 function renderDelta(delta: NpmPackageDelta): string[] {
@@ -553,6 +709,46 @@ function renderDelta(delta: NpmPackageDelta): string[] {
   return lines;
 }
 
+/** The changed production dependency declarations between the two published
+ * manifests — the "changed declarations" a file-hash delta cannot show. */
+function renderDependencyDelta(delta: NpmDependencyDelta): string[] {
+  const lines: string[] = [];
+  const total = delta.added.length + delta.removed.length + delta.changed.length;
+  lines.push(`- Published \`dependencies\` declarations: ${total === 0 ? "**unchanged** (identical production dependency set)" : `${total} declaration change(s)`}`);
+  const renderList = (label: string, items: string[]): void => {
+    if (items.length === 0) return;
+    const shown = items.slice(0, MAX_NPM_DELTA_ROWS);
+    lines.push(`  - ${label} (${items.length}):`);
+    for (const item of shown) lines.push(`    - \`${safeInline(item)}\``);
+    if (items.length > shown.length) lines.push(`    - (+${items.length - shown.length} more)`);
+  };
+  renderList("Added dependencies", delta.added);
+  renderList("Removed dependencies", delta.removed);
+  renderList("Changed dependency ranges", delta.changed);
+  return lines;
+}
+
+/** The registry documents' own source metadata (#1821 independent review:
+ * rendered deltas dropped it) — what each version document CLAIMS as its
+ * repository, as a bounded claim, never a verified mapping. */
+function renderSourceRepositories(comparison: NpmPackageComparison): string[] {
+  const { oldSourceRepository, newSourceRepository } = comparison;
+  if (oldSourceRepository === null && newSourceRepository === null) {
+    return ["- Neither exact version document declares a source repository (`repository.url`)."];
+  }
+  if (oldSourceRepository !== null && oldSourceRepository === newSourceRepository) {
+    return [`- Both exact version documents declare the same source repository: \`${safeInline(oldSourceRepository)}\` (the document's own claim, not a verified mapping).`];
+  }
+  const lines: string[] = [];
+  if (oldSourceRepository !== null) {
+    lines.push(`- \`${safeInline(comparison.oldVersion)}\` version document declares source repository: \`${safeInline(oldSourceRepository)}\` (the document's own claim, not a verified mapping).`);
+  }
+  if (newSourceRepository !== null) {
+    lines.push(`- \`${safeInline(comparison.newVersion)}\` version document declares source repository: \`${safeInline(newSourceRepository)}\` (the document's own claim, not a verified mapping).`);
+  }
+  return lines;
+}
+
 function renderComparison(comparison: NpmPackageComparison): string[] {
   const slugLabel = safeInline(comparison.slug);
   const lines: string[] = [];
@@ -565,11 +761,13 @@ function renderComparison(comparison: NpmPackageComparison): string[] {
     lines.push("- Delta: **unresolved** (a failed read is never reported as a clean or empty delta)");
     return lines;
   }
-  lines.push("- Both exact version documents read from the authoritative npm registry; both published tarballs integrity-verified against the registry's own metadata.");
+  lines.push("- Both exact version documents read from the authoritative npm registry; both published tarballs integrity-verified against the registry's own metadata, and each published manifest names exactly the package/version its document declared.");
+  lines.push(...renderSourceRepositories(comparison));
   if (comparison.delta !== null) {
     lines.push("- Comparison method: **exact published package contents** (the Git version tag is not required and was not used).");
     lines.push(...renderDelta(comparison.delta));
-    lines.push("- This is a **package-version delta**, not a source-commit delta — it names no Git revision and asserts no semantic verdict.");
+    if (comparison.dependencyDelta !== null) lines.push(...renderDependencyDelta(comparison.dependencyDelta));
+    lines.push("- File paths and declarations are the limit of what was compared: **no source content was semantically reviewed**. This is a **package-version delta**, not a source-commit delta — it names no Git revision and asserts no semantic verdict about the upstream API.");
   }
   return lines;
 }
@@ -642,4 +840,39 @@ export async function buildNpmPackageProvenance(
     comparisons.push(await compareNpmPackage(change.slug, change.oldVersion, change.newVersion, options));
   }
   return { markdown: renderNpmPackageProvenance(comparisons, skipped), comparisons };
+}
+
+// ---------------------------------------------------------------------------
+// Settlement-contract artifact (#1821 AC1)
+// ---------------------------------------------------------------------------
+
+/** Schema id of the run artifact carrying the COMPARISON FACT for the
+ * evidence-receipt ledger. Minimal by design: one entry per comparison whose
+ * BOTH exact published versions were read, identity- and integrity-verified,
+ * unpacked, and manifest-checked — i.e. exactly `delta !== null` with zero
+ * failures. Failed, mismatched, or partial comparisons contribute NOTHING:
+ * the ledger-side reader credits only what this code actually verified, and
+ * nothing here asserts a verdict (the semantic judgment stays the reviewer's
+ * and the disposition layer's). */
+export const NPM_COMPARISONS_ARTIFACT_SCHEMA = "npm-package-comparisons/v1";
+
+export interface NpmVerifiedComparisonEntry {
+  slug: string;
+  oldVersion: string;
+  newVersion: string;
+}
+
+/** The artifact JSON the phase writes; `""` means "nothing verified this
+ * run" (also the clear-stale write on every early/failed path). */
+export function npmComparisonsArtifactJson(comparisons: readonly NpmPackageComparison[]): string {
+  const verified: NpmVerifiedComparisonEntry[] = [];
+  for (const comparison of comparisons) {
+    if (comparison.delta === null || comparison.failures.length !== 0) continue;
+    verified.push({
+      slug: comparison.slug,
+      oldVersion: comparison.oldVersion,
+      newVersion: comparison.newVersion,
+    });
+  }
+  return `${JSON.stringify({ schema: NPM_COMPARISONS_ARTIFACT_SCHEMA, verified })}\n`;
 }

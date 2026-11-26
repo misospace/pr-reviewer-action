@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import {
+  NPM_COMPARISONS_ARTIFACT_SCHEMA,
   buildNpmPackageProvenance,
+  npmComparisonsArtifactJson,
   type NpmFetchBytes,
   type NpmFetchJson,
 } from "../src/context/index.js";
@@ -68,10 +70,16 @@ const DOC_URL = (version: string): string => `https://registry.npmjs.org/@types%
 const TARBALL_URL = (version: string): string => `https://registry.npmjs.org/@types/node/-/node-${version}.tgz`;
 
 /** The published tree for one version: the new version carries one extra
- * file and a changed declaration, so the delta is non-empty and observable. */
+ * file, one changed declared dependency, and one added declared dependency,
+ * so both the file-level and the declaration-level deltas are observable
+ * (#1821 independent review: paths alone cannot establish whether the
+ * upstream API changed — the bounded declarations are rendered alongside). */
 function publishedTarball(version: string, extra?: { name: string; body: string }): Uint8Array {
+  const dependencies = version === "26.6.7"
+    ? { "undici-types": "~6.21.0", "@types/express": "^4.17.0" }
+    : { "undici-types": "~7.0.0", "new-required": "^1.0.0" };
   const members: TarMember[] = [
-    { name: "package/package.json", body: JSON.stringify({ name: "@types/node", version }) },
+    { name: "package/package.json", body: JSON.stringify({ name: "@types/node", version, dependencies }) },
     { name: "package/index.d.ts", body: `// ${version}\n` },
   ];
   if (extra !== undefined) members.push({ name: `package/${extra.name}`, body: extra.body });
@@ -82,6 +90,7 @@ function registryDoc(version: string, tarball: Uint8Array): Record<string, unkno
   return {
     name: "@types/node",
     version,
+    repository: { url: "git+https://github.com/DefinitelyTyped/DefinitelyTyped.git", directory: `types/node` },
     dist: {
       tarball: TARBALL_URL(version),
       integrity: `sha512-${createHash("sha512").update(tarball).digest("base64")}`,
@@ -95,7 +104,7 @@ const TARBALLS: Record<string, Uint8Array> = {
 };
 
 /** Render the section through the pure comparison driver over fake seams. */
-async function renderSection(): Promise<string> {
+async function renderFixture(): Promise<{ markdown: string; comparisons: Awaited<ReturnType<typeof buildNpmPackageProvenance>>["comparisons"] }> {
   const fetchJson: NpmFetchJson = async (url) => {
     const version = url.slice(DOC_URL("").length);
     const tarball = TARBALLS[version];
@@ -106,11 +115,10 @@ async function renderSection(): Promise<string> {
     const version = /node-(.+)\.tgz$/.exec(new URL(url).pathname)?.[1] ?? "";
     return TARBALLS[version] ?? null;
   };
-  const { markdown } = await buildNpmPackageProvenance(
+  return buildNpmPackageProvenance(
     [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }],
     { fetchJson, fetchBytes },
   );
-  return markdown;
 }
 
 // ── Corpus fixtures (mirroring corpus.test.ts's required workspace) ───────
@@ -260,7 +268,7 @@ test("bumps past the per-run cap are disclosed unfetched, never silently dropped
 });
 
 test("the seam-driven comparison renders the resolved package-version delta", async () => {
-  const markdown = await renderSection();
+  const { markdown } = await renderFixture();
   assert.ok(markdown.includes("## `types/node` 26.6.7 → 26.6.10"), "the bump row renders with the scope-normalized slug");
   assert.ok(markdown.includes("exact published package contents"), "the comparison method is disclosed");
   assert.ok(markdown.includes("package-version delta"), "the delta is never read as a source-commit delta");
@@ -268,12 +276,28 @@ test("the seam-driven comparison renders the resolved package-version delta", as
   assert.ok(markdown.includes("`added.d.ts`"));
   assert.ok(markdown.includes("- Changed files (2):"), "the changed declaration is itemized");
   assert.ok(markdown.includes("`index.d.ts`"));
+  // #1821 independent review: the actual changed declarations and the
+  // registry's own source metadata render alongside the file-level delta.
+  assert.ok(markdown.includes("Changed dependency ranges (1):"));
+  assert.ok(markdown.includes("`undici-types: ~6.21.0 → ~7.0.0`"), "the changed range is itemized");
+  assert.ok(markdown.includes("`@types/express@^4.17.0`"), "the removed declaration is itemized");
+  assert.ok(markdown.includes("`new-required@^1.0.0`"), "the added declaration is itemized");
+  assert.ok(markdown.includes("declare the same source repository"), "the registry-declared source metadata is rendered");
+  assert.ok(markdown.includes("not a verified mapping"), "…as the document's claim, never a verified mapping");
   assert.ok(!markdown.includes(": **unresolved**"), "a fully verified read renders no unresolved version row");
   assert.ok(!markdown.includes("Delta: **unresolved**"), "the delta is resolved, not fail-closed");
 });
 
+test("the #1819 verified comparison lands in the settlement artifact (#1821 AC1)", async () => {
+  const { comparisons } = await renderFixture();
+  const artifact = JSON.parse(npmComparisonsArtifactJson(comparisons)) as { schema: string; verified: unknown[] };
+  assert.equal(artifact.schema, NPM_COMPARISONS_ARTIFACT_SCHEMA);
+  assert.deepEqual(artifact.verified, [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }],
+    "the exact tag-less comparison the Markdown discloses is the same fact the ledger consumes");
+});
+
 test("the rendered section rides in the corpus body between the provenance sections", async () => {
-  const markdown = await renderSection();
+  const { markdown } = await renderFixture();
   const withSection = buildReviewCorpus(
     { ...baseWorkspace(), npmPackageProvenanceMd: new TextEncoder().encode(markdown) },
     baseOptions,

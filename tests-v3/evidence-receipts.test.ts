@@ -1214,3 +1214,80 @@ test("#1763: the strict scope parser refuses kind/digest/version shapes off the 
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1821 (independent review): code-owned exact-published-package comparison
+// receipts. The npm provenance phase's verified comparison must reach the
+// settlement contract as canonical version-document receipts attributed
+// `release_delta` — the fact ordinary lexical attribution of a plain
+// registry-doc fetch never grants. Failed/partial comparisons are absent
+// from the artifact; malformed artifacts contribute nothing.
+// ---------------------------------------------------------------------------
+
+function npmLedger(npmPackageComparisons?: unknown): EvidenceLedger {
+  return buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "package-lock.json" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "lockfile" } }],
+    ...(npmPackageComparisons === undefined ? {} : { npmPackageComparisons }),
+  });
+}
+
+test("#1821: a verified npm comparison yields canonical version-document receipts with release_delta attribution", () => {
+  const ledger = npmLedger({
+    schema: "npm-package-comparisons/v1",
+    verified: [
+      { slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" },
+      // A second comparison sharing the 26.6.10 endpoint dedupes by id.
+      { slug: "types/node", oldVersion: "26.6.10", newVersion: "26.6.11" },
+    ],
+  });
+  const npm = ledger.receipts.filter((receipt) => receipt.id.startsWith("npm-compare:"));
+  assert.deepEqual(npm.map((receipt) => receipt.id).sort(), [
+    "npm-compare:types/node@26.6.10",
+    "npm-compare:types/node@26.6.11",
+    "npm-compare:types/node@26.6.7",
+  ]);
+  for (const receipt of npm) {
+    assert.equal(receipt.kind, "web-fetch");
+    assert.equal(receipt.capability, "acquisition");
+    assert.equal(receipt.acquired, true);
+    assert.equal(receipt.complete, true);
+    // Upstream registry state at read time — never an exact-head acquisition.
+    assert.equal(receipt.freshness, "unbound");
+    assert.equal(receipt.trust, "web");
+    assert.deepEqual(receipt.subject.obligations, ["provenance", "release_delta"]);
+  }
+  assert.equal(npm.find((receipt) => receipt.id.endsWith("@26.6.7"))!.subject.url, "https://registry.npmjs.org/@types%2Fnode/26.6.7");
+  assert.equal(npm.find((receipt) => receipt.id.endsWith("@26.6.11"))!.subject.url, "https://registry.npmjs.org/@types%2Fnode/26.6.11");
+});
+
+test("#1821: malformed npm comparison artifacts contribute nothing and never refuse the ledger", () => {
+  for (const junk of [
+    null,
+    "not-an-object",
+    42,
+    [],
+    { schema: "other/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: "nope" },
+    { schema: "npm-package-comparisons/v1", verified: [null, 1, [], { slug: "types/node" }] },
+    // A slug/version the registry URL grammar itself refuses produced no read.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "latest", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "@@bad/slug@", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    // Over-cap identity fields stay out of the artifact's canonical bounds.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "a".repeat(300), oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "lodash", oldVersion: "1.0.0", newVersion: "2.0.0".repeat(40) }] },
+  ]) {
+    const ledger = npmLedger(junk);
+    assert.equal(ledger.state, "valid");
+    assert.equal(
+      ledger.receipts.filter((receipt) => receipt.id.startsWith("npm-compare:")).length,
+      0,
+      `junk ${JSON.stringify(junk)?.slice(0, 80)} must contribute nothing`,
+    );
+  }
+});
+
+test("#1821: npm comparison receipts round-trip the strict ledger artifact", () => {
+  const ledger = npmLedger({ schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] });
+  assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
+});

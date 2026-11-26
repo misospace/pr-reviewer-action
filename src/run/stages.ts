@@ -40,7 +40,7 @@ import {
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
 import { parseDependencyScope, type DependencyScopeSideProvenance } from "../classification/classify.js";
-import { MAX_NPM_COMPARISONS, buildNpmPackageProvenance } from "../context/npm-package-provenance.js";
+import { MAX_NPM_COMPARISONS, buildNpmPackageProvenance, npmComparisonsArtifactJson } from "../context/npm-package-provenance.js";
 import { createNpmFetches, npmPackageDeadline } from "../context/npm-package-transport.js";
 import {
   MAX_SYNTAX_BYTES,
@@ -406,6 +406,10 @@ export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: strin
  * closed and the section reports every version unresolved — never a fabricated
  * delta. */
 export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
+  // Clear any prior same-head derivation FIRST (#1821 AC1): the settlement
+  // artifact rides the shared run directory, so a stale verified list must
+  // never survive into — or past — this run's ledger, on every path.
+  ws.write("npm-package-comparisons.json", "");
   const comparable = npmPackageChangesFromDiff(diffText);
   if (comparable.length === 0) {
     ws.write("npm-package-provenance.md", "");
@@ -427,11 +431,17 @@ export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: s
     deadline,
     ...(signal !== undefined ? { signal } : {}),
   });
-  const { markdown } = await buildNpmPackageProvenance(changes, {
+  const { markdown, comparisons } = await buildNpmPackageProvenance(changes, {
     fetchJson,
     fetchBytes,
     deadline,
   }, skipped);
+  // #1821 AC1: the structured comparison FACT rides its own artifact so the
+  // evidence-receipt ledger (the settlement contract) credits the exact
+  // published-package comparison — advisory Markdown alone left the mandatory
+  // release-delta row unsettled when no Git tag/compare exists (independent
+  // review). Failed/partial comparisons are simply absent from the list.
+  ws.write("npm-package-comparisons.json", npmComparisonsArtifactJson(comparisons));
   ws.write("npm-package-provenance.md", markdown);
   return markdown;
 }

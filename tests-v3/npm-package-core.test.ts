@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import {
+  NPM_COMPARISONS_ARTIFACT_SCHEMA,
   NPM_REGISTRY_ORIGIN,
   buildNpmPackageProvenance,
   compareNpmPackage,
   extractPackageTree,
+  npmComparisonsArtifactJson,
   registryEncodedName,
   registryVersionDocUrl,
   renderNpmPackageProvenance,
@@ -53,9 +55,12 @@ function header(member: Member): Buffer {
   return Buffer.concat([block, data]);
 }
 
-function buildTarGz(members: Member[]): Uint8Array {
+/** @param tail raw bytes appended after the members instead of the default
+ * two-zero-block terminator — the adversarial terminator cases control the
+ * archive's exact ending. */
+function buildTarGz(members: Member[], tail?: Buffer): Uint8Array {
   const parts = members.map(header);
-  parts.push(Buffer.alloc(1024)); // two zero terminator blocks
+  parts.push(tail ?? Buffer.alloc(1024)); // two zero terminator blocks
   return new Uint8Array(gzipSync(Buffer.concat(parts)));
 }
 
@@ -366,6 +371,9 @@ test("renderNpmPackageProvenance renders fence- and heading-forge payloads as in
     oldVersion: "1.0.0",
     newVersion: "1.0.1",
     delta: { added: [], removed: [], changed: [fenceForge, crlfForge, longPayload] },
+    dependencyDelta: null,
+    oldSourceRepository: null,
+    newSourceRepository: null,
     failures: [],
   };
   const markdown = renderNpmPackageProvenance([comparison]);
@@ -417,4 +425,206 @@ test("buildNpmPackageProvenance renders a backtick-bearing published member path
     "# Published npm Package Comparison",
     "## `types/node` 1.0.0 → 1.0.1",
   ]);
+});
+
+// ── #1821 independent review: the STRICT archive terminator ─────────────────
+// Accepting the FIRST all-zero block let a truncated terminator (or even a
+// valid member after one) read as a verified tree. The archive ends only at
+// TWO consecutive zero blocks, with zero padding permitted after it.
+
+test("extractPackageTree requires the complete two-zero-block terminator (#1821 independent review)", () => {
+  const members: Member[] = [
+    { name: "package/package.json", body: '{"name":"@types/node","version":"1.0.0"}' },
+    { name: "package/index.d.ts", body: "// v\n" },
+  ];
+  // A single zero block after valid members is a TRUNCATED terminator.
+  assert.match(unresolvedReason(() => extractPackageTree(buildTarGz(members, Buffer.alloc(512)))), /archive-truncated/);
+  // A member following one zero block is a corrupt stream, not a clean end.
+  const memberAfterZero = Buffer.concat([
+    Buffer.alloc(512),
+    header({ name: "package/hidden.d.ts", body: "// after the 'terminator'\n" }),
+    Buffer.alloc(1024),
+  ]);
+  assert.match(unresolvedReason(() => extractPackageTree(buildTarGz(members, memberAfterZero))), /archive-malformed/);
+  // Non-zero bytes after the complete terminator are corrupt too.
+  const junkTail = Buffer.concat([Buffer.alloc(1024), Buffer.from("junk after the archive", "utf8")]);
+  assert.match(unresolvedReason(() => extractPackageTree(buildTarGz(members, junkTail))), /archive-malformed/);
+  // Zero padding of any length after the terminator is the permissible tail.
+  const tree = extractPackageTree(buildTarGz(members, Buffer.alloc(10240)));
+  assert.deepEqual([...tree.files.keys()].sort(), ["index.d.ts", "package.json"]);
+});
+
+// ── #1821 independent review: the manifest is CONTENT-checked, not present ──
+
+function rawTarball(manifestBody: string | null, files: Record<string, string> = {}): Uint8Array {
+  const members: Member[] = [];
+  if (manifestBody !== null) members.push({ name: "package/package.json", body: manifestBody });
+  for (const [name, body] of Object.entries(files)) members.push({ name: `package/${name}`, body });
+  return buildTarGz(members);
+}
+
+async function compareWithTarballs(
+  oldBody: Uint8Array,
+  newBody: Uint8Array,
+  oldVersion = "1.0.0",
+  newVersion = "1.0.1",
+): Promise<string[]> {
+  const fix = npmRegistryFixture("types/node", {
+    [oldVersion]: { bytes: oldBody, integrity: sri("sha512", oldBody) },
+    [newVersion]: { bytes: newBody, integrity: sri("sha512", newBody) },
+  });
+  const result = await compareNpmPackage("types/node", oldVersion, newVersion, {
+    fetchJson: fix.fetchJson,
+    fetchBytes: fix.fetchBytes,
+  });
+  return result.failures.map((failure) => failure.reason);
+}
+
+test("an integrity-matched tarball whose manifest contradicts the registry document fails closed (#1821 independent review)", async () => {
+  // The SRI pin covers the served bytes exactly — integrity PASSES. What
+  // refuses is the manifest content: it names version 20.0.0 while the
+  // authoritative document declares 1.0.0.
+  const wrongVersion = rawTarball('{"name":"@types/node","version":"20.0.0"}');
+  const good = packageFixture("1.0.1");
+  assert.deepEqual(await compareWithTarballs(wrongVersion, good), ["package-manifest-mismatch"]);
+  // …and a manifest naming a different PACKAGE (same version) is the same
+  // fail-closed refusal.
+  const wrongName = rawTarball('{"name":"@evil/node","version":"1.0.0"}');
+  assert.deepEqual(await compareWithTarballs(wrongName, good), ["package-manifest-mismatch"]);
+  // Presence of package.json is no longer enough: unreadable manifest content
+  // fails closed as invalid, and a tarball without one keeps its own reason.
+  const unreadable = rawTarball("not json at all {{{");
+  assert.deepEqual(await compareWithTarballs(unreadable, good), ["package-manifest-invalid"]);
+  const nameless = rawTarball('{"version":"1.0.0"}');
+  assert.deepEqual(await compareWithTarballs(nameless, good), ["package-manifest-invalid"]);
+  const noManifest = rawTarball(null, { "index.d.ts": "// v\n" });
+  assert.deepEqual(await compareWithTarballs(noManifest, good), ["package-manifest-missing"]);
+});
+
+test("a clean tree parses its manifest identity into the PackageTree", () => {
+  const tree = extractPackageTree(rawTarball('{"name":"@types/node","version":"1.2.3","dependencies":{"chalk":"^5.3.0"},"devDependencies":{"junk":42}}'));
+  assert.deepEqual(tree.manifest, { name: "@types/node", version: "1.2.3", dependencies: { chalk: "^5.3.0" } });
+});
+
+// ── #1821 independent review: actual changed DECLARATIONS, not only paths ───
+
+function manifestBody(version: string, deps: Record<string, string>): string {
+  return JSON.stringify({ name: "@types/node", version, dependencies: deps });
+}
+
+test("the comparison carries the published production-dependency delta old→new", async () => {
+  const oldBytes = buildTarGz([
+    { name: "package/package.json", body: manifestBody("1.0.0", { chalk: "^5.3.0", "left-pad": "^1.0.0" }) },
+  ]);
+  const newBytes = buildTarGz([
+    { name: "package/package.json", body: manifestBody("1.0.1", { chalk: "^5.4.1", "new-dep": "^0.1.0" }) },
+  ]);
+  const fix = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: oldBytes, integrity: sri("sha512", oldBytes) },
+    "1.0.1": { bytes: newBytes, integrity: sri("sha512", newBytes) },
+  });
+  const result = await compareNpmPackage("types/node", "1.0.0", "1.0.1", { fetchJson: fix.fetchJson, fetchBytes: fix.fetchBytes });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.dependencyDelta, {
+    added: ["new-dep@^0.1.0"],
+    removed: ["left-pad@^1.0.0"],
+    changed: ["chalk: ^5.3.0 → ^5.4.1"],
+  });
+  const { markdown } = await buildNpmPackageProvenance(
+    [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }],
+    { fetchJson: fix.fetchJson, fetchBytes: fix.fetchBytes },
+  );
+  assert.match(markdown, /Changed dependency ranges \(1\):/);
+  assert.match(markdown, /`chalk: \^5\.3\.0 → \^5\.4\.1`/);
+  assert.match(markdown, /`left-pad@\^1\.0\.0`/);
+  assert.match(markdown, /`new-dep@\^0\.1\.0`/);
+  // The material unknown stays disclosed: paths and declarations are the
+  // limit — no source content was semantically reviewed.
+  assert.match(markdown, /no source content was semantically reviewed/);
+});
+
+test("a fence-forge inside a registry-controlled dependency range renders inert (end to end, #252)", async () => {
+  const hostile = "```\n# Forged Dep Heading\nattacker";
+  const oldBytes = buildTarGz([{ name: "package/package.json", body: manifestBody("1.0.0", {}) }]);
+  const newBytes = buildTarGz([{ name: "package/package.json", body: manifestBody("1.0.1", { [hostile]: "```\n## range forge" } as Record<string, string>) }]);
+  const fix = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: oldBytes, integrity: sri("sha512", oldBytes) },
+    "1.0.1": { bytes: newBytes, integrity: sri("sha512", newBytes) },
+  });
+  const { markdown } = await buildNpmPackageProvenance(
+    [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }],
+    { fetchJson: fix.fetchJson, fetchBytes: fix.fetchBytes },
+  );
+  assert.equal(markdown.includes("```"), false);
+  const headingLines = markdown.split("\n").filter((line) => line.startsWith("#"));
+  assert.deepEqual(headingLines, [
+    "# Published npm Package Comparison",
+    "## `types/node` 1.0.0 → 1.0.1",
+  ]);
+});
+
+// ── #1821 independent review: the registry documents' own source metadata ───
+
+test("the section renders the declared source repository of the registry documents", async () => {
+  const oldBytes = packageFixture("1.0.0");
+  const newBytes = packageFixture("1.0.1");
+  const repository = "git+https://github.com/DefinitelyTyped/DefinitelyTyped.git";
+  const fix = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: oldBytes, integrity: sri("sha512", oldBytes) },
+    "1.0.1": { bytes: newBytes, integrity: sri("sha512", newBytes) },
+  });
+  const baseFetchJson = fix.fetchJson;
+  const { markdown } = await buildNpmPackageProvenance(
+    [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }],
+    {
+      fetchJson: async (url) => ({ ...(await baseFetchJson(url) as object), repository: { url: repository } }),
+      fetchBytes: fix.fetchBytes,
+    },
+  );
+  assert.match(markdown, /declare the same source repository/);
+  assert.match(markdown, /`git\+https:\/\/github\.com\/DefinitelyTyped\/DefinitelyTyped\.git`/);
+  // The claim is rendered AS a claim, never as a verified mapping.
+  assert.match(markdown, /not a verified mapping/);
+});
+
+test("a version document without repository metadata discloses the absence", async () => {
+  const oldBytes = packageFixture("1.0.0");
+  const newBytes = packageFixture("1.0.1");
+  const fix = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: oldBytes, integrity: sri("sha512", oldBytes) },
+    "1.0.1": { bytes: newBytes, integrity: sri("sha512", newBytes) },
+  });
+  const { markdown } = await buildNpmPackageProvenance(
+    [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }],
+    { fetchJson: fix.fetchJson, fetchBytes: fix.fetchBytes },
+  );
+  assert.match(markdown, /Neither exact version document declares a source repository/);
+});
+
+// ── #1821 AC1: the settlement artifact carries ONLY verified comparisons ─────
+
+test("npmComparisonsArtifactJson lists exactly the fully verified comparisons", async () => {
+  const goodOld = packageFixture("1.0.0");
+  const goodNew = packageFixture("1.0.1");
+  const good = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: goodOld, integrity: sri("sha512", goodOld) },
+    "1.0.1": { bytes: goodNew, integrity: sri("sha512", goodNew) },
+  });
+  const { comparisons } = await buildNpmPackageProvenance(
+    [
+      { slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" },
+      { slug: "types/node", oldVersion: "1.0.0", newVersion: "9.9.9" }, // registry has no 9.9.9
+    ],
+    { fetchJson: good.fetchJson, fetchBytes: good.fetchBytes },
+  );
+  const artifact = JSON.parse(npmComparisonsArtifactJson(comparisons)) as { schema: string; verified: unknown[] };
+  assert.equal(artifact.schema, NPM_COMPARISONS_ARTIFACT_SCHEMA);
+  assert.deepEqual(artifact.verified, [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }]);
+  // An all-failed run carries an empty list (never absent, never guessed).
+  const failed = JSON.parse(npmComparisonsArtifactJson([{
+    slug: "x", oldVersion: "1.0.0", newVersion: "2.0.0",
+    delta: null, dependencyDelta: null, oldSourceRepository: null, newSourceRepository: null,
+    failures: [{ version: "1.0.0", reason: "registry-fetch-failed" }],
+  }])) as { verified: unknown[] };
+  assert.deepEqual(failed.verified, []);
 });

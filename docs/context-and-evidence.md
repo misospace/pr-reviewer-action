@@ -392,21 +392,44 @@ checks each tarball against the registry's own integrity metadata, and
 compares the two published file trees. This shows the exact difference
 between the two published versions without needing a Git tag.
 
-- The comparison is **advisory corpus only**, like the Image Digest Provenance
-  section. It never sets the review verdict.
+- The rendered section stays **advisory corpus**, like the Image Digest
+  Provenance section. It never sets the review verdict by itself.
 - The read deadline is operator-tunable via the `npm-package-budget-sec`
   input (default 60, 0 disables).
 - It never runs `npm install`, a lifecycle script, or any package code. The
   archive is unpacked in memory under hard bounds and rejects traversal,
-  links, and malformed or truncated archives.
+  links, and malformed or truncated archives. Termination is strict: the
+  archive ends at two consecutive all-zero blocks (a single one is
+  `archive-truncated`, a member after one is `archive-malformed`), and only
+  zero padding may follow.
+- The published manifest is content-checked, not merely present: the
+  integrity-verified `package/package.json` must parse
+  (`package-manifest-invalid`) and name exactly the package/version the
+  registry version document declared (`package-manifest-mismatch`).
+- The rendered delta is bounded content plus declarations: file-level
+  added/removed/changed, the changed production `dependencies` declarations
+  of the two published manifests, and the source repository each version
+  document itself declares — always disclosed as the document's claim, and
+  always capped by the explicit note that no source content was
+  semantically reviewed.
 - It never names a Git revision and never claims a source-commit delta. A
   published-package delta and a source-commit delta stay distinct.
 - A version it cannot read, verify, or unpack is reported **unresolved** and
   stays fail-closed. Do not read an unresolved version as clean or risky.
-- Settlement is unchanged: provenance and release-delta obligations still
-  settle from the reviewer's own `web_fetch` reads of the registry documents.
-  The default allowlist is what lets those reads happen by default; a
-  restrictive override that omits `registry.npmjs.org` makes them fail closed.
+- Settlement: provenance and release-delta obligations still settle from the
+  reviewer's own `web_fetch` reads of the registry documents, AND — for a
+  comparison the phase **fully verified** (both exact version documents,
+  integrity- and manifest-verified trees, compared) — from code-owned
+  evidence. The phase writes `npm-package-comparisons.json`
+  (`npm-package-comparisons/v1`), and `buildEvidenceLedger` turns each
+  verified entry into one receipt per exact version document targeting the
+  canonical registry URL, attributed `provenance` + `release_delta`. That is
+  how the organic #1819 shape (no per-version Git tag; ordinary version-doc
+  fetches attribute provenance only) settles its mandatory release-delta
+  row. Failed, mismatched, or partial comparisons are absent from the
+  artifact and credit nothing; `security_advisory` is never attributed (no
+  advisory was checked). A restrictive override that omits
+  `registry.npmjs.org` makes every read fail closed.
 
 ## The upstream link sanitizer
 

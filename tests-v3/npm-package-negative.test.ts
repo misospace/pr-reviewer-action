@@ -55,9 +55,13 @@ function tarMember(member: TarMember): Buffer {
 }
 
 /** @param truncateTo cut the raw tar (before gzip) to this many bytes,
- * producing a truncated archive that still gunzips cleanly. */
-function tarGz(members: TarMember[], truncateTo?: number): Uint8Array {
-  const tar = Buffer.concat([...members.map(tarMember), Buffer.alloc(1024, 0)]);
+ * producing a truncated archive that still gunzips cleanly.
+ * @param tail replace the default two-zero-block terminator with raw bytes
+ * (#1821 independent review: the malformed-terminator shapes are fed to the
+ * FULL pipeline with integrity computed over the served bytes, so integrity
+ * passes and the archive check is what refuses). */
+function tarGz(members: TarMember[], truncateTo?: number, tail?: Buffer): Uint8Array {
+  const tar = Buffer.concat([...members.map(tarMember), tail ?? Buffer.alloc(1024, 0)]);
   const cut = truncateTo === undefined ? tar : tar.subarray(0, truncateTo);
   return new Uint8Array(gzipSync(cut));
 }
@@ -226,4 +230,60 @@ test("a malformed header checksum and a truncated archive are both unresolved, n
   });
   assert.match(markdownTrunc, /was truncated/);
   assertNeverClaimsADelta(markdownTrunc);
+});
+
+// ── #1821 independent review: malformed/truncated shapes with INTEGRITY-MATCHING
+//    archives. The registry pin covers exactly the served bytes, so integrity
+//    PASSES and the archive/manifest check is the boundary doing the refusing.
+
+function renderOldSide(oldTarball: Uint8Array): Promise<string> {
+  return renderWith({
+    docs: {
+      [OLD]: { name: "@types/node", version: OLD, dist: { tarball: TARBALL_URL(OLD), integrity: integrityOf(oldTarball) } },
+      [NEW]: new Error("HTTP 404"),
+    },
+    tarballs: { [OLD]: oldTarball },
+  });
+}
+
+test("an integrity-matching archive with a truncated terminator is unresolved, never a verified tree", async () => {
+  // Valid members followed by ONE zero block: the complete terminator needs two.
+  const singleZeroTail = tarGz([manifestMember(OLD)], undefined, Buffer.alloc(512, 0));
+  const markdown = await renderOldSide(singleZeroTail);
+  assert.match(markdown, /was truncated/);
+  assertNeverClaimsADelta(markdown);
+});
+
+test("an integrity-matching archive with a member hidden after the terminator is unresolved", async () => {
+  // members … ZERO-BLOCK … member … full terminator: the first zero block
+  // must NOT be read as a clean end.
+  const afterTerminator = Buffer.concat([
+    Buffer.alloc(512, 0),
+    tarMember({ name: "package/late.d.ts", body: "// smuggled past a 'clean' end\n" }),
+    Buffer.alloc(1024, 0),
+  ]);
+  const tarball = tarGz([manifestMember(OLD)], undefined, afterTerminator);
+  const markdown = await renderOldSide(tarball);
+  assert.match(markdown, /malformed \(bad header or checksum\)/);
+  assertNeverClaimsADelta(markdown);
+});
+
+test("an integrity-matching tarball shipping a manifest that contradicts the version document is unresolved", async () => {
+  // The registry names 26.6.7; the hashed tarball's manifest claims 20.0.0.
+  const contradicting = tarGz([{ name: "package/package.json", body: JSON.stringify({ name: "@types/node", version: "20.0.0" }) }]);
+  const markdown = await renderOldSide(contradicting);
+  assert.match(markdown, /manifest inside the published tarball names a different package\/version/);
+  assertNeverClaimsADelta(markdown);
+
+  // A different package name at the right version: same fail-closed boundary.
+  const wrongName = tarGz([{ name: "package/package.json", body: JSON.stringify({ name: "@evil/node", version: OLD }) }]);
+  const markdownName = await renderOldSide(wrongName);
+  assert.match(markdownName, /manifest inside the published tarball names a different package\/version/);
+  assertNeverClaimsADelta(markdownName);
+
+  // And unreadable manifest content is its own closed reason.
+  const unreadable = tarGz([{ name: "package/package.json", body: "\u0000not-json\u0000" }]);
+  const markdownInvalid = await renderOldSide(unreadable);
+  assert.match(markdownInvalid, /not readable as a manifest/);
+  assertNeverClaimsADelta(markdownInvalid);
 });

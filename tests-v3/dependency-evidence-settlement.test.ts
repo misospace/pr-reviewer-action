@@ -52,7 +52,7 @@ import {
 } from "../src/enforcement/review-obligations.js";
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
-import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evaluateRowEvidence } from "../src/enforcement/evidence-receipts.js";
 import { canonicalRegistryCatalogImageIdentity, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, registryRedirectSourceMapping, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
@@ -1781,4 +1781,101 @@ test("#1763 (review): two-segment official-Hub identities settle advisories thro
   ), "obligation-4");
   assert.equal(fetchedName.status, "unresolved");
   assert.equal(fetchedName.evidence?.state, "receipt-absent");
+});
+
+// ---------------------------------------------------------------------------
+// #1821 (independent review): the organic #1819 acceptance shape.
+// An `@types/node` 26.6.7 → 26.6.10 lockfile bump whose upstream
+// (DefinitelyTyped) publishes NO per-version Git tag: the model's tag/compare
+// lookups 404, and ordinary registry version-doc fetches attribute provenance
+// only — so the mandatory `release_delta` row could not settle. The code-owned
+// exact published-package comparison (integrity- and manifest-verified trees,
+// compared without any tag) now rides the ledger and settles exactly what it
+// proved — and nothing it did not.
+// ---------------------------------------------------------------------------
+
+const TYPES_NODE = [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }];
+
+const NPM1819_ROWS = [
+  { text: "establish upstream provenance for the updated dependency: publisher and canonical source repository", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: TYPES_NODE },
+  { text: "inspect the exact old→new upstream release delta for the updated dependency", row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: TYPES_NODE },
+  { text: "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: TYPES_NODE },
+];
+
+function npm1819Tags(text: string) {
+  const row = NPM1819_ROWS.find((candidate) => candidate.text === text)!;
+  const tags = checkEvidenceTagsFromArtifact([row]);
+  assert.equal(tags.length, 1);
+  return tags[0]!;
+}
+
+/** The #1819 run's trace: the tag-era lookups all failed (DefinitelyTyped has
+ * no per-version tags), and NO successful acquisition carries the exact
+ * old→new pair through lexical attribution. */
+const NPM1819_CALLS = [
+  { tool: "read_file", args: { path: "package-lock.json" }, status: "ok" },
+  { tool: "web_fetch", args: { url: "https://github.com/DefinitelyTyped/DefinitelyTyped/compare/types-node-26.6.7...types-node-26.6.10" }, status: "error" },
+  { tool: "web_fetch", args: { url: "https://registry.npmjs.org/@types%2Fnode" }, status: "ok" },
+];
+const NPM1819_RESULTS = [
+  { status: "ok", result: { content: "lockfile" } },
+  { status: "error", result: { error: "HTTP 404" } },
+  { status: "ok", result: { content: "{}", truncated: false, status: 200 } },
+];
+
+function npm1819Ledger(verified: unknown[]) {
+  return buildEvidenceLedger({
+    toolCalls: NPM1819_CALLS,
+    toolResults: NPM1819_RESULTS,
+    certifiedDiffPayloads: [],
+    rawDiff: null,
+    candidatePaths: [],
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified },
+    reviewedHeadSha: HEAD,
+  });
+}
+
+test("#1821 replay: a valid tag-less published-package comparison settles the mandatory release-delta row", () => {
+  const ledger = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(ledger.state, "valid");
+  const delta = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, ledger);
+  assert.equal(delta.state, "receipt-backed");
+  assert.deepEqual(delta.receipts.sort(), ["npm-compare:types/node@26.6.10", "npm-compare:types/node@26.6.7"]);
+  // The canonical registry documents the phase read also settle provenance…
+  const provenance = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[0]!.text), NPM1819_ROWS[0]!.text, ledger);
+  assert.equal(provenance.state, "receipt-backed");
+  // …but nothing here checked advisories: that row stays fail-closed, never
+  // carried by proximity to the comparison (no manufactured clean verdict).
+  const advisory = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[2]!.text), NPM1819_ROWS[2]!.text, ledger);
+  assert.ok(advisory.state === "receipt-absent" || advisory.state === "receipt-mismatch", `advisory must not settle, got ${advisory.state}`);
+});
+
+test("#1821 replay negatives: failed, mismatched, and partial comparisons never settle the release-delta row", () => {
+  const deltaTag = npm1819Tags(NPM1819_ROWS[1]!.text);
+  // (a) The comparison FAILED (registry miss / integrity refusal): the
+  // artifact carries nothing, and the run's own tag-era trace settles no
+  // delta — the pre-#1821 fail-closed reading stands.
+  const failed = evaluateRowEvidence(deltaTag, deltaTag.text, npm1819Ledger([]));
+  assert.ok(failed.state === "receipt-absent" || failed.state === "receipt-mismatch", `failed comparison must not settle, got ${failed.state}`);
+  // (b) WRONG slug: evidence for another package never speaks about this row.
+  const wrongSlug = evaluateRowEvidence(deltaTag, deltaTag.text, npm1819Ledger([{ slug: "types/notes", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.ok(wrongSlug.state === "receipt-absent" || wrongSlug.state === "receipt-mismatch", `wrong slug must not settle, got ${wrongSlug.state}`);
+  // (c) WRONG version pair: provenance still binds (the document is for THIS
+  // slug), but the asserted old→new pair never appears — mismatch, not backed.
+  const wrongPair = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.9" }]);
+  assert.equal(evaluateRowEvidence(deltaTag, deltaTag.text, wrongPair).state, "receipt-mismatch");
+  assert.equal(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[0]!.text), NPM1819_ROWS[0]!.text, wrongPair).state, "receipt-backed");
+  // (d) PARTIAL: an aggregate row naming two packages settles only when EVERY
+  // entry's delta is covered — one verified package credits nothing.
+  const aggregateRow = {
+    text: "inspect the exact old→new upstream release delta for the updated dependency",
+    row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"],
+    dependency_scope: [{ slug: "lodash", versions: ["4.17.21", "4.18.0"] }],
+  };
+  const aggregateTags = checkEvidenceTagsFromArtifact([
+    { ...aggregateRow, dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }, { slug: "lodash", versions: ["4.17.21", "4.18.0"] }] },
+  ]);
+  assert.equal(aggregateTags.length, 1);
+  const partial = evaluateRowEvidence(aggregateTags[0]!, aggregateRow.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.ok(partial.state === "receipt-mismatch" || partial.state === "receipt-absent", `partial coverage must not settle, got ${partial.state}`);
 });
