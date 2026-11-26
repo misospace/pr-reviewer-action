@@ -355,7 +355,7 @@ The native tool loop's `web_fetch` tool, and any linked-source fetching, are
 restricted to an explicit host allowlist:
 
 ```yaml
-    allowed-source-hosts: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io,ghcr.io,hub.docker.com,docker.io,quay.io"
+    allowed-source-hosts: "github.com,api.github.com,gitlab.com,registry.npmjs.org,npmjs.com,registry.terraform.io,artifacthub.io,ghcr.io,hub.docker.com,docker.io,quay.io"
 ```
 
 That's the default list. Any host not on it is refused.
@@ -370,14 +370,37 @@ it is the canonical registry catalog page for the exact artifact path
 `gcr.io`/`registry.k8s.io`/`mcr.microsoft.com`/`public.ecr.aws` families) —
 never from a same-named repository on a forge, a same-named artifact on
 another registry or under another owner, or a search result, because every
-one of those targets is registrable by an attacker. The core
-container-registry catalog hosts are in the default list so the organic
-image bump settles; the npm registry hosts and the remaining catalog hosts
-(`gcr.io` and its regional variants, `registry.k8s.io`, `k8s.gcr.io`,
-`mcr.microsoft.com`, `public.ecr.aws`, `gallery.ecr.aws`) are not, so with
-the host a row needs refused its provenance row stays fail-closed
-unresolved — add that registry's host to `allowed-source-hosts` when runs
-should be able to settle its provenance.
+one of those targets is registrable by an attacker. The npm registry hosts
+(`registry.npmjs.org`, `npmjs.com`) and the core container-registry catalog
+hosts are in the default list, so an organic npm bump or image bump settles
+(#1821). The remaining catalog hosts (`gcr.io` and its regional variants,
+`registry.k8s.io`, `k8s.gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`,
+`gallery.ecr.aws`) are opt-in, so with the host a row needs refused its
+provenance row stays fail-closed unresolved — add that registry's host to
+`allowed-source-hosts` when runs should be able to settle its provenance.
+
+## Published npm package comparison (#1821)
+
+For an npm version bump the review gains a deterministic
+`# Published npm Package Comparison` corpus section. It reads both exact
+version documents from the npm registry, downloads both published tarballs,
+checks each tarball against the registry's own integrity metadata, and
+compares the two published file trees. This shows the exact difference
+between the two published versions without needing a Git tag.
+
+- The comparison is **advisory corpus only**, like the Image Digest Provenance
+  section. It never sets the review verdict.
+- It never runs `npm install`, a lifecycle script, or any package code. The
+  archive is unpacked in memory under hard bounds and rejects traversal,
+  links, and malformed or truncated archives.
+- It never names a Git revision and never claims a source-commit delta. A
+  published-package delta and a source-commit delta stay distinct.
+- A version it cannot read, verify, or unpack is reported **unresolved** and
+  stays fail-closed. Do not read an unresolved version as clean or risky.
+- Settlement is unchanged: provenance and release-delta obligations still
+  settle from the reviewer's own `web_fetch` reads of the registry documents.
+  The default allowlist is what lets those reads happen by default; a
+  restrictive override that omits `registry.npmjs.org` makes them fail closed.
 
 ## The upstream link sanitizer
 

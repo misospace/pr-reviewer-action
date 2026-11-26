@@ -366,8 +366,8 @@ inputs:
   - id: allowed-source-hosts
     v2_id: allowed_source_hosts
     required: false
-    default: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io,ghcr.io,hub.docker.com,docker.io,quay.io"
-    description: "Comma-separated list of hosts allowed for linked source fetching. The dependency-evidence provenance obligation settles only from the dependency's authoritative registry document: for npm that is registry.npmjs.org / npmjs.com (NOT in the default list - add them when npm provenance settlement is wanted), for a container image or OCI chart it is the registry catalog page on ghcr.io / hub.docker.com / docker.io / quay.io (in the default list so the organic image bump settles; the npm hosts and the other catalog hosts - gcr.io, registry.k8s.io, mcr.microsoft.com, public.ecr.aws - are opt-in). With the needed host refused the provenance row stays fail-closed unresolved."
+    default: "github.com,api.github.com,gitlab.com,registry.npmjs.org,npmjs.com,registry.terraform.io,artifacthub.io,ghcr.io,hub.docker.com,docker.io,quay.io"
+    description: "Comma-separated list of hosts allowed for linked source fetching. The dependency-evidence provenance obligation settles only from the dependency's authoritative registry document: for npm that is registry.npmjs.org / npmjs.com (in the default list so the organic npm bump settles and the published-package comparison can read exact version documents; set a restrictive override to withhold them), for a container image or OCI chart it is the registry catalog page on ghcr.io / hub.docker.com / docker.io / quay.io (in the default list so the organic image bump settles; the other catalog hosts - gcr.io, registry.k8s.io, mcr.microsoft.com, public.ecr.aws - are opt-in). With the needed host refused the provenance row stays fail-closed unresolved."
   - id: related-code-context
     v2_id: related_code_context
     required: false

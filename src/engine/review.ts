@@ -165,6 +165,7 @@ import {
   renderLinkedSourcesPhase,
   runEvidencePhase,
   runImageDigestPhase,
+  runNpmPackageProvenancePhase,
   authoritativeBodyRevision,
   runToolHarnessPhase,
   safeJson,
@@ -1619,6 +1620,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ws.write("image-digest-context.md", "Image digest provenance analysis failed for this run.\n");
     return null;
   });
+  const npmPackagePromise = runNpmPackageProvenancePhase(ws, diffText, env, cancellation.scope.signal).catch((cause: unknown) => {
+    errorLog(`npm package comparison failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    ws.write("npm-package-provenance.md", "npm published-package comparison failed for this run.\n");
+    return null;
+  });
   const evidencePromise = runEvidencePhase(ws, env, forkFlag, runDir, log, cancellation.scope.signal).catch((cause: unknown) => {
     errorLog(`Evidence provider execution failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("evidence-providers.md", "Evidence providers failed to run in this review.\n");
@@ -1739,7 +1745,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     }
   }
 
-  await Promise.all([enrichmentPromise, imageDigestPromise, evidencePromise]);
+  await Promise.all([enrichmentPromise, imageDigestPromise, npmPackagePromise, evidencePromise]);
   checkpoint();
 
   // PR-thread context (corpus.sh) — same pass cutoff as the review threads.

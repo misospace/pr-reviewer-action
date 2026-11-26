@@ -39,6 +39,9 @@ import {
 } from "../context/index.js";
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
+import { parseDependencyScope } from "../classification/classify.js";
+import { MAX_NPM_COMPARISONS, buildNpmPackageProvenance } from "../context/npm-package-provenance.js";
+import { createNpmFetches, npmPackageDeadline } from "../context/npm-package-transport.js";
 import {
   MAX_SYNTAX_BYTES,
   buildSyntaxContext,
@@ -356,6 +359,56 @@ export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, en
   return markdown;
 }
 
+/** The npm package changes an exact-published-package comparison can attempt
+ * from a dependency-scope result: every npm entry (no `kind`, the pre-#1763
+ * spelling) that carries at least two exact versions, as its first→last pair.
+ * Pure and total so the phase's decision is unit-testable without a network. */
+export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: string; oldVersion: string; newVersion: string }> {
+  const scope = parseDependencyScope(diffText);
+  if (!scope.available) return [];
+  const changes: Array<{ slug: string; oldVersion: string; newVersion: string }> = [];
+  for (const entry of scope.entries) {
+    // npm-era entries leave `kind` undefined; image/chart kinds never do.
+    if (entry.kind !== undefined) continue;
+    // A clean old→new published comparison needs EXACTLY two exact version
+    // tokens (one per side of the bump). A dependency-range edit (">=1 <2")
+    // tokenizes to more than two, and no install transitioned between the first
+    // and last of those — skip it rather than compare versions nobody moved
+    // through. More than two is reported by the coverage section, not here.
+    if (entry.versions.length !== 2) continue;
+    changes.push({ slug: entry.slug, oldVersion: entry.versions[0]!, newVersion: entry.versions[1]! });
+    if (changes.length >= MAX_NPM_COMPARISONS) break;
+  }
+  return changes;
+}
+
+/** #1821: deterministic exact-published-package comparison for npm bumps. Reads
+ * both version documents + tarballs through the SSRF-gated npm transport, under
+ * the NPM_PACKAGE_BUDGET_SEC deadline, and writes `npm-package-provenance.md`.
+ * Empty (and no network) when the diff carries no comparable npm bump. When the
+ * registry host is not in the operator's `allowed-source-hosts`, the reads fail
+ * closed and the section reports every version unresolved — never a fabricated
+ * delta. */
+export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
+  const changes = npmPackageChangesFromDiff(diffText);
+  if (changes.length === 0) {
+    ws.write("npm-package-provenance.md", "");
+    return "";
+  }
+  const allowedHosts = parseAllowedHosts(env.ALLOWED_SOURCE_HOSTS ?? "");
+  const { fetchJson, fetchBytes } = createNpmFetches({
+    allowedHosts,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  const { markdown } = await buildNpmPackageProvenance(changes, {
+    fetchJson,
+    fetchBytes,
+    deadline: npmPackageDeadline(env as NodeJS.ProcessEnv),
+  });
+  ws.write("npm-package-provenance.md", markdown);
+  return markdown;
+}
+
 export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void, signal?: AbortSignal): Promise<string> {
   const outcome = await runEvidenceProvidersPhase({
     env: env as NodeJS.ProcessEnv,
@@ -656,6 +709,7 @@ export function assembleCorpus(
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
       dependencyCoverageMd: ws.read("dependency-coverage.md"),
+      npmPackageProvenanceMd: ws.read("npm-package-provenance.md"),
       reReviewScopeMd: ws.read("re-review-scope.md"),
       reReviewEvidenceMd: ws.read("re-review-evidence.md"),
       linkedSourcesMd: ws.read("linked-sources.md"),

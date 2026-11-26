@@ -85,6 +85,10 @@ export interface CorpusWorkspace {
    * so existing fixtures need no update: an absent field behaves like
    * `null`. */
   dependencyCoverageMd?: Uint8Array | null;
+  /** #1821: the deterministic exact-published-package comparison section
+   * (empty unless the run read npm version bumps). Optional so existing
+   * fixtures need no update: an absent field behaves like `null`. */
+  npmPackageProvenanceMd?: Uint8Array | null;
   /** #1426: the re-review scope section (empty unless the run knows a prior
    * reviewed head). Optional so existing fixtures need no update: an absent
    * field behaves like `null`. */
@@ -533,6 +537,12 @@ export function buildReviewCorpus(
   // were detected — no section boundary for anything else.
   if (nonEmpty(ws.dependencyCoverageMd)) {
     pushSection(undefined, bytes(ws.dependencyCoverageMd!));
+  }
+  // #1821: the exact-published-package comparison rides right after the
+  // coverage accounting that references it. Empty unless npm version bumps
+  // were read — no section boundary for anything else.
+  if (nonEmpty(ws.npmPackageProvenanceMd)) {
+    pushSection(undefined, bytes(ws.npmPackageProvenanceMd!));
   }
   // Lowest-value sections last — first to be dropped on truncation.
   pushSection("# Linked Sources", bytes(ws.linkedSourcesMd));
