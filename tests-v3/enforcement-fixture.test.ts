@@ -271,8 +271,8 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
       ci_evidence: {
         version: 1, head_sha: CI_HEAD_1820, final_state: "success",
         checks: [
-          { name: "validate-typescript", state: "success", conclusion: "success" },
-          { name: "validate-runtime-floor", state: "success", conclusion: "success" },
+          { name: "validate-typescript", state: "success", conclusion: "success", origin: "actions" },
+          { name: "validate-runtime-floor", state: "success", conclusion: "success", origin: "actions" },
         ],
       },
       ci_test_jobs: { text: "test-jobs:\n  validate-typescript: full-suite\n  validate-runtime-floor: full-suite\n" },

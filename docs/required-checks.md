@@ -270,8 +270,18 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   context rows may be trimmed (failed rows first). If the complete test-row
   set cannot fit, the gate also emits NO evidence line — an artifact missing
   a skipped, pending, or otherwise incomplete test leg could otherwise look
-  falsely complete and discharge a full-suite ask. A final strict-parser
-  round-trip means an oversized or malformed artifact is never emitted.
+  falsely complete and discharge a full-suite ask. Every exact GitHub Actions
+  check-run row is retained unconditionally, and a row whose name or
+  conclusion bounding altered is marked `clipped` in the artifact so it can
+  never serve as an exact identity match downstream. Each row also carries
+  its producer `origin`: `actions` (the forge's native Actions check run —
+  on GitHub, `app.slug === "github-actions"`), `check` (a check run from
+  another integration), or `status` (a commit-status context). Same-name
+  check runs from different workflow runs are no longer collapsed into one
+  row: a same-name green from one workflow can never discard a same-name red
+  from another, which for unconfigured repositories can only make more
+  failure rows visible, never fewer. A final strict-parser round-trip means
+  an oversized or malformed artifact is never emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and
@@ -281,6 +291,11 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   without the artifact keeps the pre-#1594 recompute exactly.
 
 ## Trusted explicit CI test-job identities (#1820)
+
+Configured discharge requires an exact GitHub Actions check-run producer.
+Forgejo and GitLab provide commit statuses without per-check producer identity,
+so configured asks remain unresolved there by design; the workflow-surface
+fence remains the second guard.
 
 Name heuristics read the check NAME. Some real full-suite jobs do not carry a
 test word — this repository's own `validate-typescript` and
@@ -312,7 +327,13 @@ reconciliation above is unchanged for every repository that does not opt in.
   `load`, `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) — the
   same scope vocabulary the name heuristics use.
 - **Authority**: for a configured check, the configured scope replaces the
-  name-derived scope entirely. Unconfigured checks keep the name heuristics.
+  name-derived scope entirely only when the evidence row is an exact, unclipped
+  GitHub Actions check run (`origin: "actions"`) and exactly one such row has
+  the configured name. Two same-named rows from different workflow runs refuse
+  the configured identity with `configured-identity-ambiguous`. Commit-status
+  contexts and third-party check runs never satisfy configured identities;
+  those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
+  checks keep the name heuristics.
 - **The declared set defines the suite**: when a full-suite ask is settled
   against a config that declares `full-suite` jobs, EVERY configured
   `full-suite` identity must appear in the head-bound evidence and be green.
@@ -331,10 +352,11 @@ reconciliation above is unchanged for every repository that does not opt in.
   identity that is absent from the evidence (a scheduled, path-filtered, or
   removed job — or a mis-declared name) keeps every full-suite ask
   unresolved, and an unresolved `must_check` row withholds the trusted
-  native approve. The same holds on check-heavy repos: the gate retains
-  every test-named row but may trim other context rows past its 50-row /
-  16,384-character bounds, and a configured identity is normally not
-  test-named — so declare few, stable, always-on identities.
+  native approve. The producer marks control-collapsed or truncated check
+  names and conclusions as `clipped`; clipped rows never satisfy configured
+  identities. The gate retains every test-named row and every exact Actions
+  check-run row, and never trims Actions rows out of the evidence. Other
+  context rows may still be trimmed at the 50-row / 16,384-character bounds.
 - **Workflow-surface masquerade fence (#1820)**: configured identities exist
   and the PR leaves the supported forges' CI workflow surface unchanged
   relative to the merge-base of the trusted base ref before any CI evidence
@@ -366,6 +388,10 @@ reconciliation above is unchanged for every repository that does not opt in.
   `include:` chain can define jobs outside `.gitlab-ci.yml` — a PR editing
   those configs can still mint a heuristic-accepted name for a narrow ask, so
   the residual risk is narrower than unfenced name matching but not zero.
+  Configured identity discharge does not accept status contexts, closing that
+  status-context residual for configured asks; status rows can still match the
+  pre-#1820 name heuristics, so the residual remains for repositories without
+  a matching configured identity.
 
 ## Evidence classes and objective provenance (#1657)
 

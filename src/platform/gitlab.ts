@@ -663,7 +663,7 @@ export class GitLabAdapter implements PlatformReadAdapter {
           : typeof row.context === "string" && row.context !== "" ? row.context : "(status)";
         if (context !== "" && name === context) continue;
         const collapsed = gitlabStatusState(row.status ?? row.state);
-        checks.push({ name, ...collapsed });
+        checks.push({ name, ...collapsed, origin: "status" });
       }
       if (data.length < GITLAB_LIST_PAGE_SIZE) break;
     }

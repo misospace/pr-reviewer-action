@@ -145,6 +145,7 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  *   test-run row the CI evidence answers — `ci-evidence-head-mismatch`,
  *   `ci-evidence-no-matching-test-check`,
   *   `ci-evidence-configured-test-job-missing` (#1820),
+  *   `ci-evidence-configured-identity-ambiguous` (#1820),
   *   `ci-evidence-ci-workflow-surface-untrusted` (#1820 masquerade fence),
   *   `ci-evidence-test-check-not-success`,
  *   `ci-evidence-test-check-contradicted` — so the obligation artifact says
@@ -173,6 +174,7 @@ export type ReviewObligationReason =
   | "ci-evidence-head-mismatch"
   | "ci-evidence-no-matching-test-check"
   | "ci-evidence-configured-test-job-missing"
+  | "ci-evidence-configured-identity-ambiguous"
   | "ci-evidence-ci-workflow-surface-untrusted"
   | "ci-evidence-test-check-not-success"
   | "ci-evidence-test-check-contradicted";
@@ -1319,7 +1321,7 @@ const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
   // the obligation-side CI-evidence reason refinement.
   "dependency-evidence",
   "ci-evidence-head-mismatch", "ci-evidence-no-matching-test-check",
-  "ci-evidence-configured-test-job-missing", "ci-evidence-ci-workflow-surface-untrusted",
+  "ci-evidence-configured-test-job-missing", "ci-evidence-configured-identity-ambiguous", "ci-evidence-ci-workflow-surface-untrusted",
   "ci-evidence-test-check-not-success", "ci-evidence-test-check-contradicted",
   // Retired #1627/#1634 vocabulary — accepted for backward compatibility only.
   "uncited-satisfaction", "citation-already-used", "unrelated-executed-call", "malformed-executed-trace",

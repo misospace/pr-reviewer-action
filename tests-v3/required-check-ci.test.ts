@@ -16,16 +16,22 @@ import { evaluateRequiredCheckCoverage, type RequiredCheckRow } from "../src/enf
 import { reviewObligationsFromArtifact, reviewObligationsToArtifact, type ReviewObligation } from "../src/enforcement/review-obligations.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import type { TrustedCiJobs, TrustedCiTestScope } from "../src/config/ci-test-jobs.js";
+import { normalizeExternalChecks } from "../src/platform/normalize.js";
+import { renderCiEvidenceOutput } from "../src/gates/ci-wait.js";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const STALE = "aabbccddeeff00112233445566778899aabbccdd";
 
 function evidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<Omit<CiEvidenceCheck, "conclusion"> & { conclusion?: string | null }>, headSha = HEAD): HeadBoundCiEvidence {
-  return { headSha, finalState, checks: checks.map((check) => ({ name: check.name, state: check.state, conclusion: check.conclusion ?? null })) };
+  return { headSha, finalState, checks: checks.map((check) => ({ ...check, conclusion: check.conclusion ?? null })) };
 }
 
 function configuredJobs(jobs: [string, TrustedCiTestScope][], workflowSurfaceTrusted = true): TrustedCiJobs {
   return { jobs: new Map(jobs), workflowSurfaceTrusted };
+}
+
+function actionsEvidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<Omit<CiEvidenceCheck, "conclusion" | "origin"> & { conclusion?: string | null }>, headSha = HEAD): HeadBoundCiEvidence {
+  return evidence(finalState, checks.map((check) => ({ ...check, origin: "actions" })) as Array<Omit<CiEvidenceCheck, "conclusion"> & { conclusion?: string | null }>, headSha);
 }
 
 function d(check: string, status: string, rationale?: string | null): NormalizedRequiredCheckDisposition {
@@ -535,7 +541,7 @@ test("#1820 trusted configured CI identities define full-suite proof and require
   const ask = "run full test suite after upgrade";
   const integrationAsk = "run integration tests after upgrade";
   const configured = configuredJobs([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
-  const green = evidence("success", [
+  const green = actionsEvidence("success", [
     { name: "validate-typescript", state: "success", conclusion: "success" },
     { name: "validate-runtime-floor", state: "success", conclusion: "success" },
     { name: "validate-static", state: "success", conclusion: "success" },
@@ -557,7 +563,7 @@ test("#1820 trusted configured CI identities define full-suite proof and require
   const unrelated = evidence("success", [{ name: "validate-static", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText(ask, unrelated, head, configured).reason, "configured-test-job-missing");
   assert.equal(ciDischargeForCheckText(ask, green, STALE, configured).reason, "head-mismatch");
-  const failed = evidence("failure", [
+  const failed = actionsEvidence("failure", [
     { name: "validate-typescript", state: "failure", conclusion: "failure" },
     { name: "validate-runtime-floor", state: "success", conclusion: "success" },
   ], head);
@@ -566,10 +572,10 @@ test("#1820 trusted configured CI identities define full-suite proof and require
     { name: "validate-typescript", state: "pending" },
     { name: "validate-typescript", state: "success", conclusion: "skipped" },
   ]) {
-    const pending = evidence("success", [check, { name: "validate-runtime-floor", state: "success", conclusion: "success" }], head);
+    const pending = actionsEvidence("success", [check, { name: "validate-runtime-floor", state: "success", conclusion: "success" }], head);
     assert.equal(ciDischargeForCheckText(ask, pending, head, configured).reason, "test-check-not-success");
   }
-  const oneLeg = evidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
+  const oneLeg = actionsEvidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText(ask, oneLeg, head, configured).reason, "configured-test-job-missing");
   const heuristicAndMissing = evidence("success", [
     { name: "Tests", state: "success", conclusion: "success" },
@@ -584,6 +590,66 @@ test("#1820 trusted configured CI identities define full-suite proof and require
   ], head), head, configured).reason, "configured-test-job-missing");
   assert.equal(reconcileRequiredCheckRows(coverage.checks, null, head, configured).discharged, 0);
   assert.deepEqual(reconcileObligationsWithCiEvidence(obligations, null, head, configured), obligations);
+});
+
+test("#1820 provenance chain: configured identities require one exact Actions run row", () => {
+  const head = HEAD;
+  const configured = configuredJobs([["validate-typescript", "full-suite"], ["Unit Tests", "unit"], ["x".repeat(200), "full-suite"]]);
+  const chain = (runs: unknown[], statuses: unknown[] = []) => {
+    const normalized = normalizeExternalChecks(JSON.stringify({ check_runs: runs }), JSON.stringify({ statuses }), "", "") ?? [];
+    const line = renderCiEvidenceOutput(head, "success", normalized);
+    return parseHeadBoundCiEvidence(line.replace(/^ci_checks_evidence=/, ""));
+  };
+  const run = (name: string, id: number, conclusion = "success", app = "github-actions") => ({
+    id: id * 10, name, app: { slug: app }, details_url: `https://github.test/actions/runs/${id}/job/${id * 10}`,
+    status: "completed", conclusion, started_at: `2026-01-0${id % 9 + 1}T00:00:00Z`,
+  });
+  const decide = (ask: string, parsed: HeadBoundCiEvidence | null) => ciDischargeForCheckText(ask, parsed, head, configured);
+
+  const redThenGreen = chain([run("validate-typescript", 1, "failure"), run("validate-typescript", 2)]);
+  assert.deepEqual(redThenGreen?.checks.map((check) => check.state), ["failure", "success"]);
+  assert.equal(decide("run full test suite", redThenGreen).outcome, "contradicted");
+
+  const statusOnly = chain([], [{ context: "validate-typescript", state: "success" }]);
+  assert.equal(decide("run full test suite", statusOnly).reason, "configured-test-job-missing");
+
+  const full = chain([run("validate-typescript", 3)]);
+  assert.equal(ciDischargeForCheckText("run full test suite", full, head, configuredJobs([["validate-typescript", "full-suite"]])).outcome, "satisfied");
+  const narrow = chain([run("Unit Tests", 4)]);
+  assert.equal(ciDischargeForCheckText("run unit tests", narrow, head, configuredJobs([["Unit Tests", "unit"]])).outcome, "satisfied");
+
+  const clippedCollision = chain([run("x".repeat(200) + "y", 5)]);
+  assert.equal(clippedCollision?.checks[0]?.clipped, true);
+  assert.equal(ciDischargeForCheckText("run full test suite", clippedCollision, head, configuredJobs([["x".repeat(200), "full-suite"]])).reason, "configured-test-job-missing");
+  const exactLongName = chain([run("x".repeat(200), 6)]);
+  assert.equal(ciDischargeForCheckText("run full test suite", exactLongName, head, configuredJobs([["x".repeat(200), "full-suite"]])).outcome, "satisfied");
+
+  const controlCollision = chain([run("Unit\u0000Tests", 7)]);
+  // The NUL byte is not a name separator in the pre-collapse matcher, so the
+  // source name classifies as non-test while the collapsed one is a test row:
+  // identity drift refuses the whole artifact (stronger than clip marking),
+  // and null evidence keeps the ask unresolved.
+  assert.equal(controlCollision, null);
+  assert.equal(ciDischargeForCheckText("run unit tests", controlCollision, head, configuredJobs([["Unit Tests", "unit"]])).reason, "no-ci-evidence");
+
+  const ambiguous = chain([run("validate-typescript", 8), run("validate-typescript", 9)]);
+  assert.equal(ciDischargeForCheckText("run full test suite", ambiguous, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-identity-ambiguous");
+
+  const thirdParty = chain([run("validate-typescript", 10, "success", "other-app")]);
+  assert.equal(thirdParty?.checks[0]?.origin, "check");
+  assert.equal(ciDischargeForCheckText("run full test suite", thirdParty, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-test-job-missing");
+});
+
+test("#1820 evidence parser validates provenance while retaining old heuristic artifacts", () => {
+  const base = { version: 1, head_sha: HEAD, final_state: "success", checks: [{ name: "Tests", state: "success" }] };
+  assert.equal(parseHeadBoundCiEvidenceValue({ ...base, checks: [{ ...base.checks[0], origin: "unknown" }] }), null);
+  assert.equal(parseHeadBoundCiEvidenceValue({ ...base, checks: [{ ...base.checks[0], clipped: false }] }), null);
+  assert.deepEqual(parseHeadBoundCiEvidenceValue({ ...base, checks: [{ name: "x", state: "success", origin: "actions", clipped: true }] })?.checks[0], {
+    name: "x", state: "success", conclusion: null, origin: "actions", clipped: true,
+  });
+  const oldShape = parseHeadBoundCiEvidenceValue(base);
+  assert.equal(ciDischargeForCheckText("run full test suite", oldShape, HEAD).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite", oldShape, HEAD, configuredJobs([["Tests", "full-suite"]])).reason, "configured-test-job-missing");
 });
 
 test("#1820 a closed workflow fence refuses every CI-evidence settlement of a test-run ask", () => {
@@ -602,7 +668,7 @@ test("#1820 a closed workflow fence refuses every CI-evidence settlement of a te
   assert.equal(heuristic.outcome, "unresolved");
   assert.equal(heuristic.reason, "ci-workflow-surface-untrusted");
 
-  const red = evidence("failure", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
+  const red = actionsEvidence("failure", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
   assert.equal(ciDischargeForCheckText(ask, red, head, configured).reason, "test-check-contradicted");
   const emptyConfigured = ciDischargeForCheckText(ask, evidence("success", [
     { name: "Tests", state: "success", conclusion: "success" },
@@ -624,24 +690,24 @@ test("#1820 a closed workflow fence refuses every CI-evidence settlement of a te
 test("#1820 every declared leg is required for generic and narrow asks, with failure-first precedence", () => {
   const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
   const fullSuiteJobs = configuredJobs([["validate-typescript", "full-suite"], ["validate-runtime-floor", "full-suite"]]);
-  const onlyTypeScript = evidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
+  const onlyTypeScript = actionsEvidence("success", [{ name: "validate-typescript", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText("run the tests", onlyTypeScript, head, fullSuiteJobs).reason, "configured-test-job-missing");
-  const fullSuiteGreen = evidence("success", [
+  const fullSuiteGreen = actionsEvidence("success", [
     { name: "validate-typescript", state: "success", conclusion: "success" },
     { name: "validate-runtime-floor", state: "success", conclusion: "success" },
   ], head);
   assert.equal(ciDischargeForCheckText("run the tests", fullSuiteGreen, head, fullSuiteJobs).outcome, "satisfied");
 
   const unitJobs = configuredJobs([["unit-one", "unit"], ["unit-two", "unit"]]);
-  const oneUnit = evidence("success", [{ name: "unit-one", state: "success", conclusion: "success" }], head);
+  const oneUnit = actionsEvidence("success", [{ name: "unit-one", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText("run unit tests after upgrade", oneUnit, head, unitJobs).reason, "configured-test-job-missing");
-  const bothUnits = evidence("success", [
+  const bothUnits = actionsEvidence("success", [
     { name: "unit-one", state: "success", conclusion: "success" },
     { name: "unit-two", state: "success", conclusion: "success" },
   ], head);
   assert.equal(ciDischargeForCheckText("run unit tests after upgrade", bothUnits, head, unitJobs).outcome, "satisfied");
 
-  const redAndMissing = evidence("success", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
+  const redAndMissing = actionsEvidence("success", [{ name: "validate-typescript", state: "failure", conclusion: "failure" }], head);
   assert.equal(ciDischargeForCheckText("run the tests", redAndMissing, head, fullSuiteJobs).reason, "test-check-contradicted");
 
   const mixedJobs = configuredJobs([
@@ -655,7 +721,7 @@ test("#1820 every declared leg is required for generic and narrow asks, with fai
 test("#1820 a narrow-declared scope proves exactly its own ask, never a generic or full-suite ask", () => {
   const head = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
   const narrow = configuredJobs([["unit-tests", "unit"]]);
-  const unitGreen = evidence("success", [{ name: "unit-tests", state: "success", conclusion: "success" }], head);
+  const unitGreen = actionsEvidence("success", [{ name: "unit-tests", state: "success", conclusion: "success" }], head);
   assert.equal(ciDischargeForCheckText("run unit tests after upgrade", unitGreen, head, narrow).outcome, "satisfied");
   // M1 #1820 review: the operator's declared scope is authoritative — a
   // unit-declared job must not widen itself into a generic discharge.

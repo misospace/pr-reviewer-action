@@ -74,12 +74,12 @@ test("GitHub externalChecks: transientAsUnknown turns a failed status read into 
 test("GitHub externalChecks: a transient check-runs read is unknown too (no partial fold onto statuses)", async () => {
   const routes = { [RUNS]: [{ transport: true } as Reply], [STATUS]: [greenStatus] };
   assert.equal(await github(routes).externalChecks(SHA, strict), null);
-  assert.deepEqual(await github(routes).externalChecks(SHA, {}), [{ name: "ci/x", state: "success", conclusion: "success" }]);
+  assert.deepEqual(await github(routes).externalChecks(SHA, {}), [{ name: "ci/x", state: "success", conclusion: "success", origin: "status" }]);
 });
 
 test("GitHub externalChecks: a 4xx JSON answer is persistent, not transient — strict mode still folds it", async () => {
   const routes = { [RUNS]: [{ status: 403, body: { message: "Resource not accessible by integration" } }], [STATUS]: [greenStatus] };
-  assert.deepEqual(await github(routes).externalChecks(SHA, strict), [{ name: "ci/x", state: "success", conclusion: "success" }]);
+  assert.deepEqual(await github(routes).externalChecks(SHA, strict), [{ name: "ci/x", state: "success", conclusion: "success", origin: "status" }]);
 });
 
 test("Forgejo externalChecks: auto mode discovers and excludes statuses by target URL", async () => {
@@ -102,8 +102,8 @@ test("Forgejo externalChecks: auto mode discovers and excludes statuses by targe
     ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r",
     selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
   }), [
-    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
-    { name: "ci/external", state: "success", conclusion: "success" },
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "ci/external", state: "success", conclusion: "success", origin: "status" },
   ]);
   assert.equal(discovery.found, true);
   assert.equal(discovery.runJobs, "single");
@@ -153,7 +153,7 @@ test("Forgejo v16 job from another run cannot exclude a pending status", async (
   assert.deepEqual(await adapter.externalChecks(SHA, {
     ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r",
     selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
-  }), [{ name: "reviewer", state: "pending", conclusion: "pending" }]);
+  }), [{ name: "reviewer", state: "pending", conclusion: "pending", origin: "status" }]);
   assert.equal(discovery.runJobs, "unavailable");
   assert.equal(discovery.found, false);
 });
@@ -174,7 +174,7 @@ test("Forgejo v16 single job does not exclude a run-page status", async () => {
   assert.deepEqual(await adapter.externalChecks(SHA, {
     ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r",
     selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
-  }), [{ name: "run-status", state: "pending", conclusion: "pending" }]);
+  }), [{ name: "run-status", state: "pending", conclusion: "pending", origin: "status" }]);
   assert.equal(discovery.runJobs, "single");
   assert.equal(discovery.found, false);
 });
@@ -210,8 +210,8 @@ test("Forgejo externalChecks: transient jobs lookup retries but a definitive 404
   });
   const unavailableDiscovery = discoveryState();
   const unavailableOpts = { ...opts, selfStatusDiscovery: unavailableDiscovery };
-  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending" }]);
-  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending" }]);
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending", origin: "status" }]);
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending", origin: "status" }]);
   assert.equal(unavailableDiscovery.runJobs, "unavailable");
   assert.equal(unavailableDiscovery.runJobsUnavailableReason, "run-jobs endpoint returned HTTP 404");
   assert.deepEqual(unavailableRequests, [statusPath, jobsPath, statusPath]);
@@ -228,7 +228,7 @@ test("Forgejo externalChecks: terminal sibling failure stays visible in auto mod
   const discovery = discoveryState();
   assert.deepEqual(await adapter.externalChecks(SHA, {
     ...strict, selfRunNumbers: ["171447"], selfRunRepo: "o/r", selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
-  }), [{ name: "unit-tests", state: "failure", conclusion: "failure" }]);
+  }), [{ name: "unit-tests", state: "failure", conclusion: "failure", origin: "status" }]);
   assert.equal(discovery.matchCount, 0);
   assert.equal(discovery.found, false);
   assert.equal(discovery.runJobs, "unknown", "a terminal match does not need the jobs endpoint");
@@ -246,7 +246,7 @@ test("Forgejo externalChecks: transientAsUnknown retries transport/5xx/undecodab
   assert.deepEqual(await forgejo({ status: 404, body: { message: "nope" } }).externalChecks(SHA, strict), []);
   assert.deepEqual(
     await forgejo({ body: { state: "success", statuses: [{ context: "ci/w", status: "success" }] } }).externalChecks(SHA, strict),
-    [{ name: "ci/w", state: "success", conclusion: "success" }],
+    [{ name: "ci/w", state: "success", conclusion: "success", origin: "status" }],
   );
 });
 
@@ -395,7 +395,7 @@ test("runCiWait: a multi-job singleton status stays visible when the job URL doe
     FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
   });
   assert.equal(await runCiWait(h.deps), 0);
-  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success", origin: "status" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
   assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
   assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
@@ -428,7 +428,7 @@ test("runCiWait: multi-job pending sibling survives the no-check grace and later
     FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
   });
   assert.equal(await runCiWait(h.deps), 0);
-  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success", origin: "status" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
   assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
   assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
@@ -490,7 +490,7 @@ test("runCiWait: Forgejo publication race discovers its status on a later poll",
   assert.equal(pendingLines.length, 2);
   assert.equal(pendingLines[0]! < discoveryLine && discoveryLine < pendingLines[1]!, true);
   assert.match(h.out[discoveryLine] ?? "", /context: ci\/reviewer-generated/);
-  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "ci/external", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "ci/external", state: "success", conclusion: "success", origin: "status" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| ci\/external \| success \|/);
   assert.deepEqual(requests, [statusPath, statusPath, jobsPath, statusPath]);
   rmSync(h.dir, { recursive: true, force: true });
@@ -684,7 +684,7 @@ test("runCiWait: superseded cancelled run is omitted when a passing rerun exists
     { name: "validate-toml", status: "completed", conclusion: "success", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
   ] });
   const checks = normalizeExternalChecks(runs, "{}", "", "");
-  assert.deepEqual(checks, [{ name: "validate-toml", state: "success", conclusion: "success" }]);
+  assert.deepEqual(checks, [{ name: "validate-toml", state: "success", conclusion: "success", origin: "check" }]);
   const h = harness(fakeAdapter([checks]));
   assert.equal(await runCiWait(h.deps), 0);
   const evidence = readFileSync(h.checksFile, "utf8");
@@ -699,7 +699,7 @@ test("runCiWait: a newer completed rerun displaces an older stuck pending run", 
     { name: "validate-toml", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
   ] });
   const checks = normalizeExternalChecks(runs, "{}", "", "");
-  assert.deepEqual(checks, [{ name: "validate-toml", state: "failure", conclusion: "failure" }]);
+  assert.deepEqual(checks, [{ name: "validate-toml", state: "failure", conclusion: "failure", origin: "check" }]);
   const h = harness(fakeAdapter([checks]));
   assert.equal(await runCiWait(h.deps), 0);
   assert.deepEqual(h.sleeps, [], "the newer terminal run finalizes immediately instead of timing out");
@@ -716,7 +716,7 @@ test("runCiWait: a genuinely newer pending rerun keeps the gate waiting", async 
     { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:04:00Z" },
   ] });
   const checks = normalizeExternalChecks(runs, "{}", "", "");
-  assert.deepEqual(checks, [{ name: "unit", state: "pending" }]);
+  assert.deepEqual(checks, [{ name: "unit", state: "pending", origin: "check" }]);
   const h = harness(fakeAdapter([checks]), { CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true" });
   assert.equal(await runCiWait(h.deps), 1);
   assert.deepEqual(h.sleeps, [10, 10, 5]);
@@ -875,6 +875,30 @@ test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artif
   assert.equal(parsedOverflow!.checks.length, 50);
   assert.equal(parsedOverflow!.checks.some((check) => check.name === "Unit Tests" && check.state === "failure"), true, "the red check survives the cap");
   assert.equal(parsedOverflow!.checks[0]!.name, "Unit Tests", "red rows lead the truncated list");
+});
+
+test("renderCiEvidenceOutput: provenance, clipping, and Actions retention survive parser bounds", () => {
+  const clipped = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", [
+    { name: "build\u0000", state: "success", origin: "actions" },
+  ]).replace(/^ci_checks_evidence=/, ""));
+  assert.equal(clipped?.checks[0]?.origin, "actions");
+  assert.equal(clipped?.checks[0]?.clipped, true);
+
+  const many = [
+    ...Array.from({ length: 55 }, (_, i) => ({ name: `context-${i}`, state: "success", origin: "status" as const })),
+    { name: "validate-typescript", state: "success", origin: "actions" as const },
+  ];
+  const retained = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", many).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(retained, null);
+  assert.equal(retained!.checks.some((check) => check.name === "validate-typescript"), true);
+  assert.equal(retained!.checks.length, 50);
+
+  const tooManyActions = Array.from({ length: 51 }, (_, i) => ({ name: `validate-${i}`, state: "success", origin: "actions" as const }));
+  assert.equal(renderCiEvidenceOutput(SHA, "success", tooManyActions), "");
+  const tooLargeActions = Array.from({ length: 50 }, (_, i) => ({
+    name: `validate-${i}-${"x".repeat(140)}`, state: "success", conclusion: "c".repeat(200), origin: "actions" as const,
+  }));
+  assert.equal(renderCiEvidenceOutput(SHA, "success", tooLargeActions), "");
 });
 
 test("renderCiEvidenceOutput: truncated names are never decision evidence", () => {

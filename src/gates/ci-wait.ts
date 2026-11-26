@@ -182,6 +182,8 @@ interface EvidenceRow {
   name: string;
   state: string;
   conclusion?: string;
+  origin?: "actions" | "check" | "status";
+  clipped?: true;
 }
 
 /** One source check plus its ORIGINAL-name classification. Retention and
@@ -190,6 +192,7 @@ interface EvidenceRow {
 interface EvidenceEntry {
   row: EvidenceRow;
   testExecution: boolean;
+  exactActions: boolean;
 }
 
 /** #1594: the head-bound check-evidence gate output — the compact-JSON
@@ -228,16 +231,19 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       // away. Classification is only sound on the complete source name, and
       // the consumer can only see the bounded one, so any identity drift
       // makes the whole artifact unsafe: emit no evidence.
+      const rawConclusion = typeof check.conclusion === "string" ? check.conclusion : "";
+      const conclusion = rawConclusion === "" ? "" : boundedEvidenceField(rawConclusion);
+      const clipped = name !== check.name || (rawConclusion !== "" && conclusion !== rawConclusion);
       if (ciCheckIdentity(check.name) !== ciCheckIdentity(name)) return "";
-      const conclusion = typeof check.conclusion === "string" ? boundedEvidenceField(check.conclusion) : "";
       entries.push({
-        // Original-name classification is the retention decision; the bounded
-        // name is never allowed to downgrade a test row into disposable context.
         testExecution: isTestExecutionCheckName(check.name),
+        exactActions: check.origin === "actions" && !clipped,
         row: {
           name,
           state: check.state,
           ...(conclusion === "" ? {} : { conclusion }),
+          ...(check.origin === undefined ? {} : { origin: check.origin }),
+          ...(clipped ? { clipped: true } : {}),
         },
       });
     }
@@ -264,10 +270,10 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       ...list.filter((entry) => entry.row.state === "failure"),
       ...list.filter((entry) => entry.row.state !== "failure"),
     ];
-    const testEntries = byFailureFirst(entries.filter((entry) => entry.testExecution));
-    if (testEntries.length > MAX_EVIDENCE_CHECKS) return "";
-    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution));
-    let retained = testEntries.map((entry) => entry.row);
+    const requiredEntries = byFailureFirst(entries.filter((entry) => entry.testExecution || entry.exactActions));
+    if (requiredEntries.length > MAX_EVIDENCE_CHECKS) return "";
+    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution && !entry.exactActions));
+    let retained = requiredEntries.map((entry) => entry.row);
     let json = serialize(retained);
     if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
     for (const entry of otherEntries) {
