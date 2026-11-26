@@ -118,6 +118,21 @@ test("the publish-mode family stays operator-only and allow-approve stays declar
   assert.equal(byId.get("publish-mode")!.default, "review_comment");
 });
 
+// #1821 review: provenance settlement accepts npm package pages on the npm
+// website with or without `www.`, and the fetch allowlist is exact-host and
+// re-checked on every redirect hop (the npm site redirects to www.npmjs.com),
+// so the shipped default must carry BOTH website spellings next to the
+// registry host — otherwise the organic npm bump it claims to settle is
+// refused at the transport.
+test("the default allowed-source-hosts carries every npm host settlement credits", () => {
+  const entry = loadContract().inputs.find((input) => input.id === "allowed-source-hosts");
+  assert.ok(entry);
+  const hosts = new Set(String(entry!.default).split(","));
+  for (const host of ["registry.npmjs.org", "npmjs.com", "www.npmjs.com"]) {
+    assert.ok(hosts.has(host), host);
+  }
+});
+
 // Tier-resolved and specialist transport inputs stay operator-only workflow
 // inputs; repository config must not select model endpoints or credentials.
 const TIER_RESOLVED_NOT_REPO_CONFIGURABLE = ["primary_tool_max_requests", "smart_tool_max_requests"];
