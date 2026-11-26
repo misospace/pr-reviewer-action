@@ -15,6 +15,7 @@ import {
 import { evaluateRequiredCheckCoverage, type RequiredCheckRow } from "../src/enforcement/required-checks.js";
 import { reviewObligationsFromArtifact, reviewObligationsToArtifact, type ReviewObligation } from "../src/enforcement/review-obligations.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
+import { CI_TEST_SCOPES } from "../src/config/ci-test-jobs.js";
 import type { TrustedCiJobs, TrustedCiTestScope } from "../src/config/ci-test-jobs.js";
 import { normalizeExternalChecks } from "../src/platform/normalize.js";
 import { renderCiEvidenceOutput } from "../src/gates/ci-wait.js";
@@ -861,6 +862,19 @@ test("#1820 the missing-leg reason refines unresolved obligation rows on both fo
   ], unrelated, head, configured);
   assert.equal(obligations[0]!.status, "unresolved");
   assert.equal(obligations[0]!.reason, "ci-evidence-configured-test-job-missing");
+});
+
+test("#1820 the configured scope vocabulary stays in sync with the name-derived scopes", () => {
+  // CI_TEST_SCOPES duplicates the TEST_SCOPE_ALIASES vocabulary in
+  // required-check-ci.ts by contract ("keep in sync" comment). A scope in the
+  // config list that the ask-side vocabulary cannot produce would silently
+  // never select its required leg for narrow asks, so pin every narrow scope
+  // through the public decision identity: a `"<scope> tests"` check name must
+  // denote test execution AND carry exactly that scope.
+  for (const scope of CI_TEST_SCOPES) {
+    if (scope === "full-suite") continue;
+    assert.equal(ciCheckIdentity(`${scope} tests`), `test|${scope}|plain`, scope);
+  }
 });
 
 test("#1594 rows helper: reconcile leaves no-evidence coverage rows byte-shape-identical", () => {

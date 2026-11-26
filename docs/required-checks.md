@@ -272,15 +272,15 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   retaining rows uses the COMPLETE source name, never the truncated copy:
   if bounding would change a check's decision identity (test-execution
   classification, proved scope, or exhaustive identity), the gate emits NO
-   evidence line rather than let a truncated skipped test row read as
-   disposable context. Test-execution and exact Actions rows are decision
-   evidence: they are retained up to the same-name bound below, and if the
-   bounded required-row set cannot fit, the gate emits NO evidence line — an
-   artifact missing a skipped, pending, or otherwise incomplete test leg could
-   otherwise look falsely complete and discharge a full-suite ask. Only
-   non-test context rows may be trimmed (failed rows first). A row whose name
-   or conclusion bounding altered is marked `clipped` in the artifact so it can
-   never serve as an exact identity match downstream. Each row also carries
+  evidence line rather than let a truncated skipped test row read as
+  disposable context. Test-execution and exact Actions rows are decision
+  evidence: they are retained up to the same-name bound below, and if the
+  bounded required-row set cannot fit, the gate emits NO evidence line — an
+  artifact missing a skipped, pending, or otherwise incomplete test leg could
+  otherwise look falsely complete and discharge a full-suite ask. Only
+  non-test context rows may be trimmed (failed rows first). A row whose name
+  or conclusion bounding altered is marked `clipped` in the artifact so it can
+  never serve as an exact identity match downstream. Each row also carries
   its producer `origin`: `actions` (the forge's native Actions check run —
   on GitHub, `app.slug === "github-actions"`), `check` (a check run from
   another integration), or `status` (a commit-status context). Same-name

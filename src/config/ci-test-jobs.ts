@@ -52,7 +52,9 @@ export const MAX_CI_TEST_JOBS_FILE_BYTES = 32_768;
 export const MAX_CI_TEST_JOB_IDENTITIES = 50;
 /** Mirrors MAX_EVIDENCE_FIELD_LENGTH; longer identities cannot match bounded evidence names. */
 export const MAX_CI_TEST_JOB_IDENTITY_CHARS = 200;
-/** Keep canonical scopes in sync with TEST_SCOPE_ALIASES in required-check-ci.ts. */
+/** Keep canonical scopes in sync with TEST_SCOPE_ALIASES in required-check-ci.ts;
+ * the vocabulary-pin test in tests-v3/required-check-ci.test.ts rejects drift:
+ * every narrow scope here must be derivable from a `"<scope> tests"` name. */
 export const CI_TEST_SCOPES = ["full-suite", "unit", "integration", "e2e", "smoke", "acceptance", "contract", "regression", "performance", "load", "browser", "ui", "api", "functional", "mutation", "fuzz"] as const;
 export type TrustedCiTestScope = (typeof CI_TEST_SCOPES)[number];
 
