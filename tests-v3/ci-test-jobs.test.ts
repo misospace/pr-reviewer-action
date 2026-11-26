@@ -187,6 +187,24 @@ test("#1820 resolver validates configured identities against the complete base w
 
   const skippedNonYaml = resolverFixture({ "test.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n", "README.md": "not a workflow\n" });
   assert.equal(ciJobIdentitiesFromRef(skippedNonYaml.base, skippedNonYaml.root).staticNames.get("validate-typescript"), 1);
+
+  // Extension matching is case-insensitive: the scanner must never be
+  // stricter than the platform about which files can define workflows.
+  const upperCase = resolverFixture({ "test.YML": "jobs:\n  dynamic:\n    name: ${{ github.event.pull_request.title }}\n" }, ["validate-typescript"]);
+  assert.equal(ciJobIdentitiesFromRef(upperCase.base, upperCase.root).prMintable, true);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: upperCase.base, headRef: upperCase.base, workspace: upperCase.root }).jobs.size, 0);
+
+  // Case-variant context spelling is still PR-controlled.
+  const mixedCase = resolverFixture({ "mixed.yml": "jobs:\n  dynamic:\n    name: ${{ GitHub.EVENT.pull_request.title }}\n" }, ["validate-typescript"]);
+  assert.equal(ciJobIdentitiesFromRef(mixedCase.base, mixedCase.root).prMintable, true);
+
+  // GitHub's workflow parser rejects YAML anchors and merge keys; a merge-key
+  // job's shape is unknowable here, so the file fails closed. An empty or
+  // whitespace `name:` falls back to the job key, like the platform does.
+  const mergeKey = resolverFixture({ "merge.yml": "defaults: &d\n  runs-on: ubuntu-latest\njobs:\n  validate-typescript:\n    <<: *d\n" }, ["validate-typescript"]);
+  assert.ok(/merge key/.test(ciJobIdentitiesFromRef(mergeKey.base, mergeKey.root).warning ?? ""));
+  const emptyName = resolverFixture({ "empty.yml": "jobs:\n  validate-typescript:\n    name: \"\"\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(emptyName.base, emptyName.root).staticNames.get("validate-typescript"), 1);
   assert.equal(MAX_CI_WORKFLOW_FILES, 32);
   assert.equal(MAX_CI_WORKFLOW_SURFACE_BYTES, 1_048_576);
   const aggregateWorkflows = Object.fromEntries(Array.from({ length: 5 }, (_, index) => [

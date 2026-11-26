@@ -179,7 +179,7 @@ function isPrMintableDisplayName(name: string): boolean {
     const end = remaining.indexOf("}}", start + 3);
     if (end < 0) return true;
     const span = remaining.slice(start + 3, end);
-    if (!/\b(?:matrix|strategy|vars)\s*\./.test(span) || /\b(?:github|env|needs|steps|secrets|inputs)\b/.test(span)) return true;
+    if (!/\b(?:matrix|strategy|vars)\s*\./i.test(span) || /\b(?:github|env|needs|steps|secrets|inputs)\b/i.test(span)) return true;
     remaining = remaining.slice(end + 2);
   }
   return false;
@@ -210,7 +210,7 @@ export function ciJobIdentitiesFromRef(
   let listing: string;
   try {
     if (exhausted()) return failure(`surface scan exceeded ${timeoutSec}s`);
-    listing = execFileSync("git", ["ls-tree", "-r", "--name-only", ref, "--", ".github/workflows"], {
+    listing = execFileSync("git", ["ls-tree", "-r", "--name-only", ref, "--", ":(top).github/workflows"], {
       cwd,
       timeout: remainingTimeout(),
       maxBuffer: MAX_CI_WORKFLOW_FILE_BYTES * 4,
@@ -226,7 +226,9 @@ export function ciJobIdentitiesFromRef(
     return failure(detail);
   }
   const files = listing.split("\n")
-    .filter((path) => path.startsWith(".github/workflows/") && /\.ya?ml$/.test(path))
+    // Extension matched case-insensitively: the scanner must never be
+    // stricter than the platform about which files can define workflows.
+    .filter((path) => path.startsWith(".github/workflows/") && /\.ya?ml$/i.test(path))
     .sort();
   if (files.length > MAX_CI_WORKFLOW_FILES) {
     return failure(`more than ${MAX_CI_WORKFLOW_FILES} workflow files were found (additional files omitted)`);
@@ -266,7 +268,14 @@ export function ciJobIdentitiesFromRef(
     }
     if (!isPlainObject(parsed) || !isPlainObject(parsed.jobs)) return failure("workflow has no jobs mapping", path);
     for (const [key, rawJob] of Object.entries(parsed.jobs)) {
-      const displayName = isPlainObject(rawJob) && typeof rawJob.name === "string" ? rawJob.name : undefined;
+      // GitHub's workflow parser rejects YAML anchors and merge keys; the
+      // `yaml` package does not resolve `<<`, so a merge-key job's shape is
+      // unknowable here — fail closed on the whole file rather than credit a
+      // display name the platform would refuse to build anyway.
+      if (isPlainObject(rawJob) && Object.keys(rawJob).some((field) => field.trim() === "<<")) {
+        return failure("workflow job uses a YAML merge key (anchors are not supported)", path);
+      }
+      const displayName = isPlainObject(rawJob) && typeof rawJob.name === "string" && rawJob.name.trim() !== "" ? rawJob.name : undefined;
       if (displayName === undefined) {
         staticNames.set(key, (staticNames.get(key) ?? 0) + 1);
       } else if (displayName.includes("${{")) {

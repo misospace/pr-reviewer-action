@@ -352,7 +352,9 @@ reconciliation above is unchanged for every repository that does not opt in.
   scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB aggregate, and one
   shared 10s deadline. It is deliberately GitHub-scoped because configured
   discharge is GitHub-Actions-only; the workflow-surface fence remains the
-  broader forge-agnostic guard. Each expression span is accepted only when it
+  broader forge-agnostic guard. Only `.yml`/`.yaml` files (any case) are
+  scanned; other files under `.github/workflows` cannot mint check-run names
+  and are skipped. Each expression span is accepted only when it
   references `matrix`, `strategy`, or admin-controlled `vars`, and contains no
   PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
   `secrets`, or `inputs`). Matrix values laundered from outputs remain an
