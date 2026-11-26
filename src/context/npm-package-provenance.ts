@@ -66,7 +66,9 @@ export const MAX_NPM_ENTRIES = 20000;
  * the corpus; over-cap is truncated on a row boundary with a disclosure line. */
 export const MAX_NPM_SECTION_BYTES = 60 * 1024;
 /** Most package comparisons per run — bounds wall time and corpus growth on a
- * pathological multi-bump PR; over-cap changes are reported, not fetched. */
+ * pathological multi-bump PR; over-cap changes are never fetched, and the
+ * phase passes them to `renderNpmPackageProvenance` as `skipped` so the
+ * section discloses every comparison it did not make (#1821 review round 2). */
 export const MAX_NPM_COMPARISONS = 12;
 /** The number of delta rows itemized before the rest is summarized. */
 export const MAX_NPM_DELTA_ROWS = 40;
@@ -566,9 +568,14 @@ function renderComparison(comparison: NpmPackageComparison): string[] {
   return lines;
 }
 
-/** The bounded corpus section. Returns "" when there is nothing to compare. */
-export function renderNpmPackageProvenance(comparisons: readonly NpmPackageComparison[]): string {
-  if (comparisons.length === 0) return "";
+/** The bounded corpus section. Returns "" when there is nothing to compare.
+ * `skipped` names the comparable bumps the caller capped away: they are
+ * disclosed unfetched, never dropped (#1821 review round 2). */
+export function renderNpmPackageProvenance(
+  comparisons: readonly NpmPackageComparison[],
+  skipped: readonly { slug: string; oldVersion: string; newVersion: string }[] = [],
+): string {
+  if (comparisons.length === 0 && skipped.length === 0) return "";
   const lines: string[] = [];
   lines.push("# Published npm Package Comparison");
   lines.push("");
@@ -578,6 +585,14 @@ export function renderNpmPackageProvenance(comparisons: readonly NpmPackageCompa
   lines.push("");
   for (const comparison of comparisons) {
     lines.push(...renderComparison(comparison));
+    lines.push("");
+  }
+  if (skipped.length > 0) {
+    lines.push("## Not compared (over the per-run comparison cap)");
+    lines.push(`- This run compares at most ${MAX_NPM_COMPARISONS} package bumps; these ${skipped.length} comparable bump(s) were NOT fetched. Inspect them directly in the registry if they matter:`);
+    for (const change of skipped) {
+      lines.push(`  - \`${safeInline(change.slug)}\` ${safeInline(change.oldVersion)} → ${safeInline(change.newVersion)}`);
+    }
     lines.push("");
   }
   return capSection(lines);
@@ -608,14 +623,17 @@ export interface BuildNpmPackageProvenanceResult {
 
 /** Compare every npm package change and render the section. The change list is
  * produced by the caller (the diff/scope parse); this driver only reads the
- * registry and renders. Empty markdown when there are no changes. */
+ * registry and renders. `skipped` carries the caller-capped remainder and is
+ * disclosed unfetched. Empty markdown when there is nothing to compare or
+ * disclose. */
 export async function buildNpmPackageProvenance(
   changes: readonly { slug: string; oldVersion: string; newVersion: string }[],
   options: CompareNpmPackagesOptions,
+  skipped: readonly { slug: string; oldVersion: string; newVersion: string }[] = [],
 ): Promise<BuildNpmPackageProvenanceResult> {
   const comparisons: NpmPackageComparison[] = [];
   for (const change of changes) {
     comparisons.push(await compareNpmPackage(change.slug, change.oldVersion, change.newVersion, options));
   }
-  return { markdown: renderNpmPackageProvenance(comparisons), comparisons };
+  return { markdown: renderNpmPackageProvenance(comparisons, skipped), comparisons };
 }

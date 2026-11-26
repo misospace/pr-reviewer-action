@@ -4518,6 +4518,20 @@ function canonicalImageSlug(repo: string): string | null {
   return DEPENDENCY_SCOPE_SLUG_RE.test(slug) ? slug : null;
 }
 
+/** #1821 (review round 2): optional per-side version provenance for the
+ * clean-bump consumer (`npmPackageChangesFromDiff` in `src/run/stages.ts`).
+ * `minus`/`plus` collect the exact version tokens recorded from removed /
+ * added diff lines for the slug; `multiToken` records that one recorded
+ * value carried TWO OR MORE version tokens — a dependency RANGE such as
+ * `">=1.0.0 <2.0.0"` — so that slug's tokens do not describe an old→new
+ * install transition. The capture is observation-only: it never changes the
+ * parse, the fail-closed decisions, or the returned scope. */
+export interface DependencyScopeSideProvenance {
+  minus: Set<string>;
+  plus: Set<string>;
+  multiToken: boolean;
+}
+
 /**
  * #1657 (review rounds 3+8): the TRUSTED dependency update identity scope —
  * the COMPLETE set of dependency updates this diff actually changes,
@@ -4589,7 +4603,10 @@ function canonicalImageSlug(repo: string): string | null {
  * An available-but-empty scope means no dependency change could be
  * attributed at all; the rows fail closed the same way at the receipt seam.
  */
-export function parseDependencyScope(fullDiffText: string): DependencyScopeResult {
+export function parseDependencyScope(
+  fullDiffText: string,
+  npmSides?: Map<string, DependencyScopeSideProvenance>,
+): DependencyScopeResult {
   const diffLines = fullDiffText.split("\n");
   // #1763 (review finding on #1782): file-level content recognition of Flux
   // OCIRepository manifests happens in a pre-pass over the WHOLE diff —
@@ -4643,27 +4660,51 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
   const usableSlug = (name: string): boolean =>
     name !== "" && name.length <= 214 && !name.includes("..") && !name.startsWith(".") && !name.startsWith("-")
     && DEPENDENCY_SCOPE_SLUG_RE.test(name);
-  const recordVersion = (slug: string, version: string): void => {
+  // #1821 (review round 2): the optional side-provenance capture, keyed by
+  // slug and created on first recorded token. Observation-only.
+  const sideProvenance = (slug: string): DependencyScopeSideProvenance | undefined => {
+    if (npmSides === undefined) return undefined;
+    let sides = npmSides.get(slug);
+    if (sides === undefined) {
+      sides = { minus: new Set<string>(), plus: new Set<string>(), multiToken: false };
+      npmSides.set(slug, sides);
+    }
+    return sides;
+  };
+  const recordVersion = (slug: string, version: string, sign?: "+" | "-"): void => {
     const entry = entries.get(slug);
     if (entry === undefined) return;
     if (!entry.versions.has(version)) {
       if (entry.versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) { scopeComplete = false; return; }
       entry.versions.add(version);
     }
+    if (sign === undefined) return;
+    const sides = sideProvenance(slug);
+    if (sides !== undefined) (sign === "-" ? sides.minus : sides.plus).add(version);
   };
   // Version tokens are extracted ONLY from an exact field VALUE this parser
   // chose deliberately (a manifest dependency pair value, a chart version
   // field value) — never from arbitrary line content.
-  const recordVersions = (slug: string, value: string): void => {
+  const recordVersions = (slug: string, value: string, sign?: "+" | "-"): void => {
     if (!entries.has(slug)) return;
+    const matches = [...value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)];
+    // A value carrying several version tokens is a dependency RANGE
+    // (`">=1.0.0 <2.0.0"`) or an equally range-shaped string: whatever this
+    // slug's tokens are, they no longer describe a single old→new install
+    // transition. Mark the slug permanently ambiguous for the clean-bump
+    // consumer (it never mutates the parse itself).
+    if (matches.length >= 2 && (sign === "+" || sign === "-")) {
+      const sides = sideProvenance(slug);
+      if (sides !== undefined) sides.multiToken = true;
+    }
     let taken = 0;
-    for (const match of value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)) {
+    for (const match of matches) {
       if (++taken > DEPENDENCY_SCOPE_MAX_LINE_VERSIONS
         || entries.get(slug)!.versions.size >= DEPENDENCY_SCOPE_MAX_ENTRY_VERSIONS) {
         scopeComplete = false;
         return;
       }
-      recordVersion(slug, match[0].toLowerCase());
+      recordVersion(slug, match[0].toLowerCase(), sign);
     }
   };
   // #1763: a changed image reference's manifest digest (bare lowercase hex,
@@ -4699,14 +4740,14 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
     if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(value)) { scopeComplete = false; return null; }
     return value;
   };
-  const recordChangedEntry = (rawName: string, versionSource: string | null, kind?: "image" | "chart"): void => {
+  const recordChangedEntry = (rawName: string, versionSource: string | null, kind?: "image" | "chart", sign?: "+" | "-"): void => {
     const name = normalizeSlug(rawName);
     if (!usableSlug(name)) { scopeComplete = false; return; }
     if (!entries.has(name)) {
       if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
       entries.set(name, { versions: new Set<string>(), digests: new Set<string>(), ...(kind !== undefined ? { kind } : {}) });
     }
-    if (versionSource !== null) recordVersions(name, versionSource);
+    if (versionSource !== null) recordVersions(name, versionSource, sign);
   };
   // A changed pair-shaped manifest line outside any dependency section THIS
   // hunk established carries dependency identity this parser cannot
@@ -4969,7 +5010,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
         // field value — never from relation values, resolved URLs, engines
         // or integrity hashes that merely contain version-shaped text.
         if (!NPM_STRUCTURAL_LINE_RE.test(content)) {
-          recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content));
+          recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content), undefined, sign === "-" || sign === "+" ? sign : undefined);
         }
       } else if (lockfileContentUnattributable(content, braceDepth)) {
         // #1657 (review round 9): a changed field line this hunk cannot
@@ -4995,7 +5036,7 @@ export function parseDependencyScope(fullDiffText: string): DependencyScopeResul
       if (npmSectionDepth > 0) {
         if (NPM_SECTION_CLOSE_RE.test(content)) { npmSectionDepth = 0; continue; }
         const pair = NPM_SECTION_PAIR_RE.exec(content);
-        if (pair !== null) recordChangedEntry(pair[1] ?? "", pair[2] ?? "");
+        if (pair !== null) recordChangedEntry(pair[1] ?? "", pair[2] ?? "", undefined, sign === "-" || sign === "+" ? sign : undefined);
         else scopeComplete = false;
       } else if (npmDependencyShapedPair(content)) {
         // A changed dependency pair outside any dependency section THIS hunk

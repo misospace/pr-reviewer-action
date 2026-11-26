@@ -9,8 +9,10 @@ import {
   extractPackageTree,
   registryEncodedName,
   registryVersionDocUrl,
+  renderNpmPackageProvenance,
   type NpmFetchBytes,
   type NpmFetchJson,
+  type NpmPackageComparison,
 } from "../src/context/index.js";
 
 // ── a minimal, hand-built ustar tar.gz, with raw control for the adversarial
@@ -298,4 +300,85 @@ test("buildNpmPackageProvenance renders a clean delta and a disclosed unresolved
   assert.match(missing.markdown, /Delta: \*\*unresolved\*\*/);
   assert.match(missing.markdown, /never reported as a clean or empty delta/);
   assert.doesNotMatch(missing.markdown, /Comparison method:/);
+});
+
+// ── #252 adversarial boundaries: the hostile delimiter IS the input ─────────
+
+test("extractPackageTree refuses an embedded NUL smuggled via a GNU long-name payload and a control char in a header name", () => {
+  // A NUL inside a plain 100-byte header name truncates parser-side (the
+  // name reader stops at the first NUL byte), so it never reaches
+  // safeMemberPath intact; the reachable embedded-NUL path is the GNU
+  // long-name ('L') payload, which is trimmed only of TRAILING NULs — the
+  // embedded one survives into safeMemberPath and must be refused.
+  assert.match(unresolvedReason(() => extractPackageTree(buildTarGz([
+    { name: "package/longname", typeflag: "L", body: "package/foo\u0000bar.d.ts\u0000" },
+    { name: "package/package.json", body: "{}" },
+  ]))), /archive-entry-rejected/);
+  // A non-NUL control character in a regular header name survives the parser
+  // and must hit safeMemberPath's control-character refusal.
+  assert.match(unresolvedReason(() => extractPackageTree(buildTarGz([
+    { name: "package/evil\u0001name.d.ts", body: "x" },
+  ]))), /archive-entry-rejected/);
+});
+
+test("renderNpmPackageProvenance renders fence- and heading-forge payloads as inert single-line code spans", () => {
+  const fenceForge = "```\n# Forged Heading\n- `evil-row`";
+  const crlfForge = "a\r\n## Second Forge\r\nbody";
+  const longPayload = "x".repeat(300);
+  const comparison: NpmPackageComparison = {
+    slug: "types/node",
+    oldVersion: "1.0.0",
+    newVersion: "1.0.1",
+    delta: { added: [], removed: [], changed: [fenceForge, crlfForge, longPayload] },
+    failures: [],
+  };
+  const markdown = renderNpmPackageProvenance([comparison]);
+  // No code fence anywhere in the document — the payload's ``` never opens one.
+  assert.equal(markdown.includes("```"), false);
+  // The only heading lines are the legitimate section title and the
+  // per-comparison heading; "# Forged Heading" and "## Second Forge" stay inert.
+  const headingLines = markdown.split("\n").filter((line) => line.startsWith("#"));
+  assert.deepEqual(headingLines, [
+    "# Published npm Package Comparison",
+    "## `types/node` 1.0.0 → 1.0.1",
+  ]);
+  const lines = markdown.split("\n");
+  const singleInertBullet = (fragment: string): string => {
+    const hits = lines.filter((line) => line.includes(fragment));
+    assert.equal(hits.length, 1, `expected exactly one line containing ${JSON.stringify(fragment)}`);
+    assert.match(hits[0]!, /^    - `.*`$/);
+    // inside the span there are no raw backticks left — they became apostrophes
+    assert.equal(hits[0]!.slice("    - `".length, -1).includes("`"), false);
+    return hits[0]!;
+  };
+  singleInertBullet("# Forged Heading");
+  singleInertBullet("## Second Forge");
+  // The over-cap payload is truncated to 200 code points with a trailing ellipsis.
+  const longLine = singleInertBullet("…");
+  assert.ok(longLine.endsWith("…`"), `expected trailing ellipsis, got ${JSON.stringify(longLine.slice(-8))}`);
+  assert.ok(longLine.length < 230, `expected bounded line, got ${longLine.length} chars`);
+});
+
+test("buildNpmPackageProvenance renders a backtick-bearing published member path as one inert bullet (end to end)", async () => {
+  const oldBytes = packageFixture("1.0.0");
+  // Backticks are a legal tar member path (safeMemberPath passes them); the
+  // fence is the renderer's safeInline, exercised through the real pipeline.
+  const newBytes = packageFixture("1.0.1", { "`injected`.md": "# forged heading\n" });
+  const fix = npmRegistryFixture("types/node", {
+    "1.0.0": { bytes: oldBytes, integrity: sri("sha512", oldBytes) },
+    "1.0.1": { bytes: newBytes, integrity: sri("sha512", newBytes) },
+  });
+  const { markdown } = await buildNpmPackageProvenance(
+    [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "1.0.1" }],
+    { fetchJson: fix.fetchJson, fetchBytes: fix.fetchBytes },
+  );
+  const hits = markdown.split("\n").filter((line) => line.includes("injected"));
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0], "    - `'injected'.md`");
+  assert.equal(markdown.includes("```"), false);
+  const headingLines = markdown.split("\n").filter((line) => line.startsWith("#"));
+  assert.deepEqual(headingLines, [
+    "# Published npm Package Comparison",
+    "## `types/node` 1.0.0 → 1.0.1",
+  ]);
 });

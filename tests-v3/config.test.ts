@@ -63,10 +63,11 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  // #1635 + #1577: 180 inputs — tool-max-conversation-tokens sizes the
-  // loop's compaction watermark explicitly, and risk-obligations joined
-  // the pre-pass family.
-  assert.equal(contract.inputs.length, 180);
+  // #1635 + #1577 + #1821: 181 inputs — tool-max-conversation-tokens sizes
+  // the loop's compaction watermark explicitly, risk-obligations joined the
+  // pre-pass family, and npm-package-budget-sec made the npm comparison's
+  // read deadline a discoverable input.
+  assert.equal(contract.inputs.length, 181);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 

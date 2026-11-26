@@ -509,6 +509,10 @@ inputs:
     description: Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. Default 60.
     required: false
     default: "60"
+  npm-package-budget-sec:
+    description: "Maximum seconds to spend on the published npm package comparison (#1821): registry version documents and integrity-verified tarball downloads for the exact bumped versions. 0 disables the budget. Default 60."
+    required: false
+    default: "60"
   evidence-providers-file:
     description: Optional JSON file in the reviewed repository that defines evidence providers to run before review
     required: false

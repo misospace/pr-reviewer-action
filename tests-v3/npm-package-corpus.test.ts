@@ -175,6 +175,90 @@ test("npmPackageChangesFromDiff pairs the exact @types/node bump from the lockfi
   ), []);
 });
 
+// ── #1821 review round 2: two recorded tokens are a bump only with side
+//    provenance. A dependency-RANGE edit records two exact tokens on the ADDED
+//    side alone (">=26.6.7 <26.7.0" tokenizes to 26.6.7 AND 26.7.0) and a
+//    single added/removed line carries no transition at all — the section must
+//    never assert a published delta nobody installed their way through.
+
+const manifestDiff = (lines: string[]): string => [
+  "diff --git a/package.json b/package.json",
+  "@@ -1,5 +1,5 @@",
+  " {",
+  '   "dependencies": {',
+  ...lines,
+  "   }",
+  " }",
+].join("\n");
+
+test("a manifest dependency-RANGE edit is not an old→new bump (regression #1821 review round 2)", () => {
+  // The reviewer's exact shape: one changed range line whose tokens are 1.0.0
+  // and 2.0.0 — the old code compared them as a published transition.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "@types/node": "^26.6.7"',
+    '+    "@types/node": ">=26.6.7 <26.7.0"',
+  ])), []);
+  // A brand-new dependency pinned by a range: added side only, no transition.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '+    "left-pad": ">=1.0.0 <2.0.0"',
+  ])), []);
+  // A dependency REMOVAL: removed side only, no transition.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "left-pad": "^1.3.0"',
+  ])), []);
+  // A clean caret bump still compares: one exact token per side of the change.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "chalk": "^5.3.0"',
+    '+    "chalk": "^5.4.1"',
+  ])), [{ slug: "chalk", oldVersion: "5.3.0", newVersion: "5.4.1" }]);
+  // Direction comes from the SIDES, not first-seen order: the lockfile hunk
+  // records the '+' token BEFORE the manifest hunk records the '-'.
+  assert.deepEqual(npmPackageChangesFromDiff([
+    'diff --git a/package-lock.json b/package-lock.json',
+    '@@ -1,3 +1,4 @@',
+    '     "node_modules/chalk": {',
+    '+      "version": "5.4.1",',
+    '       "license": "MIT"',
+    '     }',
+    'diff --git a/package.json b/package.json',
+    '@@ -1,5 +1,4 @@',
+    ' {',
+    '   "dependencies": {',
+    '-    "chalk": "^5.3.0"',
+    '   }',
+  ].join("\n")), [{ slug: "chalk", oldVersion: "5.3.0", newVersion: "5.4.1" }]);
+  // A downgrade compares in the downgrade direction, not first→last.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "chalk": "^5.4.1"',
+    '+    "chalk": "^5.3.0"',
+  ])), [{ slug: "chalk", oldVersion: "5.4.1", newVersion: "5.3.0" }]);
+  // The pure function applies no cap of its own — the phase caps and discloses.
+  const many = manifestDiff(
+    Array.from({ length: 13 }, (_unused, index) => [
+      `-    "pkg-${index}": "^1.0.${index}"`,
+      `+    "pkg-${index}": "^1.1.${index}"`,
+    ]).flat(),
+  );
+  const all = npmPackageChangesFromDiff(many);
+  assert.equal(all.length, 13, "all 13 clean bumps stay visible to the phase");
+  assert.deepEqual(all[12], { slug: "pkg-12", oldVersion: "1.0.12", newVersion: "1.1.12" });
+});
+
+test("bumps past the per-run cap are disclosed unfetched, never silently dropped", async () => {
+  const fetched = Array.from({ length: 12 }, (_unused, index) => ({ slug: `pkg-${index}`, oldVersion: "1.0.0", newVersion: "1.1.0" }));
+  const skipped = [{ slug: "pkg-12", oldVersion: "1.0.12", newVersion: "1.1.12" }, { slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }];
+  // The compared set fails closed (no fixture documents) — the disclosure is
+  // independent of what was fetched.
+  const { markdown } = await buildNpmPackageProvenance(fetched, {
+    fetchJson: async () => { throw new Error("offline"); },
+    fetchBytes: async () => null,
+  }, skipped);
+  assert.ok(markdown.includes("## Not compared (over the per-run comparison cap)"), "the over-cap set is a visible section");
+  assert.ok(markdown.includes("- `pkg-12` 1.0.12 → 1.1.12"), "each skipped bump names its exact pair");
+  assert.ok(markdown.includes("- `types/node` 26.6.7 → 26.6.10"));
+  assert.ok(markdown.includes("were NOT fetched"), "the disclosure states the reads never happened");
+});
+
 test("the seam-driven comparison renders the resolved package-version delta", async () => {
   const markdown = await renderSection();
   assert.ok(markdown.includes("## `types/node` 26.6.7 → 26.6.10"), "the bump row renders with the scope-normalized slug");

@@ -39,7 +39,7 @@ import {
 } from "../context/index.js";
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
-import { parseDependencyScope } from "../classification/classify.js";
+import { parseDependencyScope, type DependencyScopeSideProvenance } from "../classification/classify.js";
 import { MAX_NPM_COMPARISONS, buildNpmPackageProvenance } from "../context/npm-package-provenance.js";
 import { createNpmFetches, npmPackageDeadline } from "../context/npm-package-transport.js";
 import {
@@ -361,23 +361,39 @@ export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, en
 
 /** The npm package changes an exact-published-package comparison can attempt
  * from a dependency-scope result: every npm entry (no `kind`, the pre-#1763
- * spelling) that carries at least two exact versions, as its first→last pair.
- * Pure and total so the phase's decision is unit-testable without a network. */
+ * spelling) whose exact version tokens describe a real old→new transition —
+ * EXACTLY two tokens, one contributed ONLY by removed lines and the other
+ * ONLY by added lines (#1821 review round 2). A dependency-range edit is NOT
+ * a transition: `">=1.0.0 <2.0.0"` tokenizes to two exact versions nobody
+ * installed their way from, and a single added/removed line or a chart-manifest
+ * version carries no npm install transition at all — every such entry is
+ * skipped, never compared. The `MAX_NPM_COMPARISONS` cap is applied by the
+ * phase (which discloses what it drops), not here, so the pure decision
+ * stays unit-testable without a network. */
 export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: string; oldVersion: string; newVersion: string }> {
-  const scope = parseDependencyScope(diffText);
+  const npmSides = new Map<string, DependencyScopeSideProvenance>();
+  const scope = parseDependencyScope(diffText, npmSides);
   if (!scope.available) return [];
   const changes: Array<{ slug: string; oldVersion: string; newVersion: string }> = [];
   for (const entry of scope.entries) {
     // npm-era entries leave `kind` undefined; image/chart kinds never do.
     if (entry.kind !== undefined) continue;
-    // A clean old→new published comparison needs EXACTLY two exact version
-    // tokens (one per side of the bump). A dependency-range edit (">=1 <2")
-    // tokenizes to more than two, and no install transitioned between the first
-    // and last of those — skip it rather than compare versions nobody moved
-    // through. More than two is reported by the coverage section, not here.
     if (entry.versions.length !== 2) continue;
-    changes.push({ slug: entry.slug, oldVersion: entry.versions[0]!, newVersion: entry.versions[1]! });
-    if (changes.length >= MAX_NPM_COMPARISONS) break;
+    // #1821 review round 2: two tokens are a bump only with side provenance —
+    // exactly one token recorded ONLY on the removed side and exactly one
+    // ONLY on the added side, and the pair IS the entry's whole token set.
+    // Direction comes from the sides, never from first-seen order (a cross-
+    // file bump can record the '+' line before the '-' line). No capture
+    // (e.g. a chart-manifest version) or any range-shaped value
+    // (`matches >= 2` on one line) disqualifies the entry.
+    const sides = npmSides.get(entry.slug);
+    if (sides === undefined || sides.multiToken) continue;
+    const removedOnly = entry.versions.filter((version) => sides.minus.has(version) && !sides.plus.has(version));
+    const addedOnly = entry.versions.filter((version) => sides.plus.has(version) && !sides.minus.has(version));
+    // The two filters are complementary by construction, so exactly one
+    // token on each side is the whole clean transition.
+    if (removedOnly.length !== 1 || addedOnly.length !== 1) continue;
+    changes.push({ slug: entry.slug, oldVersion: removedOnly[0]!, newVersion: addedOnly[0]! });
   }
   return changes;
 }
@@ -390,11 +406,17 @@ export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: strin
  * closed and the section reports every version unresolved — never a fabricated
  * delta. */
 export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
-  const changes = npmPackageChangesFromDiff(diffText);
-  if (changes.length === 0) {
+  const comparable = npmPackageChangesFromDiff(diffText);
+  if (comparable.length === 0) {
     ws.write("npm-package-provenance.md", "");
     return "";
   }
+  // #1821 review round 2: the per-run cap keeps a pathological multi-bump PR
+  // bounded, but dropping the excess silently overstates the section's
+  // coverage — everything past the cap is passed to the renderer and
+  // disclosed there, unfetched.
+  const changes = comparable.slice(0, MAX_NPM_COMPARISONS);
+  const skipped = comparable.slice(MAX_NPM_COMPARISONS);
   const allowedHosts = parseAllowedHosts(env.ALLOWED_SOURCE_HOSTS ?? "");
   const { fetchJson, fetchBytes } = createNpmFetches({
     allowedHosts,
@@ -404,7 +426,7 @@ export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: s
     fetchJson,
     fetchBytes,
     deadline: npmPackageDeadline(env as NodeJS.ProcessEnv),
-  });
+  }, skipped);
   ws.write("npm-package-provenance.md", markdown);
   return markdown;
 }

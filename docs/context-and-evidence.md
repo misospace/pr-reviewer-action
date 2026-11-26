@@ -390,6 +390,8 @@ between the two published versions without needing a Git tag.
 
 - The comparison is **advisory corpus only**, like the Image Digest Provenance
   section. It never sets the review verdict.
+- The read deadline is operator-tunable via the `npm-package-budget-sec`
+  input (default 60, 0 disables).
 - It never runs `npm install`, a lifecycle script, or any package code. The
   archive is unpacked in memory under hard bounds and rejects traversal,
   links, and malformed or truncated archives.

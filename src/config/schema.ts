@@ -39,6 +39,8 @@ export const INTEGER_INPUTS = new Set([
   "syntax-context-max-bytes",
   "smart-model-context-tokens", "fallback-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
   "deep-review-max-tokens", "deep-review-corpus-max-bytes", "enrichment-budget-sec", "image-digest-budget-sec",
+  // #1821: the npm published-package comparison's read deadline (0 disables).
+  "npm-package-budget-sec",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",
   "evidence-provider-parallelism", "tool-loop-wall-clock-sec", "tool-loop-summarize-max-tokens", "tool-max-requests",
   "primary-tool-max-requests", "smart-tool-max-requests", "smart-tool-max-rounds", "smart-tool-loop-wall-clock-sec",

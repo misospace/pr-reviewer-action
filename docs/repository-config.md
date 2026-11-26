@@ -170,6 +170,7 @@ still also set them as a workflow `with:` input:
 | `deep-review-max-tokens` | integer | ceiling |
 | `enrichment-budget-sec` | integer | ceiling |
 | `image-digest-budget-sec` | integer | ceiling |
+| `npm-package-budget-sec` | integer | ceiling |
 | `sarif-max-findings` | integer | ceiling |
 | `evidence-provider-timeout-sec` | integer | ceiling |
 | `evidence-provider-max-output-bytes` | integer | ceiling |
