@@ -76,8 +76,29 @@ test("registry URL builders encode scoped names canonically and refuse junk", ()
   assert.equal(registryEncodedName(""), null);
   assert.equal(registryVersionDocUrl("types/node", "26.6.10"), `${NPM_REGISTRY_ORIGIN}/@types%2Fnode/26.6.10`);
   assert.equal(registryVersionDocUrl("lodash", "4.17.21"), `${NPM_REGISTRY_ORIGIN}/lodash/4.17.21`);
+  // Build metadata is legal semver and reaches the URL percent-encoded (#1821
+  // review round 4); prerelease and build may co-occur.
+  assert.equal(registryVersionDocUrl("lodash", "4.17.21+build"), `${NPM_REGISTRY_ORIGIN}/lodash/4.17.21%2Bbuild`);
+  assert.equal(registryVersionDocUrl("types/node", "1.0.0-rc.1+meta"), `${NPM_REGISTRY_ORIGIN}/@types%2Fnode/1.0.0-rc.1%2Bmeta`);
   // A non-exact version never becomes a URL.
   assert.equal(registryVersionDocUrl("lodash", "latest"), null);
+  assert.equal(registryVersionDocUrl("lodash", "1.0.0+Build"), null); // uppercase build metadata: fail closed
+  assert.equal(registryVersionDocUrl("lodash", "1.0.0+"), null);
+  assert.equal(registryVersionDocUrl("lodash", "1.0"), null);
+});
+
+test("a slug/version the URL grammar refuses reports its own honest reason, not a document error (#1821 review round 4)", async () => {
+  const result = await compareNpmPackage("lodash", "latest", "2.0.0", {
+    fetchJson: (async () => {
+      throw new Error("fixture never answers");
+    }) as NpmFetchJson,
+    fetchBytes: (async () => null) as NpmFetchBytes,
+  });
+  assert.equal(result.delta, null);
+  assert.deepEqual(result.failures, [
+    { version: "latest", reason: "registry-url-refused" },
+    { version: "2.0.0", reason: "registry-fetch-failed" },
+  ]);
 });
 
 test("an uppercase version spelling is refused, never case-folded into a comparison (#1821 review round 3)", async () => {

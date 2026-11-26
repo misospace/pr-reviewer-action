@@ -28,6 +28,7 @@ import {
 } from "../platform/safe-fetch.js";
 import type { FetchLike } from "../platform/http.js";
 import { USER_AGENT } from "../platform/user-agent.js";
+import { pyIntFromText } from "../evidence/pyjson.js";
 import {
   MAX_NPM_TARBALL_BYTES,
   NPM_REGISTRY_ORIGIN,
@@ -47,8 +48,12 @@ const MAX_NPM_REDIRECTS = 10;
 /** The canonical npm registry package-document path grammar the comparison
  * layer builds: `/<encoded-name>/<exact-version>`, where `<encoded-name>` is an
  * unscoped name or the single-segment `@scope%2Fname` spelling. Query and hash
- * are absent by construction. */
-const VERSION_DOC_PATH = /^\/(?:[a-z0-9._~-]+|@[a-z0-9._~-]+%2F[a-z0-9._~-]+)\/[0-9][0-9a-z.+-]*$/;
+ * are absent by construction. The version segment carries the EXACT spelling
+ * `registryVersionDocUrl` produces: `encodeURIComponent` leaves every semver
+ * character but `+` untouched, so a build-metadata version (`1.0.0+build`)
+ * arrives as `1.0.0%2Bbuild` and the grammar accepts only that uppercase `%2B`
+ * encoding — any other percent sequence stays refused (#1821 review round 4). */
+const VERSION_DOC_PATH = /^\/(?:[a-z0-9._~-]+|@[a-z0-9._~-]+%2F[a-z0-9._~-]+)\/[0-9](?:[0-9a-z.+-]|%2B[0-9a-z.+-])*$/;
 
 /** The canonical npm tarball path grammar: `/<name>/-/<basename>.tgz` (the
  * scope is spelled `@scope/name` here, NOT percent-encoded — this is the URL the
@@ -215,10 +220,12 @@ export function createNpmFetches(options: NpmTransportOptions): NpmFetches {
 }
 
 /** `DeadlineBudget.from_env("NPM_PACKAGE_BUDGET_SEC", default=60)`-shaped: a
- * `Date.now()`-ms deadline, or null when disabled (<= 0). */
+ * `Date.now()`-ms deadline, or null when disabled (<= 0). Parsed with
+ * `pyIntFromText` like `imageDigestDeadline` (#1821 review round 4): a
+ * malformed value such as `"5abc"` falls back to the documented 60s default
+ * instead of a silently truncated `Number.parseInt` prefix. */
 export function npmPackageDeadline(env: NodeJS.ProcessEnv, now: number = Date.now()): number | null {
-  const raw = env.NPM_PACKAGE_BUDGET_SEC;
-  const parsed = raw === undefined || raw.trim() === "" ? DEFAULT_NPM_PACKAGE_BUDGET_SEC : Number.parseInt(raw, 10);
-  const budget = Number.isFinite(parsed) ? (parsed as number) : DEFAULT_NPM_PACKAGE_BUDGET_SEC;
+  const parsed = pyIntFromText(env.NPM_PACKAGE_BUDGET_SEC ?? String(DEFAULT_NPM_PACKAGE_BUDGET_SEC));
+  const budget = parsed === null ? DEFAULT_NPM_PACKAGE_BUDGET_SEC : Number(parsed);
   return budget <= 0 ? null : now + budget * 1000;
 }

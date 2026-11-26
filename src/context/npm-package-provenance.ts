@@ -85,6 +85,7 @@ export interface PackageTree {
  * silently-empty delta. */
 export type NpmUnresolvedReason =
   | "registry-fetch-failed"
+  | "registry-url-refused"
   | "registry-document-invalid"
   | "registry-name-mismatch"
   | "registry-version-mismatch"
@@ -98,9 +99,7 @@ export type NpmUnresolvedReason =
   | "archive-entry-rejected"
   | "archive-too-large"
   | "archive-too-many-entries"
-  | "package-manifest-missing"
-  | "package-name-mismatch"
-  | "package-version-mismatch";
+  | "package-manifest-missing";
 
 export interface NpmPackageFailure {
   version: string;
@@ -179,7 +178,7 @@ export function registryEncodedName(slug: string): string | null {
 export function registryVersionDocUrl(slug: string, version: string): string | null {
   const encoded = registryEncodedName(slug);
   if (encoded === null) return null;
-  if (!/^\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?$/.test(version)) return null;
+  if (!/^\d+(?:\.\d+){2,}(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/.test(version)) return null;
   return `${NPM_REGISTRY_ORIGIN}/${encoded}/${encodeURIComponent(version)}`;
 }
 
@@ -405,7 +404,7 @@ async function acquireVersion(
 ): Promise<PackageTree> {
   if (deadline !== null && Date.now() >= deadline) throw new UnresolvedError("registry-fetch-failed");
   const docUrl = registryVersionDocUrl(slug, version);
-  if (docUrl === null) throw new UnresolvedError("registry-document-invalid");
+  if (docUrl === null) throw new UnresolvedError("registry-url-refused");
 
   let rawDoc: unknown;
   try {
@@ -517,6 +516,7 @@ function safeInline(value: string, cap = 200): string {
 
 const REASON_TEXT: Record<NpmUnresolvedReason, string> = {
   "registry-fetch-failed": "the registry version document could not be fetched (network, host not allowlisted, or deadline)",
+  "registry-url-refused": "the package slug or version spelling is outside the registry URL grammar — no URL was built (fail closed)",
   "registry-document-invalid": "the registry version document was not a JSON object",
   "registry-name-mismatch": "the registry document names a different package than this dependency (fail closed)",
   "registry-version-mismatch": "the registry document version does not match the requested exact version (fail closed)",
@@ -531,8 +531,6 @@ const REASON_TEXT: Record<NpmUnresolvedReason, string> = {
   "archive-too-large": "the published archive exceeded a decompressed or per-file size bound",
   "archive-too-many-entries": "the published archive exceeded the entry-count bound",
   "package-manifest-missing": "the published archive contained no package/package.json manifest",
-  "package-name-mismatch": "the published manifest names a different package (fail closed)",
-  "package-version-mismatch": "the published manifest version differs from the requested version (fail closed)",
 };
 
 function renderDelta(delta: NpmPackageDelta): string[] {

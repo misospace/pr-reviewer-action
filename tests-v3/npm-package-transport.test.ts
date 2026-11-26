@@ -14,6 +14,7 @@ import {
   npmPackageDeadline,
   npmTransportAllowsTarball,
   npmTransportAllowsVersionDoc,
+  registryVersionDocUrl,
 } from "../src/context/index.js";
 import type { ExchangeRequest, ExchangeResponse } from "../src/platform/safe-fetch.js";
 
@@ -28,8 +29,32 @@ const TARBALL_BODY = Buffer.from("published-tarball-bytes");
 test("the canonical version-doc and tarball grammars are accepted for an allowlisted registry", () => {
   assert.equal(npmTransportAllowsVersionDoc(DOC, REGISTRY_HOSTS), true, "scoped @scope%2Fname doc");
   assert.equal(npmTransportAllowsVersionDoc("https://registry.npmjs.org/lodash/4.17.21", REGISTRY_HOSTS), true, "unscoped doc");
+  // A build-metadata version reaches the transport in the exact percent-encoded
+  // spelling registryVersionDocUrl produces (`+` → `%2B`) — it must not be
+  // refused into a silent UNRESOLVED (#1821 review round 4).
+  assert.equal(npmTransportAllowsVersionDoc("https://registry.npmjs.org/lodash/4.17.21%2Bbuild.1", REGISTRY_HOSTS), true, "build-metadata doc");
+  assert.equal(npmTransportAllowsVersionDoc("https://registry.npmjs.org/@types%2Fnode/26.6.10-rc.1%2Bbuild", REGISTRY_HOSTS), true, "scoped prerelease+build doc");
   assert.equal(npmTransportAllowsTarball(TARBALL, REGISTRY_HOSTS), true, "scoped tarball (unencoded @scope/name)");
   assert.equal(npmTransportAllowsTarball("https://registry.npmjs.org/ms/-/ms-2.1.3.tgz", REGISTRY_HOSTS), true, "unscoped tarball");
+});
+
+test("every URL registryVersionDocUrl builds passes the transport grammar (producer/consumer agreement)", () => {
+  // The round-4 bug was producer/consumer drift: the builder percent-encodes
+  // `+`, the grammar did not know `%2B`. Pin the pair against each other.
+  const cases: Array<[string, string]> = [
+    ["types/node", "26.6.10"],
+    ["lodash", "4.17.21"],
+    ["escape-string-regexp", "4.0.0-alpha.1"],
+    ["lodash", "4.17.21+build"],
+    ["types/node", "1.0.0-rc.1+meta.2"],
+  ];
+  for (const [slug, version] of cases) {
+    const url = registryVersionDocUrl(slug, version);
+    assert.notEqual(url, null, `${slug}@${version} must build a url`);
+    assert.equal(npmTransportAllowsVersionDoc(String(url), REGISTRY_HOSTS), true, String(url));
+  }
+  // An already-percent-encoded version string is never double-accepted.
+  assert.equal(registryVersionDocUrl("lodash", "4.17.21%2Bbuild"), null);
 });
 
 test("the host allowlist gates even the canonical forms (empty list = the override case)", () => {
@@ -53,6 +78,10 @@ test("non-canonical version documents are refused by the grammar", () => {
     "https://registry.npmjs.org/@evil%2fnode/1.0.0",
     "https://registry.npmjs.org/@types/node/../../secret",
     "https://registry.npmjs.org/@types%2Fnode/latest",
+    "https://registry.npmjs.org/lodash/4.17.21%2bbuild",
+    "https://registry.npmjs.org/lodash/4.17.21%2F..%2F..%2Fsecret",
+    "https://registry.npmjs.org/lodash/4.17.21%build",
+    "https://registry.npmjs.org/lodash/4.17.21%2B",
     "https://registry.npmjs.org.evil.test/@types%2Fnode/26.6.7",
     "https://evil.test/@types%2Fnode/26.6.7",
     "not a url",
@@ -122,6 +151,20 @@ test("a version document and a tarball are fetched when the registry is allowlis
     ["registry.npmjs.org", ["93.184.216.34"]],
     ["registry.npmjs.org", ["93.184.216.34"]],
   ]);
+});
+
+test("a build-metadata version document is fetched at its exact %2B spelling", async () => {
+  // The round-4 regression guard: `1.0.0+build` must reach the registry as
+  // `1.0.0%2Bbuild` and be ANSWERED, not refused into a silent UNRESOLVED.
+  const buildDoc = "https://registry.npmjs.org/@types%2Fnode/26.6.7%2Bbuild";
+  const harness = npmHarness((request) => {
+    if (request.path === "/@types%2Fnode/26.6.7%2Bbuild") {
+      return { status: 200, headers: {}, body: Buffer.from('{"name":"@types/node","version":"26.6.7+build"}') };
+    }
+    throw new Error(`unexpected path ${request.path}`);
+  });
+  assert.deepEqual(await harness.fetches.fetchJson(buildDoc), { name: "@types/node", version: "26.6.7+build" });
+  assert.deepEqual(harness.exchanged.map((r) => r.path), ["/@types%2Fnode/26.6.7%2Bbuild"]);
 });
 
 test("a grammar refusal at either seam happens before any connection or lookup", async () => {
@@ -265,6 +308,10 @@ test("npmPackageDeadline parses like imageDigestDeadline (default 60, <=0 disabl
   assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: " 5 " }, 0), 5000);
   assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "" }, 0), 60_000);
   assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "junk" }, 0), 60_000);
+  // pyIntFromText lineage (#1821 review round 4): a trailing-junk prefix is
+  // rejected to the documented default, never silently truncated to `5`.
+  assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "5abc" }, 0), 60_000);
+  assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "5.5" }, 0), 60_000);
   assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "0" }, 0), null);
   assert.equal(npmPackageDeadline({ NPM_PACKAGE_BUDGET_SEC: "-3" }, 0), null);
 });
