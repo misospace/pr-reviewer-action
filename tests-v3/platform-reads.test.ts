@@ -298,6 +298,23 @@ test("external-check fold: id-less same-name Actions rows remain distinct", () =
   ]);
 });
 
+test("external-check fold: same-run Actions rows collapse only when check-run ids match", () => {
+  const run = (id: number, conclusion: string, started: string) => ({
+    id, name: "Unit Tests", app: { slug: "github-actions" }, details_url: `https://x/actions/runs/100/job/${id}`,
+    status: "completed", conclusion, started_at: started,
+  });
+  const distinct = normalizeExternalChecks(JSON.stringify({ check_runs: [
+    run(1, "failure", "2026-01-01T00:00:00Z"),
+    run(2, "success", "2026-01-02T00:00:00Z"),
+  ] }), "{}", "", "");
+  assert.deepEqual(distinct?.map((check) => check.state), ["failure", "success"]);
+  const duplicate = normalizeExternalChecks(JSON.stringify({ check_runs: [
+    run(1, "failure", "2026-01-01T00:00:00Z"),
+    run(1, "success", "2026-01-02T00:00:00Z"),
+  ] }), "{}", "", "");
+  assert.deepEqual(duplicate?.map((check) => check.state), ["success"]);
+});
+
 test("external-check fold: Actions runs and producer apps retain distinct same-name rows", () => {
   const runs = JSON.stringify({ check_runs: [
     { id: 1, name: "Unit Tests", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/100/job/1", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:00:00Z" },

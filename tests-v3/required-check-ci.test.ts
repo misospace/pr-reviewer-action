@@ -611,14 +611,14 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
   assert.deepEqual(redThenGreen?.checks.map((check) => check.state), ["failure", "success"]);
   assert.equal(decide("run full test suite", redThenGreen).outcome, "contradicted");
 
-  // Same-run same-name rows collapse to the newest (GitHub retry semantics);
-  // cross-run same-name rows remain distinct and failure-first.
+  // Distinct same-run check-run ids are distinct legs; filter=latest does not
+  // prove retry semantics, so a newer green cannot discard the red leg.
   const retry = run("validate-typescript", 11, "failure");
   retry.details_url = "https://github.test/actions/runs/11/job/111";
   const retryGreen = { ...retry, id: 112, conclusion: "success", started_at: "2026-02-01T00:00:00Z", details_url: "https://github.test/actions/runs/11/job/112" };
   const retried = chain([retry, retryGreen]);
-  assert.deepEqual(retried?.checks.map((check) => check.state), ["success"]);
-  assert.equal(retried?.checks[0]?.conclusion, "success");
+  assert.deepEqual(retried?.checks.map((check) => check.state), ["failure", "success"]);
+  assert.equal(decide("run full test suite", retried).outcome, "contradicted");
   const overlapping = chain([run("validate-typescript", 12, "failure"), run("validate-typescript", 13)]);
   assert.deepEqual(overlapping?.checks.map((check) => check.state), ["failure", "success"]);
   assert.equal(decide("run full test suite", overlapping).outcome, "contradicted");
@@ -651,10 +651,33 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
 
   const ambiguous = chain([run("validate-typescript", 8), run("validate-typescript", 9)]);
   assert.equal(ciDischargeForCheckText("run full test suite", ambiguous, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-identity-ambiguous");
+  const sameRunFirstGreenLeg = run("validate-typescript", 14);
+  const sameRunSecondGreenLeg = { ...sameRunFirstGreenLeg, id: 141, details_url: "https://github.test/actions/runs/14/job/141" };
+  const sameRunGreenLegs = chain([sameRunFirstGreenLeg, sameRunSecondGreenLeg]);
+  assert.equal(ciDischargeForCheckText("run full test suite", sameRunGreenLegs, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-identity-ambiguous");
 
   const thirdParty = chain([run("validate-typescript", 10, "success", "other-app")]);
   assert.equal(thirdParty?.checks[0]?.origin, "check");
   assert.equal(ciDischargeForCheckText("run full test suite", thirdParty, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-test-job-missing");
+});
+
+test("#1820 a refused matrix identity leaves only the pre-#1820 heuristics for its name", () => {
+  const head = HEAD;
+  // Config-time refusal of a matrix-shaped identity (missing-leg): no
+  // configured scope remains, so the name falls back to the heuristics —
+  // a non-test-named identity can neither discharge nor contradict.
+  const refusedMatrix = configuredJobs([], true, true);
+  const oneGreenLeg = actionsEvidence("success", [
+    { name: "validate-typescript", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", oneGreenLeg, head, refusedMatrix).reason, "no-matching-test-check");
+  assert.equal(reconcileRequiredCheckRows(evaluateRequiredCheckCoverage(["run full test suite after upgrade"], null).checks, oneGreenLeg, head, refusedMatrix).rows[0]?.reason, "ci-evidence-no-matching-test-check");
+  // The heuristic residual is unchanged: a bare-suite name still discharges
+  // from one green leg when no configured identity applies (#1703).
+  const bareSuite = actionsEvidence("success", [
+    { name: "test", state: "success", conclusion: "success" },
+  ], head);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", bareSuite, head, refusedMatrix).outcome, "satisfied");
 });
 
 test("#1820 evidence parser validates provenance while retaining old heuristic artifacts", () => {

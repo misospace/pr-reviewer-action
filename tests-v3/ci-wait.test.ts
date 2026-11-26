@@ -15,6 +15,10 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../src/platform
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
+function configuredJobs(jobs: [string, "full-suite"][]): import("../src/config/ci-test-jobs.js").TrustedCiJobs {
+  return { jobs: new Map(jobs), identitiesRefused: false, workflowSurfaceTrusted: true };
+}
+
 type Reply = { status?: number; body?: unknown; raw?: string; transport?: boolean };
 
 /** fetch serving per-path reply sequences (last repeats). */
@@ -710,6 +714,28 @@ test("runCiWait: a newer completed rerun displaces an older stuck pending run", 
   rmSync(h.dir, { recursive: true, force: true });
 });
 
+test("runCiWait: a same-run red Actions leg fails the wait beside a same-name green leg", async () => {
+  // #1820 re-review: distinct check-run ids within one run are distinct legs;
+  // the retained red leg must fail the wait (failure-first), not be collapsed
+  // away by the newer green row.
+  const runs = JSON.stringify({ check_runs: [
+    { id: 1, name: "test", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/100/job/1", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+    { id: 2, name: "test", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/100/job/2", status: "completed", conclusion: "success", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
+  ] });
+  const checks = normalizeExternalChecks(runs, "{}", "", "");
+  assert.deepEqual(checks, [
+    { name: "test", state: "failure", conclusion: "failure", origin: "actions" },
+    { name: "test", state: "success", conclusion: "success", origin: "actions" },
+  ]);
+  const h = harness(fakeAdapter([checks]));
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.match(readFileSync(h.outputFile, "utf8"), /ci_status_final=failure/);
+  const evidence = readFileSync(h.checksFile, "utf8");
+  assert.match(evidence, /\\| test \\| failure \\|/);
+  assert.match(evidence, /\\| test \\| success \\|/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
 test("runCiWait: a genuinely newer pending rerun keeps the gate waiting", async () => {
   const runs = JSON.stringify({ check_runs: [
     { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:01:00Z", completed_at: "2026-01-01T00:02:00Z" },
@@ -899,6 +925,70 @@ test("renderCiEvidenceOutput: provenance, clipping, and Actions retention surviv
     name: `validate-${i}-${"x".repeat(140)}`, state: "success", conclusion: "c".repeat(200), origin: "actions" as const,
   }));
   assert.equal(renderCiEvidenceOutput(SHA, "success", tooLargeActions), "");
+});
+
+test("renderCiEvidenceOutput: same-name Actions legs are bounded to worst + newest, never to zero evidence", () => {
+  // #1820 re-review: the upstream fold retains same-run same-name legs, so a
+  // many-leg matrix can no longer spend the whole row budget on one name.
+  const legs = (count: number, red?: number) => Array.from({ length: count }, (_, i) => ({
+    name: "test", state: red === i ? "failure" as const : "success" as const,
+    conclusion: red === i ? "failure" : "success",
+    origin: "actions" as const,
+  }));
+  const allGreen = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", legs(60)).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(allGreen, null, "60 same-name legs still emit evidence");
+  assert.equal(allGreen!.checks.length, 2);
+  assert.equal(ciDischargeForCheckText("run full test suite", allGreen, SHA, configuredJobs([["test", "full-suite"]])).reason, "configured-identity-ambiguous");
+
+  const redFirst = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "failure", legs(60, 0)).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(redFirst, null);
+  assert.deepEqual(redFirst!.checks.map((check) => check.state), ["failure", "success"]);
+  assert.equal(ciDischargeForCheckText("run full test suite", redFirst, SHA, configuredJobs([["test", "full-suite"]])).outcome, "contradicted");
+
+  const redLast = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "failure", legs(60, 59)).replace(/^ci_checks_evidence=/, ""));
+  assert.deepEqual(redLast!.checks.map((check) => check.state), ["failure"],
+    "worst and newest are the same row when the red leg is last; the contradiction still fires");
+
+  const pendingMiddle = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", legs(60).map((leg, i) => i === 30
+    ? { name: "test", state: "pending" as const, origin: "actions" as const }
+    : leg)).replace(/^ci_checks_evidence=/, ""));
+  assert.deepEqual(pendingMiddle!.checks.map((check) => check.state), ["pending", "success"]);
+  // Two same-name rows refuse the identity as ambiguous before the unsettled
+  // check — either way the ask stays unresolved, never discharged.
+  const pendingDischarge = ciDischargeForCheckText("run full test suite", pendingMiddle, SHA, configuredJobs([["test", "full-suite"]]));
+  assert.equal(pendingDischarge.outcome, "unresolved");
+
+  // A `skipped` leg collapsed to state success is not a green: the bound must
+  // keep it (worst rank) or a mid-stack skipped leg would falsely discharge.
+  const skippedMiddle = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", legs(60).map((leg, i) => i === 30
+    ? { name: "test", state: "success" as const, conclusion: "skipped", origin: "actions" as const }
+    : leg)).replace(/^ci_checks_evidence=/, ""));
+  assert.deepEqual(skippedMiddle!.checks.map((check) => check.conclusion), ["skipped", "success"]);
+  assert.equal(ciDischargeForCheckText("run full test suite", skippedMiddle, SHA, configuredJobs([["test", "full-suite"]])).outcome, "unresolved");
+
+  // The ambiguity row count covers only Actions rows: a same-named status row
+  // must not absorb an Actions slot, or two green Actions legs would collapse
+  // to one and discharge a configured identity that two legs cannot certify.
+  const statusThenLegs = [
+    { name: "test", state: "success" as const, conclusion: "success", origin: "status" as const },
+    ...legs(60),
+  ];
+  const statusPolluted = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", statusThenLegs).replace(/^ci_checks_evidence=/, ""));
+  assert.equal(statusPolluted!.checks.filter((check) => check.origin === "actions").length, 2);
+  assert.equal(ciDischargeForCheckText("run full test suite", statusPolluted, SHA, configuredJobs([["test", "full-suite"]])).reason, "configured-identity-ambiguous");
+
+  // The exact/clipped axis is part of that row count: a same-name CLIPPED
+  // Actions row must not absorb an exact row's slot either.
+  const longIdentity = `unit tests ${"x".repeat(189)}`;
+  const clippedAbsorber = [
+    { name: longIdentity, state: "success" as const, conclusion: "success", origin: "actions" as const },
+    { name: longIdentity, state: "success" as const, conclusion: "success", origin: "actions" as const },
+    { name: `${longIdentity}EXTRA`, state: "success" as const, conclusion: "success", origin: "actions" as const },
+    ...Array.from({ length: 52 }, (_, i) => ({ name: `context-${i}`, state: "success" as const, origin: "status" as const })),
+  ];
+  const clippedPolluted = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", clippedAbsorber).replace(/^ci_checks_evidence=/, ""));
+  assert.equal(clippedPolluted!.checks.filter((check) => check.origin === "actions" && check.clipped !== true).length, 2);
+  assert.equal(ciDischargeForCheckText("run full test suite", clippedPolluted, SHA, configuredJobs([[longIdentity, "full-suite"]])).reason, "configured-identity-ambiguous");
 });
 
 test("renderCiEvidenceOutput: truncated names are never decision evidence", () => {

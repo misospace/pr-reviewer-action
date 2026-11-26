@@ -700,6 +700,7 @@ export function normalizeExternalChecks(
       return isPending(candidate) && !isPending(existing);
     };
     const actionsRows: { run: unknown; index: number }[] = [];
+    // Distinct check-run ids within one Actions run are distinct legs, not provable retries; retain the red leg for failure-first evaluation (#1820).
     for (const [index, run] of survivingRuns.entries()) {
       const name = jqAlt(jqField(run, "name"), "(unnamed)");
       const appSlug = nestedField(run, "app", "slug");
@@ -709,8 +710,9 @@ export function normalizeExternalChecks(
       const runMatch = actionsUrl?.match(/\/actions\/runs\/(\d+)/);
       const fallbackId = jqField(run, "id");
       const hasId = fallbackId !== null && fallbackId !== undefined;
+      const legKey = hasId ? `leg:${typeof fallbackId}:${JSON.stringify(fallbackId)}` : "leg:unidentified";
       const key = isActions
-        ? `${String(appSlug)}:${runMatch?.[1] ?? (!hasId ? "check:unidentified" : `check:${typeof fallbackId}:${JSON.stringify(fallbackId)}`)}:${typeof name}:${JSON.stringify(name)}`
+        ? `${String(appSlug)}:${runMatch?.[1] ?? (!hasId ? "check:unidentified" : `check:${typeof fallbackId}:${JSON.stringify(fallbackId)}`)}:${legKey}:${typeof name}:${JSON.stringify(name)}`
         : `${appSlug === undefined || appSlug === null ? "" : String(appSlug)}:${typeof name}:${JSON.stringify(name)}`;
       if (isActions && runMatch === undefined && !hasId) {
         actionsRows.push({ run, index });

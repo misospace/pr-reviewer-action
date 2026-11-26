@@ -229,12 +229,13 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   **Failure-first precedence** is scoped the same way: a differently named
   in-scope test check that went red on the exact head ref refutes discharge
   even when a differently named sibling matrix leg is green, while a red
-  unrelated scope neither refutes nor discharges. Same-named legs within one
-  workflow run are collapsed to the most recent run before this fold ever
-  sees them — the producer's read inherits GitHub's default
-  `filter=latest`, which returns the most recent check run per check-suite
-  and name, so the forge itself already applies its retry/required-check
-  semantics (see the producer fold below). A full-suite ask also needs every
+  unrelated scope neither refutes nor discharges. Same-named rows with
+  distinct check-run ids inside one workflow run reach this fold as separate
+  rows: a same-name green never discards a same-name red, so a red leg
+  contradicts no matter which leg of the run it came from (the producer fold
+  below owns the retention rule; GitHub's default `filter=latest` read shapes
+  which rows arrive but is not treated as proof of retry semantics). A
+  full-suite ask also needs every
   in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
   leg collapsed to state `success`, keeps it unresolved beside a green
   sibling (the explicit conclusion is required, and one leg that did not run
@@ -271,38 +272,42 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   retaining rows uses the COMPLETE source name, never the truncated copy:
   if bounding would change a check's decision identity (test-execution
   classification, proved scope, or exhaustive identity), the gate emits NO
-  evidence line rather than let a truncated skipped test row read as
-  disposable context. Every test-execution row is retained; only non-test
-  context rows may be trimmed (failed rows first). If the complete test-row
-  set cannot fit, the gate also emits NO evidence line — an artifact missing
-  a skipped, pending, or otherwise incomplete test leg could otherwise look
-  falsely complete and discharge a full-suite ask. Every exact GitHub Actions
-  check-run row is retained unconditionally, and a row whose name or
-  conclusion bounding altered is marked `clipped` in the artifact so it can
-  never serve as an exact identity match downstream. Each row also carries
+   evidence line rather than let a truncated skipped test row read as
+   disposable context. Test-execution and exact Actions rows are decision
+   evidence: they are retained up to the same-name bound below, and if the
+   bounded required-row set cannot fit, the gate emits NO evidence line — an
+   artifact missing a skipped, pending, or otherwise incomplete test leg could
+   otherwise look falsely complete and discharge a full-suite ask. Only
+   non-test context rows may be trimmed (failed rows first). A row whose name
+   or conclusion bounding altered is marked `clipped` in the artifact so it can
+   never serve as an exact identity match downstream. Each row also carries
   its producer `origin`: `actions` (the forge's native Actions check run —
   on GitHub, `app.slug === "github-actions"`), `check` (a check run from
   another integration), or `status` (a commit-status context). Same-name
   check runs from different workflow runs are no longer collapsed into one
   row: a same-name green from one workflow can never discard a same-name red
   from another, which for unconfigured repositories can only make more
-  failure rows visible, never fewer. Same-name check runs within one Actions
-  workflow run collapse to the newest row — the same newest-attempt semantics
-  GitHub itself applies, and usually redundant with them: the producer's
-  read (`GET /repos/{owner}/{repo}/commits/{ref}/check-runs` with GitHub's
-  default `filter=latest`) already returns the most recent check run per
-  check-suite and name, so a re-run's earlier attempts and a run's
-  same-named legs are collapsed server-side before the fold sees them
-  (verified against the live API: re-run attempts share one check-suite id,
-  re-created check runs carry new ids, and the default read returns only the
-  most recent). The fold's own same-run collapse is the bounded defense that
-  mirrors the forge's view for payloads where duplicates do arrive; the
-  forge's required-check view is the authority for retry and same-name-leg
-  semantics, and the #1820 identity controls below — producer binding,
-  config-time validation, and the masquerade fence — are the enforceable
-  layer on top of it. Non-Actions check runs keep the #995 newest-wins
-  collapse: their key carries no run identity, so same-app same-name rows
-  are indistinguishable from retries. A final
+  failure rows visible, never fewer. Same-name Actions check runs with
+  distinct check-run ids within one workflow run are retained as distinct
+  jobs/legs; `filter=latest` is not proof that same-name rows are retries, and
+  a same-name green can never discard a same-name red. The fold collapses only
+  identical ids (provable duplicates); id-less rows keep their existing
+  behavior. GitHub's default `filter=latest` read remains useful context, but
+  it does not establish retry semantics for distinct ids. A retained red leg
+  fails the CI wait (failure-first): the forge's own latest-filtered view
+  governs which rows appear, and a red leg is cleared by a new head, not by
+  trusting an assumption about attempts. When one name would flood the
+  artifact, the gate keeps at most two rows per name, producer class, and
+  exact/clipped axis — the worst state (a red leg contradicts, a pending or
+  `skipped`-collapsed leg blocks) and the newest row, which together keep
+  every consumer outcome intact: the discharge candidate, the blocking leg,
+  and enough same-name Actions rows for the ambiguity refusal to read (when
+  worst and newest are the same row the outcome is still unresolved, with the
+  more specific reason code lost) —
+  so a many-leg matrix can never spend the whole 50-row budget on one name;
+  names beyond the 50-row or byte caps still refuse the whole artifact. Non-Actions check
+  runs keep the #995 newest-wins collapse: their key carries no run identity,
+  so same-app same-name rows are indistinguishable from retries. A final
   strict-parser round-trip means an oversized or malformed artifact is never
   emitted.
 - **publish re-folds agree with the review**: the engine persists its
@@ -352,46 +357,64 @@ reconciliation above is unchanged for every repository that does not opt in.
 - **Authority**: for a configured check, the configured scope replaces the
   name-derived scope entirely only when the evidence row is an exact, unclipped
   GitHub Actions check run (`origin: "actions"`) and exactly one such row has
-  the configured name. Two same-named rows — from different workflow runs (a
-  workflow triggered by two events on the same commit produces two) — refuse
-  the configured identity with `configured-identity-ambiguous`, and the
-  configured ask stays unresolved. Commit-status
+  the configured name. Two same-named rows — from different workflow runs or two
+  legs of one matrix-shaped job on one workflow run — refuse the configured
+  identity with `configured-identity-ambiguous`; same-run red+green contradicts
+  via failure-first evaluation. Commit-status
   contexts and third-party check runs never satisfy configured identities;
   those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
   checks keep the name heuristics.
 - **Config-time identity validation**: every configured identity must name
-  exactly one static display name in the base ref's `.github/workflows`; a
-  job without `name:` contributes its key, a static `name:` contributes only
-  that name, and a dynamic name contributes neither. Undeclared or multiply
-  declared identities are refused with a warning. Any unreadable, oversized,
-  invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or any PR-controlled job
-  display name, refuses ALL configured identities with a warning and degrades
-  the feature to pre-#1820 name heuristics while the workflow-surface
-  masquerade fence stays armed (see below). Non-YAML files are skipped. The
-  scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB aggregate, and one
-  shared 10s deadline. It is deliberately GitHub-scoped because configured
-  discharge is GitHub-Actions-only; the workflow-surface fence remains the
-  broader forge-agnostic guard. Only `.yml`/`.yaml` files (any case) are
-  scanned; other files under `.github/workflows` cannot mint check-run names
-  and are skipped. Each expression span is accepted only when it
-  references `matrix`, `strategy`, or admin-controlled `vars`, and contains no
-  PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
-  `secrets`, or `inputs`). A dynamic name is accepted only when its
-  provenance is provable: a name that interpolates `matrix.*` requires the
-  job's `strategy.matrix` to be statically enumerable — a literal mapping
-  with no expression anywhere inside it (expressions in `fail-fast` or
-  `max-parallel` do not affect rendered names) — and the job must not be a
-  reusable-workflow call (`uses:` renders the name inside the callee). A
-  matrix laundered from an expression (for example
+  exactly one single-leg static job in the base ref's `.github/workflows`; a
+  job without `name:` contributes its key, and a static `name:` contributes
+  that name only when the job has no `strategy.matrix` (a `strategy` carrying
+  only `fail-fast`/`max-parallel` still runs one leg). Configured matrix jobs
+  are refused because the check-run payload cannot prove every leg ran
+  (missing-leg); the pre-#1820 name heuristics are unchanged for such a name.
+  Undeclared or multiply declared identities are refused with a warning. Any
+  unreadable, oversized, invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or
+  any PR-controlled job display name, refuses ALL configured identities with a
+  warning and degrades the feature to pre-#1820 name heuristics while the
+  workflow-surface masquerade fence stays armed (see below). Non-YAML files are
+  skipped. The scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB
+  aggregate, and one shared 10s deadline. It is deliberately GitHub-scoped
+  because configured discharge is GitHub-Actions-only; the workflow-surface
+  fence remains the broader forge-agnostic guard. Only `.yml`/`.yaml` files
+  (any case) are scanned; other files under `.github/workflows` cannot mint
+  check-run names and are skipped. Each expression span is accepted only when
+  it references `matrix`, `strategy`, or admin-controlled `vars` (dot access,
+  or a bracket index that is a quoted literal — any other bracket index is an
+  unprovable expression), and contains
+  no PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
+  `secrets`, or `inputs`). A dynamic name is accepted only when its provenance
+  is provable: a name that interpolates `matrix.*` requires the job's
+  `strategy.matrix` to be statically enumerable — a literal mapping with no
+  expression anywhere inside it (expressions in `fail-fast` or `max-parallel`
+  do not affect rendered names) — and the job must not be a reusable-workflow
+  call (`uses:` renders the name inside the callee). Literal-matrix dynamic
+  display names are enumerated as a bounded superset of base values and
+  `include` values, without an expression parser; an `include` entry that
+  does not expand an existing combination becomes a standalone leg whose
+  unlisted referenced keys render as the empty string, and that render is
+  enumerated too. A matrix combining `exclude` with `include` is
+  unenumerable (`exclude` runs before `include` matching and can turn an
+  entry standalone or remove a leg the product would count); `exclude` alone
+  only shrinks the leg set, so the enumeration stays a safe superset. Any
+  possible render colliding
+  with a configured identity refuses it. A matrix-interpolating name that
+  cannot be enumerated refuses ALL configured identities (fail closed, not
+  PR-mintable because its values are literals in the trusted base). A matrix
+  laundered from an expression (for example
   `strategy.matrix: ${{ fromJSON(...) }}`, where the producing job may run a
   script checked out from the PR head) or an absent matrix makes a
-  `matrix.*` name PR-mintable; a dynamic name that does not interpolate
-  `matrix.*` at all (for example a `vars`-only name) is accepted on a regular
-  job but contributes neither key nor name, while any dynamic name on a
-  reusable-workflow call (`uses:`) is PR-mintable regardless of what it
-  interpolates (#1820 re-review). A PR-mintable name or an unreadable surface
-  refuses ALL configured discharge; an identity that names no single static
-  job is refused individually. When every declared identity ends up
+  `matrix.*` name PR-mintable. A
+  dynamic name that does not interpolate `matrix.*` at all (for example a
+  `vars`-only name) is accepted on a regular job but contributes no names; this
+  remains an operator-authority residual because values come from repo
+  settings, not the PR. Any dynamic name on a reusable-workflow call (`uses:`)
+  is PR-mintable regardless of what it interpolates (#1820 re-review). A
+  PR-mintable name or an unreadable surface refuses ALL configured discharge;
+  an identity that names no single static job is refused individually. When every declared identity ends up
   unhonored — a refused surface, malformed YAML that still declares entries,
   or declarations that all failed validation — the resolver computes the real
   workflow-surface state, reports the identities as refused, and the
@@ -425,8 +448,10 @@ reconciliation above is unchanged for every repository that does not opt in.
   unresolved, and an unresolved `must_check` row withholds the trusted
   native approve. The producer marks control-collapsed or truncated check
   names and conclusions as `clipped`; clipped rows never satisfy configured
-  identities. The gate retains every test-named row and every exact Actions
-  check-run row, and never trims Actions rows out of the evidence. Other
+  identities. The gate retains the decision rows — every test-named and
+  exact Actions row survives the same-name bound (two rows per name,
+  producer class, and exact/clipped axis: the worst state and the newest
+  row) or the gate emits no evidence at all. Other
   context rows may still be trimmed at the 50-row / 16,384-character bounds.
 - **Workflow-surface masquerade fence (#1820)**: configured identities exist
   and the PR leaves the supported forges' CI workflow surface unchanged

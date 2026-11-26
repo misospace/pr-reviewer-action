@@ -178,6 +178,159 @@ test("#1820 resolver validates configured identities against the complete base w
   const literalMatrixIdentities = ciJobIdentitiesFromRef(literalMatrixDynamic.base, literalMatrixDynamic.root);
   assert.equal(literalMatrixIdentities.prMintable, false);
   assert.equal(literalMatrixIdentities.staticNames.size, 0);
+  assert.equal(literalMatrixIdentities.unenumeratedDynamicNames, false);
+  assert.deepEqual([...literalMatrixIdentities.dynamicRenderedNames.keys()], ["Test (18)", "Test (20)"]);
+
+  const staticMatrix = resolverFixture({ "matrix.yml": "jobs:\n  suite:\n    name: validate-typescript\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n" });
+  const staticMatrixIdentities = ciJobIdentitiesFromRef(staticMatrix.base, staticMatrix.root);
+  assert.equal(staticMatrixIdentities.matrixJobNames.get("validate-typescript"), 1);
+  const staticMatrixResult = resolveCiTestJobsFromRef({ baseRef: staticMatrix.base, headRef: staticMatrix.base, workspace: staticMatrix.root });
+  assert.equal(staticMatrixResult.jobs.size, 0);
+  assert.equal(staticMatrixResult.identitiesRefused, true);
+  assert.ok(staticMatrixResult.warnings.some((warning) => /matrix job/.test(warning)));
+
+  for (const [name, workflow, identities] of [
+    ["static-and-rendered-collision", "jobs:\n  plain:\n    name: validate-typescript\n    runs-on: ubuntu-latest\n  dynamic:\n    name: ${{ matrix.label }}\n    strategy:\n      matrix:\n        label: [validate-typescript]\n    runs-on: ubuntu-latest\n", ["validate-typescript"]],
+    ["rendered-only-collision", "jobs:\n  dynamic:\n    name: ${{ matrix.label }}\n    strategy:\n      matrix:\n        label: [validate-typescript]\n    runs-on: ubuntu-latest\n", ["validate-typescript"]],
+    ["plain-and-matrix-collision", "jobs:\n  plain:\n    name: validate-typescript\n    runs-on: ubuntu-latest\n  suite:\n    name: validate-typescript\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n", ["validate-typescript"]],
+  ] as const) {
+    const fixture = resolverFixture({ [`${name}.yml`]: workflow }, [...identities]);
+    const result = resolveCiTestJobsFromRef({ baseRef: fixture.base, headRef: fixture.base, workspace: fixture.root });
+    assert.equal(result.jobs.size, 0, name);
+    assert.equal(result.identitiesRefused, true, name);
+  }
+
+  const includeMatrix = resolverFixture({ "include.yml": "jobs:\n  dynamic:\n    name: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [linux]\n        include:\n          - os: validate-typescript\n    runs-on: ubuntu-latest\n" });
+  const includeIdentities = ciJobIdentitiesFromRef(includeMatrix.base, includeMatrix.root);
+  assert.equal(includeIdentities.dynamicRenderedNames.get("validate-typescript"), 1);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: includeMatrix.base, headRef: includeMatrix.base, workspace: includeMatrix.root }).jobs.size, 0);
+
+  // A non-addable `include` entry becomes a STANDALONE combination: a
+  // referenced key it does not name renders as the empty string — a render no
+  // cross product produces. The enumeration must count it or a static job
+  // named by the standalone render is masqueraded by that leg.
+  const includeStandalone = resolverFixture({
+    "include-standalone.yml": "jobs:\n  plain:\n    name: 'Test (validate-typescript) ()'\n    runs-on: ubuntu-latest\n  dynamic:\n    name: 'Test (${{ matrix.os }}) (${{ matrix.node }})'\n    strategy:\n      matrix:\n        os: [linux]\n        node: [18]\n        include:\n          - os: validate-typescript\n    runs-on: ubuntu-latest\n",
+  }, ["Test (validate-typescript) ()"]);
+  const includeStandaloneIdentities = ciJobIdentitiesFromRef(includeStandalone.base, includeStandalone.root);
+  assert.deepEqual([...includeStandaloneIdentities.dynamicRenderedNames.keys()].sort(), ["Test (linux) (18)", "Test (validate-typescript) ()"]);
+  const includeStandaloneResult = resolveCiTestJobsFromRef({ baseRef: includeStandalone.base, headRef: includeStandalone.base, workspace: includeStandalone.root });
+  assert.equal(includeStandaloneResult.jobs.size, 0);
+  assert.equal(includeStandaloneResult.identitiesRefused, true);
+
+  // An `include` entry repeating an existing value must not double-count a
+  // render into a false ambiguity.
+  const includeRepeat = resolverFixture({ "include-repeat.yml": "jobs:\n  dynamic:\n    name: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [apple]\n        include:\n          - os: apple\n    runs-on: ubuntu-latest\n" });
+  const includeRepeatIdentities = ciJobIdentitiesFromRef(includeRepeat.base, includeRepeat.root);
+  assert.deepEqual([...includeRepeatIdentities.dynamicRenderedNames.entries()], [["apple", 1]]);
+
+  // GitHub applies `exclude` before `include` matching, so the combination of
+  // the two can mint standalone legs the enumeration cannot model: unprovable.
+  const excludeWithInclude = resolverFixture({
+    "exclude-include.yml": "jobs:\n  dynamic:\n    name: 'Test (${{ matrix.os }}) (${{ matrix.node }})'\n    strategy:\n      matrix:\n        os: [linux, mac]\n        node: [18]\n        exclude:\n          - os: linux\n        include:\n          - os: linux\n    runs-on: ubuntu-latest\n",
+  }, ["Test (linux) ()"]);
+  const excludeWithIncludeIdentities = ciJobIdentitiesFromRef(excludeWithInclude.base, excludeWithInclude.root);
+  assert.equal(excludeWithIncludeIdentities.prMintable, false);
+  assert.equal(excludeWithIncludeIdentities.unenumeratedDynamicNames, true);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: excludeWithInclude.base, headRef: excludeWithInclude.base, workspace: excludeWithInclude.root }).jobs.size, 0);
+
+  // `exclude` alone only shrinks the leg set: the product stays a safe
+  // superset and a non-colliding identity remains validatable.
+  const excludeOnly = resolverFixture({
+    "exclude-only.yml": "jobs:\n  dynamic:\n    name: 'Test (${{ matrix.os }})'\n    strategy:\n      matrix:\n        os: [linux, mac]\n        exclude:\n          - os: linux\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n",
+  });
+  const excludeOnlyIdentities = ciJobIdentitiesFromRef(excludeOnly.base, excludeOnly.root);
+  assert.equal(excludeOnlyIdentities.prMintable, false);
+  assert.equal(excludeOnlyIdentities.unenumeratedDynamicNames, false);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: excludeOnly.base, headRef: excludeOnly.base, workspace: excludeOnly.root }).jobs.has("validate-typescript"), true);
+
+  // An empty `exclude` list removes nothing: `include` stays enumerable.
+  const emptyExclude = resolverFixture({
+    "exclude-empty.yml": "jobs:\n  dynamic:\n    name: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [linux]\n        exclude: []\n        include:\n          - os: validate-typescript\n    runs-on: ubuntu-latest\n",
+  });
+  const emptyExcludeIdentities = ciJobIdentitiesFromRef(emptyExclude.base, emptyExclude.root);
+  assert.equal(emptyExcludeIdentities.unenumeratedDynamicNames, false);
+  assert.equal(emptyExcludeIdentities.dynamicRenderedNames.get("validate-typescript"), 1);
+
+  // A non-scalar value a merged entry renders on every leg is unprovable.
+  const nonScalarInclude = resolverFixture({
+    "include-object.yml": "jobs:\n  dynamic:\n    name: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [linux]\n        include:\n          - os:\n              a: b\n    runs-on: ubuntu-latest\n",
+  });
+  assert.equal(ciJobIdentitiesFromRef(nonScalarInclude.base, nonScalarInclude.root).unenumeratedDynamicNames, true);
+
+  for (const [name, workflow] of [
+    ["unparsed", "jobs:\n  dynamic:\n    name: \"${{ format('{0}', matrix.os) }}\"\n    strategy:\n      matrix:\n        os: [linux]\n    runs-on: ubuntu-latest\n"],
+    ["over-cap", "jobs:\n  dynamic:\n    name: '${{ matrix.a }}-${{ matrix.b }}-${{ matrix.c }}'\n    strategy:\n      matrix:\n        a: [1, 2, 3, 4, 5, 6]\n        b: [1, 2, 3, 4, 5, 6]\n        c: [1, 2, 3, 4, 5, 6]\n    runs-on: ubuntu-latest\n"],
+    ["missing-key", "jobs:\n  dynamic:\n    name: ${{ matrix.nope }}\n    strategy:\n      matrix:\n        os: [linux]\n    runs-on: ubuntu-latest\n"],
+  ] as const) {
+    const fixture = resolverFixture({ [`${name}.yml`]: workflow });
+    const identities = ciJobIdentitiesFromRef(fixture.base, fixture.root);
+    assert.equal(identities.prMintable, false, name);
+    assert.equal(identities.unenumeratedDynamicNames, true, name);
+    const result = resolveCiTestJobsFromRef({ baseRef: fixture.base, headRef: fixture.base, workspace: fixture.root });
+    assert.equal(result.jobs.size, 0, name);
+    assert.ok(result.warnings.some((warning) => /cannot be statically enumerated/.test(warning)), name);
+  }
+
+  const separateMatrix = resolverFixture({ "separate.yml": "jobs:\n  dynamic:\n    name: 'Test (${{ matrix.node }})'\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: separateMatrix.base, headRef: separateMatrix.base, workspace: separateMatrix.root }).jobs.has("validate-typescript"), true);
+
+  // #252: a matrix value is inserted literally. `$`-bearing replacement
+  // patterns (`$&`, `$'`) must not rewrite the enumerated render, or a real
+  // collision with a static job name goes uncounted and the identity is
+  // honored while the masquerading leg can still mint the name.
+  const dollarValue = resolverFixture({
+    "dollar.yml": "jobs:\n  plain:\n    name: \"x$&y\"\n    runs-on: ubuntu-latest\n  dynamic:\n    name: ${{ matrix.label }}\n    strategy:\n      matrix:\n        label: [\"x$&y\"]\n    runs-on: ubuntu-latest\n",
+  }, ["x$&y"]);
+  const dollarIdentities = ciJobIdentitiesFromRef(dollarValue.base, dollarValue.root);
+  assert.deepEqual([...dollarIdentities.dynamicRenderedNames.keys()], ["x$&y"]);
+  const dollarResult = resolveCiTestJobsFromRef({ baseRef: dollarValue.base, headRef: dollarValue.base, workspace: dollarValue.root });
+  assert.equal(dollarResult.jobs.size, 0);
+  assert.equal(dollarResult.identitiesRefused, true);
+
+  // A `strategy` without a `matrix` (only `fail-fast`/`max-parallel`) runs
+  // exactly one leg: the identity stays validatable.
+  const strategyNoMatrix = resolverFixture({ "flags.yml": "jobs:\n  suite:\n    name: validate-typescript\n    strategy:\n      fail-fast: false\n    runs-on: ubuntu-latest\n" });
+  const strategyNoMatrixIdentities = ciJobIdentitiesFromRef(strategyNoMatrix.base, strategyNoMatrix.root);
+  assert.equal(strategyNoMatrixIdentities.matrixJobNames.size, 0);
+  assert.equal(strategyNoMatrixIdentities.staticNames.get("validate-typescript"), 1);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: strategyNoMatrix.base, headRef: strategyNoMatrix.base, workspace: strategyNoMatrix.root }).jobs.has("validate-typescript"), true);
+
+  // Bracket notation interpolates the matrix too: it is not PR-mintable
+  // (values are literals in the trusted base) but it cannot be enumerated, so
+  // identities are refused with the enumeration warning, not the PR-mintable one.
+  const bracketMatrix = resolverFixture({ "bracket.yml": "jobs:\n  dynamic:\n    name: \"${{ matrix['label'] }}\"\n    strategy:\n      matrix:\n        label: [validate-typescript]\n    runs-on: ubuntu-latest\n" });
+  const bracketIdentities = ciJobIdentitiesFromRef(bracketMatrix.base, bracketMatrix.root);
+  assert.equal(bracketIdentities.prMintable, false);
+  assert.equal(bracketIdentities.unenumeratedDynamicNames, true);
+  const bracketResult = resolveCiTestJobsFromRef({ baseRef: bracketMatrix.base, headRef: bracketMatrix.base, workspace: bracketMatrix.root });
+  assert.equal(bracketResult.jobs.size, 0);
+  assert.ok(bracketResult.warnings.some((warning) => /cannot be statically enumerated/.test(warning)));
+  assert.ok(bracketResult.warnings.every((warning) => !/PR-author-controlled/.test(warning)));
+
+  // A bracket index that is not a quoted literal is an arbitrary expression:
+  // unprovable, so PR-mintable (fail closed), never operator-authority.
+  const expressionBracket = resolverFixture({ "bracket-expr.yml": "jobs:\n  dynamic:\n    name: \"${{ vars[jobs.x.outputs.y] }}\"\n    runs-on: ubuntu-latest\n" }, ["validate-typescript"]);
+  assert.equal(ciJobIdentitiesFromRef(expressionBracket.base, expressionBracket.root).prMintable, true);
+
+  // An INCOMPLETE bracket token is also mint-able: the naive `}}` span cut
+  // hides the disqualified context behind an open quote
+  // (`vars['}}'] || github...` scans as the span `vars['`).
+  const incompleteBracket = resolverFixture({ "bracket-open.yml": "jobs:\n  dynamic:\n    name: \"${{ vars['}}'] || github.event.pull_request.title }}\"\n    runs-on: ubuntu-latest\n" }, ["validate-typescript"]);
+  assert.equal(ciJobIdentitiesFromRef(incompleteBracket.base, incompleteBracket.root).prMintable, true);
+  const incompleteResult = resolveCiTestJobsFromRef({ baseRef: incompleteBracket.base, headRef: incompleteBracket.base, workspace: incompleteBracket.root });
+  assert.equal(incompleteResult.jobs.size, 0);
+  assert.equal(incompleteResult.identitiesRefused, true);
+
+  // A `}}` inside a string literal does not terminate the expression: the
+  // quote-aware span extraction sees the disqualified context after it.
+  const hiddenContext = resolverFixture({ "hidden-ctx.yml": "jobs:\n  dynamic:\n    name: \"${{ !contains(vars.a, '}}') && github.event.pull_request.title }}\"\n    runs-on: ubuntu-latest\n" }, ["validate-typescript"]);
+  assert.equal(ciJobIdentitiesFromRef(hiddenContext.base, hiddenContext.root).prMintable, true);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: hiddenContext.base, headRef: hiddenContext.base, workspace: hiddenContext.root }).jobs.size, 0);
+
+  // The same cut cannot hide a laundered matrix behind a quote either.
+  const hiddenMatrix = resolverFixture({ "hidden-matrix.yml": "jobs:\n  dynamic:\n    name: \"${{ vars.a == '}}' || matrix.os }}\"\n    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(hiddenMatrix.base, hiddenMatrix.root).prMintable, true);
 
   const unsafeExpressions = [
     "${{ github['event'].pull_request.title }}",
