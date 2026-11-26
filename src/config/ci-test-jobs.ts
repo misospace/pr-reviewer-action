@@ -5,8 +5,10 @@
  * PR head, so a contributor cannot declare their own job trusted on their own
  * branch. Absence is fine (pre-#1820 behavior); a read failure degrades to
  * "no jobs" with a surfaced warning, never silently treated as absence by the
- * caller. Individual invalid entries are dropped with a warning; a malformed
- * file is ignored in its entirety. The configured scope REPLACES job-name
+ * caller. Individual invalid entries are dropped with a warning; malformed
+ * files and mappings whose entries are all dropped report declared identities
+ * as refused, keeping the workflow-surface masquerade fence armed. The configured
+ * scope REPLACES job-name
  * scope heuristics for configured checks (the operator's declaration is the
  * authority). Identity matching is exact and case-sensitive after trimming:
  * only an unambiguous configured identity matches; a case/spacing mismatch
@@ -17,7 +19,12 @@
  * a PR that changed a supported CI workflow file relative to the trusted
  * base's merge-base (or whose surface could not be verified) cannot have
  * same-named jobs discharge (#1820). This is the conservative substitute
- * where a forge does not expose workflow identity per check run.
+ * where a forge does not expose workflow identity per check run. Dynamic
+ * display names that interpolate `matrix.*` are accepted only when the job's
+ * `strategy.matrix` is statically enumerable: a literal matrix with no
+ * expression inside it, and not a reusable-workflow (`uses:`) call. Expressions
+ * in `fail-fast`/`max-parallel` do not affect rendered names, and dynamic names
+ * that do not interpolate `matrix.*` do not require a matrix.
  *
  * File shape (top-level `test-jobs` mapping):
  *
@@ -46,9 +53,11 @@ export type TrustedCiTestScope = (typeof CI_TEST_SCOPES)[number];
 
 export interface TrustedCiJobs {
   readonly jobs: ReadonlyMap<string, TrustedCiTestScope>;
-  /** Authoritative only when jobs is nonempty: true means no identities are
-   * configured or the surface was verified unchanged; false means configured
-   * and changed or unverifiable. With no jobs, this flag is moot. */
+  /** True when config declared identities but none were honored this run
+   * (surface refused them, the surface could not be read, or none validated).
+   * Consumers must keep the masquerade fence armed when the surface is not
+   * trusted, even though `jobs` is empty. */
+  readonly identitiesRefused: boolean;
   readonly workflowSurfaceTrusted: boolean;
 }
 
@@ -95,24 +104,44 @@ export function readCiTestJobsFromRef(
   return undefined;
 }
 
-/** Parse trusted CI job identities; malformed YAML is rejected as a whole. */
+/** Parse trusted CI job identities and count mapping entries before validation or cap drops; malformed YAML is rejected as a whole. */
 export function parseCiTestJobsText(
   text: string,
   path: string,
-): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[] } | { malformed: true; warning: string } {
+): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; declaredCount: number } | { malformed: true; warning: string; declaredCount: number } {
+  const malformedMapping = text.match(/^["']?test-jobs["']?\s*:[ \t]*(.*)$/m);
+  const malformedDeclaredCount = malformedMapping === null ? 0
+    : malformedMapping[1]!.trim() !== "" && !malformedMapping[1]!.trimStart().startsWith("#") ? 1
+      : text.slice((malformedMapping.index ?? 0) + malformedMapping[0].length)
+        .split(/\r?\n/)
+        // Best-effort block count for a file that will not parse: the
+        // `test-jobs` block ends at the first line that starts at column
+        // zero (a later top-level key). Quoted and unquoted key spellings
+        // both count — the parser honors either.
+        .reduce<{ lines: string[]; done: boolean }>((state, line) => {
+          if (state.done || (line.length > 0 && !/^\s/.test(line))) return { lines: state.lines, done: true };
+          return { lines: [...state.lines, line], done: false };
+        }, { lines: [], done: false })
+        .lines.filter((line) => /^[ \t]+[^\s#]/.test(line)).length;
   if (Buffer.byteLength(text, "utf8") > MAX_CI_TEST_JOBS_FILE_BYTES) {
-    return { malformed: true, warning: `CI test jobs '${path}' exceeds the ${MAX_CI_TEST_JOBS_FILE_BYTES}-byte cap; ignoring it.` };
+    return { malformed: true, warning: `CI test jobs '${path}' exceeds the ${MAX_CI_TEST_JOBS_FILE_BYTES}-byte cap; ignoring it.`, declaredCount: malformedDeclaredCount };
   }
   let parsed: unknown;
   try {
     parsed = parseYaml(text);
   } catch {
-    return { malformed: true, warning: `CI test jobs '${path}' is not valid YAML; ignoring it.` };
+    return { malformed: true, warning: `CI test jobs '${path}' is not valid YAML; ignoring it.`, declaredCount: malformedDeclaredCount };
   }
-  if (parsed === null || parsed === undefined) return { jobs: new Map(), warnings: [] };
-  if (!isPlainObject(parsed)) return { malformed: true, warning: `CI test jobs '${path}' must parse to a mapping; ignoring it.` };
+  if (parsed === null || parsed === undefined) return { jobs: new Map(), warnings: [], declaredCount: 0 };
+  if (!isPlainObject(parsed)) return { malformed: true, warning: `CI test jobs '${path}' must parse to a mapping; ignoring it.`, declaredCount: malformedDeclaredCount };
   const rawJobs = parsed["test-jobs"];
-  if (!isPlainObject(rawJobs)) return { malformed: true, warning: `CI test jobs '${path}' has no 'test-jobs' mapping; ignoring it.` };
+  if (rawJobs === null && Object.hasOwn(parsed, "test-jobs")) {
+    // A present-but-null `test-jobs` key declares nothing, so this is not a
+    // refusal — but it is never a healthy config, so the operator still
+    // hears about it instead of it reading as an absent file.
+    return { jobs: new Map(), warnings: [`CI test jobs '${path}' declares a null 'test-jobs' key; treating it as no identities.`], declaredCount: 0 };
+  }
+  if (!isPlainObject(rawJobs)) return { malformed: true, warning: `CI test jobs '${path}' has no 'test-jobs' mapping; ignoring it.`, declaredCount: malformedDeclaredCount };
   const jobs = new Map<string, TrustedCiTestScope>();
   const warnings: string[] = [];
   const scopes: ReadonlySet<string> = new Set(CI_TEST_SCOPES);
@@ -138,7 +167,7 @@ export function parseCiTestJobsText(
     }
     jobs.set(identity, rawScope as TrustedCiTestScope);
   }
-  return { jobs, warnings };
+  return { jobs, warnings, declaredCount: entries };
 }
 
 /** Compare workflow paths from the repository root, regardless of workspace cwd. */
@@ -170,6 +199,27 @@ export function ciWorkflowSurfaceChangedFromBase(options: {
         : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
     return { changed: true, warning: `CI workflow surface could not be verified against the base ref: ${detail}.` };
   }
+}
+
+/** A job's matrix origin is statically enumerable only when the strategy is
+ * a literal mapping with no expression anywhere inside it. A display name
+ * that interpolates `matrix.*` on a job whose matrix is expression-derived
+ * (e.g. `strategy.matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}`, where
+ * the producing job may run a script checked out from the PR head) is not
+ * enumerable: a PR that edits only that script can launder any name through
+ * the matrix (#1820 re-review). A reusable-workflow call (`uses:`) renders
+ * its name inside the callee, so the caller's matrix says nothing about the
+ * name it mints. */
+function matrixOriginIsStaticallyEnumerable(job: Record<string, unknown>): boolean {
+  if (typeof job.uses === "string" || !isPlainObject(job.strategy) || !isPlainObject(job.strategy.matrix)) return false;
+  return !strategyContainsExpression(job.strategy.matrix);
+}
+
+function strategyContainsExpression(value: unknown): boolean {
+  if (typeof value === "string") return value.includes("${{");
+  if (Array.isArray(value)) return value.some(strategyContainsExpression);
+  if (isPlainObject(value)) return Object.values(value).some(strategyContainsExpression);
+  return false;
 }
 
 function isPrMintableDisplayName(name: string): boolean {
@@ -279,7 +329,11 @@ export function ciJobIdentitiesFromRef(
       if (displayName === undefined) {
         staticNames.set(key, (staticNames.get(key) ?? 0) + 1);
       } else if (displayName.includes("${{")) {
-        if (isPrMintableDisplayName(displayName)) prMintable = true;
+        const interpolatesMatrix = [...displayName.matchAll(/\$\{\{([\s\S]*?)\}\}/g)]
+          .some((match) => /\bmatrix\s*\./i.test(match[1] ?? ""));
+        const enumerable = !interpolatesMatrix
+          || (isPlainObject(rawJob) && matrixOriginIsStaticallyEnumerable(rawJob));
+        if (isPrMintableDisplayName(displayName) || (isPlainObject(rawJob) && typeof rawJob.uses === "string") || !enumerable) prMintable = true;
       } else {
         staticNames.set(displayName, (staticNames.get(displayName) ?? 0) + 1);
       }
@@ -296,33 +350,56 @@ export function resolveCiTestJobsFromRef(options: {
   headRef?: string | undefined;
   workspace?: string | null | undefined;
   gitTimeoutSec?: number | undefined;
-}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null; workflowSurfaceTrusted: boolean } {
+}): { jobs: ReadonlyMap<string, TrustedCiTestScope>; warnings: readonly string[]; sourcePath: string | null; identitiesRefused: boolean; workflowSurfaceTrusted: boolean } {
   // No trusted ref is a normal no-config state; avoid an unnecessary git call.
-  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null, workflowSurfaceTrusted: true };
+  if (options.baseRef === "") return { jobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
+  const surfaceState = (): { trusted: boolean; warning: string | null } => {
+    if (options.headRef === undefined || options.headRef === "") {
+      return { trusted: false, warning: "CI workflow surface could not be verified against the base ref: head ref is missing." };
+    }
+    const surface = ciWorkflowSurfaceChangedFromBase({
+      baseRef: options.baseRef,
+      headRef: options.headRef,
+      ...(options.workspace !== undefined ? { workspace: options.workspace } : {}),
+      ...(options.gitTimeoutSec !== undefined ? { gitTimeoutSec: options.gitTimeoutSec } : {}),
+    });
+    return { trusted: !surface.changed, warning: surface.warning };
+  };
   let file: CiTestJobsFile | undefined;
   try {
     file = readCiTestJobsFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
   } catch (error) {
-    return {
-      jobs: new Map(),
-      warnings: [`CI test jobs could not be read from the base ref: ${error instanceof Error ? error.message : "unknown error"}; ignoring it.`],
-      sourcePath: null,
-      workflowSurfaceTrusted: false,
-    };
+    const warnings = [`CI test jobs could not be read from the base ref: ${error instanceof Error ? error.message : "unknown error"}; ignoring it.`];
+    const surface = surfaceState();
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: new Map(), warnings, sourcePath: null, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
-  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null, workflowSurfaceTrusted: true };
+  if (file === undefined) return { jobs: new Map(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
   const parsed = parseCiTestJobsText(file.text, file.path);
-  if ("malformed" in parsed) return { jobs: new Map(), warnings: [parsed.warning], sourcePath: null, workflowSurfaceTrusted: true };
+  if ("malformed" in parsed) {
+    const warnings = [parsed.warning];
+    const surface = parsed.declaredCount > 0 ? surfaceState() : { trusted: true, warning: null };
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: new Map(), warnings, sourcePath: null, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
+  }
   const warnings = [...parsed.warnings];
-  if (parsed.jobs.size === 0) return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+  if (parsed.jobs.size === 0) {
+    const surface = parsed.declaredCount > 0 ? surfaceState() : { trusted: true, warning: null };
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: parsed.jobs, warnings, sourcePath: file.path, identitiesRefused: parsed.declaredCount > 0, workflowSurfaceTrusted: surface.trusted };
+  }
   const identities = ciJobIdentitiesFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
   if (identities.prMintable) {
     warnings.push(identities.warning ?? "CI workflow surface contains a PR-author-controlled job display name; configured test-job identities are refused.");
-    return { jobs: new Map(), warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+    const surface = surfaceState();
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   if (identities.warning !== null) {
     warnings.push(identities.warning);
-    return { jobs: new Map(), warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+    const surface = surfaceState();
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: new Map(), warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
   const validatedJobs = new Map<string, TrustedCiTestScope>();
   for (const [identity, scope] of parsed.jobs) {
@@ -335,17 +412,12 @@ export function resolveCiTestJobsFromRef(options: {
       validatedJobs.set(identity, scope);
     }
   }
-  if (validatedJobs.size === 0) return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
-  if (options.headRef === undefined || options.headRef === "") {
-    warnings.push("CI workflow surface could not be verified against the base ref: head ref is missing.");
-    return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: false };
+  if (validatedJobs.size === 0) {
+    const surface = surfaceState();
+    if (surface.warning !== null) warnings.push(surface.warning);
+    return { jobs: validatedJobs, warnings, sourcePath: file.path, identitiesRefused: true, workflowSurfaceTrusted: surface.trusted };
   }
-  const surface = ciWorkflowSurfaceChangedFromBase({
-    baseRef: options.baseRef,
-    headRef: options.headRef,
-    ...(options.workspace !== undefined ? { workspace: options.workspace } : {}),
-    ...(options.gitTimeoutSec !== undefined ? { gitTimeoutSec: options.gitTimeoutSec } : {}),
-  });
+  const surface = surfaceState();
   if (surface.warning !== null) warnings.push(surface.warning);
-  return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: !surface.changed };
+  return { jobs: validatedJobs, warnings, sourcePath: file.path, identitiesRefused: false, workflowSurfaceTrusted: surface.trusted };
 }

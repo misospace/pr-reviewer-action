@@ -26,8 +26,8 @@ function evidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<O
   return { headSha, finalState, checks: checks.map((check) => ({ ...check, conclusion: check.conclusion ?? null })) };
 }
 
-function configuredJobs(jobs: [string, TrustedCiTestScope][], workflowSurfaceTrusted = true): TrustedCiJobs {
-  return { jobs: new Map(jobs), workflowSurfaceTrusted };
+function configuredJobs(jobs: [string, TrustedCiTestScope][], workflowSurfaceTrusted = true, identitiesRefused = false): TrustedCiJobs {
+  return { jobs: new Map(jobs), identitiesRefused, workflowSurfaceTrusted };
 }
 
 function actionsEvidence(finalState: HeadBoundCiEvidence["finalState"], checks: Array<Omit<CiEvidenceCheck, "conclusion" | "origin"> & { conclusion?: string | null }>, headSha = HEAD): HeadBoundCiEvidence {
@@ -602,6 +602,7 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
   };
   const run = (name: string, id: number, conclusion = "success", app = "github-actions") => ({
     id: id * 10, name, app: { slug: app }, details_url: `https://github.test/actions/runs/${id}/job/${id * 10}`,
+    check_suite: { id: id },
     status: "completed", conclusion, started_at: `2026-01-0${id % 9 + 1}T00:00:00Z`,
   });
   const decide = (ask: string, parsed: HeadBoundCiEvidence | null) => ciDischargeForCheckText(ask, parsed, head, configured);
@@ -610,13 +611,21 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
   assert.deepEqual(redThenGreen?.checks.map((check) => check.state), ["failure", "success"]);
   assert.equal(decide("run full test suite", redThenGreen).outcome, "contradicted");
 
-  // Same-run same-name rows collapse to the newest (GitHub retry semantics;
-  // the trust layer refuses identities that map to more than one static job).
+  // Same-run same-name rows collapse to the newest (GitHub retry semantics);
+  // cross-run same-name rows remain distinct and failure-first.
   const retry = run("validate-typescript", 11, "failure");
   retry.details_url = "https://github.test/actions/runs/11/job/111";
   const retryGreen = { ...retry, id: 112, conclusion: "success", started_at: "2026-02-01T00:00:00Z", details_url: "https://github.test/actions/runs/11/job/112" };
   const retried = chain([retry, retryGreen]);
   assert.deepEqual(retried?.checks.map((check) => check.state), ["success"]);
+  assert.equal(retried?.checks[0]?.conclusion, "success");
+  const overlapping = chain([run("validate-typescript", 12, "failure"), run("validate-typescript", 13)]);
+  assert.deepEqual(overlapping?.checks.map((check) => check.state), ["failure", "success"]);
+  assert.equal(decide("run full test suite", overlapping).outcome, "contradicted");
+  assert.equal(ciDischargeForCheckText("run full test suite", chain([run("validate-typescript", 13)]), head, configuredJobs([
+    ["validate-typescript", "full-suite"],
+    ["validate-runtime-floor", "full-suite"],
+  ])).reason, "configured-test-job-missing");
 
   const statusOnly = chain([], [{ context: "validate-typescript", state: "success" }]);
   assert.equal(ciDischargeForCheckText("run full test suite", statusOnly, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-test-job-missing");
@@ -682,6 +691,10 @@ test("#1820 a closed workflow fence refuses every CI-evidence settlement of a te
     { name: "Tests", state: "success", conclusion: "success" },
   ], head), head, configuredJobs([], false));
   assert.equal(emptyConfigured.outcome, "satisfied");
+  const refused = ciDischargeForCheckText(ask, evidence("success", [
+    { name: "Tests", state: "success", conclusion: "success" },
+  ], head), head, configuredJobs([], false, true));
+  assert.equal(refused.reason, "ci-workflow-surface-untrusted");
   assert.equal(ciDischargeForCheckText(ask, evidence("success", [
     { name: "Tests", state: "success", conclusion: "success" },
   ], head), head).outcome, "satisfied");

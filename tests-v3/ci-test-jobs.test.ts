@@ -23,7 +23,7 @@ import { RepositoryConfigError } from "../src/config/repository-config.js";
 const PATH = CI_TEST_JOBS_CANDIDATE_PATHS[0];
 const BASE = "test-jobs:\n  validate-typescript: full-suite\n";
 
-function parsed(text: string): { jobs: ReadonlyMap<string, string>; warnings: readonly string[] } {
+function parsed(text: string): { jobs: ReadonlyMap<string, string>; warnings: readonly string[]; declaredCount: number } {
   const result = parseCiTestJobsText(text, PATH);
   assert.ok(!("malformed" in result));
   return result;
@@ -42,17 +42,22 @@ test("#1820 parses explicit job scopes and drops invalid entries", () => {
     "",
   ].join("\n"));
   assert.deepEqual([...result.jobs], [["validate-typescript", "full-suite"], ["duplicate", "unit"]]);
+  assert.equal(result.declaredCount, 7);
   assert.ok(result.warnings.length >= 5);
   assert.equal("malformed" in parseCiTestJobsText("test-jobs: []\n", PATH), true);
   assert.equal("malformed" in parseCiTestJobsText("x".repeat(MAX_CI_TEST_JOBS_FILE_BYTES + 1), PATH), true);
   assert.deepEqual(parsed("").jobs.size, 0);
   assert.equal(parsed("").warnings.length, 0);
+  assert.equal(parsed("test-jobs:\n").declaredCount, 0);
+  assert.equal(parsed("test-jobs:\n  valid: unit\n").declaredCount, 1);
+  assert.equal(parsed("test-jobs:\n  valid: unit\n  invalid: nope\n").declaredCount, 2);
 });
 
 test("#1820 caps identities and rejects malformed yaml or root values", () => {
   const rows = Array.from({ length: MAX_CI_TEST_JOB_IDENTITIES + 3 }, (_, index) => `  job-${index}: unit`).join("\n");
   const capped = parsed(`test-jobs:\n${rows}\n`);
   assert.equal(capped.jobs.size, MAX_CI_TEST_JOB_IDENTITIES);
+  assert.equal(capped.declaredCount, MAX_CI_TEST_JOB_IDENTITIES + 3);
   assert.ok(capped.warnings.some((warning) => /extra entries ignored/.test(warning)));
   for (const text of ["test-jobs: [", "- list", "test-jobs: 7", "other: value"]) {
     assert.ok("malformed" in parseCiTestJobsText(text, PATH), text);
@@ -126,8 +131,8 @@ test("#1820 resolver validates configured identities against the complete base w
   const dynamicDisplay = resolverFixture({ "dynamic.yml": "jobs:\n  validate-typescript:\n    name: 'Test (\${{ matrix.os }})'\n    runs-on: ubuntu-latest\n" });
   const dynamicResult = resolveCiTestJobsFromRef({ baseRef: dynamicDisplay.base, headRef: dynamicDisplay.base, workspace: dynamicDisplay.root });
   assert.equal(dynamicResult.jobs.size, 0);
-  assert.ok(dynamicResult.warnings.some((warning) => /does not name a static job/.test(warning)));
-  assert.equal(ciJobIdentitiesFromRef(dynamicDisplay.base, dynamicDisplay.root).prMintable, false);
+  assert.ok(dynamicResult.warnings.some((warning) => /PR-author-controlled job display name/.test(warning)));
+  assert.equal(ciJobIdentitiesFromRef(dynamicDisplay.base, dynamicDisplay.root).prMintable, true);
 
   const staticName = resolverFixture({ "static.yml": "jobs:\n  validate-typescript:\n    name: TypeScript Suite\n    runs-on: ubuntu-latest\n" }, ["TypeScript Suite"]);
   assert.equal(resolveCiTestJobsFromRef({ baseRef: staticName.base, headRef: staticName.base, workspace: staticName.root }).jobs.has("TypeScript Suite"), true);
@@ -154,8 +159,25 @@ test("#1820 resolver validates configured identities against the complete base w
     assert.ok(result.warnings.some((warning) => /more than one job/.test(warning)));
   }
 
-  const matrix = resolverFixture({ "matrix.yml": "jobs:\n  matrix:\n    name: 'Test (\${{ matrix.node }})'\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
+  const matrix = resolverFixture({ "matrix.yml": "jobs:\n  matrix:\n    name: 'Test (\${{ matrix.node }})'\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
   assert.equal(resolveCiTestJobsFromRef({ baseRef: matrix.base, headRef: matrix.base, workspace: matrix.root }).jobs.has("validate-typescript"), true);
+
+  const expressionMatrix = resolverFixture({ "expression-matrix.yml": "jobs:\n  plan:\n    runs-on: ubuntu-latest\n  dynamic:\n    name: \${{ matrix.label }}\n    strategy:\n      matrix: \${{ fromJSON(needs.plan.outputs.matrix) }}\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(expressionMatrix.base, expressionMatrix.root).prMintable, true);
+  const expressionMatrixResult = resolveCiTestJobsFromRef({ baseRef: expressionMatrix.base, headRef: expressionMatrix.base, workspace: expressionMatrix.root });
+  assert.equal(expressionMatrixResult.jobs.size, 0);
+  assert.ok(expressionMatrixResult.warnings.some((warning) => /PR-author-controlled job display name/.test(warning)));
+
+  const expressionValueMatrix = resolverFixture({ "expression-value-matrix.yml": "jobs:\n  dynamic:\n    name: \${{ matrix.label }}\n    strategy:\n      matrix:\n        label: [\"\${{ env.X }}\"]\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(expressionValueMatrix.base, expressionValueMatrix.root).prMintable, true);
+
+  const reusableMatrix = resolverFixture({ "reusable-matrix.yml": "jobs:\n  dynamic:\n    name: \${{ matrix.label }}\n    uses: owner/repo/.github/workflows/x.yml@main\n    strategy:\n      matrix:\n        label: [one, two]\n" });
+  assert.equal(ciJobIdentitiesFromRef(reusableMatrix.base, reusableMatrix.root).prMintable, true);
+
+  const literalMatrixDynamic = resolverFixture({ "literal-matrix-dynamic.yml": "jobs:\n  dynamic:\n    name: 'Test (\${{ matrix.node }})'\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n" });
+  const literalMatrixIdentities = ciJobIdentitiesFromRef(literalMatrixDynamic.base, literalMatrixDynamic.root);
+  assert.equal(literalMatrixIdentities.prMintable, false);
+  assert.equal(literalMatrixIdentities.staticNames.size, 0);
 
   const unsafeExpressions = [
     "${{ github['event'].pull_request.title }}",
@@ -172,8 +194,16 @@ test("#1820 resolver validates configured identities against the complete base w
     assert.equal(identities.prMintable, true, expression);
     assert.equal(resolveCiTestJobsFromRef({ baseRef: unsafe.base, headRef: unsafe.base, workspace: unsafe.root }).jobs.size, 0);
   }
-  for (const name of ["${{ format('{0}', matrix.os) }}", "${{ vars.CI_NAME }}", "Static suite"]) {
-    const safe = resolverFixture({ "safe.yml": `jobs:\n  configured:\n    name: ${JSON.stringify(name)}\n    runs-on: ubuntu-latest\n` }, [name]);
+  const varsName = resolverFixture({ "vars-name.yml": "jobs:\n  dynamic:\n    name: '\${{ vars.CI_NAME }}'\n    runs-on: ubuntu-latest\n" });
+  const varsIdentity = ciJobIdentitiesFromRef(varsName.base, varsName.root);
+  assert.equal(varsIdentity.prMintable, false);
+  assert.equal(varsIdentity.staticNames.size, 0);
+
+  const strategyFlags = resolverFixture({ "strategy-flags.yml": "jobs:\n  dynamic:\n    name: 'Test (\${{ matrix.os }})'\n    strategy:\n      fail-fast: \${{ inputs.f }}\n      max-parallel: \${{ inputs.p }}\n      matrix:\n        os: [ubuntu, windows]\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(strategyFlags.base, strategyFlags.root).prMintable, false);
+
+  for (const name of ["${{ format('{0}', matrix.os) }}", "Static suite"]) {
+    const safe = resolverFixture({ "safe.yml": `jobs:\n  configured:\n    name: ${JSON.stringify(name)}\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n    runs-on: ubuntu-latest\n` }, [name]);
     assert.equal(ciJobIdentitiesFromRef(safe.base, safe.root).prMintable, false, name);
   }
 
@@ -243,6 +273,31 @@ test("#1820 resolver degrades a malformed trusted file to no jobs with a surface
   assert.ok(resolved.warnings.some((warning) => /not valid YAML/.test(warning)));
 });
 
+test("#1820 refused config entries keep the surface fence armed only when workflows changed", () => {
+  for (const [configText, label] of [["test-jobs: [", "malformed"], ["test-jobs:\n  validate-typescript: mystery\n", "dropped"]] as const) {
+    const root = initRepo();
+    writeFileSync(join(root, "README"), "seed");
+    writeConfig(root, PATH, configText);
+    writeConfig(root, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
+    const base = commit(root, `${label} config`);
+    writeConfig(root, ".github/workflows/changed.yml", "name: changed\\n");
+    const changedHead = commit(root, "changed workflow");
+    const resolved = resolveCiTestJobsFromRef({ baseRef: base, headRef: changedHead, workspace: root });
+    assert.equal(resolved.identitiesRefused, true);
+    assert.equal(resolved.workflowSurfaceTrusted, false);
+  }
+
+  const empty = resolverFixture({}, []);
+  writeConfig(empty.root, PATH, "test-jobs:\n");
+  const emptyHead = commit(empty.root, "empty config");
+  const emptyResult = resolveCiTestJobsFromRef({ baseRef: emptyHead, headRef: emptyHead, workspace: empty.root });
+  assert.equal(emptyResult.identitiesRefused, false);
+
+  const unreadable = resolveCiTestJobsFromRef({ baseRef: "missing-ref", headRef: "missing-ref", workspace: tmpdir() });
+  assert.equal(unreadable.identitiesRefused, true);
+  assert.equal(unreadable.workflowSurfaceTrusted, false);
+});
+
 test("#1820 workflow surface fence tracks only changes introduced by the PR", () => {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
@@ -265,6 +320,23 @@ test("#1820 workflow surface fence tracks only changes introduced by the PR", ()
   const changed = resolveCiTestJobsFromRef({ baseRef: base, headRef: workflowHead, workspace: root });
   assert.equal(changed.workflowSurfaceTrusted, false);
   assert.equal(changed.warnings.length, 0);
+
+  const refused = resolverFixture({ "matrix.yml": "jobs:\n  dynamic:\n    name: 'Test (\${{ matrix.label }})'\n    strategy:\n      matrix: \${{ fromJSON(needs.plan.outputs.matrix) }}\n" });
+  writeConfig(refused.root, ".github/workflows/pr-added.yml", "name: pr-added\n");
+  const refusedHead = commit(refused.root, "add PR workflow");
+  const refusedChanged = resolveCiTestJobsFromRef({ baseRef: refused.base, headRef: refusedHead, workspace: refused.root });
+  assert.equal(refusedChanged.jobs.size, 0);
+  assert.equal(refusedChanged.identitiesRefused, true);
+  assert.equal(refusedChanged.workflowSurfaceTrusted, false);
+  assert.equal(refusedChanged.warnings.some((warning) => /PR-author-controlled/.test(warning)), true);
+  assert.equal(refusedChanged.warnings.some((warning) => /could not be verified/.test(warning)), false);
+
+  const refusedUnchanged = resolveCiTestJobsFromRef({ baseRef: refused.base, headRef: refused.base, workspace: refused.root });
+  assert.equal(refusedUnchanged.identitiesRefused, true);
+  assert.equal(refusedUnchanged.workflowSurfaceTrusted, true);
+  const refusedMissingHead = resolveCiTestJobsFromRef({ baseRef: refused.base, workspace: refused.root });
+  assert.equal(refusedMissingHead.identitiesRefused, true);
+  assert.equal(refusedMissingHead.workflowSurfaceTrusted, false);
 
   const branchRoot = initRepo();
   writeFileSync(join(branchRoot, "README"), "seed");

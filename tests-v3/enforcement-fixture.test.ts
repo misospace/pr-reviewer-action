@@ -288,6 +288,16 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
     assert.equal(completeness.checks[0].status, "satisfied");
     assert.equal(completeness.checks[0].reason, "ci-evidence");
 
+    const refusedOnChangedSurface = runEnforcementFixture(writeJson(dir, "configured-refused-surface.json", {
+      ...base,
+      ci_identities_refused: true,
+      ci_workflow_surface_trusted: false,
+    }));
+    assert.equal(refusedOnChangedSurface.ok, true);
+    const refusedCompleteness = JSON.parse(refusedOnChangedSurface.values!.completeness_result!);
+    assert.equal(refusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(refusedCompleteness.checks[0].reason, "ci-evidence-ci-workflow-surface-untrusted");
+
     const fencedByDefault = runEnforcementFixture(writeJson(dir, "configured-fenced-default.json", {
       ...base,
       ci_workflow_surface_trusted: undefined,

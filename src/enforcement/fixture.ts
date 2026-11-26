@@ -41,6 +41,7 @@ interface EnforcementFixture {
   ci_test_jobs?: { path?: string; text: string } | null;
   /** Fixtures cannot read git refs, so they state the CI workflow fence explicitly; absent defaults false. */
   ci_workflow_surface_trusted?: boolean;
+  ci_identities_refused?: boolean;
   /** #1594: the exact head this fixture's review is bound to. */
   reviewed_head_sha?: string;
   /** The requirement ledger artifact (for the coverage fold). */
@@ -96,7 +97,7 @@ export function runEnforcementFixture(fixturePath: string): {
     // Malformed or non-string fixture config behaves as absent; fixtures
     // cannot read git refs.
     const trustedCiJobs = parsedCiTestJobs !== null && !("malformed" in parsedCiTestJobs)
-      ? { jobs: parsedCiTestJobs.jobs, workflowSurfaceTrusted: fixture.ci_workflow_surface_trusted === true }
+      ? { jobs: parsedCiTestJobs.jobs, identitiesRefused: fixture.ci_identities_refused === true, workflowSurfaceTrusted: fixture.ci_workflow_surface_trusted === true }
       : null;
     const reviewedHeadSha = fixture.reviewed_head_sha ?? "";
     // The model's own verdict, captured before the pipeline can mutate it —

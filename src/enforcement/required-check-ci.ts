@@ -8,13 +8,13 @@
  * arbitrary check is insufficient: the check name must genuinely denote a
  * test execution, unless a trusted base-ref config explicitly identifies it;
  * the evidence must be bound to the exact head. Configured scopes replace
- *   name-derived scopes for those identities; unconfigured checks retain the
- *   existing heuristic behavior. A closed workflow-surface fence refuses
- *   every test-run discharge for that run (`ci-workflow-surface-untrusted`),
- *   retaining failure-first contradiction (#1820 masquerade fence). Repos
- *   without configured identities keep the pre-#1820 name-heuristic behavior.
- *   The every-declared-leg rule covers generic and narrow asks as well as
- *   full-suite asks.
+ * name-derived scopes for those identities; unconfigured checks retain the
+ * existing heuristic behavior. A closed workflow-surface fence refuses
+ * every test-run discharge for that run (`ci-workflow-surface-untrusted`),
+ * retaining failure-first contradiction (#1820 masquerade fence). Repos
+ * without configured identities keep the pre-#1820 name-heuristic behavior.
+ * The every-declared-leg rule covers generic and narrow asks as well as
+ * full-suite asks.
  *
  * Authority model (this is deterministic policy, not a model verdict):
  * - the evidence artifact is code-generated from platform reads by the CI
@@ -409,7 +409,11 @@ export function ciDischargeForCheckText(
   // bare-suite heuristic name alike — so no head-bound CI evidence settles a
   // test-run ask this run. Failure-first stays ahead of this fence: a red
   // relevant leg still contradicts.
-  if (trustedJobs !== null && trustedJobs !== undefined && trustedJobs.jobs.size > 0 && !trustedJobs.workflowSurfaceTrusted) {
+  // Declared identities that were refused still arm the masquerade fence:
+  // otherwise refusal could silently reopen PR-added-workflow masquerade.
+  if (trustedJobs !== null && trustedJobs !== undefined
+    && (trustedJobs.jobs.size > 0 || trustedJobs.identitiesRefused)
+    && !trustedJobs.workflowSurfaceTrusted) {
     return { applies: true, outcome: "unresolved", reason: "ci-workflow-surface-untrusted", check: null };
   }
   // #1820: every configured identity the ask would be discharged BY must be

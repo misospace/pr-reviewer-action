@@ -1156,7 +1156,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const headSha = request.headSha !== "" ? request.headSha : (request.eventHeadSha || pre.head_sha);
   const ciTestJobs = baseRef !== ""
     ? resolveCiTestJobsFromRef({ baseRef, headRef: headSha, workspace: dependencies.workspace })
-    : { jobs: new Map<string, TrustedCiTestScope>(), warnings: [], sourcePath: null, workflowSurfaceTrusted: true };
+    : { jobs: new Map<string, TrustedCiTestScope>(), warnings: [], sourcePath: null, identitiesRefused: false, workflowSurfaceTrusted: true };
   for (const warning of ciTestJobs.warnings) errorLog(`ci test jobs: ${warning}`);
   // Applied-config visibility (#1820 review): the reason codes alone should
   // not be the only trace of a trusted config that failed to match.
@@ -2565,7 +2565,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // trusted producer tags the #1381 fold carries — never from prose.
     mustCheckEvidence: checkEvidenceTagsFromArtifact(classificationArtifact.must_check_evidence),
     ciEvidence: ciGateEvidence,
-    trustedCiJobs: { jobs: ciTestJobs.jobs, workflowSurfaceTrusted: ciTestJobs.workflowSurfaceTrusted },
+    trustedCiJobs: { jobs: ciTestJobs.jobs, identitiesRefused: ciTestJobs.identitiesRefused, workflowSurfaceTrusted: ciTestJobs.workflowSurfaceTrusted },
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
   const enforcementInputs: EnforcementInputs = {
@@ -2627,7 +2627,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     env.VALIDATE_REQUIRED_CHECKS,
     derivedObligationsEnabled,
     ciGateEvidence,
-    { jobs: ciTestJobs.jobs, workflowSurfaceTrusted: ciTestJobs.workflowSurfaceTrusted },
+    { jobs: ciTestJobs.jobs, identitiesRefused: ciTestJobs.identitiesRefused, workflowSurfaceTrusted: ciTestJobs.workflowSurfaceTrusted },
     completenessBaseOptions.reviewedHeadSha,
     riskObligationsEnabled,
   );

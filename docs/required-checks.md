@@ -230,8 +230,11 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   in-scope test check that went red on the exact head ref refutes discharge
   even when a differently named sibling matrix leg is green, while a red
   unrelated scope neither refutes nor discharges. Same-named legs within one
-  workflow run collapse to the newest attempt under GitHub retry semantics
-  (see the retry residual below). A full-suite ask also needs every
+  workflow run are collapsed to the most recent run before this fold ever
+  sees them — the producer's read inherits GitHub's default
+  `filter=latest`, which returns the most recent check run per check-suite
+  and name, so the forge itself already applies its retry/required-check
+  semantics (see the producer fold below). A full-suite ask also needs every
   in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
   leg collapsed to state `success`, keeps it unresolved beside a green
   sibling (the explicit conclusion is required, and one leg that did not run
@@ -282,13 +285,25 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   check runs from different workflow runs are no longer collapsed into one
   row: a same-name green from one workflow can never discard a same-name red
   from another, which for unconfigured repositories can only make more
-  failure rows visible, never fewer. Same-name check runs within one workflow
-  run collapse to the newest attempt (GitHub's own retry semantics, preserved
-  for re-run flows). The trust layer refuses identities that map to more than
-  one static job; the residual is a single matrix job whose fixed display name
-  produces several same-named check runs, where GitHub's required-check view
-  applies the same newest-attempt semantics. A final strict-parser round-trip means
-  an oversized or malformed artifact is never emitted.
+  failure rows visible, never fewer. Same-name check runs within one Actions
+  workflow run collapse to the newest row — the same newest-attempt semantics
+  GitHub itself applies, and usually redundant with them: the producer's
+  read (`GET /repos/{owner}/{repo}/commits/{ref}/check-runs` with GitHub's
+  default `filter=latest`) already returns the most recent check run per
+  check-suite and name, so a re-run's earlier attempts and a run's
+  same-named legs are collapsed server-side before the fold sees them
+  (verified against the live API: re-run attempts share one check-suite id,
+  re-created check runs carry new ids, and the default read returns only the
+  most recent). The fold's own same-run collapse is the bounded defense that
+  mirrors the forge's view for payloads where duplicates do arrive; the
+  forge's required-check view is the authority for retry and same-name-leg
+  semantics, and the #1820 identity controls below — producer binding,
+  config-time validation, and the masquerade fence — are the enforceable
+  layer on top of it. Non-Actions check runs keep the #995 newest-wins
+  collapse: their key carries no run identity, so same-app same-name rows
+  are indistinguishable from retries. A final
+  strict-parser round-trip means an oversized or malformed artifact is never
+  emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and
@@ -336,8 +351,9 @@ reconciliation above is unchanged for every repository that does not opt in.
 - **Authority**: for a configured check, the configured scope replaces the
   name-derived scope entirely only when the evidence row is an exact, unclipped
   GitHub Actions check run (`origin: "actions"`) and exactly one such row has
-  the configured name. Two same-named rows from different workflow runs refuse
-  the configured identity with `configured-identity-ambiguous`. Commit-status
+  the configured name. Two same-named rows — from different workflow runs —
+  refuse the configured identity with
+  `configured-identity-ambiguous`. Commit-status
   contexts and third-party check runs never satisfy configured identities;
   those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
   checks keep the name heuristics.
@@ -348,7 +364,8 @@ reconciliation above is unchanged for every repository that does not opt in.
   declared identities are refused with a warning. Any unreadable, oversized,
   invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or any PR-controlled job
   display name, refuses ALL configured identities with a warning and degrades
-  the feature to pre-#1820 name heuristics. Non-YAML files are skipped. The
+  the feature to pre-#1820 name heuristics while the workflow-surface
+  masquerade fence stays armed (see below). Non-YAML files are skipped. The
   scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB aggregate, and one
   shared 10s deadline. It is deliberately GitHub-scoped because configured
   discharge is GitHub-Actions-only; the workflow-surface fence remains the
@@ -357,13 +374,35 @@ reconciliation above is unchanged for every repository that does not opt in.
   and are skipped. Each expression span is accepted only when it
   references `matrix`, `strategy`, or admin-controlled `vars`, and contains no
   PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
-  `secrets`, or `inputs`). Matrix values laundered from outputs remain an
-  accepted static-scan residual. The check-run payload carries no workflow
+  `secrets`, or `inputs`). A dynamic name is accepted only when its
+  provenance is provable: a name that interpolates `matrix.*` requires the
+  job's `strategy.matrix` to be statically enumerable — a literal mapping
+  with no expression anywhere inside it (expressions in `fail-fast` or
+  `max-parallel` do not affect rendered names) — and the job must not be a
+  reusable-workflow call (`uses:` renders the name inside the callee). A
+  matrix laundered from an expression (for example
+  `strategy.matrix: ${{ fromJSON(...) }}`, where the producing job may run a
+  script checked out from the PR head) or an absent matrix makes a
+  `matrix.*` name PR-mintable; a dynamic name that does not interpolate
+  `matrix.*` at all (for example a `vars`-only name) is accepted on a regular
+  job but contributes neither key nor name, while any dynamic name on a
+  reusable-workflow call (`uses:`) is PR-mintable regardless of what it
+  interpolates (#1820 re-review). A PR-mintable name or an unreadable surface
+  refuses ALL configured discharge; an identity that names no single static
+  job is refused individually. When every declared identity ends up
+  unhonored — a refused surface, malformed YAML that still declares entries,
+  or declarations that all failed validation — the resolver computes the real
+  workflow-surface state, reports the identities as refused, and the
+  masquerade fence below stays armed even though no identity remains —
+  refusing identities must never silently disable the fence that a
+  PR-added-workflow masquerade would otherwise trip. The check-run payload
+  carries no workflow
   identity, so the trusted base surface is the only statement of which names
   the repository's own CI can mint. A reusable-workflow caller contributes its
-  job key even though the check name may come from an inner job; matrix-leg
-  runtime names are not statically enumerable. Those conservative mismatches
-  can leave a validated-but-never-satisfiable identity unresolved.
+  job key even though the check name may come from an inner job; runtime
+  matrix-leg names remain outside `staticNames`, so an identity can never be
+  validated against them. Those conservative mismatches can leave a
+  validated-but-never-satisfiable identity unresolved.
 - **The declared set defines the suite**: when a full-suite ask is settled
   against a config that declares `full-suite` jobs, EVERY configured
   `full-suite` identity must appear in the head-bound evidence and be green.
@@ -394,7 +433,11 @@ reconciliation above is unchanged for every repository that does not opt in.
   `.github/workflows`, `.forgejo/workflows`, `.gitea/workflows`, or
   `.gitlab-ci.yml` — or the surface cannot be verified (git failure or
   missing head) while the identities were readable, every test-run row stays
-  unresolved that run with `ci-evidence-ci-workflow-surface-untrusted`. A red
+  unresolved that run with `ci-evidence-ci-workflow-surface-untrusted`. The
+  fence also stays armed when identities were declared but not honored this
+  run — a refused surface, an unreadable surface, a malformed config that
+  still declared entries, or declarations that all failed validation — the
+  refusal must never silently disable it (#1820 re-review). A red
   relevant leg still contradicts (failure-first). Repositories without
   configured identities retain the pre-#1820 name-heuristic behavior. The
   merge-base anchor is deliberate: for PR events the effective workflow set
