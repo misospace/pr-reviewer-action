@@ -320,6 +320,19 @@ test("#1820 fixture: trusted CI test job config discharges full-suite coverage",
     assert.equal(partiallyRefusedCompleteness.checks[0].status, "unresolved");
     assert.equal(partiallyRefusedCompleteness.checks[0].reason, "ci-evidence-configured-test-job-missing");
 
+    // Every declaration refused (nothing honored): the refused legs still keep
+    // the ask unresolved rather than falling back to name heuristics.
+    const allRefused = runEnforcementFixture(writeJson(dir, "configured-all-refused.json", {
+      ...base,
+      ci_test_jobs: { text: "test-jobs:\n" },
+      ci_refused_test_jobs: { "validate-typescript": "full-suite", "validate-runtime-floor": "full-suite" },
+    }));
+    assert.equal(allRefused.ok, true);
+    const allRefusedCompleteness = JSON.parse(allRefused.values!.completeness_result!);
+    assert.equal(allRefusedCompleteness.status, "incomplete");
+    assert.equal(allRefusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(allRefusedCompleteness.checks[0].reason, "ci-evidence-configured-test-job-missing");
+
     const unavailable = runEnforcementFixture(writeJson(dir, "configured-no-evidence.json", {
       ...base,
       ci_evidence: undefined,

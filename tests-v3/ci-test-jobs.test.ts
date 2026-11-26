@@ -202,6 +202,7 @@ test("#1820 resolver validates configured identities against the complete base w
   assert.equal(ciJobIdentitiesFromRef(expressionMatrix.base, expressionMatrix.root).prMintable, true);
   const expressionMatrixResult = resolveCiTestJobsFromRef({ baseRef: expressionMatrix.base, headRef: expressionMatrix.base, workspace: expressionMatrix.root });
   assert.equal(expressionMatrixResult.jobs.size, 0);
+  assert.deepEqual([...expressionMatrixResult.refusedJobs], [["validate-typescript", "full-suite"]]);
   assert.ok(expressionMatrixResult.warnings.some((warning) => /PR-author-controlled job display name/.test(warning)));
 
   const expressionValueMatrix = resolverFixture({ "expression-value-matrix.yml": "jobs:\n  dynamic:\n    name: \${{ matrix.label }}\n    strategy:\n      matrix:\n        label: [\"\${{ env.X }}\"]\n    runs-on: ubuntu-latest\n" });
@@ -222,6 +223,7 @@ test("#1820 resolver validates configured identities against the complete base w
   assert.equal(staticMatrixIdentities.matrixJobNames.get("validate-typescript"), 1);
   const staticMatrixResult = resolveCiTestJobsFromRef({ baseRef: staticMatrix.base, headRef: staticMatrix.base, workspace: staticMatrix.root });
   assert.equal(staticMatrixResult.jobs.size, 0);
+  assert.deepEqual([...staticMatrixResult.refusedJobs], [["validate-typescript", "full-suite"]]);
   assert.equal(staticMatrixResult.identitiesRefused, true);
   assert.ok(staticMatrixResult.warnings.some((warning) => /matrix job/.test(warning)));
 
@@ -477,6 +479,25 @@ test("#1820 a partially refused declaration stays in the resolved required set",
   };
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", evidence, head, resolved).reason, "configured-test-job-missing");
   assert.equal(ciDischargeForCheckText("run full test suite after upgrade", { ...evidence, checks: evidence.checks.slice(0, 1) }, head, resolved).reason, "configured-test-job-missing");
+
+  // All declarations refused (only identity names a matrix job): the trusted
+  // surface stays open (nothing changed), so the resolution must come from the
+  // refused declaration — a green heuristic bare-suite row cannot reopen the
+  // heuristic channel.
+  const allRefused = resolverFixture({
+    "matrix.yml": "jobs:\n  suite:\n    name: validate-typescript\n    strategy:\n      matrix:\n        node: [18, 20]\n    runs-on: ubuntu-latest\n",
+  }, ["validate-typescript"]);
+  const allRefusedResolved = resolveCiTestJobsFromRef({ baseRef: allRefused.base, headRef: allRefused.base, workspace: allRefused.root });
+  assert.equal(allRefusedResolved.jobs.size, 0);
+  assert.deepEqual([...allRefusedResolved.refusedJobs], [["validate-typescript", "full-suite"]]);
+  assert.equal(allRefusedResolved.workflowSurfaceTrusted, true);
+  const heuristicSuite: HeadBoundCiEvidence = {
+    headSha: allRefused.base,
+    finalState: "success",
+    checks: [{ name: "Tests", state: "success", conclusion: "success" }],
+  };
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", heuristicSuite, allRefused.base, allRefusedResolved).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText("run the tests", heuristicSuite, allRefused.base, allRefusedResolved).reason, "configured-test-job-missing");
 });
 
 test("#1820 resolver degrades a malformed trusted file to no jobs with a surfaced warning", () => {

@@ -374,11 +374,11 @@ reconciliation above is unchanged for every repository that does not opt in.
   that name only when the job has no `strategy.matrix` (a `strategy` carrying
   only `fail-fast`/`max-parallel` still runs one leg). Configured matrix jobs
   are refused because the check-run payload cannot prove every leg ran
-  (missing-leg); the pre-#1820 name heuristics are unchanged for such a name.
-  Undeclared or multiply declared identities are refused with a warning. Any
+  (missing-leg). Undeclared or multiply declared identities are refused with a
+  warning. Any
   unreadable, oversized, invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or
   any PR-controlled job display name, refuses ALL configured identities with a
-  warning and degrades the feature to pre-#1820 name heuristics while the
+  warning while the
   workflow-surface masquerade fence stays armed (see below). Non-YAML files are
   skipped. The scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB
   aggregate, and one shared 10s deadline. It is deliberately GitHub-scoped
@@ -447,7 +447,12 @@ reconciliation above is unchanged for every repository that does not opt in.
   requested scopes), not only full-suite asks. A declaration refused at
   config load (matrix-origin, ambiguous, or naming no static job) is still a
   declared leg for its scope: it can never be satisfied, so the ask stays
-  unresolved rather than being outvoted by a surviving green identity. One
+  unresolved rather than being outvoted by a surviving green identity — and
+  the same holds when NO identity survived, because refusing declarations
+  must not silently reopen the heuristic channel under an ask the operator's
+  declaration covers. Pre-#1820 name heuristics therefore settle an ask only
+  when no declaration covers it: no config file, or entries that never
+  declared a usable scope (one a required leg could be built for). One
   missing leg keeps the row
   unresolved (`configured-test-job-missing`) — even when an unrelated
   heuristic-matched `Tests` job is green. A red configured leg still

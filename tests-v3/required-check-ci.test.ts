@@ -666,23 +666,21 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
   assert.equal(ciDischargeForCheckText("run full test suite", thirdParty, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-test-job-missing");
 });
 
-test("#1820 a refused matrix identity leaves only the pre-#1820 heuristics for its name", () => {
+test("#1820 a refused matrix identity keeps its declaration required instead of falling back to heuristics", () => {
   const head = HEAD;
-  // Config-time refusal of a matrix-shaped identity (missing-leg): no
-  // configured scope remains, so the name falls back to the heuristics —
-  // a non-test-named identity can neither discharge nor contradict.
-  const refusedMatrix = configuredJobs([], true, true);
+  // Config-time refusal of a matrix-shaped identity (missing-leg) keeps the
+  // declaration in `refusedJobs`, so the ask cannot be settled by the
+  // refused row itself nor by a heuristic bare-suite name.
+  const refusedMatrix = configuredJobs([], true, true, [["validate-typescript", "full-suite"]]);
   const oneGreenLeg = actionsEvidence("success", [
     { name: "validate-typescript", state: "success", conclusion: "success" },
   ], head);
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", oneGreenLeg, head, refusedMatrix).reason, "no-matching-test-check");
-  assert.equal(reconcileRequiredCheckRows(evaluateRequiredCheckCoverage(["run full test suite after upgrade"], null).checks, oneGreenLeg, head, refusedMatrix).rows[0]?.reason, "ci-evidence-no-matching-test-check");
-  // The heuristic residual is unchanged: a bare-suite name still discharges
-  // from one green leg when no configured identity applies (#1703).
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", oneGreenLeg, head, refusedMatrix).reason, "configured-test-job-missing");
+  assert.equal(reconcileRequiredCheckRows(evaluateRequiredCheckCoverage(["run full test suite after upgrade"], null).checks, oneGreenLeg, head, refusedMatrix).rows[0]?.reason, "ci-evidence-configured-test-job-missing");
   const bareSuite = actionsEvidence("success", [
     { name: "test", state: "success", conclusion: "success" },
   ], head);
-  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", bareSuite, head, refusedMatrix).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", bareSuite, head, refusedMatrix).reason, "configured-test-job-missing");
 });
 
 test("#1820 a refused declared identity stays required and cannot be outvoted by a surviving green leg", () => {
@@ -738,12 +736,18 @@ test("#1820 a refused declared identity stays required and cannot be outvoted by
   ], head);
   assert.equal(ciDischargeForCheckText(ask, fullGreen, head, mixedScopes).outcome, "satisfied");
 
-  // No honored identity at all keeps the pre-#1820 heuristic fallback: the
-  // refused declaration is not a required leg when the configured path is
-  // entirely inactive.
+  // No honored identity at all: refusing every declaration must not silently
+  // reopen the heuristic channel, so the refused declaration still keeps the
+  // ask unresolved rather than letting a green heuristic `Tests` row settle it.
   const allRefused = configuredJobs([], true, true, [["validate-typescript", "full-suite"]]);
   const bareSuite = actionsEvidence("success", [{ name: "Tests", state: "success", conclusion: "success" }], head);
-  assert.equal(ciDischargeForCheckText(ask, bareSuite, head, allRefused).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText(ask, bareSuite, head, allRefused).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText("run the tests", bareSuite, head, allRefused).reason, "configured-test-job-missing");
+  // The heuristic residual survives only where no declaration covers the ask:
+  // a repo state with no declared leg at all (no config file, or every entry
+  // dropped for a bad scope) keeps pre-#1820 behavior byte-for-byte.
+  const nothingDeclared = configuredJobs([], true, true);
+  assert.equal(ciDischargeForCheckText(ask, bareSuite, head, nothingDeclared).outcome, "satisfied");
 });
 
 test("#1820 evidence parser validates provenance while retaining old heuristic artifacts", () => {

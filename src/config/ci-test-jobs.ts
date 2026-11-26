@@ -72,7 +72,8 @@ export interface TrustedCiJobs {
    * with the whole surface). They can never be matched by evidence, but they
    * stay DECLARED: the every-declared-leg rule requires them for their scope,
    * so a surviving green identity cannot settle an ask a refused declaration
-   * also covers (#1820 re-review). */
+   * also covers, and refusing every declaration cannot silently reopen the
+   * pre-#1820 heuristic channel under such an ask (#1820 re-review). */
   readonly refusedJobs: ReadonlyMap<string, TrustedCiTestScope>;
   /** True when config declared identities but none were honored this run
    * (surface refused them, the surface could not be read, or none validated).

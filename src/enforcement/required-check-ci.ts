@@ -17,7 +17,9 @@
  * full-suite asks, and a declaration refused at config load (matrix-origin,
  * ambiguous, or naming no static job) remains a required leg for its scope:
  * it can never match evidence, so the ask stays unresolved instead of letting
- * a surviving green identity settle it (#1820 re-review).
+ * a surviving green identity settle it — even when no identity survived, so
+ * refusing declarations never silently reopens the heuristic channel
+ * (#1820 re-review).
  *
  * Authority model (this is deterministic policy, not a model verdict):
  * - the evidence artifact is code-generated from platform reads by the CI
@@ -427,9 +429,13 @@ export function ciDischargeForCheckText(
   // leg also covers. A declaration refused at config load is still DECLARED:
   // keeping it in this set (it can never match evidence) makes the ask stay
   // unresolved instead of letting a surviving green identity outvote it
-  // (#1820 re-review). When no identity survived at all, the pre-#1820
-  // heuristic path applies unchanged (configured.size === 0).
-  const declaredLegs = configured.size > 0 ? new Map([...refused, ...configured]) : configured;
+  // (#1820 re-review). This holds when NO identity survived either: refusing
+  // declarations must not silently reopen the heuristic channel, or a
+  // heuristic `Tests` row would settle an ask the operator's refused
+  // declaration covers. The heuristics stay in force only when nothing with a
+  // usable scope was declared at all (no config file, or every entry dropped
+  // for a bad scope/identity), where `refused` is empty by construction.
+  const declaredLegs = new Map([...refused, ...configured]);
   const requiredLegs = [...declaredLegs.entries()]
     .filter(([, scope]) => (requestedScopes.length > 0 ? requestedScopes.includes(scope) : scope === "full-suite"));
   const requiredLegMissing = requiredLegs.some(([identity]) => !evidence.checks.some((check) =>
