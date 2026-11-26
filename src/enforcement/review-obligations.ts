@@ -144,10 +144,10 @@ export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "d
  *   refinement, now also written on the obligation side): an unresolved
  *   test-run row the CI evidence answers — `ci-evidence-head-mismatch`,
  *   `ci-evidence-no-matching-test-check`,
-  *   `ci-evidence-configured-test-job-missing` (#1820),
-  *   `ci-evidence-configured-identity-ambiguous` (#1820),
-  *   `ci-evidence-ci-workflow-surface-untrusted` (#1820 masquerade fence),
-  *   `ci-evidence-test-check-not-success`,
+ *   `ci-evidence-configured-test-job-missing` (#1820),
+ *   `ci-evidence-configured-identity-ambiguous` (#1820),
+ *   `ci-evidence-ci-workflow-surface-untrusted` (#1820 masquerade fence),
+ *   `ci-evidence-test-check-not-success`,
  *   `ci-evidence-test-check-contradicted` — so the obligation artifact says
  *   exactly WHY the row stayed open instead of the generic answer-level
  *   reason, and the two folds agree row-for-row.
