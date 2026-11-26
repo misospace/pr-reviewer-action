@@ -14,7 +14,8 @@ import {
   type NpmFetchBytes,
   type NpmFetchJson,
 } from "../src/context/index.js";
-import { npmPackageChangesFromDiff } from "../src/run/stages.js";
+import { npmPackageChangesFromDiff, runNpmPackageProvenancePhase } from "../src/run/stages.js";
+import { RunWorkspace } from "../src/run/workspace.js";
 import { buildReviewCorpus, type CorpusWorkspace } from "../src/corpus/index.js";
 
 const enc = (text: string): Uint8Array => Buffer.from(text, "utf8");
@@ -294,6 +295,25 @@ test("the #1819 verified comparison lands in the settlement artifact (#1821 AC1)
   assert.equal(artifact.schema, NPM_COMPARISONS_ARTIFACT_SCHEMA);
   assert.deepEqual(artifact.verified, [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }],
     "the exact tag-less comparison the Markdown discloses is the same fact the ledger consumes");
+});
+
+test("the settlement artifact is cleared or rewritten on every phase path — a stale verified list never survives (#1821 AC1)", async () => {
+  const ws = new RunWorkspace("/run-dir-not-used", false);
+  // A prior derivation's verified list sits in the shared run directory.
+  ws.write("npm-package-comparisons.json", JSON.stringify({
+    schema: NPM_COMPARISONS_ARTIFACT_SCHEMA,
+    verified: [{ slug: "pkg/from-prior-run", oldVersion: "1.0.0", newVersion: "2.0.0" }],
+  }));
+  // This run carries no comparable npm bump → the stale list is CLEARED.
+  await runNpmPackageProvenancePhase(ws, "diff --git a/src/a.ts b/src/a.ts\n+const answer = 42;\n", {});
+  assert.equal(ws.readText("npm-package-comparisons.json"), "");
+  // This run DOES carry the #1819 bump, but the registry host is not
+  // allowlisted: every read fails closed and the rewritten artifact verifies
+  // nothing (no network touched: the allowlist refuses before any request).
+  await runNpmPackageProvenancePhase(ws, LOCKFILE_DIFF, {});
+  const artifact = JSON.parse(ws.readText("npm-package-comparisons.json")!) as { schema: string; verified: unknown[] };
+  assert.equal(artifact.schema, NPM_COMPARISONS_ARTIFACT_SCHEMA);
+  assert.deepEqual(artifact.verified, []);
 });
 
 test("the rendered section rides in the corpus body between the provenance sections", async () => {

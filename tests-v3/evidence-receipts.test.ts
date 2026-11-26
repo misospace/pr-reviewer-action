@@ -1269,6 +1269,10 @@ test("#1821: malformed npm comparison artifacts contribute nothing and never ref
     [],
     { schema: "other/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
     { schema: "npm-package-comparisons/v1", verified: "nope" },
+    // House strict-artifact rule: any key this runtime did not write makes
+    // the whole artifact (or entry) absent, never partially trusted.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }], extra: true },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0", fabricated: true }] },
     { schema: "npm-package-comparisons/v1", verified: [null, 1, [], { slug: "types/node" }] },
     // A slug/version the registry URL grammar itself refuses produced no read.
     { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "latest", newVersion: "2.0.0" }] },

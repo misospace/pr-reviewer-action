@@ -475,13 +475,17 @@ function parsePublishedManifest(raw: Buffer | null): PackageManifest | null {
   const name = typeof doc.name === "string" ? doc.name : "";
   const version = typeof doc.version === "string" ? doc.version : "";
   if (name === "" || version === "") throw new UnresolvedError("package-manifest-invalid");
-  const dependencies: Record<string, string> = {};
+  // Prototype-free so a published dependency literally named `__proto__`
+  // lands as data instead of hitting the Object prototype setter.
+  const dependencies: Record<string, string> = Object.create(null) as Record<string, string>;
   if (doc.dependencies !== null && typeof doc.dependencies === "object" && !Array.isArray(doc.dependencies)) {
     for (const [dep, range] of Object.entries(doc.dependencies as Record<string, unknown>)) {
       if (typeof range === "string") dependencies[dep] = range;
     }
   }
-  return { name, version, dependencies };
+  // Spread copies own properties with CreateDataProperty semantics, so a
+  // `__proto__` declaration captured above survives into the plain result.
+  return { name, version, dependencies: { ...dependencies } };
 }
 
 /** Confirm an unpacked tree carries the published manifest AND that its
@@ -493,7 +497,8 @@ function parsePublishedManifest(raw: Buffer | null): PackageManifest | null {
  * is the version document, so the manifest must agree with it, and the
  * normalized-slug spelling matches the document check in `acquireVersion`. */
 function verifyPackageManifest(tree: PackageTree, slug: string, version: string): NpmUnresolvedReason | null {
-  if (tree.files.get("package.json") === undefined) return "package-manifest-missing";
+  // `manifest === null` exactly when the archive carried no package/package.json
+  // (present-but-malformed content already threw in `parsePublishedManifest`).
   const manifest = tree.manifest;
   if (manifest === null) return "package-manifest-missing";
   if (scopeNormalizedSlug(manifest.name) !== slug) return "package-manifest-mismatch";

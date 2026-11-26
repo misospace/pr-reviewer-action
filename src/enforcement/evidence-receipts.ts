@@ -1026,6 +1026,11 @@ const MAX_NPM_RECEIPT_VERSION_LENGTH = 100;
 function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
   const record = value as Record<string, unknown>;
+  // House strict-artifact rule: any key this runtime did not write makes the
+  // WHOLE artifact absent (never partially trusted).
+  for (const key of Object.keys(record)) {
+    if (key !== "schema" && key !== "verified") return [];
+  }
   if (record.schema !== NPM_COMPARISONS_ARTIFACT_SCHEMA) return [];
   const verified = record.verified;
   if (!Array.isArray(verified)) return [];
@@ -1034,6 +1039,8 @@ function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
   for (const raw of verified) {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
     const entry = raw as Record<string, unknown>;
+    const entryKeys = Object.keys(entry).every((key) => key === "slug" || key === "oldVersion" || key === "newVersion");
+    if (!entryKeys) continue;
     const slug = typeof entry.slug === "string" ? entry.slug.trim().toLowerCase() : "";
     const oldVersion = typeof entry.oldVersion === "string" ? entry.oldVersion.trim().toLowerCase() : "";
     const newVersion = typeof entry.newVersion === "string" ? entry.newVersion.trim().toLowerCase() : "";
@@ -1041,7 +1048,10 @@ function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
     if (slug.length > MAX_NPM_RECEIPT_SLUG_LENGTH || oldVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH || newVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH) continue;
     // Receipts ride the SAME canonical version-document grammar the phase
     // fetched through: anything it refuses produced no read and credits
-    // nothing.
+    // nothing. A build-metadata version carries into the URL percent-encoded
+    // (`1.0.0+build` → `…%2Bbuild`) while the trusted scope entry spells the
+    // token with `+`, so the version carry never matches such an entry —
+    // under-credit, fail-closed, never an over-credit.
     const oldUrl = registryVersionDocUrl(slug, oldVersion);
     const newUrl = registryVersionDocUrl(slug, newVersion);
     if (oldUrl === null || newUrl === null) continue;

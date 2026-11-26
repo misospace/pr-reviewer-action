@@ -506,6 +506,18 @@ test("a clean tree parses its manifest identity into the PackageTree", () => {
   assert.deepEqual(tree.manifest, { name: "@types/node", version: "1.2.3", dependencies: { chalk: "^5.3.0" } });
 });
 
+test("a published dependency named __proto__ is captured as data, not silently dropped (#1821 review)", () => {
+  // Written as a raw JSON document: an object LITERAL's `__proto__` key would
+  // hit the prototype setter on the BUILDER side and vanish before the test
+  // even runs. JSON.parse produces a true own data property.
+  const tree = extractPackageTree(rawTarball(
+    '{"name":"@types/node","version":"1.2.3","dependencies":{"__proto__":"^1.0.0","chalk":"^5.0.0"}}',
+  ));
+  assert.ok(tree.manifest !== null);
+  assert.equal(tree.manifest.dependencies["__proto__"], "^1.0.0");
+  assert.equal(tree.manifest.dependencies["chalk"], "^5.0.0");
+});
+
 // ── #1821 independent review: actual changed DECLARATIONS, not only paths ───
 
 function manifestBody(version: string, deps: Record<string, string>): string {
