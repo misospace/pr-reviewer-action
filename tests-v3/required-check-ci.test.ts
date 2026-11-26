@@ -610,8 +610,16 @@ test("#1820 provenance chain: configured identities require one exact Actions ru
   assert.deepEqual(redThenGreen?.checks.map((check) => check.state), ["failure", "success"]);
   assert.equal(decide("run full test suite", redThenGreen).outcome, "contradicted");
 
+  // Same-run same-name rows collapse to the newest (GitHub retry semantics;
+  // the trust layer refuses identities that map to more than one static job).
+  const retry = run("validate-typescript", 11, "failure");
+  retry.details_url = "https://github.test/actions/runs/11/job/111";
+  const retryGreen = { ...retry, id: 112, conclusion: "success", started_at: "2026-02-01T00:00:00Z", details_url: "https://github.test/actions/runs/11/job/112" };
+  const retried = chain([retry, retryGreen]);
+  assert.deepEqual(retried?.checks.map((check) => check.state), ["success"]);
+
   const statusOnly = chain([], [{ context: "validate-typescript", state: "success" }]);
-  assert.equal(decide("run full test suite", statusOnly).reason, "configured-test-job-missing");
+  assert.equal(ciDischargeForCheckText("run full test suite", statusOnly, head, configuredJobs([["validate-typescript", "full-suite"]])).reason, "configured-test-job-missing");
 
   const full = chain([run("validate-typescript", 3)]);
   assert.equal(ciDischargeForCheckText("run full test suite", full, head, configuredJobs([["validate-typescript", "full-suite"]])).outcome, "satisfied");

@@ -708,10 +708,11 @@ export function normalizeExternalChecks(
         .find((url): url is string => typeof url === "string" && /\/actions\/runs\/(\d+)/.test(url));
       const runMatch = actionsUrl?.match(/\/actions\/runs\/(\d+)/);
       const fallbackId = jqField(run, "id");
+      const hasId = fallbackId !== null && fallbackId !== undefined;
       const key = isActions
-        ? `${String(appSlug)}:${runMatch?.[1] ?? `check:${typeof fallbackId}:${JSON.stringify(fallbackId)}`}:${typeof name}:${JSON.stringify(name)}`
+        ? `${String(appSlug)}:${runMatch?.[1] ?? (!hasId ? "check:unidentified" : `check:${typeof fallbackId}:${JSON.stringify(fallbackId)}`)}:${typeof name}:${JSON.stringify(name)}`
         : `${appSlug === undefined || appSlug === null ? "" : String(appSlug)}:${typeof name}:${JSON.stringify(name)}`;
-      if (isActions && runMatch === undefined && fallbackId === undefined) {
+      if (isActions && runMatch === undefined && !hasId) {
         actionsRows.push({ run, index });
         continue;
       }

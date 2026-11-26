@@ -52,6 +52,8 @@ export interface TrustedCiJobs {
 export const CI_WORKFLOW_SURFACE_PATHS = [".github/workflows", ".forgejo/workflows", ".gitea/workflows", ".gitlab-ci.yml"] as const;
 
 const DEFAULT_GIT_TIMEOUT_SEC = 10;
+const MAX_CI_WORKFLOW_FILES = 32;
+const MAX_CI_WORKFLOW_FILE_BYTES = 65_536;
 
 export interface CiTestJobsFile {
   readonly path: string;
@@ -166,6 +168,87 @@ export function ciWorkflowSurfaceChangedFromBase(options: {
   }
 }
 
+/**
+ * Configured discharge binds a display name to a check run with no workflow
+ * identity in the payload. The base-ref surface is the only trusted statement
+ * of which names repository CI can mint, so undeclared or ambiguous names must
+ * never discharge.
+ */
+export function ciJobIdentitiesFromRef(
+  ref: string,
+  workspace?: string | null,
+  options: { gitTimeoutSec?: number } = {},
+): { staticNames: ReadonlyMap<string, number>; prMintable: boolean; warning: string | null } {
+  const empty = new Map<string, number>();
+  const timeoutSec = options.gitTimeoutSec ?? DEFAULT_GIT_TIMEOUT_SEC;
+  const cwd = workspace ?? process.cwd();
+  const failure = (detail: string, file?: string) => ({
+    staticNames: empty,
+    prMintable: true,
+    warning: `CI workflow surface could not be read from the base ref: ${file === undefined ? detail : `${file}: ${detail}`}; configured test-job identities are refused.`,
+  });
+  let listing: string;
+  try {
+    listing = execFileSync("git", ["ls-tree", "-r", "--name-only", ref, "--", ".github/workflows"], {
+      cwd,
+      timeout: timeoutSec * 1000,
+      maxBuffer: MAX_CI_WORKFLOW_FILE_BYTES * 4,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    }).toString("utf8");
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+    const detail = err.code === "ENOENT" ? "git executable not found"
+      : err.killed || err.signal ? `git ls-tree timed out after ${timeoutSec}s`
+        : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
+    return failure(detail);
+  }
+  const files = listing.split("\n").filter((path) => path.startsWith(".github/workflows/")).sort();
+  if (files.length > MAX_CI_WORKFLOW_FILES) {
+    return failure(`more than ${MAX_CI_WORKFLOW_FILES} workflow files were found (additional files omitted)`);
+  }
+  const staticNames = new Map<string, number>();
+  let prMintable = false;
+  for (const path of files) {
+    let text: string;
+    try {
+      const bytes = execFileSync("git", ["show", `${ref}:${path}`], {
+        cwd,
+        timeout: timeoutSec * 1000,
+        maxBuffer: MAX_CI_WORKFLOW_FILE_BYTES + 1,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      if (bytes.byteLength > MAX_CI_WORKFLOW_FILE_BYTES) return failure(`file exceeds ${MAX_CI_WORKFLOW_FILE_BYTES}-byte cap`, path);
+      text = bytes.toString("utf8");
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+      const detail = err.code === "ENOENT" ? "git executable not found"
+        : err.killed || err.signal ? `git show timed out after ${timeoutSec}s`
+          : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
+      return failure(detail, path);
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(text);
+    } catch {
+      return failure("workflow YAML is not valid", path);
+    }
+    if (!isPlainObject(parsed) || !isPlainObject(parsed.jobs)) return failure("workflow has no jobs mapping", path);
+    for (const [key, rawJob] of Object.entries(parsed.jobs)) {
+      const names = new Set([key]);
+      if (isPlainObject(rawJob) && typeof rawJob.name === "string") {
+        if (!rawJob.name.includes("${{")) names.add(rawJob.name);
+        else if (/\$\{\{[^}]*\b(?:github\.event|github\.head_ref|github\.triggering_actor)\b/.test(rawJob.name)) prMintable = true;
+      }
+      for (const name of names) staticNames.set(name, (staticNames.get(name) ?? 0) + 1);
+    }
+  }
+  return { staticNames, prMintable, warning: prMintable
+    ? "CI workflow surface contains a PR-author-controlled job display name; configured test-job identities are refused."
+    : null };
+}
+
 /** Read and parse base-ref config; failures are surfaced by the resolver. */
 export function resolveCiTestJobsFromRef(options: {
   baseRef: string;
@@ -191,9 +274,30 @@ export function resolveCiTestJobsFromRef(options: {
   if ("malformed" in parsed) return { jobs: new Map(), warnings: [parsed.warning], sourcePath: null, workflowSurfaceTrusted: true };
   const warnings = [...parsed.warnings];
   if (parsed.jobs.size === 0) return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+  const identities = ciJobIdentitiesFromRef(options.baseRef, options.workspace, options.gitTimeoutSec === undefined ? {} : { gitTimeoutSec: options.gitTimeoutSec });
+  if (identities.prMintable) {
+    warnings.push(identities.warning ?? "CI workflow surface contains a PR-author-controlled job display name; configured test-job identities are refused.");
+    return { jobs: new Map(), warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+  }
+  if (identities.warning !== null) {
+    warnings.push(identities.warning);
+    return { jobs: new Map(), warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
+  }
+  const validatedJobs = new Map<string, TrustedCiTestScope>();
+  for (const [identity, scope] of parsed.jobs) {
+    const occurrences = identities.staticNames.get(identity) ?? 0;
+    if (occurrences === 0) {
+      warnings.push(`CI test jobs '${file.path}' identity '${identity}' does not name a static job in the base ref's GitHub workflows; ignoring it.`);
+    } else if (occurrences > 1) {
+      warnings.push(`CI test jobs '${file.path}' identity '${identity}' names more than one job in the base ref's GitHub workflows; refusing the ambiguous identity.`);
+    } else {
+      validatedJobs.set(identity, scope);
+    }
+  }
+  if (validatedJobs.size === 0) return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: true };
   if (options.headRef === undefined || options.headRef === "") {
     warnings.push("CI workflow surface could not be verified against the base ref: head ref is missing.");
-    return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: false };
+    return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: false };
   }
   const surface = ciWorkflowSurfaceChangedFromBase({
     baseRef: options.baseRef,
@@ -202,5 +306,5 @@ export function resolveCiTestJobsFromRef(options: {
     ...(options.gitTimeoutSec !== undefined ? { gitTimeoutSec: options.gitTimeoutSec } : {}),
   });
   if (surface.warning !== null) warnings.push(surface.warning);
-  return { jobs: parsed.jobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: !surface.changed };
+  return { jobs: validatedJobs, warnings, sourcePath: file.path, workflowSurfaceTrusted: !surface.changed };
 }

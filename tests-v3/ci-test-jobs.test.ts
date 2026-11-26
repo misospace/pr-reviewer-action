@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CI_TEST_JOBS_CANDIDATE_PATHS,
+  ciJobIdentitiesFromRef,
   ciWorkflowSurfaceChangedFromBase,
   MAX_CI_TEST_JOB_IDENTITIES,
   MAX_CI_TEST_JOB_IDENTITY_CHARS,
@@ -72,11 +73,20 @@ function writeConfig(root: string, path: string, text: string): void {
   writeFileSync(target, text);
 }
 
+function resolverFixture(workflows: Record<string, string>, identities: string[] = ["validate-typescript"]): { root: string; base: string } {
+  const root = initRepo();
+  writeFileSync(join(root, "README"), "seed");
+  writeConfig(root, PATH, `test-jobs:\n${identities.map((identity) => `  '${identity}': full-suite`).join("\n")}\n`);
+  for (const [path, text] of Object.entries(workflows)) writeConfig(root, `.github/workflows/${path}`, text);
+  return { root, base: commit(root, "base config and workflows") };
+}
+
 test("#1820 resolves only the trusted base tree and handles absent/unreadable refs", () => {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
   commit(root, "seed");
   writeConfig(root, PATH, BASE);
+  writeConfig(root, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
   const base = commit(root, "base config");
   writeConfig(root, PATH, "test-jobs:\n  attacker: full-suite\n");
   commit(root, "head config");
@@ -98,6 +108,49 @@ test("#1820 resolves only the trusted base tree and handles absent/unreadable re
   assert.deepEqual(resolveCiTestJobsFromRef({ baseRef: "" }).warnings, []);
 });
 
+test("#1820 resolver validates configured identities against the complete base workflow surface", () => {
+  const absent = resolverFixture({});
+  const absentResult = resolveCiTestJobsFromRef({ baseRef: absent.base, headRef: absent.base, workspace: absent.root });
+  assert.equal(absentResult.jobs.size, 0);
+  assert.ok(absentResult.warnings.some((warning) => /does not name a static job/.test(warning)));
+  assert.equal(absentResult.sourcePath, PATH);
+
+  const byKey = resolverFixture({ "key.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: byKey.base, headRef: byKey.base, workspace: byKey.root }).jobs.has("validate-typescript"), true);
+
+  const byName = resolverFixture({ "name.yml": "jobs:\n  test-job:\n    name: validate-typescript\n    uses: owner/repo/.github/workflows/test.yml@main\n" });
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: byName.base, headRef: byName.base, workspace: byName.root }).jobs.has("validate-typescript"), true);
+
+  for (const workflows of [
+    { "one.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n", "two.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n" },
+    { "duplicate.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n  validate-typescript-copy:\n    name: validate-typescript\n    runs-on: ubuntu-latest\n" },
+  ]) {
+    const duplicate = resolverFixture(workflows);
+    const result = resolveCiTestJobsFromRef({ baseRef: duplicate.base, headRef: duplicate.base, workspace: duplicate.root });
+    assert.equal(result.jobs.size, 0);
+    assert.ok(result.warnings.some((warning) => /more than one job/.test(warning)));
+  }
+
+  const matrix = resolverFixture({ "matrix.yml": "jobs:\n  matrix:\n    name: 'Test (\${{ matrix.node }})'\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: matrix.base, headRef: matrix.base, workspace: matrix.root }).jobs.has("validate-typescript"), true);
+
+  for (const workflow of [
+    "jobs:\n  dynamic:\n    name: ${{ github.event.pull_request.title }}\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n",
+    "jobs: [\n",
+  ]) {
+    const unsafe = resolverFixture({ "unsafe.yml": workflow });
+    const result = resolveCiTestJobsFromRef({ baseRef: unsafe.base, headRef: unsafe.base, workspace: unsafe.root });
+    assert.equal(result.jobs.size, 0);
+    assert.ok(result.warnings.some((warning) => /PR-author-controlled|unsafe.yml/.test(warning)));
+  }
+
+  const unreadable = resolverFixture({});
+  const failed = ciJobIdentitiesFromRef(unreadable.base, tmpdir());
+  assert.equal(failed.staticNames.size, 0);
+  assert.equal(failed.prMintable, true);
+  assert.ok(failed.warning?.includes("could not be read"));
+});
+
 test("#1820 resolver degrades a malformed trusted file to no jobs with a surfaced warning", () => {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
@@ -114,6 +167,7 @@ test("#1820 workflow surface fence tracks only changes introduced by the PR", ()
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
   writeConfig(root, PATH, BASE);
+  writeConfig(root, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
   const base = commit(root, "base config");
   writeFileSync(join(root, "ordinary.txt"), "unchanged workflow surface\n");
   const unchangedHead = commit(root, "unchanged head");
@@ -157,6 +211,7 @@ test("#1820 workflow surface verification fails closed and resolver reports miss
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
   writeConfig(root, PATH, BASE);
+  writeConfig(root, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
   const base = commit(root, "base config");
   const unknownHead = "0000000000000000000000000000000000000000";
   const failed = ciWorkflowSurfaceChangedFromBase({ baseRef: base, headRef: unknownHead, workspace: root });

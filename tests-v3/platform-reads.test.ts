@@ -287,6 +287,17 @@ test("external-check fold: superseded runs collapse to the newest raw conclusion
     "a genuinely newer pending rerun remains live and keeps the gate waiting");
 });
 
+test("external-check fold: id-less same-name Actions rows remain distinct", () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "Unit Tests", app: { slug: "github-actions" }, status: "completed", conclusion: "failure" },
+    { name: "Unit Tests", app: { slug: "github-actions" }, status: "completed", conclusion: "success" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(runs, "{}", "", ""), [
+    { name: "Unit Tests", state: "failure", conclusion: "failure", origin: "actions" },
+    { name: "Unit Tests", state: "success", conclusion: "success", origin: "actions" },
+  ]);
+});
+
 test("external-check fold: Actions runs and producer apps retain distinct same-name rows", () => {
   const runs = JSON.stringify({ check_runs: [
     { id: 1, name: "Unit Tests", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/100/job/1", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:00:00Z" },

@@ -280,7 +280,12 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   check runs from different workflow runs are no longer collapsed into one
   row: a same-name green from one workflow can never discard a same-name red
   from another, which for unconfigured repositories can only make more
-  failure rows visible, never fewer. A final strict-parser round-trip means
+  failure rows visible, never fewer. Same-name check runs within one workflow
+  run collapse to the newest attempt (GitHub's own retry semantics, preserved
+  for re-run flows). The trust layer refuses identities that map to more than
+  one static job; the residual is a single matrix job whose fixed display name
+  produces several same-named check runs, where GitHub's required-check view
+  applies the same newest-attempt semantics. A final strict-parser round-trip means
   an oversized or malformed artifact is never emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
@@ -334,6 +339,15 @@ reconciliation above is unchanged for every repository that does not opt in.
   contexts and third-party check runs never satisfy configured identities;
   those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
   checks keep the name heuristics.
+- **Config-time identity validation**: every configured identity must name
+  exactly one static job key or static `name:` in the base ref's
+  `.github/workflows`. Undeclared or multiply declared identities are refused
+  with a warning. If any job name uses a PR-author-controlled
+  `github.event`/`github.head_ref`/`github.triggering_actor` expression, all
+  configured identities are refused with a warning and the feature degrades to
+  the pre-#1820 name heuristics. The check-run payload carries no workflow
+  identity, so the trusted base surface is the only statement of which names
+  the repository's own CI can mint.
 - **The declared set defines the suite**: when a full-suite ask is settled
   against a config that declares `full-suite` jobs, EVERY configured
   `full-suite` identity must appear in the head-bound evidence and be green.
