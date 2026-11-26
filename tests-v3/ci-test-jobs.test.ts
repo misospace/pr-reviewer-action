@@ -11,6 +11,9 @@ import {
   MAX_CI_TEST_JOB_IDENTITIES,
   MAX_CI_TEST_JOB_IDENTITY_CHARS,
   MAX_CI_TEST_JOBS_FILE_BYTES,
+  MAX_CI_WORKFLOW_FILES,
+  MAX_CI_WORKFLOW_FILE_BYTES,
+  MAX_CI_WORKFLOW_SURFACE_BYTES,
   parseCiTestJobsText,
   readCiTestJobsFromRef,
   resolveCiTestJobsFromRef,
@@ -72,7 +75,6 @@ function writeConfig(root: string, path: string, text: string): void {
   mkdirSync(join(target, ".."), { recursive: true });
   writeFileSync(target, text);
 }
-
 function resolverFixture(workflows: Record<string, string>, identities: string[] = ["validate-typescript"]): { root: string; base: string } {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
@@ -121,6 +123,27 @@ test("#1820 resolver validates configured identities against the complete base w
   const byName = resolverFixture({ "name.yml": "jobs:\n  test-job:\n    name: validate-typescript\n    uses: owner/repo/.github/workflows/test.yml@main\n" });
   assert.equal(resolveCiTestJobsFromRef({ baseRef: byName.base, headRef: byName.base, workspace: byName.root }).jobs.has("validate-typescript"), true);
 
+  const dynamicDisplay = resolverFixture({ "dynamic.yml": "jobs:\n  validate-typescript:\n    name: 'Test (\${{ matrix.os }})'\n    runs-on: ubuntu-latest\n" });
+  const dynamicResult = resolveCiTestJobsFromRef({ baseRef: dynamicDisplay.base, headRef: dynamicDisplay.base, workspace: dynamicDisplay.root });
+  assert.equal(dynamicResult.jobs.size, 0);
+  assert.ok(dynamicResult.warnings.some((warning) => /does not name a static job/.test(warning)));
+  assert.equal(ciJobIdentitiesFromRef(dynamicDisplay.base, dynamicDisplay.root).prMintable, false);
+
+  const staticName = resolverFixture({ "static.yml": "jobs:\n  validate-typescript:\n    name: TypeScript Suite\n    runs-on: ubuntu-latest\n" }, ["TypeScript Suite"]);
+  assert.equal(resolveCiTestJobsFromRef({ baseRef: staticName.base, headRef: staticName.base, workspace: staticName.root }).jobs.has("TypeScript Suite"), true);
+  const hiddenKey = resolverFixture({ "static.yml": "jobs:\n  validate-typescript:\n    name: TypeScript Suite\n    runs-on: ubuntu-latest\n" });
+  const hiddenResult = resolveCiTestJobsFromRef({ baseRef: hiddenKey.base, headRef: hiddenKey.base, workspace: hiddenKey.root });
+  assert.equal(hiddenResult.jobs.size, 0);
+  assert.ok(hiddenResult.warnings.some((warning) => /does not name a static job/.test(warning)));
+
+  const duplicateStaticNames = resolverFixture({
+    "one.yml": "jobs:\n  first:\n    name: TypeScript Suite\n    runs-on: ubuntu-latest\n",
+    "two.yml": "jobs:\n  second:\n    name: TypeScript Suite\n    runs-on: ubuntu-latest\n",
+  }, ["TypeScript Suite"]);
+  const duplicateStaticResult = resolveCiTestJobsFromRef({ baseRef: duplicateStaticNames.base, headRef: duplicateStaticNames.base, workspace: duplicateStaticNames.root });
+  assert.equal(duplicateStaticResult.jobs.size, 0);
+  assert.ok(duplicateStaticResult.warnings.some((warning) => /more than one job/.test(warning)));
+
   for (const workflows of [
     { "one.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n", "two.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n" },
     { "duplicate.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n  validate-typescript-copy:\n    name: validate-typescript\n    runs-on: ubuntu-latest\n" },
@@ -134,15 +157,54 @@ test("#1820 resolver validates configured identities against the complete base w
   const matrix = resolverFixture({ "matrix.yml": "jobs:\n  matrix:\n    name: 'Test (\${{ matrix.node }})'\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
   assert.equal(resolveCiTestJobsFromRef({ baseRef: matrix.base, headRef: matrix.base, workspace: matrix.root }).jobs.has("validate-typescript"), true);
 
-  for (const workflow of [
-    "jobs:\n  dynamic:\n    name: ${{ github.event.pull_request.title }}\n    runs-on: ubuntu-latest\n  validate-typescript:\n    runs-on: ubuntu-latest\n",
-    "jobs: [\n",
-  ]) {
-    const unsafe = resolverFixture({ "unsafe.yml": workflow });
-    const result = resolveCiTestJobsFromRef({ baseRef: unsafe.base, headRef: unsafe.base, workspace: unsafe.root });
-    assert.equal(result.jobs.size, 0);
-    assert.ok(result.warnings.some((warning) => /PR-author-controlled|unsafe.yml/.test(warning)));
+  const unsafeExpressions = [
+    "${{ github['event'].pull_request.title }}",
+    "${{ format('{0}', github.event.pull_request.title) }}",
+    "${{ env.JOB_NAME }}",
+    "${{ needs.build.outputs.name }}",
+    "${{ steps.meta.outputs.name }}",
+    "${{ inputs.job_name }}",
+    "${{ github.actor }}",
+  ];
+  for (const [index, expression] of unsafeExpressions.entries()) {
+    const unsafe = resolverFixture({ [`unsafe-${index}.yml`]: `jobs:\n  dynamic:\n    name: ${JSON.stringify(expression)}\n    runs-on: ubuntu-latest\n` });
+    const identities = ciJobIdentitiesFromRef(unsafe.base, unsafe.root);
+    assert.equal(identities.prMintable, true, expression);
+    assert.equal(resolveCiTestJobsFromRef({ baseRef: unsafe.base, headRef: unsafe.base, workspace: unsafe.root }).jobs.size, 0);
   }
+  for (const name of ["${{ format('{0}', matrix.os) }}", "${{ vars.CI_NAME }}", "Static suite"]) {
+    const safe = resolverFixture({ "safe.yml": `jobs:\n  configured:\n    name: ${JSON.stringify(name)}\n    runs-on: ubuntu-latest\n` }, [name]);
+    assert.equal(ciJobIdentitiesFromRef(safe.base, safe.root).prMintable, false, name);
+  }
+
+  const padded = resolverFixture({ "large.yml": `jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n${"# padded workflow data\n".repeat(3_500)}` });
+  const paddedBytes = Buffer.byteLength(readFileSync(join(padded.root, ".github/workflows/large.yml")));
+  assert.ok(paddedBytes > 65_536 && paddedBytes < MAX_CI_WORKFLOW_FILE_BYTES);
+  assert.equal(ciJobIdentitiesFromRef(padded.base, padded.root).staticNames.get("validate-typescript"), 1);
+  const oversized = resolverFixture({ "large.yml": `jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n${"# padded workflow data\n".repeat(14_000)}` });
+  assert.ok(Buffer.byteLength(readFileSync(join(oversized.root, ".github/workflows/large.yml"))) > MAX_CI_WORKFLOW_FILE_BYTES);
+  assert.ok(ciJobIdentitiesFromRef(oversized.base, oversized.root).warning?.includes(`${MAX_CI_WORKFLOW_FILE_BYTES}-byte cap`));
+
+  const skippedNonYaml = resolverFixture({ "test.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n", "README.md": "not a workflow\n" });
+  assert.equal(ciJobIdentitiesFromRef(skippedNonYaml.base, skippedNonYaml.root).staticNames.get("validate-typescript"), 1);
+  assert.equal(MAX_CI_WORKFLOW_FILES, 32);
+  assert.equal(MAX_CI_WORKFLOW_SURFACE_BYTES, 1_048_576);
+  const aggregateWorkflows = Object.fromEntries(Array.from({ length: 5 }, (_, index) => [
+    `large-${index}.yml`, `jobs:\n  job-${index}:\n    runs-on: ubuntu-latest\n${"# padded workflow data\n".repeat(11_000)}`,
+  ]));
+  const aggregate = resolverFixture(aggregateWorkflows);
+  const aggregateBytes = Object.values(aggregateWorkflows).reduce((total, text) => total + Buffer.byteLength(text), 0);
+  assert.ok(aggregateBytes > MAX_CI_WORKFLOW_SURFACE_BYTES);
+  const aggregateResult = ciJobIdentitiesFromRef(aggregate.base, aggregate.root);
+  assert.ok(aggregateResult.warning?.includes(`${MAX_CI_WORKFLOW_SURFACE_BYTES}-byte cap`), aggregateResult.warning ?? "no warning");
+
+  const timeoutOption = resolverFixture({ "test.yml": "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n" });
+  assert.equal(ciJobIdentitiesFromRef(timeoutOption.base, timeoutOption.root, { gitTimeoutSec: 1 }).staticNames.get("validate-typescript"), 1);
+
+  const malformedYaml = resolverFixture({ "README.md": "ignored", "bad.yml": "jobs: [\n" });
+  const malformedResult = ciJobIdentitiesFromRef(malformedYaml.base, malformedYaml.root);
+  assert.equal(malformedResult.staticNames.size, 0);
+  assert.ok(malformedResult.warning?.includes("bad.yml"));
 
   const unreadable = resolverFixture({});
   const failed = ciJobIdentitiesFromRef(unreadable.base, tmpdir());

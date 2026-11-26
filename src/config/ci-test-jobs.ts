@@ -10,10 +10,13 @@
  * scope heuristics for configured checks (the operator's declaration is the
  * authority). Identity matching is exact and case-sensitive after trimming:
  * only an unambiguous configured identity matches; a case/spacing mismatch
- * fails conservative to unresolved. Discharge from configured identities is
- * fenced: a PR that changed a supported CI workflow file relative to the
- * trusted base's merge-base (or whose surface could not be verified) cannot
- * have same-named jobs discharge (#1820). This is the conservative substitute
+ * fails conservative to unresolved. The config-time identity scan is
+ * deliberately GitHub-scoped (`.github/workflows`) because configured
+ * discharge is GitHub-Actions-only; the separate workflow-surface fence is
+ * broader and forge-agnostic. Discharge from configured identities is fenced:
+ * a PR that changed a supported CI workflow file relative to the trusted
+ * base's merge-base (or whose surface could not be verified) cannot have
+ * same-named jobs discharge (#1820). This is the conservative substitute
  * where a forge does not expose workflow identity per check run.
  *
  * File shape (top-level `test-jobs` mapping):
@@ -52,8 +55,9 @@ export interface TrustedCiJobs {
 export const CI_WORKFLOW_SURFACE_PATHS = [".github/workflows", ".forgejo/workflows", ".gitea/workflows", ".gitlab-ci.yml"] as const;
 
 const DEFAULT_GIT_TIMEOUT_SEC = 10;
-const MAX_CI_WORKFLOW_FILES = 32;
-const MAX_CI_WORKFLOW_FILE_BYTES = 65_536;
+export const MAX_CI_WORKFLOW_FILES = 32;
+export const MAX_CI_WORKFLOW_FILE_BYTES = 262_144;
+export const MAX_CI_WORKFLOW_SURFACE_BYTES = 1_048_576;
 
 export interface CiTestJobsFile {
   readonly path: string;
@@ -168,6 +172,19 @@ export function ciWorkflowSurfaceChangedFromBase(options: {
   }
 }
 
+function isPrMintableDisplayName(name: string): boolean {
+  let remaining = name;
+  while (remaining.includes("${{")) {
+    const start = remaining.indexOf("${{");
+    const end = remaining.indexOf("}}", start + 3);
+    if (end < 0) return true;
+    const span = remaining.slice(start + 3, end);
+    if (!/\b(?:matrix|strategy|vars)\s*\./.test(span) || /\b(?:github|env|needs|steps|secrets|inputs)\b/.test(span)) return true;
+    remaining = remaining.slice(end + 2);
+  }
+  return false;
+}
+
 /**
  * Configured discharge binds a display name to a check run with no workflow
  * identity in the payload. The base-ref surface is the only trusted statement
@@ -187,45 +204,58 @@ export function ciJobIdentitiesFromRef(
     prMintable: true,
     warning: `CI workflow surface could not be read from the base ref: ${file === undefined ? detail : `${file}: ${detail}`}; configured test-job identities are refused.`,
   });
+  const deadline = Date.now() + timeoutSec * 1000;
+  const remainingTimeout = (): number => Math.max(1_000, deadline - Date.now());
+  const exhausted = (): boolean => Date.now() >= deadline;
   let listing: string;
   try {
+    if (exhausted()) return failure(`surface scan exceeded ${timeoutSec}s`);
     listing = execFileSync("git", ["ls-tree", "-r", "--name-only", ref, "--", ".github/workflows"], {
       cwd,
-      timeout: timeoutSec * 1000,
+      timeout: remainingTimeout(),
       maxBuffer: MAX_CI_WORKFLOW_FILE_BYTES * 4,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     }).toString("utf8");
   } catch (error) {
     const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
-    const detail = err.code === "ENOENT" ? "git executable not found"
-      : err.killed || err.signal ? `git ls-tree timed out after ${timeoutSec}s`
-        : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
+    const detail = exhausted() ? `surface scan exceeded ${timeoutSec}s`
+      : err.code === "ENOENT" ? "git executable not found"
+        : err.killed || err.signal ? `git ls-tree timed out after ${timeoutSec}s`
+          : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
     return failure(detail);
   }
-  const files = listing.split("\n").filter((path) => path.startsWith(".github/workflows/")).sort();
+  const files = listing.split("\n")
+    .filter((path) => path.startsWith(".github/workflows/") && /\.ya?ml$/.test(path))
+    .sort();
   if (files.length > MAX_CI_WORKFLOW_FILES) {
     return failure(`more than ${MAX_CI_WORKFLOW_FILES} workflow files were found (additional files omitted)`);
   }
   const staticNames = new Map<string, number>();
   let prMintable = false;
+  let totalBytes = 0;
   for (const path of files) {
     let text: string;
     try {
+      if (exhausted()) return failure(`surface scan exceeded ${timeoutSec}s`);
       const bytes = execFileSync("git", ["show", `${ref}:${path}`], {
         cwd,
-        timeout: timeoutSec * 1000,
+        timeout: remainingTimeout(),
         maxBuffer: MAX_CI_WORKFLOW_FILE_BYTES + 1,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
       if (bytes.byteLength > MAX_CI_WORKFLOW_FILE_BYTES) return failure(`file exceeds ${MAX_CI_WORKFLOW_FILE_BYTES}-byte cap`, path);
+      totalBytes += bytes.byteLength;
+      if (totalBytes > MAX_CI_WORKFLOW_SURFACE_BYTES) return failure(`aggregate surface exceeds ${MAX_CI_WORKFLOW_SURFACE_BYTES}-byte cap`, path);
       text = bytes.toString("utf8");
     } catch (error) {
       const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
-      const detail = err.code === "ENOENT" ? "git executable not found"
-        : err.killed || err.signal ? `git show timed out after ${timeoutSec}s`
-          : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
+      const detail = exhausted() ? `surface scan exceeded ${timeoutSec}s`
+        : err.code === "ENOENT" ? "git executable not found"
+          : err.code === "ENOBUFS" ? `file exceeds ${MAX_CI_WORKFLOW_FILE_BYTES}-byte cap`
+            : err.killed || err.signal ? `git show timed out after ${timeoutSec}s`
+              : error instanceof Error ? error.message.slice(0, 300) : "unknown error";
       return failure(detail, path);
     }
     let parsed: unknown;
@@ -236,12 +266,14 @@ export function ciJobIdentitiesFromRef(
     }
     if (!isPlainObject(parsed) || !isPlainObject(parsed.jobs)) return failure("workflow has no jobs mapping", path);
     for (const [key, rawJob] of Object.entries(parsed.jobs)) {
-      const names = new Set([key]);
-      if (isPlainObject(rawJob) && typeof rawJob.name === "string") {
-        if (!rawJob.name.includes("${{")) names.add(rawJob.name);
-        else if (/\$\{\{[^}]*\b(?:github\.event|github\.head_ref|github\.triggering_actor)\b/.test(rawJob.name)) prMintable = true;
+      const displayName = isPlainObject(rawJob) && typeof rawJob.name === "string" ? rawJob.name : undefined;
+      if (displayName === undefined) {
+        staticNames.set(key, (staticNames.get(key) ?? 0) + 1);
+      } else if (displayName.includes("${{")) {
+        if (isPrMintableDisplayName(displayName)) prMintable = true;
+      } else {
+        staticNames.set(displayName, (staticNames.get(displayName) ?? 0) + 1);
       }
-      for (const name of names) staticNames.set(name, (staticNames.get(name) ?? 0) + 1);
     }
   }
   return { staticNames, prMintable, warning: prMintable

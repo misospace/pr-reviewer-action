@@ -226,10 +226,12 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   `all tests`) with no narrow scope: a bare generic `test`/`tests`/
   `test (24)` name does not prove which suite ran, and one narrow matrix leg
   cannot discharge it. A generic ask accepts any test execution.
-  **Failure-first precedence** is scoped the same way: an
-  in-scope test-named check that went red on the exact head refutes
-  discharge even when a sibling matrix leg is green, while a red unrelated
-  scope neither refutes nor discharges. A full-suite ask also needs every
+  **Failure-first precedence** is scoped the same way: a differently named
+  in-scope test check that went red on the exact head ref refutes discharge
+  even when a differently named sibling matrix leg is green, while a red
+  unrelated scope neither refutes nor discharges. Same-named legs within one
+  workflow run collapse to the newest attempt under GitHub retry semantics
+  (see the retry residual below). A full-suite ask also needs every
   in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
   leg collapsed to state `success`, keeps it unresolved beside a green
   sibling (the explicit conclusion is required, and one leg that did not run
@@ -340,14 +342,26 @@ reconciliation above is unchanged for every repository that does not opt in.
   those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
   checks keep the name heuristics.
 - **Config-time identity validation**: every configured identity must name
-  exactly one static job key or static `name:` in the base ref's
-  `.github/workflows`. Undeclared or multiply declared identities are refused
-  with a warning. If any job name uses a PR-author-controlled
-  `github.event`/`github.head_ref`/`github.triggering_actor` expression, all
-  configured identities are refused with a warning and the feature degrades to
-  the pre-#1820 name heuristics. The check-run payload carries no workflow
+  exactly one static display name in the base ref's `.github/workflows`; a
+  job without `name:` contributes its key, a static `name:` contributes only
+  that name, and a dynamic name contributes neither. Undeclared or multiply
+  declared identities are refused with a warning. Any unreadable, oversized,
+  invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or any PR-controlled job
+  display name, refuses ALL configured identities with a warning and degrades
+  the feature to pre-#1820 name heuristics. Non-YAML files are skipped. The
+  scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB aggregate, and one
+  shared 10s deadline. It is deliberately GitHub-scoped because configured
+  discharge is GitHub-Actions-only; the workflow-surface fence remains the
+  broader forge-agnostic guard. Each expression span is accepted only when it
+  references `matrix`, `strategy`, or admin-controlled `vars`, and contains no
+  PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
+  `secrets`, or `inputs`). Matrix values laundered from outputs remain an
+  accepted static-scan residual. The check-run payload carries no workflow
   identity, so the trusted base surface is the only statement of which names
-  the repository's own CI can mint.
+  the repository's own CI can mint. A reusable-workflow caller contributes its
+  job key even though the check name may come from an inner job; matrix-leg
+  runtime names are not statically enumerable. Those conservative mismatches
+  can leave a validated-but-never-satisfiable identity unresolved.
 - **The declared set defines the suite**: when a full-suite ask is settled
   against a config that declares `full-suite` jobs, EVERY configured
   `full-suite` identity must appear in the head-bound evidence and be green.
