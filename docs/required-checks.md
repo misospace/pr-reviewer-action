@@ -254,6 +254,7 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
   `-no-matching-test-check` — including a check whose scope does not prove
   the ask, `-configured-test-job-missing` (#1820),
+  `-configured-identity-ambiguous` (#1820 same-named rows),
   `-ci-workflow-surface-untrusted` (#1820 masquerade fence),
   `-test-check-not-success`):
   capability, missing-source, transport, budget and timeout shaped failures
@@ -351,9 +352,10 @@ reconciliation above is unchanged for every repository that does not opt in.
 - **Authority**: for a configured check, the configured scope replaces the
   name-derived scope entirely only when the evidence row is an exact, unclipped
   GitHub Actions check run (`origin: "actions"`) and exactly one such row has
-  the configured name. Two same-named rows — from different workflow runs —
-  refuse the configured identity with
-  `configured-identity-ambiguous`. Commit-status
+  the configured name. Two same-named rows — from different workflow runs (a
+  workflow triggered by two events on the same commit produces two) — refuse
+  the configured identity with `configured-identity-ambiguous`, and the
+  configured ask stays unresolved. Commit-status
   contexts and third-party check runs never satisfy configured identities;
   those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
   checks keep the name heuristics.
