@@ -388,6 +388,12 @@ export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: strin
     // (`matches >= 2` on one line) disqualifies the entry.
     const sides = npmSides.get(entry.slug);
     if (sides === undefined || sides.multiToken) continue;
+    // #1826 (review of #1825): a slug whose tokens were recorded from blocks
+    // spelled with different case (`@Foo/Bar` removed, `@foo/bar` added)
+    // merges two differently-named blocks through the case-folded key — the
+    // PR re-spelled a dependency, it did not bump one. Never compare, so a
+    // forged framing can never settle a release-delta row.
+    if (sides.caseCollision) continue;
     const removedOnly = entry.versions.filter((version) => sides.minus.has(version) && !sides.plus.has(version));
     const addedOnly = entry.versions.filter((version) => sides.plus.has(version) && !sides.minus.has(version));
     // The two filters are complementary by construction, so exactly one

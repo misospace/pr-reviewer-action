@@ -253,6 +253,82 @@ test("a manifest dependency-RANGE edit is not an old→new bump (regression #182
   assert.deepEqual(all[12], { slug: "pkg-12", oldVersion: "1.0.12", newVersion: "1.1.12" });
 });
 
+// ── #1826 (review of #1825): the case-folded slug must never merge blocks
+//    spelled with DIFFERENT case into one "clean bump" the comparison then
+//    settles a release-delta row from. The PR re-spelled a dependency name;
+//    nobody transitioned through the registry from 1.0.0 to 2.0.0.
+
+const lockfileDiff = (lines: string[]): string => [
+  "diff --git a/package-lock.json b/package-lock.json",
+  "@@ -10,7 +10,7 @@",
+  ...lines,
+].join("\n");
+
+test("case-colliding blocks never pair as a clean bump (regression #1826)", () => {
+  // The forgery from #1826 verbatim: `@Foo/Bar` removed, `@foo/bar` added.
+  assert.deepEqual(npmPackageChangesFromDiff(lockfileDiff([
+    '-    "node_modules/@Foo/Bar": {',
+    '-      "version": "1.0.0"',
+    '-    },',
+    '+    "node_modules/@foo/bar": {',
+    '+      "version": "2.0.0"',
+    '+    },',
+  ])), []);
+  // Same collision through manifest dependency pairs.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "Chalk": "^5.3.0"',
+    '+    "chalk": "^5.4.1"',
+  ])), []);
+  // Control: identical block casing IS the ordinary recorded transition.
+  assert.deepEqual(npmPackageChangesFromDiff(lockfileDiff([
+    '-    "node_modules/@foo/bar": {',
+    '-      "version": "1.0.0"',
+    '-    },',
+    '+    "node_modules/@foo/bar": {',
+    '+      "version": "2.0.0"',
+    '+    },',
+  ])), [{ slug: "foo/bar", oldVersion: "1.0.0", newVersion: "2.0.0" }]);
+  // Control: ONE consistent (uppercase) spelling on both sides is not a
+  // collision — only byte-different spellings of one slug disqualify.
+  assert.deepEqual(npmPackageChangesFromDiff(lockfileDiff([
+    '-    "node_modules/@Foo/Bar": {',
+    '-      "version": "1.0.0"',
+    '-    },',
+    '+    "node_modules/@Foo/Bar": {',
+    '+      "version": "2.0.0"',
+    '+    },',
+  ])), [{ slug: "foo/bar", oldVersion: "1.0.0", newVersion: "2.0.0" }]);
+  // The forgery split across HUNKS still collides: the spelling observation
+  // spans the whole diff (hunk-local resets would silently reopen #1826).
+  assert.deepEqual(npmPackageChangesFromDiff([
+    "diff --git a/package-lock.json b/package-lock.json",
+    "@@ -10,3 +10,0 @@",
+    '-    "node_modules/@Foo/Bar": {',
+    '-      "version": "1.0.0"',
+    '-    },',
+    "@@ -20,0 +17,3 @@",
+    '+    "node_modules/@foo/bar": {',
+    '+      "version": "2.0.0"',
+    '+    },',
+  ].join("\n")), []);
+  // Control: a scoped SAME-case bump recorded through both surfaces
+  // (lockfile block + manifest pair) must not false-flag — the
+  // `node_modules/`/`@` strips align the spellings.
+  assert.deepEqual(npmPackageChangesFromDiff([
+    "diff --git a/package-lock.json b/package-lock.json",
+    "@@ -10,3 +10,3 @@",
+    ' "node_modules/@foo/bar": {',
+    '-  "version": "1.0.0"',
+    '+  "version": "2.0.0"',
+    "diff --git a/package.json b/package.json",
+    "@@ -1,4 +1,4 @@",
+    " {",
+    '   "dependencies": {',
+    '-    "@foo/bar": "^1.0.0"',
+    '+    "@foo/bar": "^2.0.0"',
+  ].join("\n")), [{ slug: "foo/bar", oldVersion: "1.0.0", newVersion: "2.0.0" }]);
+});
+
 test("bumps past the per-run cap are disclosed unfetched, never silently dropped", async () => {
   const fetched = Array.from({ length: 12 }, (_unused, index) => ({ slug: `pkg-${index}`, oldVersion: "1.0.0", newVersion: "1.1.0" }));
   const skipped = [{ slug: "pkg-12", oldVersion: "1.0.12", newVersion: "1.1.12" }, { slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }];

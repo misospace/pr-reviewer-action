@@ -4524,12 +4524,18 @@ function canonicalImageSlug(repo: string): string | null {
  * added diff lines for the slug; `multiToken` records that one recorded
  * value carried TWO OR MORE version tokens — a dependency RANGE such as
  * `">=1.0.0 <2.0.0"` — so that slug's tokens do not describe an old→new
- * install transition. The capture is observation-only: it never changes the
- * parse, the fail-closed decisions, or the returned scope. */
+ * install transition. `caseCollision` (#1826, review of #1825) records that
+ * the slug's tokens were recorded from changed lines whose RAW dependency
+ * names differ only in case (`node_modules/@Foo/Bar` removed vs
+ * `node_modules/@foo/bar` added): the case-folded slug merges blocks of
+ * different spellings, so such a pair never proves an install transition
+ * anyone made — it re-spells one. The capture is observation-only: it never
+ * changes the parse, the fail-closed decisions, or the returned scope. */
 export interface DependencyScopeSideProvenance {
   minus: Set<string>;
   plus: Set<string>;
   multiToken: boolean;
+  caseCollision: boolean;
 }
 
 /**
@@ -4630,6 +4636,10 @@ export function parseDependencyScope(
   // themselves.
   let braceDepth = 0;
   let currentBlockSlug: string | null = null;
+  // #1826 (review of #1825): the RAW (not case-folded) package name of the
+  // block currentBlockSlug was established from — the spelling the version
+  // lines inside this block were recorded under.
+  let currentBlockRawName = "";
   let npmSectionDepth = 0;
   let chartSlug: string | null = null;
   let imageAnchor: { slug: string; kind: "image" | "chart" } | null = null;
@@ -4650,6 +4660,7 @@ export function parseDependencyScope(
   const resetAttribution = (): void => {
     braceDepth = 0;
     currentBlockSlug = null;
+    currentBlockRawName = "";
     npmSectionDepth = 0;
     chartSlug = null;
     imageAnchor = null;
@@ -4666,12 +4677,32 @@ export function parseDependencyScope(
     if (npmSides === undefined) return undefined;
     let sides = npmSides.get(slug);
     if (sides === undefined) {
-      sides = { minus: new Set<string>(), plus: new Set<string>(), multiToken: false };
+      sides = { minus: new Set<string>(), plus: new Set<string>(), multiToken: false, caseCollision: false };
       npmSides.set(slug, sides);
     }
     return sides;
   };
-  const recordVersion = (slug: string, version: string, sign?: "+" | "-"): void => {
+  // #1826 (review of #1825): the first raw spelling a slug's SIDED version
+  // tokens were recorded under (quotes / `node_modules/` / leading `@`
+  // stripped — the only raw variation left that still case-folds to the same
+  // slug IS case). A second, byte-different spelling of the same slug is a
+  // case collision; the observation never touches the parse.
+  const recordedSpellings = new Map<string, string>();
+  const noteRecordedSpelling = (slug: string, rawName: string): void => {
+    if (npmSides === undefined) return;
+    const spelling = rawName.trim().replace(/^["']|["']$/g, "").replace(/^node_modules\//, "").replace(/^@/, "");
+    if (spelling === "" || spelling.toLowerCase() !== slug) return;
+    const prior = recordedSpellings.get(slug);
+    if (prior === undefined) {
+      recordedSpellings.set(slug, spelling);
+      return;
+    }
+    if (prior !== spelling) {
+      const sides = sideProvenance(slug);
+      if (sides !== undefined) sides.caseCollision = true;
+    }
+  };
+  const recordVersion = (slug: string, version: string, sign?: "+" | "-", spelling?: string): void => {
     const entry = entries.get(slug);
     if (entry === undefined) return;
     if (!entry.versions.has(version)) {
@@ -4681,11 +4712,12 @@ export function parseDependencyScope(
     if (sign === undefined) return;
     const sides = sideProvenance(slug);
     if (sides !== undefined) (sign === "-" ? sides.minus : sides.plus).add(version);
+    if (spelling !== undefined) noteRecordedSpelling(slug, spelling);
   };
   // Version tokens are extracted ONLY from an exact field VALUE this parser
   // chose deliberately (a manifest dependency pair value, a chart version
   // field value) — never from arbitrary line content.
-  const recordVersions = (slug: string, value: string, sign?: "+" | "-"): void => {
+  const recordVersions = (slug: string, value: string, sign?: "+" | "-", spelling?: string): void => {
     if (!entries.has(slug)) return;
     const matches = [...value.matchAll(DEPENDENCY_SCOPE_VERSION_TOKEN_RE)];
     // A value carrying several version tokens is a dependency RANGE
@@ -4704,7 +4736,7 @@ export function parseDependencyScope(
         scopeComplete = false;
         return;
       }
-      recordVersion(slug, match[0].toLowerCase(), sign);
+      recordVersion(slug, match[0].toLowerCase(), sign, spelling);
     }
   };
   // #1763: a changed image reference's manifest digest (bare lowercase hex,
@@ -4747,7 +4779,7 @@ export function parseDependencyScope(
       if (entries.size >= DEPENDENCY_SCOPE_MAX_ENTRIES) { scopeComplete = false; return; }
       entries.set(name, { versions: new Set<string>(), digests: new Set<string>(), ...(kind !== undefined ? { kind } : {}) });
     }
-    if (versionSource !== null) recordVersions(name, versionSource, sign);
+    if (versionSource !== null) recordVersions(name, versionSource, sign, rawName);
   };
   // A changed pair-shaped manifest line outside any dependency section THIS
   // hunk established carries dependency identity this parser cannot
@@ -4964,11 +4996,13 @@ export function parseDependencyScope(
         if (braceDepth <= 0) {
           braceDepth = 0;
           currentBlockSlug = null;
+          currentBlockRawName = "";
         } else {
           const block = LOCKFILE_BLOCK_KEY_CAPTURE_RE.exec(content);
           if (block !== null) {
             const name = normalizeSlug(block[1] ?? "");
             currentBlockSlug = usableSlug(name) ? name : null;
+            currentBlockRawName = block[1] ?? "";
           }
         }
       } else if (inManifest) {
@@ -5000,6 +5034,7 @@ export function parseDependencyScope(
         recordChangedEntry(block[1] ?? "", null);
         const name = normalizeSlug(block[1] ?? "");
         currentBlockSlug = usableSlug(name) ? name : null;
+        currentBlockRawName = block[1] ?? "";
         for (const ch of content) { if (ch === "{") braceDepth += 1; }
         continue;
       }
@@ -5010,7 +5045,9 @@ export function parseDependencyScope(
         // field value — never from relation values, resolved URLs, engines
         // or integrity hashes that merely contain version-shaped text.
         if (!NPM_STRUCTURAL_LINE_RE.test(content)) {
-          recordChangedEntry(currentBlockSlug, lockfileVersionFieldValue(content), undefined, sign === "-" || sign === "+" ? sign : undefined);
+          // #1826: record under the block's RAW spelling too — the side
+          // capture needs the spelling the version was recorded under.
+          recordChangedEntry(currentBlockRawName === "" ? currentBlockSlug : currentBlockRawName, lockfileVersionFieldValue(content), undefined, sign === "-" || sign === "+" ? sign : undefined);
         }
       } else if (lockfileContentUnattributable(content, braceDepth)) {
         // #1657 (review round 9): a changed field line this hunk cannot
@@ -5028,7 +5065,7 @@ export function parseDependencyScope(
         if (ch === "{") braceDepth += 1;
         else if (ch === "}") braceDepth -= 1;
       }
-      if (braceDepth <= 0) { braceDepth = 0; currentBlockSlug = null; }
+      if (braceDepth <= 0) { braceDepth = 0; currentBlockSlug = null; currentBlockRawName = ""; }
       continue;
     }
     if (inManifest) {
