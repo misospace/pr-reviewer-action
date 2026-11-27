@@ -459,8 +459,9 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   // `review_triage_targets` logical-id selection alongside the #1003 pair.
   // #1337 adds the `dependency_coverage` accounting array alongside them.
   // Strip every `review_triage_*` property and required entry, the
-  // #1337 array, and — #1381 — the `unmet` disposition status (the one
-  // v3 vocabulary addition inside a v2-carried enum), and — #1449 — the
+  // #1337 array, the #1835 `material_unknowns` declaration array, and —
+  // #1381 — the `unmet` disposition status (the one v3 vocabulary addition
+  // inside a v2-carried enum), and — #1449 — the
   // `required_check_dispositions` description (a prose annotation, not a
   // shape change), and — #1627 — the disposition ITEM description (the
   // proof-index citation annotation, prose only), and the pin is
@@ -471,9 +472,9 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   };
   const schema = live.json_schema.schema;
   for (const key of Object.keys(schema.properties)) {
-    if (key.startsWith("review_triage_") || key === "dependency_coverage") delete schema.properties[key];
+    if (key.startsWith("review_triage_") || key === "dependency_coverage" || key === "material_unknowns") delete schema.properties[key];
   }
-  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage");
+  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage" && name !== "material_unknowns");
   const dispositions = schema.properties.required_check_dispositions as {
     description?: string;
     items: { properties: { status: { enum: string[] } }; description?: string };
@@ -491,8 +492,10 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
     schema.required,
     // #1337: `dependency_coverage` joins the strict required list (null
     // permitted, so non-dependency PRs answer null) after
-    // `required_check_dispositions`.
-    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
+    // `required_check_dispositions`; #1835: `material_unknowns` joins it
+    // the same way (null permitted, so a review with no material unknown
+    // answers null).
+    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage", "material_unknowns"],
   );
   const properties = schema.properties as unknown as Record<string, { type: unknown; enum?: string[] }>;
   assert.deepEqual(properties.smart_review_requested!.type, "boolean");
