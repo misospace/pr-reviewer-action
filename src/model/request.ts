@@ -161,7 +161,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // declared here rather than left in prose.
         material_unknowns: {
           type: ["array", "null"],
-          description: "Declare each unresolved question that materially bears on the verdict — the reference unavailable, the comparison not performed — as one object per question: subject (one concise sentence) and affects (the path or path:LINE citation of the location whose finding the question undermines; null when it ties to no specific location). Null when none; at most 8 are kept. Declare a question required_check_dispositions also carries as unresolved; do not declare routine tool unavailability that bore on no conclusion.",
+          description: "Declare each unresolved question that materially bears on the verdict — the reference unavailable, the comparison not performed — as one object per question: subject (one concise sentence) and affects (the path or path:LINE citation of the location whose finding the question undermines; null when it ties to no specific location). An association that matches several unresolved findings is ambiguous and takes no effect. Null when none; at most 8 are kept. Declare a question required_check_dispositions also carries as unresolved; do not declare routine tool unavailability that bore on no conclusion.",
           items: {
             type: "object",
             properties: {

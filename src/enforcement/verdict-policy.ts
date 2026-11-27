@@ -323,14 +323,24 @@ export function isBlockingOpenFinding(finding: ArtifactFinding): boolean {
 /**
  * #1835 round 2: the indexes of open blocker/major findings a reviewer's
  * OWN declared association undermines. The association is the declaration's
- * `affects` citation — the reviewer's answer to WHICH location's finding the
- * unresolved question contradicts — matched structurally against the
- * finding's cited file and line by the one canonical citation grammar. No
- * subject-text comparison ever runs. A deterministically attested finding
- * (the boundary's recorded "grounded" decision, or a capping path) is
- * immune: the witness beats the reviewer's self-doubt. A declaration whose
- * citation parses as nothing associates with nothing — it withholds
- * certification on its own and can never reach a finding by accident.
+ * `affects` citation — the reviewer's answer to WHICH finding the unresolved
+ * question contradicts — matched structurally by the one canonical citation
+ * grammar. No subject-text comparison ever runs. A deterministically
+ * attested finding (the boundary's recorded "grounded" decision, or a
+ * capping path) is immune: the witness beats the reviewer's self-doubt. A
+ * declaration whose citation parses as nothing associates with nothing — it
+ * withholds certification on its own and can never reach a finding by
+ * accident.
+ *
+ * Round 3: an association suppresses only when it resolves to EXACTLY ONE
+ * suppressible candidate. A bare path over a file with several undecided
+ * majors, or a line shared by several independent findings, is AMBIGUOUS —
+ * it cannot identify the finding it contradicts, so it suppresses nothing
+ * and every candidate keeps its standing authority (the fail-safe side: a
+ * lost suppression costs accuracy of the event, a wrongful suppression
+ * manufactures a block). An explicit line likewise never reaches a
+ * line-less finding — a location the reviewer pinned cannot name a finding
+ * that pins none.
  */
 export function underminedBlockingFindingIndexes(
   findings: unknown,
@@ -338,7 +348,14 @@ export function underminedBlockingFindingIndexes(
 ): Set<number> {
   const undermined = new Set<number>();
   if (!Array.isArray(findings) || declared.length === 0) return undermined;
-  const targets: Array<{ file: string; line: number; explicitLine: boolean }> = [];
+  const candidates: Array<{ index: number; record: ArtifactFinding }> = [];
+  findings.forEach((finding, index) => {
+    const record = (finding ?? {}) as ArtifactFinding;
+    if (!isBlockingOpenFinding(record)) return;
+    if (record.grounding_status === "grounded" || record.capped_from !== undefined || record.ci_capped === true) return;
+    candidates.push({ index, record });
+  });
+  if (candidates.length === 0) return undermined;
   for (const unknown of declared) {
     if (unknown.affects === null) continue;
     const loc = parseCitationLocation(unknown.affects);
@@ -346,20 +363,13 @@ export function underminedBlockingFindingIndexes(
     // `path:LINE` (or the range/diff-anchor spelling) names a line; a bare
     // `path` names the file. parseCitationLocation defaults a bare path to
     // line 1, so the explicit-line probe distinguishes the two forms.
-    targets.push({ file: loc.file, line: loc.line, explicitLine: /:\d/.test(unknown.affects.trim()) });
+    const explicitLine = /:\d/.test(unknown.affects.trim());
+    const matches = candidates.filter(({ record }) => {
+      if (record.file !== loc.file) return false;
+      return explicitLine ? record.line === loc.line : true;
+    });
+    if (matches.length === 1) undermined.add(matches[0]!.index);
   }
-  if (targets.length === 0) return undermined;
-  findings.forEach((finding, index) => {
-    const record = (finding ?? {}) as ArtifactFinding;
-    if (!isBlockingOpenFinding(record)) return;
-    if (record.grounding_status === "grounded" || record.capped_from !== undefined || record.ci_capped === true) return;
-    for (const target of targets) {
-      if (record.file !== target.file) continue;
-      if (target.explicitLine && record.line !== null && record.line !== target.line) continue;
-      undermined.add(index);
-      break;
-    }
-  });
   return undermined;
 }
 

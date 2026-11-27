@@ -2984,7 +2984,7 @@ test("#1835 round 2: the affects association undermines exactly the finding it n
   assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("src/auth.ts:43"))], []);
   assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("not a citation"))], []);
   assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration(null))], []);
-  // A bare `path` names the file: any undecided blocker there.
+  // A bare `path` names the file: the single undecided blocker there.
   assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("src/auth.ts"))], [0]);
   // The boundary's recorded "grounded" decision is immune to self-doubt.
   const grounded = markerFinding({ severity: "major" });
@@ -2993,4 +2993,30 @@ test("#1835 round 2: the affects association undermines exactly the finding it n
   assert.equal(hasUnunderminedBlockingFinding([grounded], declaration("src/a.ts:1")), true);
   assert.equal(hasUnunderminedBlockingFinding([undecided, other], declaration("src/auth.ts:42")), true, "the unassociated finding keeps the authority");
   assert.equal(hasUnunderminedBlockingFinding([undecided], declaration("src/auth.ts:42")), false);
+});
+
+test("#1835 round 3: an ambiguous association identifies no finding and suppresses nothing", async () => {
+  const sameLocationA = markerFinding({ severity: "major", file: "src/auth.ts", line: 42, message: "the middleware interpolates the request body unsanitized" });
+  const sameLocationB = markerFinding({ severity: "major", file: "src/auth.ts", line: 42, message: "the token format differs from the canonical profile text" });
+  const siblingInFile = markerFinding({ severity: "major", file: "src/auth.ts", line: 90, message: "an unrelated categorical claim" });
+  const lineless = markerFinding({ severity: "major", file: "src/auth.ts", line: null, message: "a file-level claim without a line" });
+  const declaration = (affects: string): DeclaredMaterialUnknown[] => [{ subject: "the comparison was not performed", affects }];
+  // Two independent undecided majors at the same location: the citation
+  // matches both, so it identifies neither — the fail-safe side keeps every
+  // candidate's standing authority.
+  assert.deepEqual([...underminedBlockingFindingIndexes([sameLocationA, sameLocationB], declaration("src/auth.ts:42"))], []);
+  // A bare path over several undecided majors in one file is equally
+  // ambiguous.
+  assert.deepEqual([...underminedBlockingFindingIndexes([sameLocationA, siblingInFile], declaration("src/auth.ts"))], []);
+  // An explicit line never reaches a finding that pins no line.
+  assert.deepEqual([...underminedBlockingFindingIndexes([lineless], declaration("src/auth.ts:42"))], []);
+  // Uniqueness counts only SUPPRESSIBLE candidates: a grounded sibling at
+  // the same location cannot make the association ambiguous, and the
+  // undecided one is still the only finding the citation can reach.
+  const grounded = markerFinding({ severity: "major" });
+  await verify([grounded], async () => source("const value = '⟦redacted:credential⟧';"));
+  assert.deepEqual([...underminedBlockingFindingIndexes([grounded, sameLocationA], declaration("src/auth.ts:42"))], [1]);
+  // With the ambiguity gone (one candidate), the same association lands.
+  assert.deepEqual([...underminedBlockingFindingIndexes([sameLocationA], declaration("src/auth.ts:42"))], [0]);
+  assert.equal(hasUnunderminedBlockingFinding([sameLocationA, sameLocationB], declaration("src/auth.ts:42")), true, "the ambiguous association keeps both authorities");
 });

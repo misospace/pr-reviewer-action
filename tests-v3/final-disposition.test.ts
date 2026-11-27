@@ -1556,6 +1556,57 @@ test("#1835 control: mixed supported and unsupported majors — the supported fi
   assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
 });
 
+test("#1835 round 3: two undecided majors sharing a location — the ambiguous association suppresses neither", async () => {
+  // The requested mixed-major control: BOTH findings are outside the
+  // deterministic classifier (no recorded grounding decision) and share one
+  // location, but only one is unsupported. The declaration's citation
+  // matches both, identifies neither, and suppresses nothing — the genuine
+  // major keeps its categorical authority, and the unsupported one is not
+  // silently certified either way: the disposition stays REQUEST_CHANGES.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/auth/session.ts", line: 42, message: "the session middleware interpolates the request body into the token lookup unsanitized" },
+      { severity: "major", category: "bug", file: "src/auth/session.ts", line: 42, message: "the middleware's token format differs from the canonical OAuth2 profile text rather than the verbatim RFC sample" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nTwo majors at the token lookup.",
+      material_unknowns: [{ subject: "the canonical profile text could not be fetched, so the format comparison was not performed", affects: "src/auth/session.ts:42" }],
+    },
+  );
+  assert.equal(findings[0]!.grounding_status, undefined, "the genuine major is outside the classifier");
+  assert.equal(findings[1]!.grounding_status, undefined, "the comparative major is outside the classifier too");
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [], "the ambiguous association identifies neither finding");
+  const { evidence, input } = dispositionInput(findings, declared, "request_changes");
+  assert.ok(evidence.some((entry) => entry.code === "reviewer_declared_unknown"));
+  assert.ok(!evidence.some((entry) => entry.code === "unverified_blocking_claim"), "no finding is disclosed as undermined");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835 round 3: with the ambiguity gone the same association suppresses the unsupported major => INCOMPLETE", async () => {
+  // The contrast control: the SAME comparative major, SAME declaration —
+  // but no genuine sibling sharing the location. The association resolves
+  // to exactly one candidate, so the suppression lands and the disposition
+  // withholds instead of certifying the unsupported defect.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/auth/session.ts", line: 42, message: "the middleware's token format differs from the canonical OAuth2 profile text rather than the verbatim RFC sample" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nOne comparison outstanding.",
+      material_unknowns: [{ subject: "the canonical profile text could not be fetched, so the format comparison was not performed", affects: "src/auth/session.ts:42" }],
+    },
+  );
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [0]);
+  const { input } = dispositionInput(findings, declared, "request_changes");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
 test("#1835: an association that misses — wrong path, wrong line, or unparseable — leaves the standing authority untouched", async () => {
   const { findings, declared } = await productionReview(
     [

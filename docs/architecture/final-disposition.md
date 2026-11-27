@@ -173,7 +173,11 @@ settle a state:
   evidence-provider signal is immune) is excluded from
   `blockingFindingOpen` upstream (`hasUnunderminedBlockingFinding`), so the
   disposition's own rule stays severity-only over a set the association has
-  already narrowed. The undermined finding keeps its severity and stays
+  already narrowed. Round 3: an association resolves only when it matches
+  EXACTLY ONE suppressible candidate — a bare path over several undecided
+  majors in one file, or a line shared by several independent findings, is
+  ambiguous and suppresses nothing (every candidate keeps its standing
+  authority), and an explicit line never reaches a line-less finding. The undermined finding keeps its severity and stays
   listed, disclosed as `unverified_blocking_claim`; the disposition
   publishes INCOMPLETE/COMMENT. An unrelated declared unknown never touches
   another finding's standing authority, a declaration without an
