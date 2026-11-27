@@ -908,8 +908,8 @@ function receiptForTraceCall(
  * corpus-diff and CI receipts the trace-present path derives (#1821 review
  * of #1825; #1836 — the code-owned activation must not hide the run's other
  * recorded facts from the gate it opens). An over-cap trace is bounded by
- * PREFIX truncation so the 1-based
- * positional ids keep their exact alignment (#1627 m1). Never throws.
+ * PREFIX truncation so the 1-based positional ids keep their exact
+ * alignment (#1627 m1). Never throws.
  */
 export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger {
   // #1821 (review of #1825): code-owned comparison facts are the runtime's
