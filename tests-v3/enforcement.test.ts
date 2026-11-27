@@ -30,6 +30,7 @@ import {
   normalizeEnforcedReviewMarkdown,
 } from "../src/enforcement/enforce.js";
 import { extractCoveragePayload, normalizeRequirementCoverage } from "../src/enforcement/requirement-coverage.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, stripReservedMarkers } from "../src/metadata/markers.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
@@ -2136,4 +2137,46 @@ test("#1681 r7b: a model-issued `unresolved` human claim is accepted, not coerce
   assert.equal(record.disposition, "unresolved");
   assert.equal(record.basis, "model-claim");
   assert.match(String(a.review_markdown), /is unresolved at this head/);
+});
+
+test("#1822: the Unaddressed-required-checks bullets name the row's own rejection reason and uncovered cells", () => {
+  const advisoryCheck = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+  // Production path: the scoped advisory query FAILED (the receipt exists —
+  // slug + both versions — but nothing was acquired) and the run echoed no
+  // structured disposition.
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "types/node 26.6.7 26.6.10 security advisory" }, status: "error" }],
+    toolResults: [{ status: "error", result: { error: "source host refused" } }],
+  });
+  assert.equal(ledger.state, "valid");
+  const warn = artifact({ required_check_dispositions: [] });
+  applyRequiredCheckValidation(warn, {
+    enabled: "true",
+    mode: "warn",
+    mustCheck: [advisoryCheck],
+    ledger,
+    mustCheckEvidence: checkEvidenceTagsFromArtifact([
+      { text: advisoryCheck, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }] },
+    ]),
+  });
+  assert.equal(warn.required_checks, "incomplete");
+  // The bullet carries the closed rejection reason, the receipt state and
+  // the per-cell gap — the #1819 shape rendered four identical bare check
+  // texts instead.
+  assert.match(warn.review_markdown, /- .*check upstream security advisories[^\n]*\(reason: no-disposition, evidence: receipt-unverified, uncovered: security_advisory:types\/node\)/);
+  // A receipt-refused `satisfied` claim renders its refusal reason instead —
+  // the evidence state byte-equals the reason and is not repeated, while the
+  // per-cell gap still names what the run must still acquire.
+  const claimed = artifact({ required_check_dispositions: [{ check: advisoryCheck, status: "satisfied", rationale: "no advisories found" }] });
+  applyRequiredCheckValidation(claimed, {
+    enabled: "true",
+    mode: "warn",
+    mustCheck: [advisoryCheck],
+    ledger,
+    mustCheckEvidence: checkEvidenceTagsFromArtifact([
+      { text: advisoryCheck, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }] },
+    ]),
+  });
+  assert.match(claimed.review_markdown, /\(reason: receipt-unverified, uncovered: security_advisory:types\/node\)/);
+  assert.ok(!claimed.review_markdown.includes("evidence: receipt-unverified"));
 });

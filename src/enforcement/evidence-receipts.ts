@@ -1127,6 +1127,23 @@ export interface RowEvidenceState {
   /** The ids of the receipts that jointly support the requirement (bounded,
    * deterministic order). Empty unless `receipt-backed`. */
   receipts: string[];
+  /** #1822: the dependency-evidence cells (obligation kind × scope entry) the
+   * validated receipts do NOT cover, as bounded `kind:slug` identities.
+   * Empty for every gate but `dependency-evidence` and for a covered row —
+   * the aggregate `receipt-absent`/`receipt-unverified`/`receipt-mismatch`
+   * state alone cannot name WHICH acquisition the row still lacks. Never
+   * carries provider payload text: the kind is the closed obligation
+   * vocabulary, the slug comes from the trusted producer scope parse. */
+  uncoveredCells: readonly string[];
+}
+
+/** Cap on the disclosed uncovered-cell list and on one disclosed slug. */
+const MAX_UNCOVERED_CELLS = 12;
+const MAX_UNCOVERED_CELL_CHARS = 120;
+
+/** Bound one uncovered cell identity: `kind:slug`, both producer-trusted. */
+function uncoveredCellIdentity(kind: DependencyEvidenceObligation, entry: DependencyScopeEntry): string {
+  return `${kind}:${entry.slug.slice(0, MAX_UNCOVERED_CELL_CHARS)}`;
 }
 
 const MAX_ROW_RECEIPT_IDS = 20;
@@ -1433,7 +1450,7 @@ function dependencyReceiptCoverage(
   ledger: EvidenceLedger,
   kinds: readonly DependencyEvidenceObligation[],
   scope: readonly DependencyScopeEntry[],
-): { state: "receipt-backed" | "receipt-absent" | "receipt-mismatch" | "receipt-unverified"; receipts: EvidenceReceipt[] } {
+): { state: "receipt-backed" | "receipt-absent" | "receipt-mismatch" | "receipt-unverified"; receipts: EvidenceReceipt[]; uncoveredCells: readonly string[] } {
   const verified: EvidenceReceipt[] = [];
   const unverified: EvidenceReceipt[] = [];
   // #1782: the pool-wide artifact→source mappings. #1763 makes the
@@ -1509,7 +1526,14 @@ function dependencyReceiptCoverage(
     }
   }
   if (verified.length === 0) {
-    return { state: unverified.length > 0 ? "receipt-unverified" : "receipt-absent", receipts: [] };
+    // Nothing verified covers any cell. The disclosed gap is still per-cell:
+    // an aggregate row must not read as one undifferentiated failure when the
+    // scope names several packages (#1822).
+    return {
+      state: unverified.length > 0 ? "receipt-unverified" : "receipt-absent",
+      receipts: [],
+      uncoveredCells: uncoveredCellIdentities(kinds, scope),
+    };
   }
   const uncovered: Array<{ kind: DependencyEvidenceObligation; entry: DependencyScopeEntry }> = [];
   for (const [index, entry] of scope.entries()) {
@@ -1517,14 +1541,34 @@ function dependencyReceiptCoverage(
       if (!dependencyCellCovered(verified, kind, entry, mappings[index] ?? null)) uncovered.push({ kind, entry });
     }
   }
-  if (uncovered.length === 0) return { state: "receipt-backed", receipts: verified };
+  if (uncovered.length === 0) return { state: "receipt-backed", receipts: verified, uncoveredCells: [] };
   // An uncovered cell that the verified receipts plus an unverified
   // acquisition WOULD cover keeps `receipt-unverified`; verified-but-
   // partial coverage is a mismatch.
   const pool = [...verified, ...unverified];
   const unverifiedFill = uncovered.some((cell) => dependencyCellCovered(pool, cell.kind, cell.entry, fullMappings[scope.indexOf(cell.entry)] ?? null)
     && !dependencyCellCovered(verified, cell.kind, cell.entry, mappings[scope.indexOf(cell.entry)] ?? null));
-  return { state: unverifiedFill ? "receipt-unverified" : "receipt-mismatch", receipts: [] };
+  return {
+    state: unverifiedFill ? "receipt-unverified" : "receipt-mismatch",
+    receipts: [],
+    uncoveredCells: uncovered.slice(0, MAX_UNCOVERED_CELLS).map((cell) => uncoveredCellIdentity(cell.kind, cell.entry)),
+  };
+}
+
+/** The per-cell gap identities for a row whose receipts cover nothing:
+ * every demanded kind × every trusted scope entry, bounded. */
+function uncoveredCellIdentities(
+  kinds: readonly DependencyEvidenceObligation[],
+  scope: readonly DependencyScopeEntry[],
+): readonly string[] {
+  const cells: string[] = [];
+  for (const entry of scope) {
+    for (const kind of kinds) {
+      if (cells.length >= MAX_UNCOVERED_CELLS) return cells;
+      cells.push(uncoveredCellIdentity(kind, entry));
+    }
+  }
+  return cells;
 }
 
 function supportedIdentityReceipts(
@@ -1569,6 +1613,7 @@ export function evaluateRowEvidence(
     gate: tag?.gate ?? null,
     state: "not-required",
     receipts: [],
+    uncoveredCells: [],
   };
   // Only an explicitly-objective row has a receipt gate at all: attention
   // rows, review prompts, and legacy rows fold on the presence-and-shape
@@ -1590,6 +1635,7 @@ export function evaluateRowEvidence(
       receipts: coverage.state === "receipt-backed"
         ? coverage.receipts.slice(0, MAX_ROW_RECEIPT_IDS).map((receipt) => receipt.id)
         : [],
+      uncoveredCells: coverage.state === "receipt-backed" ? [] : coverage.uncoveredCells,
     };
   }
   // source-identity: every exact identity token the row names must be
@@ -1849,12 +1895,14 @@ export function evidenceLedgerFromArtifact(value: unknown): EvidenceLedger | nul
 }
 
 /** The per-row evidence projection serialized onto the coverage and
- * obligation artifact rows (snake_case; `receipts` → `receipt_ids`). */
+ * obligation artifact rows (snake_case; `receipts` → `receipt_ids`; the
+ * #1822 uncovered-cell gap rides only when the row is uncovered). */
 export function rowEvidenceStateToArtifact(state: RowEvidenceState | undefined): Record<string, unknown> | undefined {
   if (state === undefined) return undefined;
   return {
     gate: state.gate,
     state: state.state,
     ...(state.receipts.length > 0 ? { receipt_ids: state.receipts } : {}),
+    ...(state.uncoveredCells.length > 0 ? { uncovered_cells: [...state.uncoveredCells] } : {}),
   };
 }

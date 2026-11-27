@@ -249,7 +249,20 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     // provenance and the row stays a MATERIAL unknown — objective
     // unresolved receipt state remains material (#1657). A legacy row
     // keeps the TRANSITIONAL CONSERVATIVE mapping (pre-#1657 semantics).
-    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
+    // #1822: the subject leads with the row's own deterministic rejection
+    // reason (the same closed code the obligation fold assigns — the
+    // disposition record names WHY the row stayed open, not only which
+    // requirement it was), falling back to the bare check when the row
+    // predates the reason vocabulary.
+    const reason = typeof row.reason === "string" && row.reason !== "" && row.reason !== "ok"
+      ? row.reason
+      : null;
+    evidence.push(dispositionEvidence(
+      "mandatory_requirement_unresolved",
+      "deterministic",
+      "material",
+      reason !== null ? `${reason}: ${check}` : check,
+    ));
   }
 
   // The obligation fold's rows. #1656 audit round 3: materiality is never

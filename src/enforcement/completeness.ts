@@ -191,7 +191,25 @@ export function applyRequiredCheckValidation(
     };
 
     if (status === "incomplete" && (mode === "warn" || mode === "fail")) {
-      const bullets = notClean.map((item) => `- ${item}`).join("\n");
+      // #1822: each bullet carries the row's own deterministic rejection
+      // reason (and the objective row's receipt state, when it says
+      // something the reason does not) instead of a bare check text — the
+      // same closed codes the obligation fold renders, so the two published
+      // sections cannot disagree about why a row stayed open.
+      const byCheck = new Map(coverage.checks.map((row) => [row.check, row]));
+      const bullets = notClean.map((item) => {
+        const row = byCheck.get(item);
+        const parts: string[] = [];
+        if (row?.reason !== undefined && row.reason !== "ok") parts.push(`reason: ${row.reason}`);
+        const evidenceState = row?.evidence?.state;
+        if (evidenceState !== undefined && evidenceState !== "not-required" && evidenceState !== "no-ledger"
+          && evidenceState !== row?.reason) {
+          parts.push(`evidence: ${evidenceState}`);
+        }
+        const uncovered = row?.evidence?.uncoveredCells ?? [];
+        if (uncovered.length > 0) parts.push(`uncovered: ${uncovered.join(", ")}`);
+        return `- ${item}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
+      }).join("\n");
       // #1594: when a validated head-bound CI contradiction downgraded a
       // row, the section must publish the mismatch explicitly — the reader
       // sees ONE disposition (the evidence), with the claimed one named as

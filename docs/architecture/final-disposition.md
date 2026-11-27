@@ -73,6 +73,10 @@ Materiality never derives from the `required_checks=incomplete` bit. The
 seam (`DispositionEvidence`) carries closed reason codes, WHO ruled the
 materiality (`deterministic` for the objective floors, `reviewer` for the
 genuinely semantic calls #1657/#1658/#1659 feed) and a bounded subject.
+For a deterministic unresolved requirement the subject leads with the row's
+own per-row rejection reason (the same closed code the obligation fold and
+the published body render — #1822), so the record names why the requirement
+stayed open, not only which one it was.
 
 Material codes (each can withhold approval when applicable to the changed
 behavior): `unread_affected_path`, `exact_head_evidence_unavailable`,

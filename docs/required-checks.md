@@ -113,7 +113,10 @@ The public `required-checks` output vocabulary is unchanged
 
 - `auto` — validate when `must_check` is non-empty;
 - `warn` — append an `### Unaddressed required checks` section listing the
-  unresolved checks; the completeness pass itself never flips the verdict
+  unresolved checks, each with its deterministic per-row rejection reason
+  (and, for an uncovered dependency row, the per-cell
+  `kind:slug` gap — #1822); the completeness pass itself never flips the
+  verdict
   (but see #1381 below — the review-obligation gate does, and it is not
   governed by this mode);
 - `fail` — additionally forces `request_changes` through the completeness
@@ -725,7 +728,9 @@ The rules this buys, and their limits:
 - **No repair from prose.** Malformed or stale provenance is visible and
   reason-coded; nothing rewrites a disposition.
 - **Surfaces for #1656/#1659**: every coverage and obligation row carries
-  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`); the
+  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`, plus
+  `uncovered_cells` — the bounded `kind:slug` dependency cells the validated
+  receipts do NOT cover, #1822); the
   bounded ledger rides the run dir as `evidence-receipts.json` (strict
   round-trip reader, `unavailable` explicit rather than inferred); the
   required-evidence sentinel rows carry `row_class`. Nothing here decides

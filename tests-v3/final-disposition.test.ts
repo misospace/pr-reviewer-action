@@ -1761,3 +1761,40 @@ test("#1835: same object — the undermined major publishes COMMENT, INCOMPLETE 
   const handoff = handoffPayload(body);
   assert.equal(handoff.review_result, "partial");
 });
+
+// #1822: the disposition record names WHY each unresolved requirement stayed
+// open — the subject leads with the row's own deterministic rejection reason
+// (the same closed code the obligation fold and the published body render),
+// so a controller reading the material unknowns never has to guess which of
+// "never dispositioned", "receipt refused" or "CI could not settle" applied.
+test("#1822: an unresolved requirement's material-unknown subject leads with its rejection reason", () => {
+  const build = buildDispositionEvidence({
+    completenessChecks: [
+      { check: "verify secrets are not logged or exposed in diffs", status: "unresolved", reason: "no-disposition" },
+      { check: "check upstream security advisories for the updated dependency", status: "unresolved", reason: "receipt-mismatch" },
+      { check: "run the full test suite", status: "unresolved", reason: "ci-evidence-no-matching-test-check" },
+      { check: "legacy row predating the reason vocabulary", status: "unresolved" },
+      { check: "performed and failed", status: "unmet", reason: "ok" },
+    ],
+    obligations: [],
+    findings: [],
+    toolCapabilityFailure: null,
+    toolFloorUnmet: false,
+    noEvidenceReason: null,
+    partialCoverageStopReason: null,
+    traceUnresolvedMaterial: false,
+    traceUnmetClaimed: false,
+    mechanicallyProvenUnmetRequirements: 0,
+    ciConclusion: null,
+    ciEvidenceContractActive: false,
+  });
+  const subjects = build.evidence.filter((entry) => entry.code === "mandatory_requirement_unresolved").map((entry) => entry.subject);
+  assert.deepEqual(subjects, [
+    "no-disposition: verify secrets are not logged or exposed in diffs",
+    "receipt-mismatch: check upstream security advisories for the updated dependency",
+    "ci-evidence-no-matching-test-check: run the full test suite",
+    "legacy row predating the reason vocabulary",
+    "performed and failed",
+  ]);
+  assert.ok(build.evidence.every((entry) => entry.subject.length <= 200), "subjects stay bounded");
+});

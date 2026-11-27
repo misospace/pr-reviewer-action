@@ -1000,6 +1000,33 @@ function riskObligationAttribution(ids: string[]): string {
 }
 
 /**
+ * #1822: the bounded deterministic rejection suffix one UNRESOLVED row
+ * renders beside its cause. The cause (`missing-source-evidence`) is a
+ * completion-state label; the fold's own fields say WHY the row stayed open
+ * — the disposition answer (`reason`), the acquisition coverage
+ * (`evidence.state`) when it adds something the reason does not, and the
+ * per-cell dependency gap (`uncovered`). Closed vocabularies and trusted
+ * producer identities only, never model text; a field byte-equal to the
+ * cause (the derived coverage marker) is not repeated.
+ */
+function obligationDiagnosticSuffix(obligation: ReviewObligation): string {
+  const parts: string[] = [];
+  if (obligation.reason !== undefined && obligation.reason !== obligation.cause) {
+    parts.push(`reason: ${obligation.reason}`);
+  }
+  const evidence = obligation.evidence;
+  if (evidence !== undefined) {
+    if (evidence.state !== "not-required" && evidence.state !== "no-ledger" && evidence.state !== obligation.reason) {
+      parts.push(`evidence: ${evidence.state}`);
+    }
+    if (evidence.uncoveredCells.length > 0) {
+      parts.push(`uncovered: ${evidence.uncoveredCells.join(", ")}`);
+    }
+  }
+  return parts.length > 0 ? `, ${parts.join(", ")}` : "";
+}
+
+/**
  * Does an undischarged row FORCE a verdict, or is it only COVERAGE?
  *
  * #1505 contract: forcing is STATUS-based, not merely source-based.
@@ -1151,7 +1178,7 @@ export function applyReviewObligationEnforcement(
     // the trusted approval is withheld until the evidence is gathered.
     const ids = ungathered.map((obligation) => obligation.id);
     const rows = ungathered.map((obligation) =>
-      `- ${obligation.id} (${obligation.source}, ${obligation.status}, cause: ${obligation.cause ?? "unknown"}): ${obligation.text}`,
+      `- ${obligation.id} (${obligation.source}, ${obligation.status}, cause: ${obligation.cause ?? "unknown"}${obligationDiagnosticSuffix(obligation)}): ${obligation.text}`,
     ).join("\n");
     const delimiter = fenceDelimiterFor(rows);
     sections.push(
@@ -1165,7 +1192,7 @@ export function applyReviewObligationEnforcement(
   if (derived.length > 0) {
     const ids = derived.map((obligation) => obligation.id);
     const rows = derived.map((obligation) =>
-      `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}` : ""}): ${obligation.text}`,
+      `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}${obligationDiagnosticSuffix(obligation)}` : ""}): ${obligation.text}`,
     ).join("\n");
     const delimiter = fenceDelimiterFor(rows);
     // #1449: the two classes read APART. An `unresolved` row means the
@@ -1218,7 +1245,7 @@ export function applyReviewObligationEnforcement(
     // read as "no defect is claimed".
     const ids = risk.map((obligation) => obligation.id);
     const rows = risk.map((obligation) =>
-      `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}` : ""}): ${obligation.text}`,
+      `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}${obligationDiagnosticSuffix(obligation)}` : ""}): ${obligation.text}`,
     ).join("\n");
     const delimiter = fenceDelimiterFor(rows);
     const unresolvedRisk = risk.filter((obligation) => obligation.status === "unresolved");
@@ -1338,6 +1365,9 @@ const EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-
 const EVIDENCE_STATES: ReadonlySet<string> = new Set([
   "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
 ]);
+/** #1822: one disclosed uncovered-cell identity — a closed obligation kind,
+ * a colon, and a bounded slug with no control or fence-breaking characters. */
+const UNCOVERED_CELL_RE = /^(?:provenance|release_delta|security_advisory):[^\s\u0000-\u001f`]{1,120}$/;
 /** #1657: read the per-row evidence projection back strictly (the shape
  * `rowEvidenceStateToArtifact` writes). `rowClass` comes from the row's own
  * `row_class` field. Anything else refuses the artifact. */
@@ -1345,7 +1375,7 @@ function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidence
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "gate" && key !== "state" && key !== "receipt_ids") return null;
+    if (key !== "gate" && key !== "state" && key !== "receipt_ids" && key !== "uncovered_cells") return null;
   }
   if (record.gate !== null && !(typeof record.gate === "string" && EVIDENCE_GATES.has(record.gate))) return null;
   if (typeof record.state !== "string" || !EVIDENCE_STATES.has(record.state)) return null;
@@ -1355,11 +1385,22 @@ function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidence
       || !record.receipt_ids.every((id) => typeof id === "string" && id !== "")) return null;
     receipts = record.receipt_ids as string[];
   }
+  // #1822: the bounded per-cell dependency gap — `kind:slug` identities
+  // from the closed obligation vocabulary and the trusted producer scope.
+  // Anything else (arbitrary text, control characters, an unknown kind) is
+  // corruption, not diagnostics; the row still reads, without a gap list.
+  let uncoveredCells: string[] = [];
+  if (record.uncovered_cells !== undefined) {
+    if (!Array.isArray(record.uncovered_cells) || record.uncovered_cells.length > 12
+      || !record.uncovered_cells.every((cell) => typeof cell === "string" && UNCOVERED_CELL_RE.test(cell))) return null;
+    uncoveredCells = record.uncovered_cells as string[];
+  }
   return {
     rowClass,
     gate: (record.gate === null ? null : record.gate) as RowEvidenceState["gate"],
     state: record.state as RowEvidenceState["state"],
     receipts,
+    uncoveredCells,
   };
 }
 

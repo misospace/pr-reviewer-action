@@ -757,8 +757,10 @@ test("#1659 P1: a material open / failed-acquisition / unanswered question canno
     completenessChecks: [{ check: questionText, status: "unresolved", reason: "receipt-absent", row_class: "objective" }],
     finalSettlements: coveredRows,
   }));
+  // #1822: the subject leads with the row's own deterministic rejection
+  // reason.
   assert.deepEqual(coveredBuild.evidence.map((entry) => [entry.code, entry.subject]),
-    [["mandatory_requirement_unresolved", questionText]]);
+    [["mandatory_requirement_unresolved", `receipt-absent: ${questionText}`]]);
   assert.equal(publish(coveredBuild).kind, "incomplete");
 
   // (3b) P1 (review round 5): the SAME open question with a SATISFIED
@@ -1027,7 +1029,7 @@ test("#1659: a resolved/cap-released row the fold credited feeds nothing, and tr
     completenessChecks: [{ check: "check the bump", status: "unresolved", reason: "receipt-absent", row_class: "objective" }],
     finalSettlements: [final({ semantic: "unknown" })],
   }));
-  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.subject]), [["mandatory_requirement_unresolved", "check the bump"]]);
+  assert.deepEqual(build.evidence.map((entry) => [entry.code, entry.subject]), [["mandatory_requirement_unresolved", "receipt-absent: check the bump"]]);
 });
 
 test("#1659: a dependency shape row the fold resolved is never re-disclosed, and no receipt id is required", () => {
