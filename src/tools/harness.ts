@@ -5317,14 +5317,20 @@ turnTimeout,
     ...(deps.wallClockSecCap !== undefined ? { wallClockSecCap: deps.wallClockSecCap } : {}),
   });
   if (!handled) {
-    // The model issued no tool calls (or the loop errored before any): degrade
-    // to a corpus-only review. The standard review call still produces a
-    // verdict, just without gathered tool evidence.
+    // #1837: the doc names which zero-call shape this run was — the model's
+    // own corpus-direct completion, or a loop-chosen stop before any reply
+    // (a genuine investigation failure).
     result.mode = "native_loop";
+    const stopReason = String(result.stop_reason ?? "");
     writeOutputs(
       result,
-      "# Tool Harness Results\n\nThe native tool-calling loop issued no tool " +
-        "calls; reviewing the corpus directly (no evidence gathered).\n",
+      stopReason === STOP_NO_TOOL_CALLS
+        ? "# Tool Harness Results\n\nThe native tool-calling loop's model reply issued " +
+          "no tool calls; reviewing the corpus directly (deliberate corpus-direct " +
+          "completion).\n"
+        : "# Tool Harness Results\n\nThe native tool-calling loop issued no tool calls " +
+          `before any reply (stop: ${stopReason}); reviewing the corpus directly ` +
+          "(no evidence gathered).\n",
       deps,
     );
   }
