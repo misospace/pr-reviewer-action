@@ -614,6 +614,10 @@ test("#1820 workflow surface fence requires base and head workflow trees to be i
   const forkBase = commit(renameRoot, "fork point: unrelated same-name job");
   writeFileSync(join(renameRoot, "old-pr.txt"), "stale pr");
   const staleHead = commit(renameRoot, "pr change from fork point");
+  // The PR itself changes no workflow file: merge-base(base, staleHead) IS
+  // forkBase here, so this is exactly the reading the retired three-dot fence
+  // made — which is why base-side drift slipped through it.
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: forkBase, headRef: staleHead, workspace: renameRoot }), { changed: false, warning: null });
   execFileSync("git", ["-C", renameRoot, "checkout", "-q", "main"], { env: GIT_ENV });
   execFileSync("git", ["-C", renameRoot, "rm", "-q", ".github/workflows/push.yml"], { env: GIT_ENV });
   writeConfig(renameRoot, ".github/workflows/ci.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
