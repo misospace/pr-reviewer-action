@@ -140,6 +140,20 @@ export function parseCitationLocation(ref: unknown): CitationLocation | null {
   return { file: trimmed, line: 1 };
 }
 
+/** #1835 round 4: whether a parseable ref names an EXPLICIT line — the
+ * canonical bare-path question. `parseCitationLocation` collapses both
+ * spellings to a line (a bare path defaults to 1), so the distinction must
+ * come from the grammar's own regexes, never from a second ad-hoc probe
+ * that can drift (the `path:+LINE-END` anchor's `:` is followed by `+`, not
+ * a digit). A bare path is file-level; `path:LINE`, `path:LINE-END`, and
+ * both diff-anchor spellings are line-specific (ranges ride the canonical
+ * start line). */
+export function citationNamesExplicitLine(ref: unknown): boolean {
+  if (parseCitationLocation(ref) === null) return false;
+  const trimmed = (ref as string).trim();
+  return PLAIN_CITATION_RE.test(trimmed) || DIFF_ANCHOR_RE.test(trimmed);
+}
+
 /** Cap on locations extracted from one free-text evidence string. */
 const MAX_EXTRACTED_LOCATIONS = 16;
 

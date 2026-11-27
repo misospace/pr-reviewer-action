@@ -3020,3 +3020,17 @@ test("#1835 round 3: an ambiguous association identifies no finding and suppress
   assert.deepEqual([...underminedBlockingFindingIndexes([sameLocationA], declaration("src/auth.ts:42"))], [0]);
   assert.equal(hasUnunderminedBlockingFinding([sameLocationA, sameLocationB], declaration("src/auth.ts:42")), true, "the ambiguous association keeps both authorities");
 });
+
+test("#1835 round 4: a diff-anchor association is line-specific, never file-level", async () => {
+  const sole = markerFinding({ severity: "major", file: "src/auth.ts", line: 8, message: "the middleware interpolates the request body unsanitized" });
+  const declaration = (affects: string): DeclaredMaterialUnknown[] => [{ subject: "the comparison was not performed", affects }];
+  // The bug the fix pins: `path:+42-50` parses as a line-specific citation,
+  // so an anchor targeting the WRONG line cannot suppress the sole
+  // unrelated major in that file — under the digit probe it was misread as
+  // file-level and suppressed anything in reach.
+  assert.deepEqual([...underminedBlockingFindingIndexes([sole], declaration("src/auth.ts:+42-50"))], []);
+  assert.deepEqual([...underminedBlockingFindingIndexes([sole], declaration("src/auth.ts:+8"))], [0], "an anchor at the finding's own line identifies it");
+  assert.deepEqual([...underminedBlockingFindingIndexes([sole], declaration("src/auth.ts:+8-9"))], [0], "an anchor range rides its canonical start line");
+  assert.deepEqual([...underminedBlockingFindingIndexes([sole], declaration("src/auth.ts:12-30"))], [], "a plain range is line-specific too");
+  assert.equal(hasUnunderminedBlockingFinding([sole], declaration("src/auth.ts:+42-50")), true, "the wrong-line anchor leaves the standing authority");
+});

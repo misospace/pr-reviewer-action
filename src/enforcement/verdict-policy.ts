@@ -23,7 +23,7 @@ import {
   VERIFICATION_ONLY_RELAXATION_NOTE,
 } from "./artifact.js";
 import type { DeclaredMaterialUnknown, VerdictValue } from "../model/types.js";
-import { parseCitationLocation } from "./citations.js";
+import { citationNamesExplicitLine, parseCitationLocation } from "./citations.js";
 
 /**
  * Categories a consumer may declare non-blocking (`non_blocking_finding_categories`,
@@ -361,9 +361,11 @@ export function underminedBlockingFindingIndexes(
     const loc = parseCitationLocation(unknown.affects);
     if (loc === null) continue;
     // `path:LINE` (or the range/diff-anchor spelling) names a line; a bare
-    // `path` names the file. parseCitationLocation defaults a bare path to
-    // line 1, so the explicit-line probe distinguishes the two forms.
-    const explicitLine = /:\d/.test(unknown.affects.trim());
+    // `path` names the file. The distinction is the canonical grammar's own
+    // answer (parseCitationLocation defaults a bare path to line 1), never
+    // an ad-hoc probe — the `path:+LINE-END` anchor's colon is followed by
+    // `+`, which a digit probe misreads as file-level.
+    const explicitLine = citationNamesExplicitLine(unknown.affects);
     const matches = candidates.filter(({ record }) => {
       if (record.file !== loc.file) return false;
       return explicitLine ? record.line === loc.line : true;

@@ -1607,6 +1607,31 @@ test("#1835 round 3: with the ambiguity gone the same association suppresses the
   assert.equal(disposition.nativeEvent, "COMMENT");
 });
 
+test("#1835 round 4: a diff-anchor targeting the wrong line cannot suppress the sole unrelated major in that file", async () => {
+  // Production path: the sole major is outside the classifier, and the
+  // declaration's diff anchor names a line span the finding does not sit
+  // on. The anchor is line-specific (canonical grammar), so the
+  // association reaches nothing and the major keeps its authority.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/auth/session.ts", line: 42, message: "the session middleware interpolates the request body into the token lookup unsanitized" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nOne major; one comparison outstanding.",
+      material_unknowns: [{ subject: "the canonical profile text could not be fetched, so the format comparison was not performed", affects: "src/auth/session.ts:+7-12" }],
+    },
+  );
+  assert.equal(findings[0]!.grounding_status, undefined);
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [], "the wrong-line anchor reaches nothing");
+  const { evidence, input } = dispositionInput(findings, declared, "request_changes");
+  assert.ok(evidence.some((entry) => entry.code === "reviewer_declared_unknown"));
+  assert.ok(!evidence.some((entry) => entry.code === "unverified_blocking_claim"), "the sole major is never disclosed as undermined");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
 test("#1835: an association that misses — wrong path, wrong line, or unparseable — leaves the standing authority untouched", async () => {
   const { findings, declared } = await productionReview(
     [
