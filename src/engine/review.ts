@@ -106,8 +106,8 @@ import { runConfidenceScorer } from "../confidence/scorer.js";
 import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTelemetry, type ConfidenceTelemetry, type ConfidenceUsageTelemetry } from "../confidence/telemetry.js";
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
-import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, hasBlockingOpenFinding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { reviewArtifactFromParsed, declaredMaterialUnknownsOf, type ArtifactFinding } from "../enforcement/artifact.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, hasUnunderminedBlockingFinding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
@@ -2728,13 +2728,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // fabricated claim cannot re-enter as a live blocker. The boundary skips
     // findings it already processed.
     if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
-      // Only findings the first pass never classified (grounded findings
-      // carry no grounding_status, so the processed-index set is the reliable
-      // record — re-reading grounded claims would spend the source-read
-      // budget twice). Re-emitted findings sit at new array positions and
-      // are verified here. The filtered array reindexes from zero, so the
-      // pass's entry indices are remapped back to absolute positions before
-      // the merge (the artifact is a diagnostic consumed by position).
+      // Only findings the first pass never classified (since #1835 a
+      // classified claim always carries its grounding_status on the finding,
+      // so the boundary's own skip covers decided claims too; the
+      // processed-index set stays the reliable position record). Re-emitted
+      // findings sit at new array positions and are verified here. The
+      // filtered array reindexes from zero, so the pass's entry indices are
+      // remapped back to absolute positions before the merge (the artifact
+      // is a diagnostic consumed by position).
       const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
       const pending: ArtifactFinding[] = [];
       const absoluteIndex: number[] = [];
@@ -2805,13 +2806,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // (same rationale as the strict branch above); the relaxers below then
     // see the final grounding states.
     if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
-      // Only findings the first pass never classified (grounded findings
-      // carry no grounding_status, so the processed-index set is the reliable
-      // record — re-reading grounded claims would spend the source-read
-      // budget twice). Re-emitted findings sit at new array positions and
-      // are verified here. The filtered array reindexes from zero, so the
-      // pass's entry indices are remapped back to absolute positions before
-      // the merge (the artifact is a diagnostic consumed by position).
+      // Only findings the first pass never classified (since #1835 a
+      // classified claim always carries its grounding_status on the finding,
+      // so the boundary's own skip covers decided claims too; the
+      // processed-index set stays the reliable position record). Re-emitted
+      // findings sit at new array positions and are verified here. The
+      // filtered array reindexes from zero, so the pass's entry indices are
+      // remapped back to absolute positions before the merge (the artifact
+      // is a diagnostic consumed by position).
       const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
       const pending: ArtifactFinding[] = [];
       const absoluteIndex: number[] = [];
@@ -3055,6 +3057,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       : [],
     obligations: resolvedObligations.obligations,
     findings: Array.isArray(reviewRecord.findings) ? reviewRecord.findings : [],
+    // #1835: the reviewer's declared materially-relevant unresolved
+    // questions (the parser's fail-closed normalization on the artifact).
+    declaredMaterialUnknowns: declaredMaterialUnknownsOf(reviewRecord),
     // A tool CAPABILITY failure is material; the configured min-successful
     // CALL-COUNT floor is advisory — a count never defines adequacy
     // (#1656 audit delta).
@@ -3158,7 +3163,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     degraded: degradedGateBypass,
     exactHead: dispositionExactHead,
     publicationHeadBound: dispositionExactHead && isNativeVerdictMode(env.PUBLISH_MODE ?? ""),
-    blockingFindingOpen: hasBlockingOpenFinding(reviewRecord.findings),
+    // #1835 round 2: per-finding undermining — an open blocker/major finding
+    // a reviewer-declared `affects` association names (and that the
+    // verification boundary never positively grounded) loses its categorical
+    // authority HERE, so the disposition's own rule stays severity-only over
+    // a set the association has already narrowed.
+    blockingFindingOpen: hasUnunderminedBlockingFinding(reviewRecord.findings, declaredMaterialUnknownsOf(reviewRecord)),
     evidenceProviderBlocker: enforcementInputs.evidenceBlockerEnabled === true && enforcementInputs.evidence?.has_blocker === true,
     provenUnmetRequirement: dispositionBuild.provenUnmetRequirement,
     verdictBearing: isNativeVerdictMode(env.PUBLISH_MODE ?? ""),

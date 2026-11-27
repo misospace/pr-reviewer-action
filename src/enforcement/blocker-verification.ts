@@ -2020,8 +2020,14 @@ export async function applyBlockerVerification(
     const status = winning.status;
     const reason = winning.reason;
 
+    // #1835: the decision is recorded on the finding for EVERY classified
+    // claim — including "grounded" — so the artifact distinguishes a claim
+    // the witness substantiated from one the boundary never decided. The
+    // authoritative disposition reads that distinction: an open blocker/major
+    // finding with no recorded decision is unattested, and the reviewer's own
+    // declared material unknown undermines its categorical authority.
+    finding.grounding_status = status;
     if (status !== "grounded") {
-      finding.grounding_status = status;
       if (finding.severity === "blocker" || finding.severity === "major") {
         if (finding.capped_from === undefined) finding.capped_from = finding.severity;
         finding.severity = "minor";

@@ -370,6 +370,8 @@ function parsedVerdict(overrides: Partial<ParsedReviewVerdict> = {}): ParsedRevi
     reviewTriageTargets: [],
     dependencyCoverage: null,
     dependencyCoverageEmitted: false,
+    materialUnknowns: [],
+    materialUnknownsEmitted: false,
     extra: {},
     ...overrides,
   };

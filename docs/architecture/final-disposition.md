@@ -78,7 +78,7 @@ Material codes (each can withhold approval when applicable to the changed
 behavior): `unread_affected_path`, `exact_head_evidence_unavailable`,
 `required_ci_failing`, `upstream_source_unavailable`,
 `unverified_blocking_claim`, `mandatory_requirement_unresolved`,
-`investigation_unavailable`.
+`investigation_unavailable`, `reviewer_declared_unknown` (#1835).
 
 Advisory codes (observable, never vetoing, never independent authorities):
 `proof_shape_mismatch`, `citation_allocation_failed`,
@@ -157,7 +157,32 @@ settle a state:
   "no gaps";
 - the exact-head CI floor reads the CI gate's already-paid conclusion — a
   KNOWN failure is always material, a PENDING one withholds only when the
-  #1594 head-bound evidence contract proves CI materially required.
+  #1594 head-bound evidence contract proves CI materially required;
+- #1835: the reviewer's own declared materially-relevant unresolved
+  questions (the parser's fail-closed `material_unknowns` normalization on
+  the verdict — the structured counterpart of the Unknowns or Needs
+  Verification section) each become a MATERIAL `reviewer_declared_unknown`
+  entry ruled by the reviewer. The disposition never validates the subject:
+  the reviewer judges what relevant evidence means. Round 2 made the
+  undermining PER FINDING: a declaration's own `affects` citation — the
+  reviewer's answer to WHICH location's finding the question contradicts —
+  is matched structurally by the one canonical citation grammar against the
+  open blocker/major findings; a matched finding that the verification
+  boundary never positively grounded (`grounding_status` recorded per
+  classified claim since #1835; "grounded", a capping path, or an
+  evidence-provider signal is immune) is excluded from
+  `blockingFindingOpen` upstream (`hasUnunderminedBlockingFinding`), so the
+  disposition's own rule stays severity-only over a set the association has
+  already narrowed. Round 3: an association resolves only when it matches
+  EXACTLY ONE suppressible candidate — a bare path over several undecided
+  majors in one file, or a line shared by several independent findings, is
+  ambiguous and suppresses nothing (every candidate keeps its standing
+  authority), and an explicit line never reaches a line-less finding. The undermined finding keeps its severity and stays
+  listed, disclosed as `unverified_blocking_claim`; the disposition
+  publishes INCOMPLETE/COMMENT. An unrelated declared unknown never touches
+  another finding's standing authority, a declaration without an
+  association never touches any finding, and runs that never declare
+  unknowns are behavior-identical.
 
 The historical enforcement layer may keep rendering the model-authored
 `unmet` rows and forcing the artifact verdict (telemetry), but it is never a

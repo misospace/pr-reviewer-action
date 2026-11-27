@@ -1,4 +1,5 @@
 import type {
+  DeclaredMaterialUnknown,
   NormalizedFinding,
   ParsedReviewVerdict,
   ReviewTriageDecision,
@@ -68,12 +69,14 @@ export interface ArtifactFinding {
    * The action-side witnesses speak for the EXECUTING revision's release
    * line only: a claim that names a different line or another patch is
    * unverified — never refuted, never grounded.
-   * One of "refuted" (the witness positively contradicts the claim),
-   * "unverified" (the witness could not check it), or "unsupported" (no
-   * concrete evidence to verify). Blocker/major findings are demoted to
-   * minor with it; minor/info findings carry it without a severity change.
-   * Never set on a grounded finding. */
-  grounding_status?: "refuted" | "unverified" | "unsupported";
+   * One of "grounded" (#1835: the witness positively substantiated the
+   * claim — recorded so the artifact distinguishes a decided claim from one
+   * the boundary never classified), "refuted" (the witness positively
+   * contradicts the claim), "unverified" (the witness could not check it),
+   * or "unsupported" (no concrete evidence to verify). Blocker/major
+   * findings are demoted to minor with every status except "grounded";
+   * minor/info findings carry it without a severity change. */
+  grounding_status?: "grounded" | "refuted" | "unverified" | "unsupported";
   /** #1517: set by the deterministic negative-evidence pass when a trusted,
    * configured evidence provider ran CLEAN at the exact reviewed head and
    * its operator-declared rule positively contradicts this finding's claim
@@ -89,6 +92,18 @@ export interface ArtifactFinding {
     decision: "demoted" | "unchanged";
     reason: string;
   };
+  /** #1835: the reviewer's own declared materially-relevant unresolved
+   * questions — the structured counterpart of the Unknowns or Needs
+   * Verification section, normalized fail-closed by the parser (present but
+   * unusable serializations collapse to one generic bounded subject). Each
+   * entry is a bounded subject sentence plus the optional `affects`
+   * association — the reviewer's own citation naming the location whose
+   * finding the question undermines. The authoritative disposition consumes
+   * them as `reviewer_declared_unknown` material evidence: they withhold
+   * certification, and a declaration associated with an open blocker/major
+   * finding the verification boundary never decided withholds that finding's
+   * categorical REQUEST_CHANGES — that finding alone, never review-wide. */
+  material_unknowns?: Array<{ subject: string; affects?: string | null }>;
 }
 
 export interface ArtifactThreadDisposition {
@@ -289,6 +304,12 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
           evidence: d.evidence,
         }));
   }
+  // #1835: publish the declared unknowns only for a non-empty declaration —
+  // a null/absent/empty answer writes no key, so a run that declared nothing
+  // stays byte-identical.
+  if (parsed.materialUnknowns.length > 0) {
+    artifact.material_unknowns = parsed.materialUnknowns;
+  }
   if (parsed.humanReviewDispositionsEmitted) {
     artifact.human_review_dispositions = parsed.humanReviewDispositions === null
       ? []
@@ -315,6 +336,29 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
  */
 export function serializeReviewArtifact(artifact: ReviewArtifact): string {
   return `${JSON.stringify(artifact)}\n`;
+}
+
+/**
+ * #1835: the run's declared materially-relevant unresolved questions, read
+ * defensively from the artifact (the engine's working record is an untyped
+ * readback). The parser already fail-closed the unusable serializations to
+ * the generic bounded subject, so a missing or malformed array here reads as
+ * no declaration — the disposition never re-derives one.
+ */
+export function declaredMaterialUnknownsOf(record: unknown): DeclaredMaterialUnknown[] {
+  const value = (record as { material_unknowns?: unknown } | null | undefined)?.material_unknowns;
+  if (!Array.isArray(value)) return [];
+  const unknowns: DeclaredMaterialUnknown[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record0 = entry as { subject?: unknown; affects?: unknown };
+    if (typeof record0.subject !== "string") continue;
+    unknowns.push({
+      subject: record0.subject,
+      affects: typeof record0.affects === "string" ? record0.affects : null,
+    });
+  }
+  return unknowns;
 }
 
 /**

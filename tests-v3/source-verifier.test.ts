@@ -450,7 +450,7 @@ test("source-verifier + boundary: committed marker stays grounded through the re
     })];
     const result = await applyBlockerVerification(findings, { readSource, expectedRevision: sha });
     assert.equal(result.demoted, 0, "committed marker must stay grounded after redaction");
-    assert.equal(findings[0]!.grounding_status, undefined);
+    assert.equal(findings[0]!.grounding_status, "grounded");
     assert.equal(result.findings.length, 1);
     assert.equal(result.findings[0]!.status, "grounded");
     assert.equal(result.findings[0]!.kind, "committed_literal");

@@ -959,3 +959,103 @@ test("#1094: the content gate's documented floor — a prose-indistinguishable s
     (error: unknown) => error instanceof VerdictParseFailure && error.kind === "known_secret_in_content",
   );
 });
+
+// ---------------------------------------------------------------------------
+// #1835: the declared materially-relevant unresolved questions. The
+// structured counterpart of the Unknowns or Needs Verification section —
+// the reviewer's own materiality judgment, normalized fail-closed and kept
+// out of the model-extras passthrough.
+// ---------------------------------------------------------------------------
+
+test("#1835: material_unknowns key-absence declares nothing", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "## OK" })));
+  assert.deepEqual(verdict.materialUnknowns, []);
+  assert.equal(verdict.materialUnknownsEmitted, false);
+});
+
+test("#1835: explicit null and an empty array both declare no unknowns", () => {
+  for (const value of ["null", "[]"]) {
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+      verdict: "approve", review_markdown: "## OK", material_unknowns: JSON.parse(value),
+    })));
+    assert.deepEqual(verdict.materialUnknowns, [], value);
+    assert.equal(verdict.materialUnknownsEmitted, true, value);
+  }
+});
+
+test("#1835: subjects are bounded single lines; the array is capped", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: [
+      { subject: "the canonical upstream text could not be fetched, so the byte comparison was not performed", affects: null },
+      { subject: `padded subject ${"x".repeat(500)}`, affects: null },
+      { subject: "another question", affects: null },
+    ],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [
+    { subject: "the canonical upstream text could not be fetched, so the byte comparison was not performed", affects: null },
+    { subject: `padded subject ${"x".repeat(185)}`, affects: null },
+    { subject: "another question", affects: null },
+  ]);
+  assert.equal(verdict.materialUnknownsEmitted, true);
+});
+
+test("#1835: the affects association survives only a canonical citation; a malformed one drops the link, never the subject", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: [
+      { subject: "the byte comparison was not performed", affects: "LICENSE:1" },
+      { subject: "a bare path names the file", affects: "LICENSE" },
+      { subject: "a diff anchor parses", affects: "src/a.ts:+4-9" },
+      { subject: "prose is not a citation", affects: "the canonical upstream file" },
+      { subject: "an absolute path is not a citation", affects: "/etc/passwd:1" },
+      { subject: "an oversized association drops", affects: `x${":".repeat(1)}${"y".repeat(500)}` },
+      { subject: "a non-string association drops", affects: 42 },
+    ],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [
+    { subject: "the byte comparison was not performed", affects: "LICENSE:1" },
+    { subject: "a bare path names the file", affects: "LICENSE" },
+    { subject: "a diff anchor parses", affects: "src/a.ts:+4-9" },
+    { subject: "prose is not a citation", affects: null },
+    { subject: "an absolute path is not a citation", affects: null },
+    { subject: "an oversized association drops", affects: null },
+    { subject: "a non-string association drops", affects: null },
+  ]);
+});
+
+test("#1835: a bare-string entry is a subject-only declaration", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: ["the comparison was not performed"],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [{ subject: "the comparison was not performed", affects: null }]);
+});
+
+test("#1835: a present but unusable serialization fails closed to one generic subject", () => {
+  // A non-array answer.
+  const nonArray = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: "the comparison was not performed",
+  })));
+  assert.deepEqual(nonArray.materialUnknowns, [{ subject: "material_unknowns present but unusable", affects: null }]);
+  // A non-empty array from which no usable subject survives.
+  const unusable = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: [42, null, "   "],
+  })));
+  assert.deepEqual(unusable.materialUnknowns, [{ subject: "material_unknowns present but unusable", affects: null }]);
+  // Mixed: usable entries survive alongside dropped ones.
+  const mixed = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: [7, "real question"],
+  })));
+  assert.deepEqual(mixed.materialUnknowns, [{ subject: "real question", affects: null }]);
+});
+
+test("#1835: material_unknowns never rides the model-extras passthrough", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: ["unresolved comparison"],
+  })));
+  assert.equal("material_unknowns" in verdict.extra, false);
+});

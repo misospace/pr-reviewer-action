@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { VERDICT_USER_INSTRUCTION } from "../src/model/conversation.js";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -697,6 +698,16 @@ test("#1800: author residual claims need verification and unverified allegations
     "a defect you assert but could not verify",
     "is not an established finding",
     "never as a categorical contradiction",
+    // #1835: the disclosed question gets a structured home the disposition
+    // consumes — the prose route alone is invisible to deterministic policy.
+    "Declare each such unresolved question that materially bears on the verdict",
+    "in the top-level `material_unknowns` array",
+    // #1835 round 2: the declaration carries the reviewer's own association
+    // (which location's finding the question undermines), and the
+    // required_check_dispositions exclusion is gone — the exclusion would
+    // leave the original unsupported categorical finding authoritative.
+    "the path or path:LINE citation naming the location whose finding the unresolved question undermines",
+    "Declare a question required_check_dispositions also carries as unresolved",
   ];
   withWorkspace({}, (dir) => {
     const ws = workspaceAt(dir);
@@ -760,4 +771,19 @@ test("#1800: a thread fix claim is a lead, not proof", () => {
     const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
     for (const phrase of required) assert.equal(assembled.includes(phrase), true, phrase);
   });
+});
+
+test("#1835: the in-conversation verdict instruction carries the material_unknowns declaration route", () => {
+  // The native loop's verdict turn is the path the #712 run used; the
+  // declaration instruction must ride it exactly as it rides the default
+  // system prompt — including the reviewer's own per-finding association
+  // and NO required_check_dispositions exclusion (an excluded question
+  // would leave the unsupported categorical finding authoritative).
+  assert.match(VERDICT_USER_INSTRUCTION, /Emit 'material_unknowns' as null when none/);
+  assert.match(VERDICT_USER_INSTRUCTION, /one object per unresolved question that materially bears on the verdict/);
+  assert.match(VERDICT_USER_INSTRUCTION, /the reference unavailable, the comparison not performed/);
+  assert.match(VERDICT_USER_INSTRUCTION, /affects \(the path or path:LINE citation naming the location whose finding the unresolved question undermines; null when it ties to no specific location\)/);
+  assert.match(VERDICT_USER_INSTRUCTION, /including a question required_check_dispositions also carries as unresolved/);
+  assert.match(VERDICT_USER_INSTRUCTION, /do not declare routine tool unavailability that bore on no conclusion/);
+  assert.doesNotMatch(VERDICT_USER_INSTRUCTION, /or a question required_check_dispositions already carries/);
 });

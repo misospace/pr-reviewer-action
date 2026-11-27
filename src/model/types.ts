@@ -367,7 +367,33 @@ export interface ParsedReviewVerdict {
   dependencyCoverage: import("./dependency-coverage.js").NormalizedDependencyCoverageAspect[] | null;
   /** True iff the model emitted the `dependency_coverage` key at all. */
   dependencyCoverageEmitted: boolean;
+  /**
+   * #1835: the reviewer's declared materially-relevant unresolved questions
+   * — normalized fail-closed (a present but unusable serialization collapses
+   * to one generic subject, never to "no unknowns"). Empty unless usable
+   * declarations exist. This is the structured counterpart of the Unknowns
+   * or Needs Verification section: the reviewer's own materiality judgment,
+   * consumed by the authoritative disposition as `reviewer_declared_unknown`
+   * evidence; a declaration whose `affects` citation names the location of
+   * an open blocker/major finding the verification boundary never decided
+   * undermines that finding's categorical authority (per finding — never
+   * review-wide).
+   */
+  materialUnknowns: DeclaredMaterialUnknown[];
+  /** True iff the model emitted the `material_unknowns` key at all. */
+  materialUnknownsEmitted: boolean;
   extra: Record<string, unknown>;
+}
+
+/** #1835: one declared materially-relevant unresolved question. `subject` is
+ * a bounded one-sentence identity; `affects` is the reviewer's own
+ * association — a repository-relative citation (`path`, `path:LINE`) naming
+ * the location whose finding the question undermines — or null when the
+ * question ties to no specific location (it then withholds certification
+ * without touching any finding's categorical authority). */
+export interface DeclaredMaterialUnknown {
+  subject: string;
+  affects: string | null;
 }
 
 /** Why a response could not be turned into a valid review verdict. */

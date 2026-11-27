@@ -83,6 +83,16 @@ export const MATERIAL_DISPOSITION_CODES = [
    * execution failure, every call failed, the loop recorded a no-evidence
    * degradation) — a genuine capability failure, never a call count. */
   "investigation_unavailable",
+  /** #1835: the reviewer itself declared a materially relevant question
+   * unresolved (the structured counterpart of the Unknowns or Needs
+   * Verification section, `ruledBy: "reviewer"`). The reviewer's own
+   * materiality judgment: its answer could change the verdict, so the run
+   * can never certify an approval while it stands. A declaration whose
+   * `affects` citation names the location of an open blocker/major finding
+   * the verification boundary never decided also undermines THAT finding's
+   * categorical authority — upstream, per finding (`hasUnunderminedBlockingFinding`),
+   * never review-wide. */
+  "reviewer_declared_unknown",
   /** #1678 hardening: the authoritative closing verdict failed the exact
    * requirement-decision contract (missing/duplicate/unexpected/malformed
    * rows, or coverage absent while in-scope requirements exist) even after
@@ -354,6 +364,7 @@ export const MATERIAL_CODE_CLAUSES: Readonly<Record<MaterialDispositionCode, str
   unverified_blocking_claim: "an open blocker/major claim could not be grounded or refuted",
   mandatory_requirement_unresolved: "a mandatory requirement remains unresolved",
   investigation_unavailable: "the investigation did not finish",
+  reviewer_declared_unknown: "the reviewer declared a materially relevant question unresolved",
   // #1678 hardening: name the SERIALIZATION failure, not a semantic unknown.
   verdict_contract_incomplete: "the closing verdict did not decide every required requirement",
 });
@@ -436,6 +447,12 @@ export function computeFinalDisposition(input: FinalDispositionInput): FinalDisp
     // conclusion with no grounded/proven claim behind it is an UNVERIFIED
     // BLOCKING CLAIM — a material unknown (INCOMPLETE/COMMENT), never a
     // fabricated block and never a silent approve.
+    // #1835 round 2: the per-finding undermining lives UPSTREAM — the
+    // engine's `blockingFindingOpen` excludes exactly the open blocker/major
+    // findings a reviewer-declared `affects` association undermines
+    // (`hasUnunderminedBlockingFinding`; attested findings are immune), so
+    // the disposition's own rule stays the plain severity-only read of a
+    // set the association has already narrowed.
     const findingBlocker = input.blockingFindingOpen || input.evidenceProviderBlocker;
     if (findingBlocker || input.provenUnmetRequirement) {
       kind = "request_changes";

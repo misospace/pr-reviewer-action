@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractCitationLocations, parseCitationLocation } from "../src/enforcement/citations.js";
+import { citationNamesExplicitLine, extractCitationLocations, parseCitationLocation } from "../src/enforcement/citations.js";
 
 // #1681 r6: the ONE citation grammar shared by the requirement trace, thread
 // settlement and human-review settlement. Parsing accepts the grammar; it
@@ -130,4 +130,17 @@ test("#1681 r7: prose discovery stays conservative — URLs, tool ids and bare l
   // the exact-head resolver, not the extractor, is what rejects it.
   assert.deepEqual(parseCitationLocation("src/does-not-exist.ts:999"), { file: "src/does-not-exist.ts", line: 999 });
   assert.deepEqual(extractCitationLocations("src/does-not-exist.ts:999"), [{ file: "src/does-not-exist.ts", line: 999 }]);
+});
+
+test("#1835 round 4: the canonical explicit-line distinction covers every line-specific spelling", () => {
+  // A bare path is file-level; `path:LINE`, `path:LINE-END` and BOTH
+  // diff-anchor spellings are line-specific. The anchor's `:` is followed
+  // by `+`, which a digit probe misreads as file-level — the distinction is
+  // the grammar's own regexes, never a second probe.
+  for (const lineSpecific of ["src/a.ts:12", "src/a.ts:12-30", "src/a.ts:+4-9", "src/a.ts:+4", "src/a.ts:+4-9:2"]) {
+    assert.equal(citationNamesExplicitLine(lineSpecific), true, lineSpecific);
+  }
+  for (const fileLevel of ["src/a.ts", "docs/inputs.md", "not a citation", "/etc/passwd:1", "src/a.ts:0"]) {
+    assert.equal(citationNamesExplicitLine(fileLevel), false, fileLevel);
+  }
 });
