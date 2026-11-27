@@ -28,7 +28,8 @@ parse, malformed = ignore with a surfaced warning): the boundary-ownership
 file below, and `.github/pr-reviewer-ci-tests.yml` (#1820 — trusted explicit
 CI test-job identities that let head-bound CI evidence settle test-run
 obligations only when the repository declared identities and the PR's CI
-workflow surface is verifiably unchanged from the base's merge-base;
+workflow surface is verifiably identical to the current base tree's (a
+base-side change after the fork point fences the stale head too);
 otherwise no test-run ask is settled by CI evidence that run; shape and
 semantics are in
 [required-checks.md](required-checks.md#trusted-explicit-ci-test-job-identities-1820),

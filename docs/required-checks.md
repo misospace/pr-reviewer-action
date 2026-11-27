@@ -474,11 +474,13 @@ reconciliation above is unchanged for every repository that does not opt in.
   row) or the gate emits no evidence at all. Other
   context rows may still be trimmed at the 50-row / 16,384-character bounds.
 - **Workflow-surface masquerade fence (#1820)**: configured identities exist
-  and the PR leaves the supported forges' CI workflow surface unchanged
-  relative to the merge-base of the trusted base ref before any CI evidence
-  can settle a test-run ask. If a PR adds or edits a workflow file there —
+  and the PR's workflow surface must be IDENTICAL to the current trusted
+  base's across the supported forges' CI surfaces before any CI evidence can
+  settle a test-run ask. If a PR adds or edits a workflow file there —
   `.github/workflows`, `.forgejo/workflows`, `.gitea/workflows`, or
-  `.gitlab-ci.yml` — or the surface cannot be verified (git failure or
+  `.gitlab-ci.yml` — or the CURRENT base changed the surface after the fork
+  point (a rename or removal: the stale head still runs the OLD same-named
+  job under its own tree), or the surface cannot be verified (git failure or
   missing head) while the identities were readable, every test-run row stays
   unresolved that run with `ci-evidence-ci-workflow-surface-untrusted`. The
   fence also stays armed when identities were declared but not honored this
@@ -486,12 +488,21 @@ reconciliation above is unchanged for every repository that does not opt in.
   still declared entries, or declarations that all failed validation — the
   refusal must never silently disable it (#1820 re-review). A red
   relevant leg still contradicts (failure-first). Repositories without
-  configured identities retain the pre-#1820 name-heuristic behavior. The
-  merge-base anchor is deliberate: for PR events the effective workflow set
-  is the merge commit, so the attacker-controlled delta is exactly the
-  merge-base diff; a two-dot diff would fence benign PRs whenever the trusted
-  base advances its own workflows. Verification requires the base ref and its
-  merge-base with the head locally. A shallow checkout (`fetch-depth: 1`)
+  configured identities retain the pre-#1820 name-heuristic behavior.
+  Comparison is TWO-DOT (base tree vs head tree), deliberately
+  (#1820 human re-review): the configured identities are validated against
+  the CURRENT base, while head-bound checks ran under the head's possibly
+  stale workflow tree, so base-side drift after the fork point is exactly as
+  dangerous as a PR-side change — a base rename/removal plus a same-named new
+  trusted declaration would otherwise let the stale head's unrelated old job
+  discharge it. A merge-base (three-dot) diff would miss that. The cost is
+  the accepted conservative side: a PR forked before a base workflow edit
+  loses configured settlement (its test-run rows stay unresolved with the
+  fence reason) until its head tree matches the base's; a benign PR whose head
+  simply lacks a base-added workflow file is fenced too, which is the trade
+  for proving surface
+  equality. Verification requires the base ref and head resolvable locally.
+  A shallow checkout (`fetch-depth: 1`)
   cannot resolve the base ref at all, so the identities are unreadable and
   the fence is inert — the pre-#1820 name heuristics stay in force, which is
   weaker than the fence but unchanged from before; the fork lane's base-only

@@ -24,13 +24,16 @@
  * deliberately GitHub-scoped (`.github/workflows`) because configured
  * discharge is GitHub-Actions-only; the separate workflow-surface fence is
  * broader and forge-agnostic. Discharge from configured identities is fenced:
- * a PR that changed a supported CI workflow file relative to the trusted
- * base's merge-base (or whose surface could not be verified) cannot have
- * same-named jobs discharge (#1820). This is the conservative substitute
- * where a forge does not expose workflow identity per check run. Literal-matrix
- * dynamic names are enumerated as a bounded superset, including `include`
- * values. An identity is refused if any surface job could render its name via
- * a matrix, or if it names a matrix job: the check-run payload cannot prove
+ * a PR whose workflow surface differs at all from the CURRENT trusted base
+ * tree — a PR-side add/edit OR base-side drift (rename/removal) since the
+ * fork point — or whose surface could not be verified cannot have same-named
+ * jobs discharge (#1820). The two-dot comparison is required because the
+ * declaration is validated against the current base while head-bound checks
+ * ran under the head's possibly-stale workflow tree. This is the conservative
+ * substitute where a forge does not expose workflow identity per check run.
+ * Literal-matrix dynamic names are enumerated as a bounded superset, including
+ * `include` values. An identity is refused if any surface job could render its
+ * name via a matrix, or if it names a matrix job: the check-run payload cannot prove
  * the complete leg set. A matrix-interpolating name that cannot be enumerated
  * refuses all configured identities. Dynamic names that interpolate only
  * `vars` or `strategy` remain accepted as operator-authority and contribute no
@@ -199,7 +202,15 @@ export function parseCiTestJobsText(
   return { jobs, warnings, declaredCount: entries };
 }
 
-/** Compare workflow paths from the repository root, regardless of workspace cwd. */
+/** Compare workflow paths from the repository root, regardless of workspace
+ * cwd. TWO-DOT (current base tree vs head tree), deliberately: the configured
+ * identities are validated against the CURRENT base, but head-bound checks
+ * ran under the head's (possibly stale) workflow tree. A base-side rename or
+ * removal after the fork point is therefore as dangerous as a PR-side change
+ * — a stale head still runs the old same-named job, and only the two-dot
+ * comparison sees the divergence (#1820 human re-review). The cost — a PR
+ * forked before a base workflow edit loses configured settlement until its
+ * head tree matches — is the accepted conservative side. */
 export function ciWorkflowSurfaceChangedFromBase(options: {
   baseRef: string;
   headRef: string;
@@ -211,7 +222,7 @@ export function ciWorkflowSurfaceChangedFromBase(options: {
     return { changed: true, warning: "CI workflow surface could not be verified against the base ref: base or head ref is empty." };
   }
   try {
-    const stdout = execFileSync("git", ["diff", "--name-only", `${options.baseRef}...${options.headRef}`, "--", ...CI_WORKFLOW_SURFACE_PATHS.map((path) => `:(top)${path}`)], {
+    const stdout = execFileSync("git", ["diff", "--name-only", options.baseRef, options.headRef, "--", ...CI_WORKFLOW_SURFACE_PATHS.map((path) => `:(top)${path}`)], {
       cwd: options.workspace ?? process.cwd(),
       timeout: timeoutSec * 1000,
       maxBuffer: MAX_CI_TEST_JOBS_FILE_BYTES * 4,

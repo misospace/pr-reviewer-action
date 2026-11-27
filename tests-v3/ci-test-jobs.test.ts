@@ -537,7 +537,7 @@ test("#1820 refused config entries keep the surface fence armed only when workfl
   assert.equal(unreadable.workflowSurfaceTrusted, false);
 });
 
-test("#1820 workflow surface fence tracks only changes introduced by the PR", () => {
+test("#1820 workflow surface fence requires base and head workflow trees to be identical", () => {
   const root = initRepo();
   writeFileSync(join(root, "README"), "seed");
   writeConfig(root, PATH, BASE);
@@ -577,18 +577,79 @@ test("#1820 workflow surface fence tracks only changes introduced by the PR", ()
   assert.equal(refusedMissingHead.identitiesRefused, true);
   assert.equal(refusedMissingHead.workflowSurfaceTrusted, false);
 
+  // Diverged base (#1820 human re-review): the base advancing its own
+  // workflows after the fork point IS a surface divergence under the two-dot
+  // comparison. The declaration scans the current base while head-bound checks
+  // ran under the head's stale tree, so a base-side add/rename/removal must
+  // fence the stale head rather than certify its old same-named job.
   const branchRoot = initRepo();
   writeFileSync(join(branchRoot, "README"), "seed");
   writeConfig(branchRoot, PATH, BASE);
-  const forkPoint = commit(branchRoot, "base config");
+  writeConfig(branchRoot, ".github/workflows/test.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
+  commit(branchRoot, "base config");
   execFileSync("git", ["-C", branchRoot, "checkout", "-q", "-b", "pr"], { env: GIT_ENV });
   writeFileSync(join(branchRoot, "pr.txt"), "pr");
   const prHead = commit(branchRoot, "pr change");
   execFileSync("git", ["-C", branchRoot, "checkout", "-q", "main"], { env: GIT_ENV });
-  writeConfig(branchRoot, ".github/workflows/base-only.yml", "name: base\n");
+  writeConfig(branchRoot, ".github/workflows/base-only.yml", "jobs:\n  deploy-docs:\n    runs-on: ubuntu-latest\n");
   commit(branchRoot, "base workflow advances");
-  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: "main", headRef: prHead, workspace: branchRoot }), { changed: false, warning: null });
-  assert.equal(forkPoint.length > 0, true);
+  assert.deepEqual(ciWorkflowSurfaceChangedFromBase({ baseRef: "main", headRef: prHead, workspace: branchRoot }), { changed: true, warning: null });
+  const diverged = resolveCiTestJobsFromRef({ baseRef: "main", headRef: prHead, workspace: branchRoot });
+  assert.equal(diverged.workflowSurfaceTrusted, false);
+  assert.equal(diverged.jobs.has("validate-typescript"), true);
+  const identicalHead = resolveCiTestJobsFromRef({ baseRef: "main", headRef: "main", workspace: branchRoot });
+  assert.equal(identicalHead.workflowSurfaceTrusted, true);
+
+  // Diverged-base same-name wrong-workflow negative: at the fork point the
+  // surface carried an unrelated push job literally named
+  // validate-typescript; main then removed it and added the REAL full-suite
+  // job with the same name, declared in the trusted config. A README-only PR
+  // from the fork point still runs the OLD unrelated job on its exact head.
+  // The current-base scanner sees one valid static identity, but the two-dot
+  // fence must see the trees differ and refuse settlement outright.
+  const renameRoot = initRepo();
+  writeFileSync(join(renameRoot, "README"), "seed");
+  writeConfig(renameRoot, PATH, "test-jobs:\n");
+  writeConfig(renameRoot, ".github/workflows/push.yml", "on: push\njobs:\n  validate-typescript:\n    name: validate-typescript\n    runs-on: ubuntu-latest\n");
+  const forkBase = commit(renameRoot, "fork point: unrelated same-name job");
+  writeFileSync(join(renameRoot, "old-pr.txt"), "stale pr");
+  const staleHead = commit(renameRoot, "pr change from fork point");
+  execFileSync("git", ["-C", renameRoot, "checkout", "-q", "main"], { env: GIT_ENV });
+  execFileSync("git", ["-C", renameRoot, "rm", "-q", ".github/workflows/push.yml"], { env: GIT_ENV });
+  writeConfig(renameRoot, ".github/workflows/ci.yml", "jobs:\n  validate-typescript:\n    runs-on: ubuntu-latest\n");
+  writeConfig(renameRoot, PATH, BASE);
+  const advancedBase = commit(renameRoot, "base retires the push job and trusts the name");
+  const advanced = resolveCiTestJobsFromRef({ baseRef: advancedBase, headRef: staleHead, workspace: renameRoot });
+  assert.equal(advanced.jobs.has("validate-typescript"), true);
+  assert.equal(advanced.workflowSurfaceTrusted, false);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", {
+    headSha: staleHead,
+    finalState: "success",
+    checks: [{ name: "validate-typescript", state: "success", conclusion: "success", origin: "actions" }],
+  }, staleHead, advanced).reason, "ci-workflow-surface-untrusted");
+
+  // Compatibility control: the same kind of divergence with NO configured
+  // identities at all keeps the pre-#1820 behavior byte-for-byte — the fence
+  // is inert and a green heuristic bare-suite row still discharges.
+  const plainRoot = initRepo();
+  writeFileSync(join(plainRoot, "README"), "seed");
+  commit(plainRoot, "no config ever");
+  execFileSync("git", ["-C", plainRoot, "checkout", "-q", "-b", "pr"], { env: GIT_ENV });
+  writeFileSync(join(plainRoot, "pr.txt"), "pr");
+  const plainHead = commit(plainRoot, "pr change");
+  execFileSync("git", ["-C", plainRoot, "checkout", "-q", "main"], { env: GIT_ENV });
+  writeConfig(plainRoot, ".github/workflows/base-only.yml", "jobs:\n  deploy-docs:\n    runs-on: ubuntu-latest\n");
+  commit(plainRoot, "base advances workflows without any config");
+  const plain = resolveCiTestJobsFromRef({ baseRef: "main", headRef: plainHead, workspace: plainRoot });
+  assert.equal(plain.jobs.size, 0);
+  assert.equal(plain.identitiesRefused, false);
+  assert.equal(plain.workflowSurfaceTrusted, true);
+  assert.deepEqual(plain.warnings, []);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", {
+    headSha: plainHead,
+    finalState: "success",
+    checks: [{ name: "Tests", state: "success", conclusion: "success" }],
+  }, plainHead, plain).outcome, "satisfied");
 
   const gitlabRoot = initRepo();
   writeFileSync(join(gitlabRoot, "README"), "seed");
