@@ -1,0 +1,14 @@
+# #1820: trusted explicit CI test-job identities for this repository. The
+# check names below are the actual test-executing jobs in
+# .github/workflows/ci.yaml (validate-typescript runs npm ci + typecheck +
+# npm test on Node 26; validate-python runs the Python/semantic suites;
+# validate-bash runs the bash suites; validate-runtime-floor runs npm ci +
+# npm test on the declared action runtime). Each runs on every pull_request.
+# The file is read from the ref the PR targets (the base tree) — a PR cannot
+# declare its own job trusted; for PRs into the protected default branch only
+# a change merged there can alter it.
+test-jobs:
+  validate-typescript: full-suite
+  validate-python: full-suite
+  validate-bash: full-suite
+  validate-runtime-floor: full-suite

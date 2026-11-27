@@ -122,7 +122,7 @@ test("runConcurrentGates launches both dist sub-modes, joins them, and each writ
     assert.equal(result.specialists.ok, true, result.specialists.error ?? "");
     assert.equal(
       readFileSync(join(dir, "github-output"), "utf8"),
-      `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "build", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`,
+      `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "build", state: "success", conclusion: "success", origin: "check" }] })}\nci_status_final=success\nci_status_skipped=false\n`,
       "#1594: the finalized gate also records the head-bound check evidence",
     );
     assert.match(readFileSync(join(dir, "ci-checks-context.md"), "utf8"), /\| build \| success \|\n$/);

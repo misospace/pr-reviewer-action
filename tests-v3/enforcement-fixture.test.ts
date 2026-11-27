@@ -231,6 +231,7 @@ test("enforcement fixture keeps relax-then-force provenance and body honest end 
 });
 
 const CI_HEAD = "0123456789abcdef0123456789abcdef01234567";
+const CI_HEAD_1820 = "8f819a82486df059e75d4c17b3e50f74d9c017d9";
 const CI_STALE = "aabbccddeeff00112233445566778899aabbccdd";
 
 test("#1594 fixture: exact-head green test check discharges the test-run ask (strict, no dispositions)", () => {
@@ -258,6 +259,97 @@ test("#1594 fixture: exact-head green test check discharges the test-run ask (st
     assert.equal(artifact.required_checks, "complete");
     assert.equal(artifact.verdict, "approve", "coverage never demotes the strict verdict here, it only completes it");
     assert.doesNotMatch(artifact.review_markdown, /Unaddressed required checks/);
+  });
+});
+
+test("#1820 fixture: trusted CI test job config discharges full-suite coverage", () => {
+  withFixtures((dir) => {
+    const base = {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run full test suite after upgrade"],
+      ci_evidence: {
+        version: 1, head_sha: CI_HEAD_1820, final_state: "success",
+        checks: [
+          { name: "validate-typescript", state: "success", conclusion: "success", origin: "actions" },
+          { name: "validate-runtime-floor", state: "success", conclusion: "success", origin: "actions" },
+        ],
+      },
+      ci_test_jobs: { text: "test-jobs:\n  validate-typescript: full-suite\n  validate-runtime-floor: full-suite\n" },
+      ci_workflow_surface_trusted: true,
+      reviewed_head_sha: CI_HEAD_1820,
+      config: { verdict_policy: "strict" },
+    };
+    const positive = runEnforcementFixture(writeJson(dir, "configured-ci.json", base));
+    assert.equal(positive.ok, true);
+    const completeness = JSON.parse(positive.values!.completeness_result!);
+    assert.equal(completeness.status, "complete");
+    assert.deepEqual(completeness.missing, []);
+    assert.equal(completeness.checks[0].status, "satisfied");
+    assert.equal(completeness.checks[0].reason, "ci-evidence");
+
+    const refusedOnChangedSurface = runEnforcementFixture(writeJson(dir, "configured-refused-surface.json", {
+      ...base,
+      ci_identities_refused: true,
+      ci_workflow_surface_trusted: false,
+    }));
+    assert.equal(refusedOnChangedSurface.ok, true);
+    const refusedCompleteness = JSON.parse(refusedOnChangedSurface.values!.completeness_result!);
+    assert.equal(refusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(refusedCompleteness.checks[0].reason, "ci-evidence-ci-workflow-surface-untrusted");
+
+    const fencedByDefault = runEnforcementFixture(writeJson(dir, "configured-fenced-default.json", {
+      ...base,
+      ci_workflow_surface_trusted: undefined,
+    }));
+    assert.equal(fencedByDefault.ok, true);
+    const fencedCompleteness = JSON.parse(fencedByDefault.values!.completeness_result!);
+    assert.equal(fencedCompleteness.status, "incomplete");
+    assert.equal(fencedCompleteness.checks[0].status, "unresolved");
+    assert.equal(fencedCompleteness.checks[0].reason, "ci-evidence-ci-workflow-surface-untrusted");
+
+    // A declaration the resolver refused (matrix-origin) stays a required
+    // leg: the surviving green identity cannot settle the ask (#1820 re-review).
+    const partiallyRefused = runEnforcementFixture(writeJson(dir, "configured-partially-refused.json", {
+      ...base,
+      ci_test_jobs: { text: "test-jobs:\n  validate-typescript: full-suite\n" },
+      ci_refused_test_jobs: { "validate-runtime-floor": "full-suite" },
+    }));
+    assert.equal(partiallyRefused.ok, true);
+    const partiallyRefusedCompleteness = JSON.parse(partiallyRefused.values!.completeness_result!);
+    assert.equal(partiallyRefusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(partiallyRefusedCompleteness.checks[0].reason, "ci-evidence-configured-test-job-missing");
+
+    // Every declaration refused (nothing honored): the refused legs still keep
+    // the ask unresolved rather than falling back to name heuristics.
+    const allRefused = runEnforcementFixture(writeJson(dir, "configured-all-refused.json", {
+      ...base,
+      ci_test_jobs: { text: "test-jobs:\n" },
+      ci_refused_test_jobs: { "validate-typescript": "full-suite", "validate-runtime-floor": "full-suite" },
+    }));
+    assert.equal(allRefused.ok, true);
+    const allRefusedCompleteness = JSON.parse(allRefused.values!.completeness_result!);
+    assert.equal(allRefusedCompleteness.status, "incomplete");
+    assert.equal(allRefusedCompleteness.checks[0].status, "unresolved");
+    assert.equal(allRefusedCompleteness.checks[0].reason, "ci-evidence-configured-test-job-missing");
+
+    const unavailable = runEnforcementFixture(writeJson(dir, "configured-no-evidence.json", {
+      ...base,
+      ci_evidence: undefined,
+    }));
+    assert.equal(unavailable.ok, true);
+    const unavailableCompleteness = JSON.parse(unavailable.values!.completeness_result!);
+    assert.equal(unavailableCompleteness.status, "incomplete");
+    assert.equal(unavailableCompleteness.checks[0].reason, "no-structured-dispositions");
+
+    const unknown = runEnforcementFixture(writeJson(dir, "configured-with-unknown.json", {
+      ...base,
+      must_check: ["run full test suite after upgrade", "verify the rate-limit regression is fixed on the endpoint"],
+    }));
+    assert.equal(unknown.ok, true);
+    const unknownCompleteness = JSON.parse(unknown.values!.completeness_result!);
+    assert.equal(unknownCompleteness.status, "incomplete");
+    assert.deepEqual(unknownCompleteness.missing, ["verify the rate-limit regression is fixed on the endpoint"]);
   });
 });
 

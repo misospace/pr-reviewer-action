@@ -182,6 +182,8 @@ interface EvidenceRow {
   name: string;
   state: string;
   conclusion?: string;
+  origin?: "actions" | "check" | "status";
+  clipped?: true;
 }
 
 /** One source check plus its ORIGINAL-name classification. Retention and
@@ -190,6 +192,7 @@ interface EvidenceRow {
 interface EvidenceEntry {
   row: EvidenceRow;
   testExecution: boolean;
+  exactActions: boolean;
 }
 
 /** #1594: the head-bound check-evidence gate output — the compact-JSON
@@ -201,17 +204,24 @@ interface EvidenceEntry {
  * invalid states and empty values are dropped, and a malformed SHA yields no
  * line at all.
  *
- * The producer obeys the consumer's limits without ever dropping decision
- * evidence. Test-execution rows (the ones the consumer can discharge or
- * contradict from) are classified by their ORIGINAL names and retained in
- * full; non-test rows are context and may be trimmed to fit 50 rows /
- * 16,384 characters. If bounding a name would change its decision identity
- * (test classification, proved scope, or exhaustive identity), or the
- * complete test-row set cannot fit, NO evidence line is emitted: an artifact
- * missing a skipped/pending test leg could otherwise look falsely complete
- * and discharge a full-suite ask. When trimming non-test rows, failed rows
- * are kept first. The final strict parser round-trip is a self-check: if it
- * ever refuses the line, emit nothing rather than an unusable artifact. The
+ * The producer obeys the consumer's limits without ever losing a decision
+ * outcome (specific reason codes may collapse under the same-name bound
+ * below). Test-execution rows (the ones the consumer can discharge or
+ * contradict from) and exact Actions rows are classified by their ORIGINAL
+ * names; when one name would flood the row budget, same-name rows are bounded
+ * to two per name, producer class, and exact/clipped axis — the worst state
+ * and the newest row, which together keep every consumer outcome intact
+ * (specific reason codes may collapse when worst and newest are the same row;
+ * the outcome stays unresolved) (#1820
+ * re-review) — and non-test rows are context that may be trimmed to fit 50
+ * rows / 16,384 characters. If bounding a name would change its decision
+ * identity (test classification, proved scope, or exhaustive identity), or
+ * the bounded required-row set cannot fit, NO evidence line is emitted: an
+ * artifact missing a skipped/pending test leg could otherwise look falsely
+ * complete and discharge a full-suite ask. When trimming non-test rows,
+ * failed rows are kept first. The final strict parser round-trip is a
+ * self-check: if it ever refuses the line, emit nothing rather than an
+ * unusable artifact. The
  * line is NOT in the `ciGateOutputs` action-output whitelist, so it never
  * reaches published action outputs. */
 export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
@@ -228,16 +238,19 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       // away. Classification is only sound on the complete source name, and
       // the consumer can only see the bounded one, so any identity drift
       // makes the whole artifact unsafe: emit no evidence.
+      const rawConclusion = typeof check.conclusion === "string" ? check.conclusion : "";
+      const conclusion = rawConclusion === "" ? "" : boundedEvidenceField(rawConclusion);
+      const clipped = name !== check.name || (rawConclusion !== "" && conclusion !== rawConclusion);
       if (ciCheckIdentity(check.name) !== ciCheckIdentity(name)) return "";
-      const conclusion = typeof check.conclusion === "string" ? boundedEvidenceField(check.conclusion) : "";
       entries.push({
-        // Original-name classification is the retention decision; the bounded
-        // name is never allowed to downgrade a test row into disposable context.
         testExecution: isTestExecutionCheckName(check.name),
+        exactActions: check.origin === "actions" && !clipped,
         row: {
           name,
           state: check.state,
           ...(conclusion === "" ? {} : { conclusion }),
+          ...(check.origin === undefined ? {} : { origin: check.origin }),
+          ...(clipped ? { clipped: true } : {}),
         },
       });
     }
@@ -256,18 +269,55 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
       const json = serialize(rows);
       if (json.length <= MAX_EVIDENCE_RAW_JSON_CHARS) return emit(json);
     }
-    // Lossy truncation is allowed ONLY for rows the consumer ignores. Test-
-    // execution rows are the decision evidence: retain every one or emit
-    // nothing at all. A failure-first order keeps red rows visible when
+    // Lossy truncation is allowed ONLY for rows the consumer ignores, bounded
+    // as below. A failure-first order keeps red rows visible when
     // non-test context is trimmed.
     const byFailureFirst = (list: readonly EvidenceEntry[]): EvidenceEntry[] => [
       ...list.filter((entry) => entry.row.state === "failure"),
       ...list.filter((entry) => entry.row.state !== "failure"),
     ];
-    const testEntries = byFailureFirst(entries.filter((entry) => entry.testExecution));
-    if (testEntries.length > MAX_EVIDENCE_CHECKS) return "";
-    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution));
-    let retained = testEntries.map((entry) => entry.row);
+    // #1820 re-review: the upstream fold retains same-run same-name Actions
+    // legs, so one name can now mint many required rows. Every consumer
+    // decision survives a two-row-per-name-and-producer bound — the worst
+    // state (a red leg must contradict; a pending or skipped-collapsed leg
+    // must block) and the newest row (the discharge candidate; a second
+    // Actions row preserves the ambiguity refusal) — so a many-leg matrix can
+    // never spend the whole 50-row budget on one name and switch the evidence
+    // contract off entirely. Grouping by producer class keeps the
+    // configured-identity row count exact: only `origin: "actions"` rows feed
+    // that refusal. Names cannot contain the separator (control characters
+    // are collapsed or refuse the artifact upstream).
+    const requiredSource = entries.filter((entry) => entry.testExecution || entry.exactActions);
+    const stateRank = (entry: EvidenceEntry): number => {
+      if (entry.row.state === "failure") return 0;
+      if (entry.row.state === "pending") return 1;
+      // A `skipped`/`neutral` leg collapsed to state success is not a green:
+      // the consumer refuses discharge on it (#1594), so it outranks one.
+      return entry.row.conclusion !== undefined && entry.row.conclusion !== "success" ? 2 : 3;
+    };
+    const slots = new Map<string, { worst: number; last: number }>();
+    requiredSource.forEach((entry, index) => {
+      // The exact/clipped axis is part of the consumer's configured-identity
+      // row count (`clipped` rows never satisfy one), so a clipped row must
+      // never absorb an exact row's slot.
+      const key = `${String(entry.row.origin ?? "check")}\u0000${entry.row.clipped === true ? "clipped" : "exact"}\u0000${entry.row.name}`;
+      const slot = slots.get(key);
+      if (slot === undefined) {
+        slots.set(key, { worst: index, last: index });
+        return;
+      }
+      if (stateRank(entry) < stateRank(requiredSource[slot.worst]!)) slot.worst = index;
+      slot.last = index;
+    });
+    const keep = new Set<number>();
+    for (const slot of slots.values()) {
+      keep.add(slot.worst);
+      keep.add(slot.last);
+    }
+    const requiredEntries = byFailureFirst([...keep].sort((a, b) => a - b).map((index) => requiredSource[index]!));
+    if (requiredEntries.length > MAX_EVIDENCE_CHECKS) return "";
+    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution && !entry.exactActions));
+    let retained = requiredEntries.map((entry) => entry.row);
     let json = serialize(retained);
     if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
     for (const entry of otherEntries) {

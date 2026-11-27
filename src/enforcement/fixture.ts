@@ -16,6 +16,7 @@ import { applyVerdictPolicy, applyStrictVerdictPolicy, relaxCiOnlyVerdict, relax
 import { capCiEvidenceFindings } from "./ci-evidence.js";
 import { applyRequiredCheckValidation, type RequiredCheckValidationResult } from "./completeness.js";
 import { parseHeadBoundCiEvidenceValue } from "./required-check-ci.js";
+import { CI_TEST_SCOPES, parseCiTestJobsText, type TrustedCiTestScope } from "../config/ci-test-jobs.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "./enforce.js";
 import type { EnforcementThread } from "./threads.js";
 import type { EnforcementHumanReview } from "./human-reviews.js";
@@ -37,6 +38,14 @@ interface EnforcementFixture {
    * `parseHeadBoundCiEvidenceValue`; an invalid value behaves as no
    * evidence, exactly like the runtime's strict gate-output parser). */
   ci_evidence?: Record<string, unknown> | null;
+  ci_test_jobs?: { path?: string; text: string } | null;
+  /** Declarations the runtime refused at config load (matrix-origin,
+   * ambiguous, or absent from the trusted surface). Fixtures cannot scan git
+   * refs, so they state these explicitly; they remain required legs. */
+  ci_refused_test_jobs?: Record<string, string> | null;
+  /** Fixtures cannot read git refs, so they state the CI workflow fence explicitly; absent defaults false. */
+  ci_workflow_surface_trusted?: boolean;
+  ci_identities_refused?: boolean;
   /** #1594: the exact head this fixture's review is bound to. */
   reviewed_head_sha?: string;
   /** The requirement ledger artifact (for the coverage fold). */
@@ -86,6 +95,22 @@ export function runEnforcementFixture(fixturePath: string): {
     // `ci_evidence` value parses to null — the pipeline then behaves
     // byte-identically to pre-#1594.
     const ciEvidence = parseHeadBoundCiEvidenceValue(fixture.ci_evidence ?? null);
+    const parsedCiTestJobs = fixture.ci_test_jobs != null && typeof fixture.ci_test_jobs.text === "string"
+      ? parseCiTestJobsText(fixture.ci_test_jobs.text, fixture.ci_test_jobs.path ?? ".github/pr-reviewer-ci-tests.yml")
+      : null;
+    // Malformed or non-string fixture config behaves as absent; fixtures
+    // cannot read git refs. Refused declarations are stated explicitly and
+    // remain required legs for their declared scope.
+    const refusedScopes = new Set<string>(CI_TEST_SCOPES);
+    const refusedJobs = new Map<string, TrustedCiTestScope>();
+    for (const [identity, scope] of Object.entries(fixture.ci_refused_test_jobs ?? {})) {
+      if (identity.trim() !== "" && typeof scope === "string" && refusedScopes.has(scope)) {
+        refusedJobs.set(identity, scope as TrustedCiTestScope);
+      }
+    }
+    const trustedCiJobs = parsedCiTestJobs !== null && !("malformed" in parsedCiTestJobs)
+      ? { jobs: parsedCiTestJobs.jobs, refusedJobs, identitiesRefused: fixture.ci_identities_refused === true, workflowSurfaceTrusted: fixture.ci_workflow_surface_trusted === true }
+      : null;
     const reviewedHeadSha = fixture.reviewed_head_sha ?? "";
     // The model's own verdict, captured before the pipeline can mutate it —
     // the strict mapping needs it as an input, not as the final answer.
@@ -104,6 +129,7 @@ export function runEnforcementFixture(fixturePath: string): {
         mode: config.required_check_validation_mode ?? "warn",
         mustCheck: fixture.must_check ?? [],
         ciEvidence,
+        trustedCiJobs,
         reviewedHeadSha,
       });
       const inputs: EnforcementInputs = {
@@ -133,6 +159,7 @@ export function runEnforcementFixture(fixturePath: string): {
         mode: config.required_check_validation_mode ?? "warn",
         mustCheck: fixture.must_check ?? [],
         ciEvidence,
+        trustedCiJobs,
         reviewedHeadSha,
       });
       const inputs: EnforcementInputs = {
