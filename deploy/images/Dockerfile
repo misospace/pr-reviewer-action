@@ -17,7 +17,7 @@
 # repository and the build stage output changes between runs — the
 # run-summary digest of a published image is the only exact reference to
 # it. A mutable tag must never be published from.
-FROM node:26-slim@sha256:0c6375bcc1ee170c22bd04e11b7c1ff9afc3bb16a865a2629308ceb4b72380ff AS build
+FROM node:26-slim@sha256:abe7e5a82b61a8ef67b315b85497c9e65173387ccf2f4a029248184b8e020be5 AS build
 WORKDIR /build
 
 # Dependency lock first for layer caching.
@@ -43,7 +43,7 @@ RUN npm run build
 # only the git subprocess path fails. Assert the binaries AND the trust
 # store file exist while building the shared runtime layer.
 # Recommendations are dropped; the base image digest stays pinned.
-FROM node:26-slim@sha256:0c6375bcc1ee170c22bd04e11b7c1ff9afc3bb16a865a2629308ceb4b72380ff AS runtime
+FROM node:26-slim@sha256:abe7e5a82b61a8ef67b315b85497c9e65173387ccf2f4a029248184b8e020be5 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git procps ca-certificates \
     && command -v git && command -v pgrep && command -v pkill \
