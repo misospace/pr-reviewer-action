@@ -1,5 +1,6 @@
 {
   "name": "pr-reviewer-action-v3-runtime",
+  "license": "AGPL-3.0-only",
   "private": true,
   "version": "0.0.0",
   "engines": {
