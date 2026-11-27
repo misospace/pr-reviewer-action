@@ -1901,3 +1901,82 @@ test("#1821 replay: a noncanonical artifact spelling is rejected, never folded i
   const canonical = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
   assert.equal(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, canonical).state, "receipt-backed");
 });
+
+// Review of #1825 (Major): a no-tool or fork run carries no harness trace, but
+// its own deterministic phase still verified the published-package transition —
+// the code-owned receipts ride a valid ledger on their own and settle the rows
+// they prove. The receipt gate this opens ALSO rejects unsupported positive
+// claims on such a run (fail-closed, never laundering); with nothing derived
+// the fold stays byte-identical to the inert pre-#1627 case.
+function npmNoTraceLedger(verified: readonly unknown[]) {
+  return buildEvidenceLedger({
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified },
+  });
+}
+
+function npmNoTraceObligations() {
+  const rows = NPM1819_ROWS.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row }));
+  const tags = checkEvidenceTagsFromArtifact(NPM1819_ROWS);
+  assert.equal(tags.length, NPM1819_ROWS.length);
+  return candidateRowsToObligations(rows, NPM1819_ROWS.map((row) => row.text), tags);
+}
+
+test("#1821 no-trace replay: the code-owned ledger settles the provenance and release-delta rows end to end", () => {
+  const ledger = npmNoTraceLedger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(ledger.state, "valid");
+  const folded = foldObligationDispositions(npmNoTraceObligations(), [], ledger, { readPaths: new Set<string>() });
+  for (const id of ["obligation-1", "obligation-2"]) {
+    assert.equal(byId(folded, id).status, "satisfied", id);
+    assert.equal(byId(folded, id).reason, "dependency-evidence", id);
+  }
+  // The advisory row was never established by the comparison: it stays
+  // unresolved fail-closed, never carried by proximity.
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.evidence !== undefined && advisory.evidence.state !== "receipt-backed");
+  // The #750 completeness fold settles the SAME rows row-for-row.
+  const coverage = evaluateRequiredCheckCoverage(
+    NPM1819_ROWS.map((row) => row.text),
+    null,
+    ledger,
+    checkEvidenceTagsFromArtifact(NPM1819_ROWS),
+  );
+  const deltaRow = coverage.checks.find((row) => row.check === NPM1819_ROWS[1]!.text)!;
+  assert.equal(deltaRow.status, "satisfied");
+  assert.equal(deltaRow.reason, "dependency-evidence");
+});
+
+test("#1821 no-trace replay: the activated gate rejects a positive claim the comparison does not prove", () => {
+  const ledger = npmNoTraceLedger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  const folded = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[2]!.text, status: "satisfied" }],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.reason === "receipt-absent" || advisory.reason === "receipt-mismatch", `got ${advisory.reason}`);
+  // The claim the receipts DO prove still discharges through the gate.
+  const proven = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[1]!.text, status: "satisfied" }],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  assert.equal(byId(proven, "obligation-2").status, "satisfied");
+});
+
+test("#1821 no-trace control: nothing derived keeps the fold byte-identical to the inert pre-#1627 case", () => {
+  const inert = buildEvidenceLedger({ npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified: [] } });
+  assert.equal(inert.state, "unavailable");
+  const folded = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[2]!.text, status: "satisfied" }],
+    inert,
+    { readPaths: new Set<string>() },
+  );
+  // With an unavailable ledger the receipt gate never touches the answer.
+  assert.equal(byId(folded, "obligation-3").status, "satisfied");
+  assert.equal(byId(folded, "obligation-3").reason, "ok");
+});

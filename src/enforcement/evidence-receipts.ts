@@ -190,14 +190,15 @@ export interface EvidenceReceipt {
 }
 
 /** The ledger's own state:
- * - `unavailable` — no executed-call trace (fresh standard-call and fork
- *   paths): the receipt gate is INERT and every fold keeps its pre-#1627
- *   semantics byte-for-byte;
+ * - `unavailable` — no executed-call trace AND nothing code-owned derived
+ *   (fresh standard-call and fork paths): the receipt gate is INERT and
+ *   every fold keeps its pre-#1627 semantics byte-for-byte;
  * - `refused` — a trace was PRESENT but malformed: the gate is ACTIVE with
  *   nothing usable, so no objective satisfaction can discharge behind a
  *   trace this runtime cannot verify (#1634's fail-closed rule, carried
  *   over); distinct from `unavailable`, never silently conflated with it;
- * - `valid` — a parsed, bounded ledger. */
+ * - `valid` — a parsed, bounded ledger; code-owned derived receipts make it
+ *   valid even when no trace was present (#1821). */
 export type EvidenceLedgerState = "unavailable" | "refused" | "valid";
 
 export interface EvidenceLedger {
@@ -900,15 +901,23 @@ function receiptForTraceCall(
  * Build the evidence ledger from the run's own records (see the module
  * docstring). Strict: a PRESENT `tool_calls` trace whose shape this runtime
  * cannot parse — or whose aligned `tool_results` are missing or misaligned —
- * REFUSES the whole ledger (gate active, nothing usable); an absent or empty
- * trace is the ordinary no-native-loop case (`unavailable`). An over-cap
- * trace is bounded by PREFIX truncation so the 1-based positional ids keep
- * their exact alignment (#1627 m1, carried over). Never throws.
+ * REFUSES the whole ledger (gate active, nothing usable, code-owned facts
+ * included — nothing settles behind an unreadable trace); an absent or empty
+ * trace is `unavailable` UNLESS the run derived code-owned comparison
+ * receipts, which ride a `valid` ledger on their own (#1821 review of
+ * #1825). An over-cap trace is bounded by PREFIX truncation so the 1-based
+ * positional ids keep their exact alignment (#1627 m1). Never throws.
  */
 export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger {
+  // #1821 (review of #1825): code-owned comparison facts are the runtime's
+  // own verified record and settle WITHOUT a tool trace — a no-tool or fork
+  // run must not discard receipts it already holds.
+  const derivedNpm = npmComparisonReceipts(input.npmPackageComparisons);
   const toolCalls = input.toolCalls;
   if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
-    return { state: "unavailable", receipts: [] };
+    return derivedNpm.length > 0
+      ? { state: "valid", receipts: derivedNpm }
+      : { state: "unavailable", receipts: [] };
   }
   const boundedCalls = toolCalls.length > MAX_EXECUTED_CALL_INDEX
     ? toolCalls.slice(0, MAX_EXECUTED_CALL_INDEX)
@@ -1001,7 +1010,7 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
   // guess) established the compared old→new pair. Failed, mismatched, or
   // partial comparisons are absent from the artifact and credit nothing;
   // `security_advisory` is never attributed (no advisory was checked).
-  for (const receipt of npmComparisonReceipts(input.npmPackageComparisons)) {
+  for (const receipt of derivedNpm) {
     if (receipts.some((existing) => existing.id === receipt.id)) continue;
     if (receipts.length >= MAX_EXECUTED_CALL_INDEX + MAX_CORPUS_DIFF_RECEIPTS + MAX_CI_RECEIPTS + MAX_NPM_COMPARISON_RECEIPTS) break;
     receipts.push(receipt);
@@ -1096,7 +1105,7 @@ function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
  * surface; never model text). */
 export type RowEvidenceStateValue =
   | "not-required"      // review-prompt/attention row: no receipt demand.
-  | "no-ledger"         // no executed-call trace: the gate is inert (pre-#1627 semantics).
+  | "no-ledger"         // no trace and nothing code-owned derived: the gate is inert (pre-#1627).
   | "trace-refused"     // trace present but unparseable: nothing is verifiable (fail closed).
   | "receipt-backed"    // validated receipts jointly cover the requirement.
   | "receipt-absent"    // no receipt carries any of the requirement's identity/kind.

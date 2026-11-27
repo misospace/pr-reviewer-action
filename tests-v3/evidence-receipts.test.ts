@@ -1295,3 +1295,33 @@ test("#1821: npm comparison receipts round-trip the strict ledger artifact", () 
   const ledger = npmLedger({ schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] });
   assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
 });
+
+// Review of #1825 (Major): the code-owned comparison facts are the runtime's
+// own verified record and must survive WITHOUT a tool trace — a no-tool or
+// fork run settles what its deterministic phase proved. With nothing derived
+// the no-native-loop case stays byte-identical (`unavailable`).
+test("#1821: a no-trace run with verified comparisons is a valid code-owned ledger; nothing derived stays unavailable", () => {
+  const artifact = { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] };
+  for (const noTrace of [{}, { toolCalls: [], toolResults: [] }] as const) {
+    const ledger = buildEvidenceLedger({ ...noTrace, npmPackageComparisons: artifact });
+    assert.equal(ledger.state, "valid", JSON.stringify(noTrace));
+    assert.deepEqual(ledger.receipts.map((receipt) => receipt.id).sort(), [
+      "npm-compare:types/node@26.6.10",
+      "npm-compare:types/node@26.6.7",
+    ]);
+    assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
+  }
+  // A present-but-malformed trace REFUSES everything, code-owned facts
+  // included: nothing settles behind a trace this runtime cannot read.
+  assert.equal(buildEvidenceLedger({ toolCalls: [null], toolResults: [], npmPackageComparisons: artifact }).state, "refused");
+  // Nothing usable derived → the byte-identical no-ledger case stands.
+  for (const nothing of [
+    undefined,
+    null,
+    { schema: "npm-package-comparisons/v1", verified: [] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "latest", newVersion: "2.0.0" }] },
+    { schema: "other/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+  ]) {
+    assert.equal(buildEvidenceLedger({ toolCalls: [], toolResults: [], npmPackageComparisons: nothing }).state, "unavailable");
+  }
+});

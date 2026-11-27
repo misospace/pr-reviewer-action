@@ -151,8 +151,9 @@ function validateDisposition(
  * fall back to legacy keyword matching in exactly that case; see
  * docs/required-checks.md.
  *
- * `ledger` (optional) is the #1657 evidence-receipt ledger — present only on
- * the native tool-loop surface. Without a ledger the receipt gate is inert
+ * `ledger` (optional) is the #1657 evidence-receipt ledger — present on the
+ * native tool-loop surface, and on a no-trace run whose own phase derived
+ * comparison receipts (#1821). Without a ledger the receipt gate is inert
  * (satisfaction folds on the pre-#1627 presence-and-shape rule); trusted
  * producer tags still govern which rows are merge-affecting — only untagged
  * `legacy` rows retain the old gating behavior.
@@ -224,10 +225,11 @@ export function evaluateRequiredCheckCoverage(
   // PRODUCER tagged objective with an explicit gate — never a row whose
   // wording merely looks material. Only a `satisfied` answer on such a row
   // is a positive evidence claim, and only on an ACTIVE ledger (a trace was
-  // present). The row's credit comes from validated receipts
-  // (`receipt-backed`) — never from a cited call id, never from argument
-  // overlap, and never from prose. `no-ledger` (no trace) keeps the
-  // pre-#1627 semantics; a refused trace fails every objective satisfaction
+  // present, or the run recorded code-owned receipts — #1821). The row's
+  // credit comes from validated receipts (`receipt-backed`) — never from a
+  // cited call id, never from argument overlap, and never from prose.
+  // `no-ledger` (no trace, nothing derived) keeps the pre-#1627 semantics;
+  // a refused trace fails every objective satisfaction
   // closed. `not_applicable` and `unmet` are never gated (applicability and
   // confirmed negatives are not positive evidence claims). Legacy,
   // attention, and review-prompt rows are never gated.
