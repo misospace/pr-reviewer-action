@@ -50,8 +50,12 @@ RUN apt-get update \
     && test -f /etc/ssl/certs/ca-certificates.crt \
     && rm -rf /var/lib/apt/lists/*
 
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/misospace/pr-reviewer-action"
 ENV NODE_ENV=production
 WORKDIR /app
+COPY LICENSE NOTICE /usr/share/doc/pr-reviewer-action/
+COPY LICENSES/MIT.txt /usr/share/doc/pr-reviewer-action/LICENSES/MIT.txt
 
 # The bundle is self-contained (pg is compiled in); no node_modules.
 COPY --from=build /build/dist/index.js /app/dist/index.js

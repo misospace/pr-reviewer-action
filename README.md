@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/misospace/pr-reviewer-action/actions/workflows/ci.yaml/badge.svg)](https://github.com/misospace/pr-reviewer-action/actions/workflows/ci.yaml)
 [![Latest release](https://img.shields.io/github/v/release/misospace/pr-reviewer-action)](https://github.com/misospace/pr-reviewer-action/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 
 **[Quick start](#-quick-start)** · **[Documentation](docs/README.md)** · **[Inputs](docs/inputs.md)** · **[Troubleshooting](docs/troubleshooting.md)** · **[Migrating from v2](docs/v3-migration.md)**
 
@@ -281,7 +281,7 @@ authorization flow, and the required `FORK_*` configuration.
 
 ## 📄 License
 
-[MIT](LICENSE)
+[AGPL-3.0-only](LICENSE). Earlier MIT grants remain valid; the original MIT notice is preserved in [LICENSES/MIT.txt](LICENSES/MIT.txt). See [licensing and corresponding source](docs/licensing.md).
 
 ---
 
