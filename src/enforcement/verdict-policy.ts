@@ -268,8 +268,10 @@ function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
 /**
  * #1016/#1656: a blocker-level finding the deterministic boundary demoted
  * to minor because its source claim could not be checked — unknown
- * evidence, not a refutation. `capped_from` and `grounding_status` are set
- * together only by `applyBlockerVerification`; the other capping paths set
+ * evidence, not a refutation. A demotion's `capped_from` and
+ * `grounding_status` are set together only by `applyBlockerVerification`
+ * (its recorded "grounded" decision sets the status alone and keeps the
+ * severity, so it cannot collide here); the other capping paths set
  * `capped_from` alone and never record a grounding status, so this cannot
  * collide with another capping path's `capped_from: "blocker"`.
  *
@@ -289,6 +291,47 @@ export function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean
   const original = finding.capped_from;
   if (original === "blocker" || original === "major") return true;
   return original === undefined && (finding.severity === "blocker" || finding.severity === "major");
+}
+
+/**
+ * #1835: a blocker/major finding the deterministic verification boundary
+ * never decided. Since #1835 the boundary records EVERY classified claim's
+ * decision on the finding (`grounding_status` includes "grounded"), so a
+ * missing status on an open blocker/major finding means no claim kind was
+ * classified: the finding's establishment rests on the reviewer's
+ * unqualified assertion alone. A deterministic capping path's decision
+ * (`capped_from`/`ci_capped`) counts as attested, so this is exactly the
+ * complement of the boundary's reach. Never true for non-blocking
+ * severities or always-non-blocking categories — those cannot carry a
+ * verdict, and the authority question is moot for them.
+ */
+export function isUnattestedBlockingFinding(finding: ArtifactFinding): boolean {
+  if (finding.severity !== "blocker" && finding.severity !== "major") return false;
+  if (isAlwaysNonBlockingCategory(finding.category)) return false;
+  if (finding.capped_from !== undefined || finding.ci_capped === true) return false;
+  return finding.grounding_status === undefined;
+}
+
+/**
+ * #1835: whether any open blocker/major finding carries the deterministic
+ * boundary's own attestation — a recorded `grounding_status: "grounded"`
+ * decision, or a deterministic capping path. The authoritative disposition
+ * consumes this as `attestedBlockingFindingOpen`: when the reviewer itself
+ * declared a material unknown, an UNATTESTED blocker/major finding can no
+ * longer carry `request_changes` on its own (its establishment rests on
+ * exactly the investigation the reviewer disclosed as unresolved), while an
+ * attested one keeps the categorical event. `hasBlockingOpenFinding`
+ * restricted to the deterministically attested subset, over the same final
+ * findings array.
+ */
+export function hasAttestedBlockingFinding(findings: unknown): boolean {
+  return Array.isArray(findings) && findings.some((finding) => {
+    const record = (finding ?? {}) as ArtifactFinding;
+    if (record.severity !== "blocker" && record.severity !== "major") return false;
+    if (isAlwaysNonBlockingCategory(record.category)) return false;
+    if (record.capped_from !== undefined || record.ci_capped === true) return true;
+    return record.grounding_status === "grounded";
+  });
 }
 
 /**

@@ -533,6 +533,9 @@ test("the strict verdict schema literal stays contractually identical", () => {
     // #1337: dependency-upgrade coverage accounting (null permitted, so a
     // non-dependency PR answers null under strict mode).
     "dependency_coverage",
+    // #1835: the declared materially-relevant unresolved questions (null
+    // permitted, so a review with no material unknown answers null).
+    "material_unknowns",
   ]);
   const props = schema.properties as Record<string, { enum?: string[]; type?: unknown }>;
   assert.deepEqual(props.verdict!.enum, ["approve", "request_changes"]);

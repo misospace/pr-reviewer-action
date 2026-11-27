@@ -36,7 +36,7 @@
  *   refutation → the proven count; an IN-SCOPE bare claim → a material
  *   unknown; an out-of-scope claim → disclosure only, never a veto).
  */
-import { isUnverifiedBlockingGrounding } from "../enforcement/verdict-policy.js";
+import { isUnverifiedBlockingGrounding, isUnattestedBlockingFinding } from "../enforcement/verdict-policy.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
 import { foldOwnershipForDependencyQuestions, type FinalSettlementRow } from "../enforcement/settlement.js";
 import { dispositionEvidence, type DispositionEvidence } from "./final.js";
@@ -51,6 +51,16 @@ export interface DispositionEvidenceParts {
   obligations: ReadonlyArray<ReviewObligation>;
   /** The final verified findings (for the unverified-blocking-claim floor). */
   findings: ReadonlyArray<unknown>;
+  /** #1835: the reviewer's declared materially-relevant unresolved
+   * questions (the parser's fail-closed `material_unknowns` normalization).
+   * Each becomes a MATERIAL `reviewer_declared_unknown` entry ruled by the
+   * reviewer; their presence also discloses every open blocker/major
+   * finding the verification boundary never decided as an
+   * `unverified_blocking_claim` — the reviewer's own record then contradicts
+   * the finding's categorical establishment. Absent/empty for legacy
+   * artifacts and runs that declared nothing, keeping their evidence bytes
+   * identical. */
+  declaredMaterialUnknowns?: ReadonlyArray<string>;
   /** The tool CAPABILITY failure reason (planning/execution error, every
    * call failed), or null. Never a call count. */
   toolCapabilityFailure: string | null;
@@ -268,6 +278,25 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   // claim) is a MATERIAL UNKNOWN, not a forced code blocker (#1656).
   for (const finding of parts.findings) {
     if (isUnverifiedBlockingGrounding(finding as never)) {
+      const record = finding as { file?: unknown; line?: unknown };
+      const file = typeof record.file === "string" ? record.file : "unlocated";
+      const line = typeof record.line === "number" && Number.isInteger(record.line) ? `:${record.line}` : "";
+      evidence.push(dispositionEvidence("unverified_blocking_claim", "deterministic", "material", `${file}${line}`));
+    }
+  }
+
+  // #1835: the reviewer's declared material unknowns are the reviewer's own
+  // materiality call — never re-derived or validated here. Beside them, an
+  // open blocker/major finding the boundary never decided is an unverified
+  // blocking claim: the reviewer's own "could not resolve this" contradicts
+  // the finding's categorical establishment.
+  const declaredUnknowns = parts.declaredMaterialUnknowns ?? [];
+  for (const subject of declaredUnknowns) {
+    evidence.push(dispositionEvidence("reviewer_declared_unknown", "reviewer", "material", subject));
+  }
+  if (declaredUnknowns.length > 0) {
+    for (const finding of parts.findings) {
+      if (!isUnattestedBlockingFinding(finding as never)) continue;
       const record = finding as { file?: unknown; line?: unknown };
       const file = typeof record.file === "string" ? record.file : "unlocated";
       const line = typeof record.line === "number" && Number.isInteger(record.line) ? `:${record.line}` : "";

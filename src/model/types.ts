@@ -367,6 +367,18 @@ export interface ParsedReviewVerdict {
   dependencyCoverage: import("./dependency-coverage.js").NormalizedDependencyCoverageAspect[] | null;
   /** True iff the model emitted the `dependency_coverage` key at all. */
   dependencyCoverageEmitted: boolean;
+  /**
+   * #1835: the reviewer's declared materially-relevant unresolved questions
+   * — bounded subject sentences, normalized fail-closed (a present but
+   * unusable serialization collapses to one generic subject, never to "no
+   * unknowns"). Empty unless usable declarations exist. This is the
+   * structured counterpart of the Unknowns or Needs Verification section:
+   * the reviewer's own materiality judgment, consumed by the authoritative
+   * disposition as `reviewer_declared_unknown` evidence.
+   */
+  materialUnknowns: string[];
+  /** True iff the model emitted the `material_unknowns` key at all. */
+  materialUnknownsEmitted: boolean;
   extra: Record<string, unknown>;
 }
 

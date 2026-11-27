@@ -959,3 +959,69 @@ test("#1094: the content gate's documented floor — a prose-indistinguishable s
     (error: unknown) => error instanceof VerdictParseFailure && error.kind === "known_secret_in_content",
   );
 });
+
+// ---------------------------------------------------------------------------
+// #1835: the declared materially-relevant unresolved questions. The
+// structured counterpart of the Unknowns or Needs Verification section —
+// the reviewer's own materiality judgment, normalized fail-closed and kept
+// out of the model-extras passthrough.
+// ---------------------------------------------------------------------------
+
+test("#1835: material_unknowns key-absence declares nothing", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "## OK" })));
+  assert.deepEqual(verdict.materialUnknowns, []);
+  assert.equal(verdict.materialUnknownsEmitted, false);
+});
+
+test("#1835: explicit null and an empty array both declare no unknowns", () => {
+  for (const value of ["null", "[]"]) {
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+      verdict: "approve", review_markdown: "## OK", material_unknowns: JSON.parse(value),
+    })));
+    assert.deepEqual(verdict.materialUnknowns, [], value);
+    assert.equal(verdict.materialUnknownsEmitted, true, value);
+  }
+});
+
+test("#1835: subjects are bounded single lines; the array is capped", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: [
+      "the canonical upstream text could not be fetched, so the byte comparison was not performed",
+      `padded subject ${"x".repeat(500)}`,
+      "another question",
+    ],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [
+    "the canonical upstream text could not be fetched, so the byte comparison was not performed",
+    `padded subject ${"x".repeat(185)}`,
+    "another question",
+  ]);
+  assert.equal(verdict.materialUnknownsEmitted, true);
+});
+
+test("#1835: a present but unusable serialization fails closed to one generic subject", () => {
+  // A non-array answer.
+  const nonArray = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: "the comparison was not performed",
+  })));
+  assert.deepEqual(nonArray.materialUnknowns, ["material_unknowns present but unusable"]);
+  // A non-empty array from which no usable subject survives.
+  const unusable = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: [42, null, "   "],
+  })));
+  assert.deepEqual(unusable.materialUnknowns, ["material_unknowns present but unusable"]);
+  // Mixed: usable entries survive alongside dropped ones.
+  const mixed = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: [7, "real question"],
+  })));
+  assert.deepEqual(mixed.materialUnknowns, ["real question"]);
+});
+
+test("#1835: material_unknowns never rides the model-extras passthrough", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "## OK", material_unknowns: ["unresolved comparison"],
+  })));
+  assert.equal("material_unknowns" in verdict.extra, false);
+});

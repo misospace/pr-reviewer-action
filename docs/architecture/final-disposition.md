@@ -78,7 +78,7 @@ Material codes (each can withhold approval when applicable to the changed
 behavior): `unread_affected_path`, `exact_head_evidence_unavailable`,
 `required_ci_failing`, `upstream_source_unavailable`,
 `unverified_blocking_claim`, `mandatory_requirement_unresolved`,
-`investigation_unavailable`.
+`investigation_unavailable`, `reviewer_declared_unknown` (#1835).
 
 Advisory codes (observable, never vetoing, never independent authorities):
 `proof_shape_mismatch`, `citation_allocation_failed`,
@@ -157,7 +157,26 @@ settle a state:
   "no gaps";
 - the exact-head CI floor reads the CI gate's already-paid conclusion — a
   KNOWN failure is always material, a PENDING one withholds only when the
-  #1594 head-bound evidence contract proves CI materially required.
+  #1594 head-bound evidence contract proves CI materially required;
+- #1835: the reviewer's own declared materially-relevant unresolved
+  questions (the parser's fail-closed `material_unknowns` normalization on
+  the verdict — the structured counterpart of the Unknowns or Needs
+  Verification section) each become a MATERIAL `reviewer_declared_unknown`
+  entry ruled by the reviewer. The disposition never validates the subject:
+  the reviewer judges what relevant evidence means. Their presence also
+  discloses every open blocker/major finding the verification boundary
+  never decided (`grounding_status` absent — since #1835 the boundary
+  records every classified claim's decision, including "grounded") as an
+  `unverified_blocking_claim`. The decision-table consequence: with a
+  declared unknown and `attestedBlockingFindingOpen === false`, an open
+  blocker/major finding can no longer carry `request_changes` on its own —
+  the reviewer's own record contradicts the categorical establishment — so
+  the disposition withholds as INCOMPLETE/COMMENT (the finding keeps its
+  severity and stays listed; approval is withheld either way). A
+  deterministically attested finding, an evidence-provider blocker or a
+  mechanically proven requirement keeps REQUEST_CHANGES; a caller that
+  cannot attest (the input absent, legacy readbacks) keeps the standing
+  authority, and runs that never declare unknowns are behavior-identical.
 
 The historical enforcement layer may keep rendering the model-authored
 `unmet` rows and forcing the artifact verdict (telemetry), but it is never a

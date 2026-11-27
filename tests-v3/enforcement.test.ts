@@ -8,6 +8,7 @@ import {
   VERIFICATION_ONLY_RELAXATION_NOTE,
   markRelaxationNotesSuperseded,
   reviewArtifactFromParsed,
+  declaredMaterialUnknownsOf,
   type ReviewArtifact,
 } from "../src/enforcement/artifact.js";
 import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseNonBlockingCategories, relaxCiOnlyVerdict, securityRiskFlagged } from "../src/enforcement/verdict-policy.js";
@@ -47,10 +48,27 @@ function parsed(overrides: Partial<ParsedReviewVerdict> = {}): ParsedReviewVerdi
 reviewTriageDecision: "unknown", reviewTriageReason: "",
 reviewTriageTargets: [],
 dependencyCoverage: null, dependencyCoverageEmitted: false,
+materialUnknowns: [], materialUnknownsEmitted: false,
 extra: {}, ...overrides,
   };
 }
 const policyOptions = { nonBlockingCategories: new Set(["tests", "docs"]), securityFlagged: false };
+
+test("#1835: material_unknowns maps onto the artifact only when declared, and reads back defensively", () => {
+  const declared = reviewArtifactFromParsed(parsed({
+    materialUnknowns: ["the canonical reference could not be fetched; the comparison was not performed"],
+  }));
+  assert.deepEqual(declared.material_unknowns, ["the canonical reference could not be fetched; the comparison was not performed"]);
+  assert.deepEqual(declaredMaterialUnknownsOf(declared), ["the canonical reference could not be fetched; the comparison was not performed"]);
+  // A null/empty declaration writes no key: a run that declared nothing
+  // stays byte-identical.
+  const clean = reviewArtifactFromParsed(parsed({ materialUnknowns: [] }));
+  assert.equal("material_unknowns" in clean, false);
+  assert.deepEqual(declaredMaterialUnknownsOf(clean), []);
+  // A malformed readback (the engine's untyped record) reads as none.
+  assert.deepEqual(declaredMaterialUnknownsOf({ material_unknowns: 42 }), []);
+  assert.deepEqual(declaredMaterialUnknownsOf(null), []);
+});
 
 test("artifact maps verdict, tri-state dispositions, findings, and extra fields", () => {
   const result = reviewArtifactFromParsed(parsed({

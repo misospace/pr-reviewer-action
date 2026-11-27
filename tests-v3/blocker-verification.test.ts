@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type PinnedActionWitness, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
+import { hasAttestedBlockingFinding, hasBlockingOpenFinding, isUnattestedBlockingFinding } from "../src/enforcement/verdict-policy.js";
 import { ACTION_GATES } from "../src/enforcement/action-gates.js";
 import type { ActionSourceReader } from "../src/enforcement/action-source.js";
 import type { ArtifactFinding } from "../src/enforcement/artifact.js";
@@ -45,7 +46,7 @@ test("literal marker in authoritative source is grounded without mutation", asyn
   assert.equal(result.findings[0]?.status, "grounded");
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("sanitized or unavailable source demotes marker claims appropriately", async () => {
@@ -137,7 +138,7 @@ test("grounded minor marker claims are marked in results without mutation", asyn
   const result = await verify([finding], async () => source("⟦redacted:credential⟧"));
   assert.equal(result.findings[0]?.status, "grounded");
   assert.equal(finding.severity, "minor");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("marker mentions that are not cited as committed content are left untouched", async () => {
@@ -322,7 +323,7 @@ test("input declaration claims are checked against the embedded contract registr
   ]);
   assert.equal(claims[2]?.severity, "blocker");
   assert.equal(claims[2]?.capped_from, undefined);
-  assert.equal(claims[2]?.grounding_status, undefined);
+  assert.equal(claims[2]?.grounding_status, "grounded");
   assert.equal(claims[0]?.severity, "minor");
   assert.equal(claims[0]?.grounding_status, "unverified");
   assert.equal(result.demoted, 2);
@@ -379,7 +380,7 @@ test("#1238 a genuinely missing declaration survives a refuted sibling claim", a
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 a claim about another action's inputs is never decided with this action's registry", async () => {
@@ -430,7 +431,7 @@ test("#1238 the claim's own clause decides its subject, not the whole message", 
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 a path citation does not stop a genuine missing declaration from grounding", async () => {
@@ -451,9 +452,9 @@ test("#1238 a path citation does not stop a genuine missing declaration from gro
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(pathFile.severity, "blocker");
-  assert.equal(pathFile.grounding_status, undefined);
+  assert.equal(pathFile.grounding_status, "grounded");
   assert.equal(manifest.severity, "blocker");
-  assert.equal(manifest.grounding_status, undefined);
+  assert.equal(manifest.grounding_status, "grounded");
 });
 
 test("#1238 a claim naming this action in a descriptive way still grounds", async () => {
@@ -469,7 +470,7 @@ test("#1238 a claim naming this action in a descriptive way still grounds", asyn
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 a refuted claim alone still demotes a finding that carries no confirmed defect", async () => {
@@ -551,7 +552,7 @@ test("#1264 an input-absence claim without the noun is grounded when the registr
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
   assert.equal(finding.capped_from, undefined);
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1264 no-noun behavior-verb absence claims stay unrecognized", async () => {
@@ -1161,7 +1162,8 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
     ["grounded", "input-absent:ai-key"],
   ]);
-  assert.ok(claims.every((finding) => finding.severity === "blocker" && finding.grounding_status === undefined));
+  assert.ok(claims.every((finding) => finding.severity === "blocker"
+    && (finding.grounding_status === undefined || finding.grounding_status === "grounded")));
 });
 
 test("#1238 a bare other-action subject downgrades contradiction to unverified", async () => {
@@ -1912,7 +1914,7 @@ test("#1240 a pinned absence claim the pinned registry lacks is grounded with th
     ["input_declaration", "grounded", "pinned-input-absent:ai-key"],
   ]);
   assert.equal(result.demoted, 0);
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1240 a pinned registry that is undecidable leaves the claim unverified", async () => {
@@ -2204,7 +2206,7 @@ test("#1238 a workflow-scoped presence claim the workflow witness confirms is gr
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 the workflow witness alone grounds a mapping claim the registry cannot speak for", async () => {
@@ -2231,7 +2233,7 @@ test("#1238 the workflow witness alone grounds a mapping claim the registry cann
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 without the workflow witness the same claim keeps today's behavior", async () => {
@@ -2312,7 +2314,7 @@ test("#1238 a genuine missing-input claim still grounds with the workflow witnes
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 an uncorroborated workflow claim is never refuted by a sibling presence claim", async () => {
@@ -2338,7 +2340,7 @@ test("#1238 an uncorroborated workflow claim is never refuted by a sibling prese
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 a negated mapping verb is an absence cue in a workflow-scoped clause", async () => {
@@ -2434,7 +2436,7 @@ test("#1238 a claim whose SUBJECT is the action is decided by the registry, neve
   assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
     ["input_declaration", "grounded", "input-declared:ai-api-key"],
   ]);
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1238 a workflow-scoped ABSENCE claim is never refuted by the declaration registry", async () => {
@@ -2639,7 +2641,8 @@ test("#1238 with a witness present NO workflow-scoped claim is ever refuted by t
     // severity, an unverified one is the #1016 unknown-evidence demotion
     // the strict mapping still holds as blocking.
     assert.ok(
-      result.findings.length === 0 || finding.grounding_status === undefined || finding.grounding_status === "unverified",
+      result.findings.length === 0 || finding.grounding_status === undefined || finding.grounding_status === "unverified"
+      || finding.grounding_status === "grounded",
       `only grounding or unknown evidence for: ${message}`,
     );
   }
@@ -2678,7 +2681,7 @@ test("#1238 a message that names a DIFFERENT workflow file does not use the witn
   ]);
   assert.equal(foreign.grounding_status, undefined);
   assert.equal(foreign.severity, "blocker");
-  assert.equal(own.grounding_status, undefined);
+  assert.equal(own.grounding_status, "grounded");
   assert.equal(own.severity, "blocker");
 });
 
@@ -2829,7 +2832,7 @@ test("#1262 a grounded sibling keeps the finding alive over its unverified gate 
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
   assert.equal(finding.capped_from, undefined);
 });
 
@@ -2857,7 +2860,7 @@ test("#1262 the source-read kinds share one read of the cited file", async () =>
   ]);
   assert.equal(result.demoted, 0);
   assert.equal(finding.severity, "blocker");
-  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.grounding_status, "grounded");
 });
 
 test("#1262 the shared read outlives the budget's last unit for its sibling kind", async () => {
@@ -2883,7 +2886,7 @@ test("#1262 the shared read outlives the budget's last unit for its sibling kind
   assert.equal(result.findings[19]?.reason, "evidence-verified");
   assert.equal(result.demoted, 19);
   assert.equal(mixed.severity, "blocker");
-  assert.equal(mixed.grounding_status, undefined);
+  assert.equal(mixed.grounding_status, "grounded");
   assert.equal(mixed.capped_from, undefined);
 });
 
@@ -2936,4 +2939,35 @@ test("#1262 combined-unverified with DIFFERENT unknown reasons per source-read k
   assert.equal(finding.severity, "minor");
   assert.equal(finding.capped_from, "blocker");
   assert.equal(finding.grounding_status, "unverified");
+});
+
+// ---------------------------------------------------------------------------
+// #1835: the attestation split. The boundary records EVERY classified
+// claim's decision on the finding, so an open blocker/major finding with no
+// recorded status is exactly one it never classified — the deterministic
+// complement the authoritative disposition consumes.
+// ---------------------------------------------------------------------------
+
+test("#1835: an unclassified blocker/major finding is unattested; a grounded or capped one is not", async () => {
+  const grounded = markerFinding({ severity: "major" });
+  await verify([grounded], async () => source("const value = '⟦redacted:credential⟧';"));
+  assert.equal(grounded.grounding_status, "grounded");
+  const undecided = markerFinding({ severity: "major", message: "the handler interpolates the request body unsanitized" });
+  const capped = markerFinding({ severity: "minor", capped_from: "blocker", grounding_status: "unverified" });
+  // Post-#1658 no deterministic pass synthesizes requirements findings, so a
+  // requirements-category finding is model-authored and unattested like any
+  // other claim the boundary never classified.
+  const requirements = markerFinding({ severity: "blocker", category: "requirements", message: "anything" });
+  // A verification-category finding can never carry a verdict (#977), so
+  // the attestation question is moot for it either way.
+  const verificationAsk = markerFinding({ severity: "major", category: "verification", message: "confirm the production flag" });
+  assert.equal(isUnattestedBlockingFinding(grounded), false);
+  assert.equal(isUnattestedBlockingFinding(undecided), true);
+  assert.equal(isUnattestedBlockingFinding(capped), false);
+  assert.equal(isUnattestedBlockingFinding(requirements), true);
+  assert.equal(isUnattestedBlockingFinding(verificationAsk), false);
+  assert.equal(hasAttestedBlockingFinding([grounded, undecided]), true);
+  assert.equal(hasAttestedBlockingFinding([undecided]), false);
+  assert.equal(hasAttestedBlockingFinding([]), false);
+  assert.equal(hasBlockingOpenFinding([undecided]), true);
 });

@@ -186,6 +186,46 @@ function normalizeRequiredCheckDispositions(
   return { present: true, dispositions, receipt };
 }
 
+/** #1835: bounds for the declared materially-relevant unresolved questions.
+ * The subject cap matches the disposition evidence seam's own subject bound,
+ * so a normalized subject never needs re-bounding downstream. */
+const MAX_MATERIAL_UNKNOWNS = 8;
+const MAX_MATERIAL_UNKNOWN_CHARS = 200;
+/** The fail-closed subject for a declaration the run cannot read. */
+const MATERIAL_UNKNOWNS_UNUSABLE = "material_unknowns present but unusable";
+
+/**
+ * #1835: normalize the model's declared materially-relevant unresolved
+ * questions (the structured counterpart of the Unknowns or Needs
+ * Verification section). Key-absence is "no declaration"; an explicit null
+ * or empty array is a clean "none". A present but unusable serialization —
+ * a non-array, or a non-empty array from which no usable subject survives —
+ * fails CLOSED to the one generic bounded subject, following the
+ * present-but-malformed-is-structured-incomplete precedent of
+ * `required_check_dispositions`: a declaration the run cannot read must
+ * still withhold certification, never read as "no unknowns".
+ */
+function normalizeMaterialUnknowns(
+  value: unknown,
+  present: boolean,
+): { present: boolean; unknowns: string[] } {
+  if (!present) return { present: false, unknowns: [] };
+  if (value === null) return { present: true, unknowns: [] };
+  if (!Array.isArray(value)) return { present: true, unknowns: [MATERIAL_UNKNOWNS_UNUSABLE] };
+  const unknowns: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const subject = item.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_MATERIAL_UNKNOWN_CHARS);
+    if (subject === "") continue;
+    unknowns.push(subject);
+    if (unknowns.length >= MAX_MATERIAL_UNKNOWNS) break;
+  }
+  if (value.length > 0 && unknowns.length === 0) {
+    return { present: true, unknowns: [MATERIAL_UNKNOWNS_UNUSABLE] };
+  }
+  return { present: true, unknowns };
+}
+
 function codepointLength(text: string): number {
   return Array.from(text).length;
 }
@@ -858,6 +898,10 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       // answer is read by the parser (fail-closed), never passed through
       // unparsed.
       && key !== "dependency_coverage"
+      // #1835: known structured field, not a model extra — the declared
+      // materially-relevant unresolved questions are read by the parser
+      // (fail-closed), never passed through unparsed.
+      && key !== "material_unknowns"
     ) {
       extra[key] = value;
     }
@@ -881,6 +925,11 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     parsed.dependency_coverage,
     "dependency_coverage" in parsed,
   );
+  // #1835: the declared materially-relevant unresolved questions (fail-closed).
+  const materialUnknowns = normalizeMaterialUnknowns(
+    parsed.material_unknowns,
+    "material_unknowns" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
@@ -902,6 +951,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     reviewTriageTargets: normalizeReviewTriageTargets(parsed),
     dependencyCoverage: dependencyCoverage.aspects,
     dependencyCoverageEmitted: dependencyCoverage.present,
+    materialUnknowns: materialUnknowns.unknowns,
+    materialUnknownsEmitted: materialUnknowns.present,
     extra,
   };
 }

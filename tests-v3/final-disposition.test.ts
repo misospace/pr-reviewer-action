@@ -1374,3 +1374,247 @@ test("#1645: thread reconciliation is provenance at the seam — an unverifiable
   assert.doesNotMatch(hostile.evidence[0]!.subject, /[\u0000-\u001f]/, "the subject stays a bounded single-line identity");
   assert.equal(decide(hostile.evidence).nativeEvent, "APPROVE");
 });
+
+// ---------------------------------------------------------------------------
+// #1835 — unsupported categorical findings vs. the establishment record.
+// The #712 incident shape: the reviewer asserted a categorical mismatch
+// (LICENSE vs. the canonical upstream text) while its own record showed the
+// comparison was never performed, and the sole major published native
+// REQUEST_CHANGES. Deterministic code cannot decide the truth of an
+// arbitrary natural-language claim; what it CAN establish is (a) the
+// verification boundary's own per-claim decision — recorded on the finding
+// since #1835, so an open blocker/major with no recorded decision is
+// UNATTESTED — and (b) the reviewer's own declared materially-relevant
+// unresolved questions. Together they decide whether the disposition may
+// certify the categorical defect.
+// ---------------------------------------------------------------------------
+
+/** The #712-shaped finding set: one undecided major (no claim kind matched,
+ * so the boundary never decided it) plus ordinary minors. */
+const UNDECIDED_MAJOR = {
+  severity: "major", category: "docs", file: "LICENSE", line: 1,
+  message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file",
+} as const;
+const DECLARED_COMPARISON_UNKNOWN =
+  "the canonical AGPL-3.0 text could not be fetched, so the byte comparison was not performed";
+
+const EVIDENCE_BASE = {
+  completenessChecks: [],
+  obligations: [],
+  findings: [],
+  toolCapabilityFailure: null,
+  toolFloorUnmet: false,
+  noEvidenceReason: null,
+  partialCoverageStopReason: null,
+  traceUnresolvedMaterial: false,
+  traceUnmetClaimed: false,
+  mechanicallyProvenUnmetRequirements: 0,
+  ciConclusion: null,
+  ciEvidenceContractActive: false,
+};
+
+test("#1835: the #712 shape — declared comparison unknown + undecided major => INCOMPLETE, never REQUEST_CHANGES", () => {
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [UNDECIDED_MAJOR, { severity: "minor", category: "docs", file: "LICENSE", line: 9, message: "minor" }],
+    obligations: [
+      { id: "obligation-3", source: "must_check", status: "unresolved", text: "establish upstream provenance" },
+      { id: "obligation-4", source: "must_check", status: "unresolved", text: "inspect the upstream release delta" },
+    ] as never,
+    partialCoverageStopReason: "request-error",
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  // The reviewer's own declaration arrives as reviewer-ruled material
+  // evidence, and the undecided major is disclosed as an unverified claim.
+  assert.ok(build.evidence.some((entry) => entry.code === "reviewer_declared_unknown" && entry.ruledBy === "reviewer"));
+  assert.ok(build.evidence.some((entry) => entry.code === "unverified_blocking_claim" && entry.subject === "LICENSE:1"));
+  const disposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      attestedBlockingFindingOpen: false,
+      evidence: build.evidence,
+    }),
+  });
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.equal(disposition.blockerProven, false);
+  assert.equal(disposition.approvalCertified, false);
+  // Round-trips through the serialized disposition contract.
+  const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
+  assert.equal(parsed?.kind, "incomplete");
+  assert.equal(parsed?.nativeEvent, "COMMENT");
+});
+
+test("#1835: a genuinely verified material mismatch still drives REQUEST_CHANGES", () => {
+  // The claim boundary positively grounded the finding (grounding_status
+  // recorded on the artifact since #1835): deterministic attestation beats
+  // the reviewer's unrelated declared unknown.
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [{ ...UNDECIDED_MAJOR, grounding_status: "grounded" as const }],
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  assert.ok(!build.evidence.some((entry) => entry.code === "unverified_blocking_claim"));
+  const disposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      attestedBlockingFindingOpen: true,
+      evidence: build.evidence,
+    }),
+  });
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.reason, "blocker_proven");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835: verified identical artifact, no remaining material concern => APPROVE", () => {
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [{ severity: "info", category: "docs", file: "LICENSE", line: 1, message: "byte-identical to the canonical text" }],
+    declaredMaterialUnknowns: [],
+  });
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "approve");
+  assert.equal(disposition.nativeEvent, "APPROVE");
+  assert.equal(disposition.approvalCertified, true);
+});
+
+test("#1835: a required comparison that remains genuinely unresolved => INCOMPLETE, not automatic APPROVE", () => {
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.match(disposition.recommendation, /INCOMPLETE/);
+  assert.ok(disposition.recommendation.includes(MATERIAL_CODE_CLAUSES.reviewer_declared_unknown));
+});
+
+test("#1835: a valid independent major survives an unrelated request-error stop", () => {
+  // The finding is deterministically attested (grounded from the exact-head
+  // source); the loop's later transport failure is disclosed, and it does
+  // not downgrade the finding — and with no declared unknown the finding's
+  // standing authority is exactly what it was before #1835.
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [{ ...UNDECIDED_MAJOR, grounding_status: "grounded" as const }],
+    partialCoverageStopReason: "request-error",
+    declaredMaterialUnknowns: [],
+  });
+  assert.ok(build.evidence.some((entry) => entry.code === "investigation_unavailable"));
+  const disposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      attestedBlockingFindingOpen: true,
+      evidence: build.evidence,
+    }),
+  });
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835: a clean review with a non-material acquisition failure stays APPROVE", () => {
+  // The configured call-count floor is advisory — a count never defines
+  // adequacy — and the reviewer declared no material unknown, so the
+  // approval certifies.
+  const build = buildDispositionEvidence({ ...EVIDENCE_BASE, toolFloorUnmet: true });
+  assert.deepEqual(build.evidence.map((entry) => entry.code), ["investigation_floor_unmet"]);
+  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.equal(disposition.kind, "approve");
+  assert.equal(disposition.nativeEvent, "APPROVE");
+});
+
+test("#1835: a material unknown rides the existing structured contract too", () => {
+  // The pre-#1835 route: an unresolved must_check obligation is already a
+  // material unknown that withholds certification.
+  const existing = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    completenessChecks: [{ check: "establish upstream provenance for the updated dependency", status: "unresolved", reason: null }],
+  });
+  assert.ok(existing.evidence.some((entry) => entry.code === "mandatory_requirement_unresolved" && entry.materiality === "material"));
+  assert.equal(computeFinalDisposition(input({ evidence: existing.evidence })).kind, "incomplete");
+  // The #1842-encouraged route: the reviewer reports the unresolved
+  // question with a conservative verdict and NO categorical finding.
+  const declared = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  const disposition = computeFinalDisposition(input({
+    verdict: "request_changes",
+    evidence: declared.evidence,
+  }));
+  assert.equal(disposition.kind, "incomplete");
+  assert.ok(disposition.materialUnknowns.some((entry) => entry.code === "unverified_blocking_claim"));
+});
+
+test("#1835: without a declared unknown the standing authority of an undecided blocker is unchanged", () => {
+  // Back-compat pin: #1835 adds NO new evidence and NO new withholding for
+  // runs that never declare an unknown (every pre-#1835 artifact).
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [UNDECIDED_MAJOR],
+    declaredMaterialUnknowns: [],
+  });
+  assert.deepEqual(build.evidence, []);
+  const disposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      attestedBlockingFindingOpen: false,
+      evidence: build.evidence,
+    }),
+  });
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+  // A legacy caller that cannot attest (the input absent) keeps the
+  // standing authority even with a declaration on the artifact.
+  const legacy = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [UNDECIDED_MAJOR],
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  const legacyDisposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      evidence: legacy.evidence,
+    }),
+  });
+  assert.equal(legacyDisposition.kind, "request_changes");
+});
+
+test("#1835: same object — the undermined major publishes COMMENT, INCOMPLETE wording and handoff agreement", async () => {
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings: [UNDECIDED_MAJOR],
+    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
+  });
+  const disposition = computeFinalDisposition({
+    ...input({
+      verdict: "request_changes",
+      blockingFindingOpen: true,
+      attestedBlockingFindingOpen: false,
+      evidence: build.evidence,
+    }),
+  });
+  const api = new MockPublishApi();
+  await publishReview(publishInput({
+    finalDisposition: disposition,
+    verdict: "request_changes",
+    reviewResult: reviewResultFromDisposition(disposition, { strict: true, openFindings: 1 }),
+    findings: [{ ...UNDECIDED_MAJOR }],
+  }), api, { diffText: "" });
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes(disposition.recommendation));
+  const handoff = handoffPayload(body);
+  // The marker/handoff word for a material-unknown abstention is `partial`,
+  // derived from the SAME disposition — never the proven-defect word.
+  assert.equal(handoff.review_result, "partial");
+});
