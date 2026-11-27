@@ -699,20 +699,38 @@ export function normalizeExternalChecks(
       if (completed !== 0) return completed > 0;
       return isPending(candidate) && !isPending(existing);
     };
+    const actionsRows: { run: unknown; index: number }[] = [];
+    // Distinct check-run ids within one Actions run are distinct legs, not provable retries; retain the red leg for failure-first evaluation (#1820).
     for (const [index, run] of survivingRuns.entries()) {
       const name = jqAlt(jqField(run, "name"), "(unnamed)");
-      const key = `${typeof name}:${JSON.stringify(name)}`;
+      const appSlug = nestedField(run, "app", "slug");
+      const isActions = appSlug === "github-actions";
+      const actionsUrl = [jqField(run, "details_url"), jqField(run, "html_url")]
+        .find((url): url is string => typeof url === "string" && /\/actions\/runs\/(\d+)/.test(url));
+      const runMatch = actionsUrl?.match(/\/actions\/runs\/(\d+)/);
+      const fallbackId = jqField(run, "id");
+      const hasId = fallbackId !== null && fallbackId !== undefined;
+      const legKey = hasId ? `leg:${typeof fallbackId}:${JSON.stringify(fallbackId)}` : "leg:unidentified";
+      const key = isActions
+        ? `${String(appSlug)}:${runMatch?.[1] ?? (!hasId ? "check:unidentified" : `check:${typeof fallbackId}:${JSON.stringify(fallbackId)}`)}:${legKey}:${typeof name}:${JSON.stringify(name)}`
+        : `${appSlug === undefined || appSlug === null ? "" : String(appSlug)}:${typeof name}:${JSON.stringify(name)}`;
+      if (isActions && runMatch === undefined && !hasId) {
+        actionsRows.push({ run, index });
+        continue;
+      }
       const existing = latestByName.get(key);
       if (!existing || newer(run, existing.run)) latestByName.set(key, { run, index });
     }
-    const checkRuns = [...latestByName.values()]
+    const checkRuns = [...latestByName.values(), ...actionsRows]
       .sort((a, b) => a.index - b.index)
       .map(({ run }): ExternalCheck => {
         const completed = jqField(run, "status") === "completed";
         const conclusion = completed ? rawConclusion(jqField(run, "conclusion")) : undefined;
+        const isActions = nestedField(run, "app", "slug") === "github-actions";
         return {
           name: jqAlt(jqField(run, "name"), "(unnamed)"),
           state: checkRunState(run),
+          origin: isActions ? "actions" : "check",
           ...(conclusion === undefined ? {} : { conclusion }),
         };
       });
@@ -729,6 +747,7 @@ export function normalizeExternalChecks(
         return {
           name: jqAlt(jqField(status, "context"), "(status)"),
           state: statusState(status),
+          origin: "status",
           ...(conclusion === undefined ? {} : { conclusion }),
         };
       });
@@ -739,7 +758,7 @@ export function normalizeExternalChecks(
     const aggregate = jqAlt(jqField(combined, "state"), "pending");
     if (jqCompare(total, 0) > 0 && (aggregate === "success" || aggregate === "failure" || aggregate === "error")) {
       const state = jqField(combined, "state");
-      return [{ name: "(combined)", state: state === "failure" || state === "error" ? "failure" : "success" }];
+      return [{ name: "(combined)", state: state === "failure" || state === "error" ? "failure" : "success", origin: "status" }];
     }
     return [];
   } catch (error) {

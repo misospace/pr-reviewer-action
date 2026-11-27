@@ -136,6 +136,7 @@ export interface ExternalCheck {
   state: string;
   /** Raw forge conclusion/state for review context; absent when pending or unavailable. */
   conclusion?: string | undefined;
+  origin?: "actions" | "check" | "status" | undefined;
 }
 
 export interface ExternalChecksOptions extends CiBoundOptions {

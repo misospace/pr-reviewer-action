@@ -227,22 +227,22 @@ test("external-check auto mode excludes only the uniquely identified pending sta
     { context: "external", state: "success", status: "success" },
   ] });
   assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"], selfStatusIndex: 1 }), [
-    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
-    { name: "external", state: "success", conclusion: "success" },
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "external", state: "success", conclusion: "success", origin: "status" },
   ]);
   assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"] }), [
-    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
-    { name: "self", state: "pending", conclusion: "pending" },
-    { name: "external", state: "success", conclusion: "success" },
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "self", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "external", state: "success", conclusion: "success", origin: "status" },
   ]);
   assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: [] }), [
-    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
-    { name: "self", state: "pending", conclusion: "pending" },
-    { name: "external", state: "success", conclusion: "success" },
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "self", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "external", state: "success", conclusion: "success", origin: "status" },
   ]);
   assert.deepEqual(normalizeExternalChecks("{}", combined, "", ""), [
-    { name: "self", state: "pending", conclusion: "pending" },
-    { name: "external", state: "success", conclusion: "success" },
+    { name: "self", state: "pending", conclusion: "pending", origin: "status" },
+    { name: "external", state: "success", conclusion: "success", origin: "status" },
   ]);
 });
 
@@ -252,8 +252,8 @@ test("external-check fold: commit statuses preserve duplicate contexts", () => {
     { context: "ci/build", state: "failure" },
   ] });
   assert.deepEqual(normalizeExternalChecks("{}", statuses, "", ""), [
-    { name: "ci/build", state: "success", conclusion: "success" },
-    { name: "ci/build", state: "failure", conclusion: "failure" },
+    { name: "ci/build", state: "success", conclusion: "success", origin: "status" },
+    { name: "ci/build", state: "failure", conclusion: "failure", origin: "status" },
   ]);
 });
 
@@ -266,25 +266,68 @@ test("external-check fold: superseded runs collapse to the newest raw conclusion
     { name: "neutral", status: "completed", conclusion: "neutral" },
   ] });
   assert.deepEqual(normalizeExternalChecks(runs, "{}", "", ""), [
-    { name: "build", state: "success", conclusion: "success" },
-    { name: "cancelled-only", state: "failure", conclusion: "cancelled" },
-    { name: "skipped", state: "success", conclusion: "skipped" },
-    { name: "neutral", state: "success", conclusion: "neutral" },
+    { name: "build", state: "success", conclusion: "success", origin: "check" },
+    { name: "cancelled-only", state: "failure", conclusion: "cancelled", origin: "check" },
+    { name: "skipped", state: "success", conclusion: "skipped", origin: "check" },
+    { name: "neutral", state: "success", conclusion: "neutral", origin: "check" },
   ]);
   const olderPending = JSON.stringify({ check_runs: [
     { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:01:00Z" },
     { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:04:00Z", completed_at: "2026-01-01T00:05:00Z" },
   ] });
   assert.deepEqual(normalizeExternalChecks(olderPending, "{}", "", ""), [
-    { name: "unit", state: "failure", conclusion: "cancelled" },
+    { name: "unit", state: "failure", conclusion: "cancelled", origin: "check" },
   ], "a newer completed rerun displaces an older stuck pending run and preserves raw conclusion");
 
   const newerPending = JSON.stringify({ check_runs: [
     { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:01:00Z", completed_at: "2026-01-01T00:02:00Z" },
     { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:04:00Z" },
   ] });
-  assert.deepEqual(normalizeExternalChecks(newerPending, "{}", "", ""), [{ name: "unit", state: "pending" }],
+  assert.deepEqual(normalizeExternalChecks(newerPending, "{}", "", ""), [{ name: "unit", state: "pending", origin: "check" }],
     "a genuinely newer pending rerun remains live and keeps the gate waiting");
+});
+
+test("external-check fold: id-less same-name Actions rows remain distinct", () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "Unit Tests", app: { slug: "github-actions" }, status: "completed", conclusion: "failure" },
+    { name: "Unit Tests", app: { slug: "github-actions" }, status: "completed", conclusion: "success" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(runs, "{}", "", ""), [
+    { name: "Unit Tests", state: "failure", conclusion: "failure", origin: "actions" },
+    { name: "Unit Tests", state: "success", conclusion: "success", origin: "actions" },
+  ]);
+});
+
+test("external-check fold: same-run Actions rows collapse only when check-run ids match", () => {
+  const run = (id: number, conclusion: string, started: string) => ({
+    id, name: "Unit Tests", app: { slug: "github-actions" }, details_url: `https://x/actions/runs/100/job/${id}`,
+    status: "completed", conclusion, started_at: started,
+  });
+  const distinct = normalizeExternalChecks(JSON.stringify({ check_runs: [
+    run(1, "failure", "2026-01-01T00:00:00Z"),
+    run(2, "success", "2026-01-02T00:00:00Z"),
+  ] }), "{}", "", "");
+  assert.deepEqual(distinct?.map((check) => check.state), ["failure", "success"]);
+  const duplicate = normalizeExternalChecks(JSON.stringify({ check_runs: [
+    run(1, "failure", "2026-01-01T00:00:00Z"),
+    run(1, "success", "2026-01-02T00:00:00Z"),
+  ] }), "{}", "", "");
+  assert.deepEqual(duplicate?.map((check) => check.state), ["success"]);
+});
+
+test("external-check fold: Actions runs and producer apps retain distinct same-name rows", () => {
+  const runs = JSON.stringify({ check_runs: [
+    { id: 1, name: "Unit Tests", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/100/job/1", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:00:00Z" },
+    { id: 2, name: "Unit Tests", app: { slug: "github-actions" }, details_url: "https://x/actions/runs/200/job/2", status: "completed", conclusion: "success", started_at: "2026-01-02T00:00:00Z" },
+    { id: 3, name: "Unit Tests", app: { slug: "other-app" }, status: "completed", conclusion: "success" },
+  ] });
+  const result = normalizeExternalChecks(runs, JSON.stringify({ statuses: [{ context: "Unit Tests", state: "success" }] }), "", "");
+  assert.deepEqual(result, [
+    { name: "Unit Tests", state: "failure", conclusion: "failure", origin: "actions" },
+    { name: "Unit Tests", state: "success", conclusion: "success", origin: "actions" },
+    { name: "Unit Tests", state: "success", conclusion: "success", origin: "check" },
+    { name: "Unit Tests", state: "success", conclusion: "success", origin: "status" },
+  ]);
 });
 
 test("external-check own workflow exclusion: run id, suite siblings, and guarded workflow/job names", () => {
@@ -296,10 +339,10 @@ test("external-check own workflow exclusion: run id, suite siblings, and guarded
     { name: "review / foreign", status: "completed", conclusion: "failure", check_suite: { id: 103 }, app: { slug: "other-app" } },
   ] });
   assert.deepEqual(normalizeExternalChecks(runs, "{}", "42", "", { githubWorkflow: "review", githubJob: "test" }), [
-    { name: "review / foreign", state: "failure", conclusion: "failure" },
+    { name: "review / foreign", state: "failure", conclusion: "failure", origin: "check" },
   ]);
   assert.deepEqual(normalizeExternalChecks(runs, "{}", "", "", { githubWorkflow: "review", githubJob: "test" }), [
-    { name: "review / foreign", state: "failure", conclusion: "failure" },
+    { name: "review / foreign", state: "failure", conclusion: "failure", origin: "check" },
   ]);
   const noIdentity = JSON.stringify({ check_runs: [
     { name: "review / unit", status: "completed", conclusion: "success", app: { slug: "github-actions" } },
@@ -318,9 +361,9 @@ test("external-check fold: self-exclusion, state mapping, combined fallback, tra
     { name: "wip", status: "in_progress" },
   ] });
   const combined = JSON.stringify({ statuses: [{ context: "pr-reviewer-action", state: "pending" }, { context: "ci", state: "error" }] });
-  assert.equal(jqCompact(normalizeExternalChecks(runs, combined, "9", "")), '[{"name":"prefix","state":"success","conclusion":"success"},{"name":"wip","state":"pending"},{"name":"ci","state":"failure","conclusion":"error"}]');
+  assert.equal(jqCompact(normalizeExternalChecks(runs, combined, "9", "")), '[{"name":"prefix","state":"success","origin":"check","conclusion":"success"},{"name":"wip","state":"pending","origin":"check"},{"name":"ci","state":"failure","origin":"status","conclusion":"error"}]');
   assert.equal(normalizeExternalChecks("", "\n", "", ""), null);
-  assert.deepEqual(normalizeExternalChecks("{}", JSON.stringify({ total_count: 2, state: "success", statuses: [] }), "", ""), [{ name: "(combined)", state: "success" }]);
+  assert.deepEqual(normalizeExternalChecks("{}", JSON.stringify({ total_count: 2, state: "success", statuses: [] }), "", ""), [{ name: "(combined)", state: "success", origin: "status" }]);
   assert.deepEqual(normalizeExternalChecks("not json", "{}", "", ""), []);
   assert.deepEqual(normalizeExternalChecks("[1]", "{}", "", ""), []);
 });
@@ -829,7 +872,7 @@ test("forgejo review threads fetch each integer review's comments; externalCheck
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example/sub/", token: "t", fetchImpl });
   assert.deepEqual(await adapter.listReviewThreads(), { ok: true, data: [] });
-  assert.deepEqual(await adapter.externalChecks("abc"), [{ name: "ci", state: "success", conclusion: "success" }]);
+  assert.deepEqual(await adapter.externalChecks("abc"), [{ name: "ci", state: "success", conclusion: "success", origin: "status" }]);
   // The reviews list is read page by page (page 2 is empty, so the listing
   // ends exhausted); the non-integer review id is still skipped.
   assert.deepEqual(seen.map((s) => s.url), [

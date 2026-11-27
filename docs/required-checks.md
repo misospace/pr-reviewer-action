@@ -226,10 +226,16 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   `all tests`) with no narrow scope: a bare generic `test`/`tests`/
   `test (24)` name does not prove which suite ran, and one narrow matrix leg
   cannot discharge it. A generic ask accepts any test execution.
-  **Failure-first precedence** is scoped the same way: an
-  in-scope test-named check that went red on the exact head refutes
-  discharge even when a sibling matrix leg is green, while a red unrelated
-  scope neither refutes nor discharges. A full-suite ask also needs every
+  **Failure-first precedence** is scoped the same way: a differently named
+  in-scope test check that went red on the exact head ref refutes discharge
+  even when a differently named sibling matrix leg is green, while a red
+  unrelated scope neither refutes nor discharges. Same-named rows with
+  distinct check-run ids inside one workflow run reach this fold as separate
+  rows: a same-name green never discards a same-name red, so a red leg
+  contradicts no matter which leg of the run it came from (the producer fold
+  below owns the retention rule; GitHub's default `filter=latest` read shapes
+  which rows arrive but is not treated as proof of retry semantics). A
+  full-suite ask also needs every
   in-scope test check settled green: a pending leg, or a `skipped`/`neutral`
   leg collapsed to state `success`, keeps it unresolved beside a green
   sibling (the explicit conclusion is required, and one leg that did not run
@@ -248,8 +254,12 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 - **everything else stays unresolved** with a bounded reason code
   (`ci-evidence-no-ci-evidence`, `-head-mismatch`,
   `-no-matching-test-check` — including a check whose scope does not prove
-  the ask, `-test-check-not-success`): capability, missing-source, transport,
-  budget and timeout shaped failures are coverage, never satisfaction.
+  the ask, `-configured-test-job-missing` (#1820),
+  `-configured-identity-ambiguous` (#1820 same-named rows),
+  `-ci-workflow-surface-untrusted` (#1820 masquerade fence),
+  `-test-check-not-success`):
+  capability, missing-source, transport, budget and timeout shaped failures
+  are coverage, never satisfaction.
 - **derived rows and `unmet` (forcing) rows are never reconciled** by CI
   evidence (#1449/#1505/#1381 semantics unchanged — discharge only from
   validated evidence, contradiction only strengthens the approval fence).
@@ -263,12 +273,43 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   if bounding would change a check's decision identity (test-execution
   classification, proved scope, or exhaustive identity), the gate emits NO
   evidence line rather than let a truncated skipped test row read as
-  disposable context. Every test-execution row is retained; only non-test
-  context rows may be trimmed (failed rows first). If the complete test-row
-  set cannot fit, the gate also emits NO evidence line — an artifact missing
-  a skipped, pending, or otherwise incomplete test leg could otherwise look
-  falsely complete and discharge a full-suite ask. A final strict-parser
-  round-trip means an oversized or malformed artifact is never emitted.
+  disposable context. Test-execution and exact Actions rows are decision
+  evidence: they are retained up to the same-name bound below, and if the
+  bounded required-row set cannot fit, the gate emits NO evidence line — an
+  artifact missing a skipped, pending, or otherwise incomplete test leg could
+  otherwise look falsely complete and discharge a full-suite ask. Only
+  non-test context rows may be trimmed (failed rows first). A row whose name
+  or conclusion bounding altered is marked `clipped` in the artifact so it can
+  never serve as an exact identity match downstream. Each row also carries
+  its producer `origin`: `actions` (the forge's native Actions check run —
+  on GitHub, `app.slug === "github-actions"`), `check` (a check run from
+  another integration), or `status` (a commit-status context). Same-name
+  check runs from different workflow runs are no longer collapsed into one
+  row: a same-name green from one workflow can never discard a same-name red
+  from another, which for unconfigured repositories can only make more
+  failure rows visible, never fewer. Same-name Actions check runs with
+  distinct check-run ids within one workflow run are retained as distinct
+  jobs/legs; `filter=latest` is not proof that same-name rows are retries, and
+  a same-name green can never discard a same-name red. The fold collapses only
+  identical ids (provable duplicates); id-less rows keep their existing
+  behavior. GitHub's default `filter=latest` read remains useful context, but
+  it does not establish retry semantics for distinct ids. A retained red leg
+  fails the CI wait (failure-first): the forge's own latest-filtered view
+  governs which rows appear, and a red leg is cleared by a new head, not by
+  trusting an assumption about attempts. When one name would flood the
+  artifact, the gate keeps at most two rows per name, producer class, and
+  exact/clipped axis — the worst state (a red leg contradicts, a pending or
+  `skipped`-collapsed leg blocks) and the newest row, which together keep
+  every consumer outcome intact: the discharge candidate, the blocking leg,
+  and enough same-name Actions rows for the ambiguity refusal to read (when
+  worst and newest are the same row the outcome is still unresolved, with the
+  more specific reason code lost) —
+  so a many-leg matrix can never spend the whole 50-row budget on one name;
+  names beyond the 50-row or byte caps still refuse the whole artifact. Non-Actions check
+  runs keep the #995 newest-wins collapse: their key carries no run identity,
+  so same-app same-name rows are indistinguishable from retries. A final
+  strict-parser round-trip means an oversized or malformed artifact is never
+  emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and
@@ -276,6 +317,212 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   instead of recomputing the raw #750 coverage — which would re-list a
   CI-discharged row as unresolved and omit a contradicted one. A run dir
   without the artifact keeps the pre-#1594 recompute exactly.
+
+## Trusted explicit CI test-job identities (#1820)
+
+Configured discharge requires an exact GitHub Actions check-run producer.
+Forgejo and GitLab provide commit statuses without per-check producer identity,
+so configured asks remain unresolved there by design; the workflow-surface
+fence remains the second guard.
+
+Name heuristics read the check NAME. Some real full-suite jobs do not carry a
+test word — this repository's own `validate-typescript` and
+`validate-runtime-floor` — so their green runs could not discharge a
+full-suite ask. #1820 adds a trusted way to name those jobs; the
+reconciliation above is unchanged for every repository that does not opt in.
+
+- **Where**: an optional repository-owned file, read from the PR's base ref
+  (never the PR head) with the same trust rules as repository config:
+  `.github/pr-reviewer-ci-tests.yml`, then `.pr-reviewer-ci-tests.yml`.
+  Implementation: `src/config/ci-test-jobs.ts`. A PR cannot declare its own
+  job trusted. For PRs into the protected default branch, only a change
+  merged there can alter the file; for PRs into other branches, whoever can
+  push the target branch controls it — the same base-ref trust every
+  repository-config file already has. Both the config and the workflow-surface
+  scan read only Git objects of that ref (`git show` / `git ls-tree`), never
+  the checked-out working tree, so a head that replaces these paths with
+  symlinks to content outside the repository cannot redirect the configuration
+  or mint a job identity.
+- **Shape**: a `test-jobs` mapping from the check identity to the scope it
+  proves. The identity is the check name the forge exposes, matched exactly
+  (after trimming; case-sensitive — a mismatch stays unresolved, the
+  conservative side):
+
+  ```yaml
+  test-jobs:
+    validate-typescript: full-suite
+    validate-runtime-floor: full-suite
+  ```
+
+- **Scopes**: `full-suite`, or one narrow scope (`unit`, `integration`,
+  `e2e`, `smoke`, `acceptance`, `contract`, `regression`, `performance`,
+  `load`, `browser`, `ui`, `api`, `functional`, `mutation`, `fuzz`) — the
+  same scope vocabulary the name heuristics use.
+- **Authority**: for a configured check, the configured scope replaces the
+  name-derived scope entirely only when the evidence row is an exact, unclipped
+  GitHub Actions check run (`origin: "actions"`) and exactly one such row has
+  the configured name. Two same-named rows — from different workflow runs or two
+  legs of one matrix-shaped job on one workflow run — refuse the configured
+  identity with `configured-identity-ambiguous`; same-run red+green contradicts
+  via failure-first evaluation. Commit-status
+  contexts and third-party check runs never satisfy configured identities;
+  those rows can still satisfy the pre-#1820 name heuristics. Unconfigured
+  checks keep the name heuristics.
+- **Config-time identity validation**: every configured identity must name
+  exactly one single-leg static job in the base ref's `.github/workflows`; a
+  job without `name:` contributes its key, and a static `name:` contributes
+  that name only when the job has no `strategy.matrix` (a `strategy` carrying
+  only `fail-fast`/`max-parallel` still runs one leg). Configured matrix jobs
+  are refused because the check-run payload cannot prove every leg ran
+  (missing-leg). Undeclared or multiply declared identities are refused with a
+  warning. Any
+  unreadable, oversized, invalid-YAML, or jobs-less `.yml`/`.yaml` workflow, or
+  any PR-controlled job display name, refuses ALL configured identities with a
+  warning while the
+  workflow-surface masquerade fence stays armed (see below). Non-YAML files are
+  skipped. The scan is bounded to 32 YAML files, 256 KiB per file, 1 MiB
+  aggregate, and one shared 10s deadline. It is deliberately GitHub-scoped
+  because configured discharge is GitHub-Actions-only; the workflow-surface
+  fence remains the broader forge-agnostic guard. Only `.yml`/`.yaml` files
+  (any case) are scanned; other files under `.github/workflows` cannot mint
+  check-run names and are skipped. Each expression span is accepted only when
+  it references `matrix`, `strategy`, or admin-controlled `vars` (dot access,
+  or a bracket index that is a quoted literal — any other bracket index is an
+  unprovable expression), and contains
+  no PR-controlled/launderable context (`github`, `env`, `needs`, `steps`,
+  `secrets`, or `inputs`). A dynamic name is accepted only when its provenance
+  is provable: a name that interpolates `matrix.*` requires the job's
+  `strategy.matrix` to be statically enumerable — a literal mapping with no
+  expression anywhere inside it (expressions in `fail-fast` or `max-parallel`
+  do not affect rendered names) — and the job must not be a reusable-workflow
+  call (`uses:` renders the name inside the callee). Literal-matrix dynamic
+  display names are enumerated as a bounded superset of base values and
+  `include` values, without an expression parser; an `include` entry that
+  does not expand an existing combination becomes a standalone leg whose
+  unlisted referenced keys render as the empty string, and that render is
+  enumerated too. A matrix combining `exclude` with `include` is
+  unenumerable (`exclude` runs before `include` matching and can turn an
+  entry standalone or remove a leg the product would count); `exclude` alone
+  only shrinks the leg set, so the enumeration stays a safe superset. Any
+  possible render colliding
+  with a configured identity refuses it. A matrix-interpolating name that
+  cannot be enumerated refuses ALL configured identities (fail closed, not
+  PR-mintable because its values are literals in the trusted base). A matrix
+  laundered from an expression (for example
+  `strategy.matrix: ${{ fromJSON(...) }}`, where the producing job may run a
+  script checked out from the PR head) or an absent matrix makes a
+  `matrix.*` name PR-mintable. A
+  dynamic name that does not interpolate `matrix.*` at all (for example a
+  `vars`-only name) is accepted on a regular job but contributes no names; this
+  remains an operator-authority residual because values come from repo
+  settings, not the PR. Any dynamic name on a reusable-workflow call (`uses:`)
+  is PR-mintable regardless of what it interpolates (#1820 re-review). A
+  PR-mintable name or an unreadable surface refuses ALL configured discharge;
+  an identity that names no single static job is refused individually, but
+  remains DECLARED: it stays a required leg for its declared scope, and
+  because evidence can never match a refused identity the ask stays
+  unresolved instead of a surviving green identity settling it (#1820
+  re-review). Only an entry that never declared a usable scope (an invalid
+  scope value, an empty or overlong identity, a cap overflow, or a duplicate)
+  disappears without trace beyond its warning, because there is no scope to
+  require. When every declared identity ends up
+  unhonored — a refused surface, malformed YAML that still declares entries,
+  or declarations that all failed validation — the resolver computes the real
+  workflow-surface state, reports the identities as refused, and the
+  masquerade fence below stays armed even though no identity remains —
+  refusing identities must never silently disable the fence that a
+  PR-added-workflow masquerade would otherwise trip. The check-run payload
+  carries no workflow
+  identity, so the trusted base surface is the only statement of which names
+  the repository's own CI can mint. A reusable-workflow caller contributes its
+  job key even though the check name may come from an inner job; runtime
+  matrix-leg names remain outside `staticNames`, so an identity can never be
+  validated against them. Those conservative mismatches can leave a
+  validated-but-never-satisfiable identity unresolved.
+- **The declared set defines the suite**: when a full-suite ask is settled
+  against a config that declares `full-suite` jobs, EVERY configured
+  `full-suite` identity must appear in the head-bound evidence and be green.
+  This every-declared-leg rule also applies to generic asks (every
+  `full-suite`-declared leg) and narrow asks (every leg declaring one of the
+  requested scopes), not only full-suite asks. A declaration refused at
+  config load (matrix-origin, ambiguous, or naming no static job) is still a
+  declared leg for its scope: it can never be satisfied, so the ask stays
+  unresolved rather than being outvoted by a surviving green identity — and
+  the same holds when NO identity survived, because refusing declarations
+  must not silently reopen the heuristic channel under an ask the operator's
+  declaration covers. Pre-#1820 name heuristics therefore settle an ask only
+  when no declaration covers it: no config file, or only entries that never
+  declared a usable scope (no scope a required leg could be built from). One
+  missing leg keeps the row unresolved
+  (`configured-test-job-missing`) — even when an unrelated
+  heuristic-matched `Tests` job is green. A red configured leg still
+  contradicts (failure-first, unchanged); a pending or skipped-collapsed leg
+  still blocks (unchanged).
+- **Narrow and generic asks** discharge from a configured job only for its
+  configured scope: a `full-suite` job proves a generic "run tests" ask, not
+  a narrow `run integration tests` ask; a narrow-declared job proves only
+  asks for its own scope.
+- **Declare only jobs that run on every PR.** A configured `full-suite`
+  identity that is absent from the evidence (a scheduled, path-filtered, or
+  removed job — or a mis-declared name) keeps every full-suite ask
+  unresolved, and an unresolved `must_check` row withholds the trusted
+  native approve. The producer marks control-collapsed or truncated check
+  names and conclusions as `clipped`; clipped rows never satisfy configured
+  identities. The gate retains the decision rows — every test-named and
+  exact Actions row survives the same-name bound (two rows per name,
+  producer class, and exact/clipped axis: the worst state and the newest
+  row) or the gate emits no evidence at all. Other
+  context rows may still be trimmed at the 50-row / 16,384-character bounds.
+- **Workflow-surface masquerade fence (#1820)**: configured identities exist
+  and the PR's workflow surface must be IDENTICAL to the current trusted
+  base's across the supported forges' CI surfaces before any CI evidence can
+  settle a test-run ask. If a PR adds or edits a workflow file there —
+  `.github/workflows`, `.forgejo/workflows`, `.gitea/workflows`, or
+  `.gitlab-ci.yml` — or the CURRENT base changed the surface after the fork
+  point (a rename or removal: the stale head still runs the OLD same-named
+  job under its own tree), or the surface cannot be verified (git failure or
+  missing head) while the identities were readable, every test-run row stays
+  unresolved that run with `ci-evidence-ci-workflow-surface-untrusted`. The
+  fence also stays armed when identities were declared but not honored this
+  run — a refused surface, an unreadable surface, a malformed config that
+  still declared entries, or declarations that all failed validation — the
+  refusal must never silently disable it (#1820 re-review). A red
+  relevant leg still contradicts (failure-first). Repositories without
+  configured identities retain the pre-#1820 name-heuristic behavior.
+  Comparison is TWO-DOT (base tree vs head tree), deliberately
+  (#1820 human re-review): the configured identities are validated against
+  the CURRENT base, while head-bound checks ran under the head's possibly
+  stale workflow tree, so base-side drift after the fork point is exactly as
+  dangerous as a PR-side change — a base rename/removal plus a same-named new
+  trusted declaration would otherwise let the stale head's unrelated old job
+  discharge it. A merge-base (three-dot) diff would miss that. The cost is
+  the accepted conservative side: a PR forked before a base workflow edit
+  loses configured settlement (its test-run rows stay unresolved with the
+  fence reason) until its head tree matches the base's; a benign PR whose head
+  simply lacks a base-added workflow file is fenced too, which is the trade
+  for proving surface
+  equality. Verification requires the base ref and head resolvable locally.
+  A shallow checkout (`fetch-depth: 1`)
+  cannot resolve the base ref at all, so the identities are unreadable and
+  the fence is inert — the pre-#1820 name heuristics stay in force, which is
+  weaker than the fence but unchanged from before; the fork lane's base-only
+  checkout keeps the identities readable, so there the fence stays closed and
+  configured discharge is inert rather than weakened. CI evidence never
+  certifies what tests DO: a PR can alter test content (`scripts`,
+  `package.json`, `Makefile`) without touching a workflow file. The fence
+  narrows the masquerade surface but does not attempt content certification.
+  `full-suite` covers full-suite and generic asks only, never a narrow scope
+  ask — declare `unit` (or the desired narrow scope) if a configured job is
+  meant to prove it. The fence covers standard workflow-definition paths;
+  external CI systems (CircleCI, Jenkins, Azure Pipelines, Travis, Buildkite)
+  report commit-status contexts without any listed file, and a GitLab
+  `include:` chain can define jobs outside `.gitlab-ci.yml` — a PR editing
+  those configs can still mint a heuristic-accepted name for a narrow ask, so
+  the residual risk is narrower than unfenced name matching but not zero.
+  Configured identity discharge does not accept status contexts, closing that
+  status-context residual for configured asks; status rows can still match the
+  pre-#1820 name heuristics, so the residual remains for repositories without
+  a matching configured identity.
 
 ## Evidence classes and objective provenance (#1657)
 
