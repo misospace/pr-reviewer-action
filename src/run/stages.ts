@@ -394,6 +394,10 @@ export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: strin
     // PR re-spelled a dependency, it did not bump one. Never compare, so a
     // forged framing can never settle a release-delta row.
     if (sides.caseCollision) continue;
+    // Review of #1825: the recorded token is already case-folded, and npm
+    // publishes case-sensitively — `1.0.0-RC1` could settle against a real
+    // lowercase `1.0.0-rc1` release. Never compare a noncanonical spelling.
+    if (sides.noncanonicalVersion) continue;
     const removedOnly = entry.versions.filter((version) => sides.minus.has(version) && !sides.plus.has(version));
     const addedOnly = entry.versions.filter((version) => sides.plus.has(version) && !sides.minus.has(version));
     // The two filters are complementary by construction, so exactly one

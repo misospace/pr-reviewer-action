@@ -15,6 +15,7 @@ import {
   type NpmFetchJson,
 } from "../src/context/index.js";
 import { npmPackageChangesFromDiff, runNpmPackageProvenancePhase } from "../src/run/stages.js";
+import { parseDependencyScope } from "../src/classification/classify.js";
 import { RunWorkspace } from "../src/run/workspace.js";
 import { buildReviewCorpus, type CorpusWorkspace } from "../src/corpus/index.js";
 
@@ -327,6 +328,82 @@ test("case-colliding blocks never pair as a clean bump (regression #1826)", () =
     '-    "@foo/bar": "^1.0.0"',
     '+    "@foo/bar": "^2.0.0"',
   ].join("\n")), [{ slug: "foo/bar", oldVersion: "1.0.0", newVersion: "2.0.0" }]);
+});
+
+// ── Review of #1825: version case is published identity too. The scope parse
+//    lowercases version tokens, so a raw `1.0.0-RC1` arrives at the consumer
+//    already folded — and npm publishes case-sensitively, so the registry can
+//    answer the folded token with a release the PR never installed. The guard
+//    must refuse BEFORE any read, and the ledger reader must reject rather
+//    than fold a noncanonical artifact field.
+
+const CHALK_TARBALLS: Record<string, Uint8Array> = {};
+function chalkTarball(version: string): Uint8Array {
+  CHALK_TARBALLS[version] ??= tarGz([
+    { name: "package/package.json", body: JSON.stringify({ name: "chalk", version, dependencies: {} }) },
+    { name: "package/index.js", body: `// chalk ${version}\n` },
+  ]);
+  return CHALK_TARBALLS[version]!;
+}
+
+/** A registry that ANSWERS the lowercase prerelease successfully — proof the
+ * guard, not a registry miss, is what stops the folded comparison. */
+const CHALK_PUBLISHED = new Set(["1.0.0-rc1", "2.0.0"]);
+const chalkSeam = (): { fetchJson: NpmFetchJson; fetchBytes: NpmFetchBytes } => ({
+  fetchJson: async (url) => {
+    const version = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "");
+    if (!CHALK_PUBLISHED.has(version)) throw new Error(`unexpected version document request: ${url}`);
+    return {
+      name: "chalk",
+      version,
+      dist: {
+        tarball: `https://registry.npmjs.org/chalk/-/chalk-${version}.tgz`,
+        integrity: `sha512-${createHash("sha512").update(chalkTarball(version)).digest("base64")}`,
+      },
+    };
+  },
+  fetchBytes: async (url) => CHALK_TARBALLS[/chalk-(.+)\.tgz$/.exec(new URL(url).pathname)?.[1] ?? ""] ?? null,
+});
+
+test("a raw uppercase version spelling never compares, even when the lowercase release exists (review of #1825)", async () => {
+  const uppercasePrerelease = lockfileDiff([
+    '-    "node_modules/chalk": {',
+    '-      "version": "1.0.0-RC1"',
+    '-    },',
+    '+    "node_modules/chalk": {',
+    '+      "version": "2.0.0"',
+    '+    },',
+  ]);
+  assert.deepEqual(npmPackageChangesFromDiff(uppercasePrerelease), [], "a folded token is not a published identity");
+  // Build-metadata spelling carries case the same way, on either side.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "chalk": "^1.0.0"',
+    '+    "chalk": "^2.0.0+Build"',
+  ])), []);
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "chalk": "^1.0.0-RC1"',
+    '+    "chalk": "^2.0.0"',
+  ])), []);
+  // Generic classification stays unchanged: the scope still records the folded
+  // token — only the comparison consumer declines the slug.
+  assert.deepEqual(parseDependencyScope(uppercasePrerelease), { available: true, entries: [{ slug: "chalk", versions: ["1.0.0-rc1", "2.0.0"] }] });
+  // The lowercase release verifies end to end when it is asked for by its own
+  // canonical spelling — so the refusal above is the guard, not a miss.
+  const { comparisons } = await buildNpmPackageProvenance(
+    [{ slug: "chalk", oldVersion: "1.0.0-rc1", newVersion: "2.0.0" }],
+    chalkSeam(),
+  );
+  assert.deepEqual(JSON.parse(npmComparisonsArtifactJson(comparisons)).verified,
+    [{ slug: "chalk", oldVersion: "1.0.0-rc1", newVersion: "2.0.0" }]);
+  // And the diff-driven phase never reads the registry at all for this bump.
+  const ws = new RunWorkspace("/run-dir-not-used", false);
+  await runNpmPackageProvenancePhase(ws, uppercasePrerelease, {});
+  assert.equal(ws.readText("npm-package-comparisons.json"), "", "no comparison, so the artifact carries nothing");
+  // Control: a canonical lowercase prerelease IS an ordinary bump.
+  assert.deepEqual(npmPackageChangesFromDiff(manifestDiff([
+    '-    "chalk": "^1.0.0-rc1"',
+    '+    "chalk": "^2.0.0"',
+  ])), [{ slug: "chalk", oldVersion: "1.0.0-rc1", newVersion: "2.0.0" }]);
 });
 
 test("bumps past the per-run cap are disclosed unfetched, never silently dropped", async () => {

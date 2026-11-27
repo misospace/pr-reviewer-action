@@ -4529,13 +4529,19 @@ function canonicalImageSlug(repo: string): string | null {
  * names differ only in case (`node_modules/@Foo/Bar` removed vs
  * `node_modules/@foo/bar` added): the case-folded slug merges blocks of
  * different spellings, so such a pair never proves an install transition
- * anyone made — it re-spells one. The capture is observation-only: it never
- * changes the parse, the fail-closed decisions, or the returned scope. */
+ * anyone made — it re-spells one. `noncanonicalVersion` (review of #1825)
+ * records that a sided version token was RAW-spelled with uppercase (a
+ * prerelease or build like `1.0.0-RC1`): version case IS published identity,
+ * and the recorded token is already case-folded, so a comparison could match
+ * a different lowercase release the registry also publishes. The capture is
+ * observation-only: it never changes the parse, the fail-closed decisions, or
+ * the returned scope. */
 export interface DependencyScopeSideProvenance {
   minus: Set<string>;
   plus: Set<string>;
   multiToken: boolean;
   caseCollision: boolean;
+  noncanonicalVersion: boolean;
 }
 
 /**
@@ -4677,7 +4683,7 @@ export function parseDependencyScope(
     if (npmSides === undefined) return undefined;
     let sides = npmSides.get(slug);
     if (sides === undefined) {
-      sides = { minus: new Set<string>(), plus: new Set<string>(), multiToken: false, caseCollision: false };
+      sides = { minus: new Set<string>(), plus: new Set<string>(), multiToken: false, caseCollision: false, noncanonicalVersion: false };
       npmSides.set(slug, sides);
     }
     return sides;
@@ -4736,6 +4742,12 @@ export function parseDependencyScope(
         scopeComplete = false;
         return;
       }
+      // Observation only: the raw spelling loses case HERE, so a sided token
+      // with uppercase marks the slug non-comparable (see the interface doc).
+      if (sign !== undefined && match[0] !== match[0].toLowerCase()) {
+        const sides = sideProvenance(slug);
+        if (sides !== undefined) sides.noncanonicalVersion = true;
+      }
       recordVersion(slug, match[0].toLowerCase(), sign, spelling);
     }
   };
@@ -4768,7 +4780,9 @@ export function parseDependencyScope(
   const lockfileVersionFieldValue = (content: string): string | null => {
     const field = NPM_BLOCK_VERSION_LINE_RE.exec(content);
     if (field === null) return null;
-    const value = (field[1] ?? "").trim().toLowerCase();
+    // Raw spelling reaches `recordVersions` on purpose: it owns the one
+    // lowercasing, so the noncanonical-version observation sees the case.
+    const value = (field[1] ?? "").trim();
     if (!DEPENDENCY_SCOPE_EXACT_VERSION_RE.test(value)) { scopeComplete = false; return null; }
     return value;
   };

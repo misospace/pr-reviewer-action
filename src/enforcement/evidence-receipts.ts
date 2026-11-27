@@ -1041,10 +1041,17 @@ function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
     const entry = raw as Record<string, unknown>;
     const entryKeys = Object.keys(entry).every((key) => key === "slug" || key === "oldVersion" || key === "newVersion");
     if (!entryKeys) continue;
-    const slug = typeof entry.slug === "string" ? entry.slug.trim().toLowerCase() : "";
-    const oldVersion = typeof entry.oldVersion === "string" ? entry.oldVersion.trim().toLowerCase() : "";
-    const newVersion = typeof entry.newVersion === "string" ? entry.newVersion.trim().toLowerCase() : "";
-    if (slug === "" || oldVersion === "" || newVersion === "") continue;
+    // Reject, never fold: the producer writes canonical lowercase identity
+    // fields, so an uppercase or padded field is not this runtime's record.
+    // Case-folding here would credit a receipt for the folded version — a
+    // release the registry may publish SEPARATELY from the raw spelling
+    // (review of #1825).
+    const canonicalField = (value: unknown): value is string =>
+      typeof value === "string" && value !== "" && value === value.trim() && value === value.toLowerCase();
+    if (!canonicalField(entry.slug) || !canonicalField(entry.oldVersion) || !canonicalField(entry.newVersion)) continue;
+    const slug = entry.slug;
+    const oldVersion = entry.oldVersion;
+    const newVersion = entry.newVersion;
     if (slug.length > MAX_NPM_RECEIPT_SLUG_LENGTH || oldVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH || newVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH) continue;
     // Receipts ride the SAME canonical version-document grammar the phase
     // fetched through: anything it refuses produced no read and credits

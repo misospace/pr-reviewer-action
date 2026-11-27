@@ -1879,3 +1879,25 @@ test("#1821 replay negatives: failed, mismatched, and partial comparisons never 
   const partial = evaluateRowEvidence(aggregateTags[0]!, aggregateRow.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
   assert.ok(partial.state === "receipt-mismatch" || partial.state === "receipt-absent", `partial coverage must not settle, got ${partial.state}`);
 });
+
+// Review of #1825: the artifact reader REJECTS a noncanonical identity field
+// rather than case-folding it. The raw manifest spelled `26.6.7-RC1`; npm
+// publishes case-sensitively, so folding it here would credit the SEPARATE
+// lowercase `26.6.7-rc1` release the run never established — and the scope
+// entry (also folded) would match, settling the row for the wrong version.
+test("#1821 replay: a noncanonical artifact spelling is rejected, never folded into a settlement", () => {
+  const rcScope = [{ slug: "types/node", versions: ["26.6.7-rc1", "26.6.10"] }];
+  const deltaRow = { ...NPM1819_ROWS[1]!, dependency_scope: rcScope };
+  const [deltaTag] = checkEvidenceTagsFromArtifact([deltaRow]);
+  assert.ok(deltaTag !== undefined);
+  const folded = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7-RC1", newVersion: "26.6.10" }]);
+  assert.equal(folded.state, "valid");
+  const state = evaluateRowEvidence(deltaTag!, deltaRow.text, folded);
+  assert.ok(state.state === "receipt-absent" || state.state === "receipt-mismatch", `a noncanonical entry must not settle, got ${state.state}`);
+  // A padded field is not this runtime's record either.
+  const padded = npm1819Ledger([{ slug: "types/node", oldVersion: " 26.6.7", newVersion: "26.6.10 " }]);
+  assert.ok(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, padded).state !== "receipt-backed");
+  // Control: the canonical spelling the producer actually writes still settles.
+  const canonical = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, canonical).state, "receipt-backed");
+});
