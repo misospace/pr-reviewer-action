@@ -145,7 +145,11 @@ test("#1507: the loop speaks the resolved primary lane's wire when an ai-primary
     },
   }));
   assert.equal(result.mode, "native_loop");
-  assert.equal(result.native_loop_degraded, "no-tool-calls");
+  // #1837: the model's own no-tool-calls reply is a deliberate corpus-direct
+  // completion — not recorded as a zero-evidence degradation.
+  assert.equal(result.native_loop_degraded, undefined);
+  assert.equal(result.stop_reason, "no-tool-calls");
+  assert.equal(result.executed_request_count, 0);
   assert.ok(seen.length >= 1, "the loop must have called the transport");
   assert.equal(seen[0]!.baseUrl, "http://lane.test/v1");
   assert.equal(seen[0]!.apiFormat, "anthropic");
@@ -164,7 +168,10 @@ test("#1507: without a lane override the loop keeps the base AI_* transport", as
     },
   }));
   assert.equal(result.mode, "native_loop");
-  assert.equal(result.native_loop_degraded, "no-tool-calls");
+  // #1837: deliberate corpus-direct completion, not a degradation marker.
+  assert.equal(result.native_loop_degraded, undefined);
+  assert.equal(result.stop_reason, "no-tool-calls");
+  assert.equal(result.executed_request_count, 0);
   assert.equal(seen[0]!.baseUrl, "http://model.test/v1");
   assert.equal(seen[0]!.apiFormat, "openai");
   assert.equal(seen[0]!.apiKey, "k");
@@ -209,11 +216,34 @@ test("no tool calls degrades to a corpus-only review without a verdict turn", as
     },
   }));
   assert.equal(result.mode, "native_loop");
-  assert.equal(result.native_loop_degraded, "no-tool-calls");
+  // #1837: the model's own no-tool-calls reply is a deliberate corpus-direct
+  // completion — the corpus review settles like `tool-mode: off`, so no
+  // zero-evidence degradation marker is recorded. The zero calls themselves
+  // stay truthfully on the artifact.
+  assert.equal(result.native_loop_degraded, undefined);
+  assert.equal(result.stop_reason, "no-tool-calls");
+  assert.equal(result.executed_request_count, 0);
   assert.equal(result.native_loop_verdict_produced, undefined);
   assert.equal(transportCalls, 1); // the single loop turn, no verdict turn
   assert.ok(fs.existsSync(path.join(root, "tool-harness.json")));
   assert.match(fs.readFileSync(path.join(root, "tool-harness.md"), "utf8"), /issued no tool calls/);
+});
+
+test("#1837: a transport failure before any reply still records the zero-evidence degradation", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
+  const { result } = await runToolHarness(deps({
+    transport: async () => {
+      throw new Error("provider 503");
+    },
+  }));
+  assert.equal(result.mode, "native_loop");
+  // The loop chose the stop — the investigation did not finish — so the
+  // degradation marker (whose downstream meaning is material
+  // `investigation_unavailable`) stays exactly as before.
+  assert.equal(result.native_loop_degraded, "request-error");
+  assert.equal(result.stop_reason, "request-error");
+  assert.equal(result.executed_request_count, 0);
 });
 
 test("the loop gathers evidence and the in-conversation verdict is produced and validated (#637)", async () => {

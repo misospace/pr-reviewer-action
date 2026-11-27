@@ -1051,13 +1051,17 @@ test("pin: an explicit mechanical proven-unmet input still => REQUEST_CHANGES", 
 // ---------------------------------------------------------------------------
 
 test("pin: a recorded zero-evidence degradation => never APPROVE, in either lane", () => {
+  // #1837: the harness records the degradation only for a zero-call stop the
+  // LOOP chose (a transport failure or deadline before any reply) — the
+  // model's own no-tool-calls reply is a deliberate corpus-direct completion
+  // and never reaches this seam.
   const build = buildDispositionEvidence({
     completenessChecks: [],
     obligations: [],
     findings: [],
     toolCapabilityFailure: null,
     toolFloorUnmet: false,
-    noEvidenceReason: "no-tool-calls",
+    noEvidenceReason: "request-error",
     partialCoverageStopReason: null,
     traceUnresolvedMaterial: false,
     traceUnmetClaimed: false,
