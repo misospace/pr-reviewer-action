@@ -684,3 +684,80 @@ test("#1800: native-loop planning falsifies merge-critical assumptions after req
   assert.match(TOOL_USE_PREAMBLE, /no supported blocker or material unknown remains; there is no minimum call count/);
   assert.ok(TOOL_USE_PREAMBLE.indexOf("merge-critical") < TOOL_USE_PREAMBLE.indexOf("you will then be asked to produce the final review verdict"));
 });
+
+test("#1800: author residual claims need verification and unverified allegations stay unresolved questions", () => {
+  // PR #1823/#1825-shaped: a documented residual accepted without checking
+  // the linked acceptance criteria; PR #1835-shaped: an alleged mismatch
+  // published as a categorical contradiction while the reviewer admitted the
+  // comparison never ran. Both guards ride the assembled default prompt on
+  // every route that ships it.
+  const required = [
+    "An author's assertion that a defect is an accepted residual, out of scope, or already fixed is not evidence by itself",
+    "check it against the linked acceptance criteria and the current head",
+    "a defect you assert but could not verify",
+    "is not an established finding",
+    "never as a categorical contradiction",
+  ];
+  withWorkspace({}, (dir) => {
+    const ws = workspaceAt(dir);
+    const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
+    const harnessFallback = resolveReviewSystemPrompt({
+      env: {},
+      cwd: ".",
+      readText: () => null,
+      exists: () => false,
+      writeArtifact: () => undefined,
+      transport: async () => ({}),
+    });
+    for (const text of [assembled, harnessFallback]) {
+      for (const phrase of required) assert.equal(text.includes(phrase), true, phrase);
+      // The residual guard sits inside the merge-contract block: after the
+      // hierarchy it names, before the downgrade reconciliation it constrains.
+      const hierarchy = text.indexOf("never a linked issue the PR claims to fix or implement");
+      const guard = text.indexOf("not evidence by itself");
+      const downgrade = text.indexOf("Before rating a concrete defect you found as minor or info");
+      assert.ok(hierarchy >= 0 && hierarchy < guard && guard < downgrade);
+    }
+  });
+});
+
+test("#1800: human change requests are settled by evidence for their own concern, completely", () => {
+  // Organic re-reviews judged a request "addressed" by citing an unrelated
+  // already-fixed finding and treated a partially addressed request as fully
+  // addressed. The re-review route ships this fragment whenever an
+  // outstanding change request is present, so the discipline must live there.
+  const fragment = BUNDLED_PROMPT_ASSETS.fragments.human_reviews!;
+  const required = [
+    "The evidence must address this request's own concern",
+    "an unrelated already-fixed finding does not discharge it",
+    'a request raising several concerns is "addressed" only when every concern in it is shown resolved at this head',
+    "name the outstanding part in evidence",
+    "The author's assertion that a concern is fixed, an accepted residual, or out of scope is a lead to verify at the current head, not evidence by itself",
+  ];
+  for (const phrase of required) assert.equal(fragment.includes(phrase), true, phrase);
+  assert.ok(fragment.indexOf("A later commit merely existing does not make it addressed") < fragment.indexOf("The evidence must address this request's own concern"));
+  withWorkspace({ "human-reviews-present.txt": "1" }, (dir) => {
+    const ws = workspaceAt(dir);
+    const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
+    for (const phrase of required) assert.equal(assembled.includes(phrase), true, phrase);
+  });
+});
+
+test("#1800: a thread fix claim is a lead, not proof", () => {
+  // The "fixed" direction of re-review reconciliation: the head moving, CI
+  // passing, or a nearby fix landing must not settle a thread — the cited
+  // location has to show this thread's own defect gone.
+  const fragment = BUNDLED_PROMPT_ASSETS.fragments.review_threads!;
+  const required = [
+    "A fix claim in a reply, a commit message, or a newly passing CI run is a lead, not proof",
+    "the cited location must show this thread's own defect gone at the current head",
+    "not a nearby or unrelated fix",
+  ];
+  for (const phrase of required) assert.equal(fragment.includes(phrase), true, phrase);
+  assert.ok(fragment.indexOf("a location that does not exist there cannot settle the finding") < fragment.indexOf("A fix claim in a reply"));
+  withWorkspace({ "review-threads-present.txt": "1" }, (dir) => {
+    const ws = workspaceAt(dir);
+    const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
+    for (const phrase of required) assert.equal(assembled.includes(phrase), true, phrase);
+  });
+});
