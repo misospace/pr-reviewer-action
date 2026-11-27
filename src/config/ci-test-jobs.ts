@@ -3,9 +3,14 @@
  * the test scope they prove. Trust model identical to `reviewer-routing.ts` /
  * `repository-config.ts`: read from the PR's BASE ref via git show, never the
  * PR head, so a contributor cannot declare their own job trusted on their own
- * branch. Absence is fine (pre-#1820 behavior); a read failure degrades to
- * "no jobs" with a surfaced warning, never silently treated as absence by the
- * caller. Individual invalid entries are dropped with a warning; malformed
+ * branch. Absence is fine (pre-#1820 behavior). Distinguishable read failures
+ * (git missing, timeout, unverifiable base ref) throw and degrade to "no jobs"
+ * with a surfaced warning and a refusal — never silently treated as absence by
+ * the caller. A generic `git show` non-zero exit cannot be told apart from a
+ * simply-absent file (git reports both the same way), so it moves to the next
+ * candidate path and finally reads as absence: the documented shallow-checkout
+ * degradation, where the fence stays inert but never weaker than pre-#1820.
+ * Individual invalid entries are dropped with a warning; malformed
  * files and mappings whose entries are all dropped report declared identities
  * as refused, keeping the workflow-surface masquerade fence armed. A
  * declaration that survives parsing but is refused during surface validation
