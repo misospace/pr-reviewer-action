@@ -1214,3 +1214,152 @@ test("#1763: the strict scope parser refuses kind/digest/version shapes off the 
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1821 (independent review): code-owned exact-published-package comparison
+// receipts. The npm provenance phase's verified comparison must reach the
+// settlement contract as canonical version-document receipts attributed
+// `release_delta` — the fact ordinary lexical attribution of a plain
+// registry-doc fetch never grants. Failed/partial comparisons are absent
+// from the artifact; malformed artifacts contribute nothing.
+// ---------------------------------------------------------------------------
+
+function npmLedger(npmPackageComparisons?: unknown): EvidenceLedger {
+  return buildEvidenceLedger({
+    toolCalls: [{ tool: "read_file", args: { path: "package-lock.json" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "lockfile" } }],
+    ...(npmPackageComparisons === undefined ? {} : { npmPackageComparisons }),
+  });
+}
+
+test("#1821: a verified npm comparison yields canonical version-document receipts with release_delta attribution", () => {
+  const ledger = npmLedger({
+    schema: "npm-package-comparisons/v1",
+    verified: [
+      { slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" },
+      // A second comparison sharing the 26.6.10 endpoint dedupes by id.
+      { slug: "types/node", oldVersion: "26.6.10", newVersion: "26.6.11" },
+    ],
+  });
+  const npm = ledger.receipts.filter((receipt) => receipt.id.startsWith("npm-compare:"));
+  assert.deepEqual(npm.map((receipt) => receipt.id).sort(), [
+    "npm-compare:types/node@26.6.10",
+    "npm-compare:types/node@26.6.11",
+    "npm-compare:types/node@26.6.7",
+  ]);
+  for (const receipt of npm) {
+    assert.equal(receipt.kind, "web-fetch");
+    assert.equal(receipt.capability, "acquisition");
+    assert.equal(receipt.acquired, true);
+    assert.equal(receipt.complete, true);
+    // Upstream registry state at read time — never an exact-head acquisition.
+    assert.equal(receipt.freshness, "unbound");
+    assert.equal(receipt.trust, "web");
+    assert.deepEqual(receipt.subject.obligations, ["provenance", "release_delta"]);
+  }
+  assert.equal(npm.find((receipt) => receipt.id.endsWith("@26.6.7"))!.subject.url, "https://registry.npmjs.org/@types%2Fnode/26.6.7");
+  assert.equal(npm.find((receipt) => receipt.id.endsWith("@26.6.11"))!.subject.url, "https://registry.npmjs.org/@types%2Fnode/26.6.11");
+});
+
+test("#1821: malformed npm comparison artifacts contribute nothing and never refuse the ledger", () => {
+  for (const junk of [
+    null,
+    "not-an-object",
+    42,
+    [],
+    { schema: "other/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: "nope" },
+    // House strict-artifact rule: any key this runtime did not write makes
+    // the whole artifact (or entry) absent, never partially trusted.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }], extra: true },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0", fabricated: true }] },
+    { schema: "npm-package-comparisons/v1", verified: [null, 1, [], { slug: "types/node" }] },
+    // A slug/version the registry URL grammar itself refuses produced no read.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "latest", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "@@bad/slug@", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    // Over-cap identity fields stay out of the artifact's canonical bounds.
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "a".repeat(300), oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "lodash", oldVersion: "1.0.0", newVersion: "2.0.0".repeat(40) }] },
+  ]) {
+    const ledger = npmLedger(junk);
+    assert.equal(ledger.state, "valid");
+    assert.equal(
+      ledger.receipts.filter((receipt) => receipt.id.startsWith("npm-compare:")).length,
+      0,
+      `junk ${JSON.stringify(junk)?.slice(0, 80)} must contribute nothing`,
+    );
+  }
+});
+
+test("#1821: npm comparison receipts round-trip the strict ledger artifact", () => {
+  const ledger = npmLedger({ schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] });
+  assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
+});
+
+// Review of #1825 (Major): the code-owned comparison facts are the runtime's
+// own verified record and must survive WITHOUT a tool trace — a no-tool or
+// fork run settles what its deterministic phase proved. With nothing derived
+// the no-native-loop case stays byte-identical (`unavailable`).
+test("#1821: a no-trace run with verified comparisons is a valid code-owned ledger; nothing derived stays unavailable", () => {
+  const artifact = { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] };
+  for (const noTrace of [{}, { toolCalls: [], toolResults: [] }] as const) {
+    const ledger = buildEvidenceLedger({ ...noTrace, npmPackageComparisons: artifact });
+    assert.equal(ledger.state, "valid", JSON.stringify(noTrace));
+    assert.deepEqual(ledger.receipts.map((receipt) => receipt.id).sort(), [
+      "npm-compare:types/node@26.6.10",
+      "npm-compare:types/node@26.6.7",
+    ]);
+    assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
+  }
+  // A present-but-malformed trace REFUSES everything, code-owned facts
+  // included: nothing settles behind a trace this runtime cannot read.
+  assert.equal(buildEvidenceLedger({ toolCalls: [null], toolResults: [], npmPackageComparisons: artifact }).state, "refused");
+  // Nothing usable derived → the byte-identical no-ledger case stands.
+  for (const nothing of [
+    undefined,
+    null,
+    { schema: "npm-package-comparisons/v1", verified: [] },
+    { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "latest", newVersion: "2.0.0" }] },
+    { schema: "other/v1", verified: [{ slug: "types/node", oldVersion: "1.0.0", newVersion: "2.0.0" }] },
+  ]) {
+    assert.equal(buildEvidenceLedger({ toolCalls: [], toolResults: [], npmPackageComparisons: nothing }).state, "unavailable");
+  }
+});
+
+// Review of #1825 (round 11, #1836): the code-owned receipts ACTIVATE the
+// objective-row gate for the WHOLE ledger, so the no-trace branch must derive
+// the same certified corpus-diff and CI receipts the trace-present path does —
+// otherwise a no-tool mixed run newly rejects rows its own records cover.
+// Without any derived comparison receipt nothing changes: the gate stays
+// inert and the case is byte-identical to the pre-#1627 no-ledger fold.
+test("#1821/#1836: a no-trace code-owned ledger carries the same corpus-diff and CI derivations; nothing derived stays unavailable", () => {
+  const rawDiff = "diff --git a/src/config.yaml b/src/config.yaml\n--- a/src/config.yaml\n+++ b/src/config.yaml\n@@ -1 +1 @@\n-x\n+y\n";
+  const ciEvidence = { headSha: HEAD, finalState: "success" as const, checks: [{ name: "Unit Tests", state: "success" as const, conclusion: "success" as const }] };
+  const shared = { certifiedDiffPayloads: [rawDiff], rawDiff, candidatePaths: ["src/config.yaml", "src/absent.yaml"], ciEvidence, reviewedHeadSha: HEAD };
+  const artifact = { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] };
+  const ledger = buildEvidenceLedger({ ...shared, npmPackageComparisons: artifact });
+  assert.equal(ledger.state, "valid");
+  const ids = new Set(ledger.receipts.map((receipt) => receipt.id));
+  assert.ok(ids.has("npm-compare:types/node@26.6.7") && ids.has("npm-compare:types/node@26.6.10"));
+  assert.ok(ids.has("ci:Unit Tests"));
+  assert.ok(!ids.has("corpus-diff:src/absent.yaml"));
+  const corpus = ledger.receipts.find((receipt) => receipt.id === "corpus-diff:src/config.yaml")!;
+  assert.deepEqual(
+    { kind: corpus.kind, capability: corpus.capability, acquired: corpus.acquired, complete: corpus.complete, freshness: corpus.freshness, trust: corpus.trust, subject: corpus.subject },
+    { kind: "corpus-diff", capability: "content", acquired: true, complete: true, freshness: "head-bound", trust: "corpus-certified", subject: { path: "src/config.yaml" } },
+  );
+  // The trace-present ledger with the same inputs derives the same receipt
+  // set (plus its call receipts) — one derivation path, no drift.
+  const traced = buildEvidenceLedger({
+    ...shared,
+    toolCalls: [{ tool: "read_file", args: { path: "README.md" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "# pr-reviewer-action\n", truncated: false } }],
+    npmPackageComparisons: artifact,
+  });
+  assert.equal(traced.state, "valid");
+  for (const id of ids) assert.ok(traced.receipts.some((receipt) => receipt.id === id), id);
+  assert.deepEqual(evidenceLedgerFromArtifact(evidenceLedgerToArtifact(ledger)), ledger);
+  // Nothing derived: certified payloads and CI rows alone do NOT activate
+  // the gate — the unavailable case stays byte-identical.
+  assert.equal(buildEvidenceLedger({ ...shared }).state, "unavailable");
+});

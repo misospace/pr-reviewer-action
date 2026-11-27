@@ -147,6 +147,7 @@
       "repo-map-max-bytes",
       "enrichment-budget-sec",
       "image-digest-budget-sec",
+      "npm-package-budget-sec",
       "allowed-source-hosts",
       "related-code-context",
       "related-code-max-bytes",

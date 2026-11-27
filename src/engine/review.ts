@@ -167,6 +167,7 @@ import {
   renderLinkedSourcesPhase,
   runEvidencePhase,
   runImageDigestPhase,
+  runNpmPackageProvenancePhase,
   authoritativeBodyRevision,
   runToolHarnessPhase,
   safeJson,
@@ -693,9 +694,11 @@ function resolveReviewObligations(
   // assembler-certified corpus-diff payloads, and the CI gate's head-bound
   // evidence (the acquisitions the run itself recorded; the same surface
   // `verdictHarnessFindingsBody` renders from). The gate is INERT only when
-  // the artifact is absent (fresh standard-call and fork paths); a
-  // PRESENT-but-malformed trace REFUSES the ledger, which keeps the gate
-  // active with nothing usable (#1634 review's fail-closed rule, carried
+  // the artifact is absent and nothing code-owned was derived (fresh
+  // standard-call and fork paths); verified npm comparison receipts still
+  // produce a valid ledger without a harness trace (#1821 review of #1825),
+  // and a PRESENT-but-malformed trace REFUSES the ledger, which keeps the
+  // gate active with nothing usable (#1634 review's fail-closed rule, carried
   // over). No model prose, no tool result bodies: objective fields only.
   const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown; tool_results?: unknown; tool_loop_telemetry?: unknown } | null;
   const riskAnchorPaths = new Set<string>();
@@ -734,6 +737,8 @@ function resolveReviewObligations(
     rawDiff: ws.readText("pr.diff"),
     candidatePaths,
     ciEvidence,
+    // #1821: this run's code-owned npm published-package comparison facts.
+    npmPackageComparisons: safeJson(ws.read("npm-package-comparisons.json")),
     reviewedHeadSha,
   });
   // #1577 (review fix): the risk discharge must be backed by the run's OWN
@@ -1629,6 +1634,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ws.write("image-digest-context.md", "Image digest provenance analysis failed for this run.\n");
     return null;
   });
+  const npmPackagePromise = runNpmPackageProvenancePhase(ws, diffText, env, cancellation.scope.signal).catch((cause: unknown) => {
+    errorLog(`npm package comparison failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    ws.write("npm-package-provenance.md", "npm published-package comparison failed for this run.\n");
+    // The settlement artifact is cleared on the failure path too: nothing
+    // this run did not verify may credit the ledger from a prior derivation.
+    ws.write("npm-package-comparisons.json", "");
+    return null;
+  });
   const evidencePromise = runEvidencePhase(ws, env, forkFlag, runDir, log, cancellation.scope.signal).catch((cause: unknown) => {
     errorLog(`Evidence provider execution failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("evidence-providers.md", "Evidence providers failed to run in this review.\n");
@@ -1749,7 +1762,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     }
   }
 
-  await Promise.all([enrichmentPromise, imageDigestPromise, evidencePromise]);
+  await Promise.all([enrichmentPromise, imageDigestPromise, npmPackagePromise, evidencePromise]);
   checkpoint();
 
   // PR-thread context (corpus.sh) — same pass cutoff as the review threads.
@@ -2634,8 +2647,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // #1657: the #750 completeness fold validates the SAME satisfied answers
   // against the SAME evidence ledger the #1381 fold was given, so the two
   // folds can never disagree on an objective satisfaction. When the ledger
-  // is unavailable (no trace at all) the option is omitted and the fold is
-  // byte-identical; a REFUSED trace passes the active-but-unusable ledger,
+  // is unavailable (no trace and nothing code-owned derived) the option is
+  // omitted and the fold is byte-identical; a REFUSED trace passes the
+  // active-but-unusable ledger,
   // failing every objective satisfaction closed on both folds.
   const completenessOptions = {
     ...completenessBaseOptions,

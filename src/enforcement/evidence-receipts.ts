@@ -87,6 +87,7 @@ import { type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { corpusDiffCoveredFiles } from "../tools/coverage.js";
 import { FORGE_READ_TOOL } from "../platform/endpoint.js";
 import { authoritativeRegistryPackageSlug, canonicalRegistryCatalogImageIdentity, dependencyEvidenceObligationsForCall, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, registryRedirectSourceMapping, sourceRepoSurfaceIdentity, type DependencyEvidenceObligation } from "../tools/dependency-evidence.js";
+import { MAX_NPM_COMPARISONS, NPM_COMPARISONS_ARTIFACT_SCHEMA, registryVersionDocUrl } from "../context/npm-package-provenance.js";
 
 export type { DependencyEvidenceObligation };
 
@@ -189,14 +190,15 @@ export interface EvidenceReceipt {
 }
 
 /** The ledger's own state:
- * - `unavailable` — no executed-call trace (fresh standard-call and fork
- *   paths): the receipt gate is INERT and every fold keeps its pre-#1627
- *   semantics byte-for-byte;
+ * - `unavailable` — no executed-call trace AND nothing code-owned derived
+ *   (fresh standard-call and fork paths): the receipt gate is INERT and
+ *   every fold keeps its pre-#1627 semantics byte-for-byte;
  * - `refused` — a trace was PRESENT but malformed: the gate is ACTIVE with
  *   nothing usable, so no objective satisfaction can discharge behind a
  *   trace this runtime cannot verify (#1634's fail-closed rule, carried
  *   over); distinct from `unavailable`, never silently conflated with it;
- * - `valid` — a parsed, bounded ledger. */
+ * - `valid` — a parsed, bounded ledger; code-owned derived receipts make it
+ *   valid even when no trace was present (#1821). */
 export type EvidenceLedgerState = "unavailable" | "refused" | "valid";
 
 export interface EvidenceLedger {
@@ -221,6 +223,11 @@ export interface EvidenceLedgerInput {
   candidatePaths?: readonly string[];
   /** The CI gate's head-bound evidence (null/absent = no CI receipts). */
   ciEvidence?: HeadBoundCiEvidence | null;
+  /** #1821: the parsed `npm-package-comparisons.json` artifact — the run's
+   * code-owned exact-published-package comparison facts (schema
+   * `npm-package-comparisons/v1`). Anything the strict reader does not accept
+   * contributes NOTHING (absent, never a guess). */
+  npmPackageComparisons?: unknown;
   /** The exact head this review is bound to. */
   reviewedHeadSha?: string;
 }
@@ -894,56 +901,72 @@ function receiptForTraceCall(
  * Build the evidence ledger from the run's own records (see the module
  * docstring). Strict: a PRESENT `tool_calls` trace whose shape this runtime
  * cannot parse — or whose aligned `tool_results` are missing or misaligned —
- * REFUSES the whole ledger (gate active, nothing usable); an absent or empty
- * trace is the ordinary no-native-loop case (`unavailable`). An over-cap
- * trace is bounded by PREFIX truncation so the 1-based positional ids keep
- * their exact alignment (#1627 m1, carried over). Never throws.
+ * REFUSES the whole ledger (gate active, nothing usable, code-owned facts
+ * included — nothing settles behind an unreadable trace); an absent or empty
+ * trace is `unavailable` UNLESS the run derived code-owned comparison
+ * receipts, which ride a `valid` ledger that carries the same certified
+ * corpus-diff and CI receipts the trace-present path derives (#1821 review
+ * of #1825; #1836 — the code-owned activation must not hide the run's other
+ * recorded facts from the gate it opens). An over-cap trace is bounded by
+ * PREFIX truncation so the 1-based positional ids keep their exact
+ * alignment (#1627 m1). Never throws.
  */
 export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger {
+  // #1821 (review of #1825): code-owned comparison facts are the runtime's
+  // own verified record and settle WITHOUT a tool trace — a no-tool or fork
+  // run must not discard receipts it already holds.
+  const derivedNpm = npmComparisonReceipts(input.npmPackageComparisons);
   const toolCalls = input.toolCalls;
-  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+  const tracePresent = Array.isArray(toolCalls) && toolCalls.length > 0;
+  if (!tracePresent && derivedNpm.length === 0) {
     return { state: "unavailable", receipts: [] };
-  }
-  const boundedCalls = toolCalls.length > MAX_EXECUTED_CALL_INDEX
-    ? toolCalls.slice(0, MAX_EXECUTED_CALL_INDEX)
-    : toolCalls;
-  const toolResults = input.toolResults;
-  if (!Array.isArray(toolResults) || toolResults.length < boundedCalls.length) {
-    // The executor writes an index-aligned result per executed call; a
-    // present trace without its aligned results cannot be validated —
-    // refuse (fail closed), never infer acquisition state.
-    return { state: "refused", receipts: [] };
   }
   const reviewedHeadSha = (input.reviewedHeadSha ?? "").toLowerCase();
   const receipts: EvidenceReceipt[] = [];
-  for (let position = 0; position < boundedCalls.length; position++) {
-    const entry = boundedCalls[position];
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+  // #1836: code-owned receipts ACTIVATE the objective-row gate for the whole
+  // ledger, so a no-trace run must derive the same corpus-diff and CI
+  // receipts a trace-present run does — otherwise rows the run already
+  // covered read as missing-receipt and newly reject.
+  if (tracePresent) {
+    const boundedCalls = toolCalls.length > MAX_EXECUTED_CALL_INDEX
+      ? toolCalls.slice(0, MAX_EXECUTED_CALL_INDEX)
+      : toolCalls;
+    const toolResults = input.toolResults;
+    if (!Array.isArray(toolResults) || toolResults.length < boundedCalls.length) {
+      // The executor writes an index-aligned result per executed call; a
+      // present trace without its aligned results cannot be validated —
+      // refuse (fail closed), never infer acquisition state.
       return { state: "refused", receipts: [] };
     }
-    const record = entry as Record<string, unknown>;
-    if (typeof record.tool !== "string" || record.tool === "" || typeof record.status !== "string") {
-      return { state: "refused", receipts: [] };
+    for (let position = 0; position < boundedCalls.length; position++) {
+      const entry = boundedCalls[position];
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return { state: "refused", receipts: [] };
+      }
+      const record = entry as Record<string, unknown>;
+      if (typeof record.tool !== "string" || record.tool === "" || typeof record.status !== "string") {
+        return { state: "refused", receipts: [] };
+      }
+      const args = record.args !== null && typeof record.args === "object" && !Array.isArray(record.args)
+        ? record.args as Record<string, unknown>
+        : {};
+      const result = traceResultAt(toolResults, position);
+      if (result === null) {
+        // An aligned result the runtime cannot read is evidence of nothing —
+        // refuse the whole ledger before constructing any receipt.
+        return { state: "refused", receipts: [] };
+      }
+      if (result.ok && evidencePayloadShape(record.tool, result.payload) === "invalid") {
+        // A SUCCESS whose payload cannot hold the observation the tool name
+        // claims (the executor's minimum output shape is absent or wrongly
+        // typed) is state the runtime cannot read — refuse the whole ledger
+        // rather than credit the call's arguments with the acquisition they
+        // merely requested.
+        return { state: "refused", receipts: [] };
+      }
+      const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);
+      if (receipt !== null) receipts.push(receipt);
     }
-    const args = record.args !== null && typeof record.args === "object" && !Array.isArray(record.args)
-      ? record.args as Record<string, unknown>
-      : {};
-    const result = traceResultAt(toolResults, position);
-    if (result === null) {
-      // An aligned result the runtime cannot read is evidence of nothing —
-      // refuse the whole ledger before constructing any receipt.
-      return { state: "refused", receipts: [] };
-    }
-    if (result.ok && evidencePayloadShape(record.tool, result.payload) === "invalid") {
-      // A SUCCESS whose payload cannot hold the observation the tool name
-      // claims (the executor's minimum output shape is absent or wrongly
-      // typed) is state the runtime cannot read — refuse the whole ledger
-      // rather than credit the call's arguments with the acquisition they
-      // merely requested.
-      return { state: "refused", receipts: [] };
-    }
-    const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);
-    if (receipt !== null) receipts.push(receipt);
   }
   // Corpus-diff credit receipts (#921's byte-exact rule): a path whose
   // complete head diff rode a certified corpus payload was IN the reviewer's
@@ -981,7 +1004,101 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
       });
     }
   }
+  // #1821 (independent review): code-owned exact-published-package comparison
+  // receipts. The npm provenance phase compared both integrity- and manifest-
+  // verified published trees for a slug's exact old→new transition WITHOUT a
+  // Git tag; that fact must reach the settlement contract, not just the
+  // advisory corpus section (organic #1819: exact version documents and a
+  // successful tarball comparison, no tag/compare, and the mandatory
+  // release-delta row stayed unsettled because ordinary version-doc fetches
+  // attribute provenance only). Each verified comparison contributes one
+  // receipt per exact version document, targeting the canonical registry URL
+  // the run actually read — the #1748 authoritative-document identity for the
+  // slug — attributed `release_delta` because the CODE (not a lexical URL
+  // guess) established the compared old→new pair. Failed, mismatched, or
+  // partial comparisons are absent from the artifact and credit nothing;
+  // `security_advisory` is never attributed (no advisory was checked).
+  for (const receipt of derivedNpm) {
+    if (receipts.some((existing) => existing.id === receipt.id)) continue;
+    if (receipts.length >= MAX_EXECUTED_CALL_INDEX + MAX_CORPUS_DIFF_RECEIPTS + MAX_CI_RECEIPTS + MAX_NPM_COMPARISON_RECEIPTS) break;
+    receipts.push(receipt);
+  }
   return { state: "valid", receipts };
+}
+
+/** Derived-receipt bound for the code-owned npm comparison class: the phase
+ * caps comparisons at `MAX_NPM_COMPARISONS` and each verified comparison
+ * yields at most two version-document receipts; the cap keeps a pathological
+ * artifact bounded. */
+export const MAX_NPM_COMPARISON_RECEIPTS = 2 * MAX_NPM_COMPARISONS;
+const MAX_NPM_RECEIPT_SLUG_LENGTH = 214;
+const MAX_NPM_RECEIPT_VERSION_LENGTH = 100;
+
+/** Strict reader for the `npm-package-comparisons/v1` artifact → code-owned
+ * receipts. Total and fail-closed: anything outside the exact schema (wrong
+ * schema id, non-array `verified`, a non-object entry, an over-cap or
+ * grammar-refused slug/version) is skipped — contributes nothing, never
+ * refuses the ledger (the artifact is this runtime's own record; the trace
+ * refusal rule belongs to the trace). */
+function npmComparisonReceipts(value: unknown): EvidenceReceipt[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const record = value as Record<string, unknown>;
+  // House strict-artifact rule: any key this runtime did not write makes the
+  // WHOLE artifact absent (never partially trusted).
+  for (const key of Object.keys(record)) {
+    if (key !== "schema" && key !== "verified") return [];
+  }
+  if (record.schema !== NPM_COMPARISONS_ARTIFACT_SCHEMA) return [];
+  const verified = record.verified;
+  if (!Array.isArray(verified)) return [];
+  const receipts: EvidenceReceipt[] = [];
+  const seen = new Set<string>();
+  for (const raw of verified) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    const entryKeys = Object.keys(entry).every((key) => key === "slug" || key === "oldVersion" || key === "newVersion");
+    if (!entryKeys) continue;
+    // Reject, never fold: the producer writes canonical lowercase identity
+    // fields, so an uppercase or padded field is not this runtime's record.
+    // Case-folding here would credit a receipt for the folded version — a
+    // release the registry may publish SEPARATELY from the raw spelling
+    // (review of #1825).
+    const canonicalField = (value: unknown): value is string =>
+      typeof value === "string" && value !== "" && value === value.trim() && value === value.toLowerCase();
+    if (!canonicalField(entry.slug) || !canonicalField(entry.oldVersion) || !canonicalField(entry.newVersion)) continue;
+    const slug = entry.slug;
+    const oldVersion = entry.oldVersion;
+    const newVersion = entry.newVersion;
+    if (slug.length > MAX_NPM_RECEIPT_SLUG_LENGTH || oldVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH || newVersion.length > MAX_NPM_RECEIPT_VERSION_LENGTH) continue;
+    // Receipts ride the SAME canonical version-document grammar the phase
+    // fetched through: anything it refuses produced no read and credits
+    // nothing. A build-metadata version carries into the URL percent-encoded
+    // (`1.0.0+build` → `…%2Bbuild`) while the trusted scope entry spells the
+    // token with `+`, so the version carry never matches such an entry —
+    // under-credit, fail-closed, never an over-credit.
+    const oldUrl = registryVersionDocUrl(slug, oldVersion);
+    const newUrl = registryVersionDocUrl(slug, newVersion);
+    if (oldUrl === null || newUrl === null) continue;
+    for (const [version, url] of [[oldVersion, oldUrl], [newVersion, newUrl]] as const) {
+      if (receipts.length >= MAX_NPM_COMPARISON_RECEIPTS) break;
+      const id = `npm-compare:${slug}@${version}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      receipts.push({
+        id,
+        kind: "web-fetch",
+        capability: "acquisition",
+        acquired: true,
+        complete: true,
+        // The registry answered at read time: upstream web state, not an
+        // exact-head acquisition — the same freshness every web receipt has.
+        freshness: "unbound",
+        trust: "web",
+        subject: { url, obligations: ["provenance", "release_delta"] },
+      });
+    }
+  }
+  return receipts;
 }
 
 // ---------------------------------------------------------------------------
@@ -996,7 +1113,7 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
  * surface; never model text). */
 export type RowEvidenceStateValue =
   | "not-required"      // review-prompt/attention row: no receipt demand.
-  | "no-ledger"         // no executed-call trace: the gate is inert (pre-#1627 semantics).
+  | "no-ledger"         // no trace and nothing code-owned derived: the gate is inert (pre-#1627).
   | "trace-refused"     // trace present but unparseable: nothing is verifiable (fail closed).
   | "receipt-backed"    // validated receipts jointly cover the requirement.
   | "receipt-absent"    // no receipt carries any of the requirement's identity/kind.

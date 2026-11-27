@@ -698,9 +698,10 @@ export function foldObligationDispositions(
   // their groundedness — the reviewer's disposition folds on the
   // presence-and-shape rule), and attention rows never reach this fold at
   // all (dropped at the candidate boundary).
-  // The gate is ACTIVE only when a trace was present: `refused` fails every
-  // objective satisfaction closed; `unavailable` (no trace) and a missing
-  // ledger leave the receipt gate inert (satisfaction folds on the
+  // The gate is ACTIVE only when a trace was present or the run recorded
+  // code-owned comparison receipts (#1821): `refused` fails every objective
+  // satisfaction closed; `unavailable` (no trace, nothing derived) and a
+  // missing ledger leave the receipt gate inert (satisfaction folds on the
   // pre-#1627 presence-and-shape rule), while trusted producer tags still
   // govern which rows are merge-affecting — only untagged `legacy` rows
   // retain the old gating behavior.
@@ -858,8 +859,9 @@ export function foldObligationDispositions(
     // `not_applicable` and `unmet` are NOT gated (applicability and
     // confirmed negatives are not positive evidence claims; a negative
     // counterexample surfaces as a finding). Review-prompt rows are never
-    // gated; attention rows never reach this fold. With no ledger (fresh
-    // standard-call and fork paths) the fold is byte-identical to
+    // gated; attention rows never reach this fold. With no ledger or an
+    // `unavailable` one (fresh standard-call and fork paths with nothing
+    // code-owned derived) the fold is byte-identical to
     // pre-#1627; a PRESENT-but-malformed trace (`refused`) fails every
     // objective satisfaction closed.
     if (ledgerActive && status === "satisfied" && obligation.source === "must_check"

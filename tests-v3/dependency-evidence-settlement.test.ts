@@ -52,7 +52,7 @@ import {
 } from "../src/enforcement/review-obligations.js";
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass } from "../src/enforcement/required-checks.js";
 import { reconcileRequiredCheckRows } from "../src/enforcement/required-check-ci.js";
-import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact, evaluateRowEvidence } from "../src/enforcement/evidence-receipts.js";
 import { canonicalRegistryCatalogImageIdentity, isCanonicalSourceRepoIdentity, registryDocumentSourceRepo, registryRedirectSourceMapping, sourceRepoSurfaceIdentity } from "../src/tools/dependency-evidence.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 import { adaptiveLoopBudgets, DEPENDENCY_EVIDENCE_OBLIGATIONS, driveToolLoop, isDependencyEvidenceChannelCall, STOP_BUDGET, STOP_OBLIGATIONS_SETTLED, type DependencyEvidenceObligation } from "../src/tools/loop.js";
@@ -1781,4 +1781,258 @@ test("#1763 (review): two-segment official-Hub identities settle advisories thro
   ), "obligation-4");
   assert.equal(fetchedName.status, "unresolved");
   assert.equal(fetchedName.evidence?.state, "receipt-absent");
+});
+
+// ---------------------------------------------------------------------------
+// #1821 (independent review): the organic #1819 acceptance shape.
+// An `@types/node` 26.6.7 → 26.6.10 lockfile bump whose upstream
+// (DefinitelyTyped) publishes NO per-version Git tag: the model's tag/compare
+// lookups 404, and ordinary registry version-doc fetches attribute provenance
+// only — so the mandatory `release_delta` row could not settle. The code-owned
+// exact published-package comparison (integrity- and manifest-verified trees,
+// compared without any tag) now rides the ledger and settles exactly what it
+// proved — and nothing it did not.
+// ---------------------------------------------------------------------------
+
+const TYPES_NODE = [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }];
+
+const NPM1819_ROWS = [
+  { text: "establish upstream provenance for the updated dependency: publisher and canonical source repository", row_class: "objective", gate: "dependency-evidence", obligations: ["provenance"], dependency_scope: TYPES_NODE },
+  { text: "inspect the exact old→new upstream release delta for the updated dependency", row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: TYPES_NODE },
+  { text: "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: TYPES_NODE },
+];
+
+function npm1819Tags(text: string) {
+  const row = NPM1819_ROWS.find((candidate) => candidate.text === text)!;
+  const tags = checkEvidenceTagsFromArtifact([row]);
+  assert.equal(tags.length, 1);
+  return tags[0]!;
+}
+
+/** The #1819 run's trace: the tag-era lookups all failed (DefinitelyTyped has
+ * no per-version tags), and NO successful acquisition carries the exact
+ * old→new pair through lexical attribution. */
+const NPM1819_CALLS = [
+  { tool: "read_file", args: { path: "package-lock.json" }, status: "ok" },
+  { tool: "web_fetch", args: { url: "https://github.com/DefinitelyTyped/DefinitelyTyped/compare/types-node-26.6.7...types-node-26.6.10" }, status: "error" },
+  { tool: "web_fetch", args: { url: "https://registry.npmjs.org/@types%2Fnode" }, status: "ok" },
+];
+const NPM1819_RESULTS = [
+  { status: "ok", result: { content: "lockfile" } },
+  { status: "error", result: { error: "HTTP 404" } },
+  { status: "ok", result: { content: "{}", truncated: false, status: 200 } },
+];
+
+function npm1819Ledger(verified: unknown[]) {
+  return buildEvidenceLedger({
+    toolCalls: NPM1819_CALLS,
+    toolResults: NPM1819_RESULTS,
+    certifiedDiffPayloads: [],
+    rawDiff: null,
+    candidatePaths: [],
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified },
+    reviewedHeadSha: HEAD,
+  });
+}
+
+test("#1821 replay: a valid tag-less published-package comparison settles the mandatory release-delta row", () => {
+  const ledger = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(ledger.state, "valid");
+  const delta = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, ledger);
+  assert.equal(delta.state, "receipt-backed");
+  assert.deepEqual(delta.receipts.sort(), ["npm-compare:types/node@26.6.10", "npm-compare:types/node@26.6.7"]);
+  // The canonical registry documents the phase read also settle provenance…
+  const provenance = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[0]!.text), NPM1819_ROWS[0]!.text, ledger);
+  assert.equal(provenance.state, "receipt-backed");
+  // …but nothing here checked advisories: that row stays fail-closed, never
+  // carried by proximity to the comparison (no manufactured clean verdict).
+  const advisory = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[2]!.text), NPM1819_ROWS[2]!.text, ledger);
+  assert.ok(advisory.state === "receipt-absent" || advisory.state === "receipt-mismatch", `advisory must not settle, got ${advisory.state}`);
+});
+
+test("#1821 replay negatives: failed, mismatched, and partial comparisons never settle the release-delta row", () => {
+  const deltaTag = npm1819Tags(NPM1819_ROWS[1]!.text);
+  // (a) The comparison FAILED (registry miss / integrity refusal): the
+  // artifact carries nothing, and the run's own tag-era trace settles no
+  // delta — the pre-#1821 fail-closed reading stands.
+  const failed = evaluateRowEvidence(deltaTag, deltaTag.text, npm1819Ledger([]));
+  assert.ok(failed.state === "receipt-absent" || failed.state === "receipt-mismatch", `failed comparison must not settle, got ${failed.state}`);
+  // (b) WRONG slug: evidence for another package never speaks about this row.
+  const wrongSlug = evaluateRowEvidence(deltaTag, deltaTag.text, npm1819Ledger([{ slug: "types/notes", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.ok(wrongSlug.state === "receipt-absent" || wrongSlug.state === "receipt-mismatch", `wrong slug must not settle, got ${wrongSlug.state}`);
+  // (c) WRONG version pair: provenance still binds (the document is for THIS
+  // slug), but the asserted old→new pair never appears — mismatch, not backed.
+  const wrongPair = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.9" }]);
+  assert.equal(evaluateRowEvidence(deltaTag, deltaTag.text, wrongPair).state, "receipt-mismatch");
+  assert.equal(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[0]!.text), NPM1819_ROWS[0]!.text, wrongPair).state, "receipt-backed");
+  // (d) PARTIAL: an aggregate row naming two packages settles only when EVERY
+  // entry's delta is covered — one verified package credits nothing.
+  const aggregateRow = {
+    text: "inspect the exact old→new upstream release delta for the updated dependency",
+    row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"],
+    dependency_scope: [{ slug: "lodash", versions: ["4.17.21", "4.18.0"] }],
+  };
+  const aggregateTags = checkEvidenceTagsFromArtifact([
+    { ...aggregateRow, dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }, { slug: "lodash", versions: ["4.17.21", "4.18.0"] }] },
+  ]);
+  assert.equal(aggregateTags.length, 1);
+  const partial = evaluateRowEvidence(aggregateTags[0]!, aggregateRow.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.ok(partial.state === "receipt-mismatch" || partial.state === "receipt-absent", `partial coverage must not settle, got ${partial.state}`);
+});
+
+// Review of #1825: the artifact reader REJECTS a noncanonical identity field
+// rather than case-folding it. The raw manifest spelled `26.6.7-RC1`; npm
+// publishes case-sensitively, so folding it here would credit the SEPARATE
+// lowercase `26.6.7-rc1` release the run never established — and the scope
+// entry (also folded) would match, settling the row for the wrong version.
+test("#1821 replay: a noncanonical artifact spelling is rejected, never folded into a settlement", () => {
+  const rcScope = [{ slug: "types/node", versions: ["26.6.7-rc1", "26.6.10"] }];
+  const deltaRow = { ...NPM1819_ROWS[1]!, dependency_scope: rcScope };
+  const [deltaTag] = checkEvidenceTagsFromArtifact([deltaRow]);
+  assert.ok(deltaTag !== undefined);
+  const folded = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7-RC1", newVersion: "26.6.10" }]);
+  assert.equal(folded.state, "valid");
+  const state = evaluateRowEvidence(deltaTag!, deltaRow.text, folded);
+  assert.ok(state.state === "receipt-absent" || state.state === "receipt-mismatch", `a noncanonical entry must not settle, got ${state.state}`);
+  // A padded field is not this runtime's record either.
+  const padded = npm1819Ledger([{ slug: "types/node", oldVersion: " 26.6.7", newVersion: "26.6.10 " }]);
+  assert.ok(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, padded).state !== "receipt-backed");
+  // Control: the canonical spelling the producer actually writes still settles.
+  const canonical = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[1]!.text), NPM1819_ROWS[1]!.text, canonical).state, "receipt-backed");
+});
+
+// Review of #1825 (Major): a no-tool or fork run carries no harness trace, but
+// its own deterministic phase still verified the published-package transition —
+// the code-owned receipts ride a valid ledger on their own and settle the rows
+// they prove. The receipt gate this opens ALSO rejects unsupported positive
+// claims on such a run (fail-closed, never laundering); with nothing derived
+// the fold stays byte-identical to the inert pre-#1627 case.
+function npmNoTraceLedger(verified: readonly unknown[]) {
+  return buildEvidenceLedger({
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified },
+  });
+}
+
+function npmNoTraceObligations() {
+  const rows = NPM1819_ROWS.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row }));
+  const tags = checkEvidenceTagsFromArtifact(NPM1819_ROWS);
+  assert.equal(tags.length, NPM1819_ROWS.length);
+  return candidateRowsToObligations(rows, NPM1819_ROWS.map((row) => row.text), tags);
+}
+
+test("#1821 no-trace replay: the code-owned ledger settles the provenance and release-delta rows end to end", () => {
+  const ledger = npmNoTraceLedger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  assert.equal(ledger.state, "valid");
+  const folded = foldObligationDispositions(npmNoTraceObligations(), [], ledger, { readPaths: new Set<string>() });
+  for (const id of ["obligation-1", "obligation-2"]) {
+    assert.equal(byId(folded, id).status, "satisfied", id);
+    assert.equal(byId(folded, id).reason, "dependency-evidence", id);
+  }
+  // The advisory row was never established by the comparison: it stays
+  // unresolved fail-closed, never carried by proximity.
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.evidence !== undefined && advisory.evidence.state !== "receipt-backed");
+  // The #750 completeness fold settles the SAME rows row-for-row.
+  const coverage = evaluateRequiredCheckCoverage(
+    NPM1819_ROWS.map((row) => row.text),
+    null,
+    ledger,
+    checkEvidenceTagsFromArtifact(NPM1819_ROWS),
+  );
+  const deltaRow = coverage.checks.find((row) => row.check === NPM1819_ROWS[1]!.text)!;
+  assert.equal(deltaRow.status, "satisfied");
+  assert.equal(deltaRow.reason, "dependency-evidence");
+});
+
+test("#1821 no-trace replay: the activated gate rejects a positive claim the comparison does not prove", () => {
+  const ledger = npmNoTraceLedger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  const folded = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[2]!.text, status: "satisfied" }],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.reason === "receipt-absent" || advisory.reason === "receipt-mismatch", `got ${advisory.reason}`);
+  // The claim the receipts DO prove still discharges through the gate.
+  const proven = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[1]!.text, status: "satisfied" }],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  assert.equal(byId(proven, "obligation-2").status, "satisfied");
+});
+
+test("#1821 no-trace control: nothing derived keeps the fold byte-identical to the inert pre-#1627 case", () => {
+  const inert = buildEvidenceLedger({ npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified: [] } });
+  assert.equal(inert.state, "unavailable");
+  const folded = foldObligationDispositions(
+    npmNoTraceObligations(),
+    [{ check: NPM1819_ROWS[2]!.text, status: "satisfied" }],
+    inert,
+    { readPaths: new Set<string>() },
+  );
+  // With an unavailable ledger the receipt gate never touches the answer.
+  assert.equal(byId(folded, "obligation-3").status, "satisfied");
+  assert.equal(byId(folded, "obligation-3").reason, "ok");
+});
+
+// Review of #1825 (round 11, #1836): the code-owned no-trace ledger activates
+// the gate for EVERY objective row, so the run's OTHER recorded facts — a
+// certified complete corpus diff — must stay legible to it. A no-tool mixed
+// run (verified npm comparison + certified source diff) must not newly read
+// its covered source-identity row as missing-receipt, while a row the
+// comparison genuinely does not prove stays rejected.
+test("#1821/#1836 no-trace mixed replay: certified corpus evidence stays legible to the gate the code-owned receipts open", () => {
+  const rawDiff = "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n-x\n+y\n";
+  const ledger = buildEvidenceLedger({
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] },
+    certifiedDiffPayloads: [rawDiff],
+    rawDiff,
+    candidatePaths: ["src/auth.ts"],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(ledger.state, "valid");
+  const sourceRow = "check the auth path in src/auth.ts";
+  const rows = [...NPM1819_ROWS, { text: sourceRow, row_class: "objective", gate: "source-identity" }];
+  const tags = checkEvidenceTagsFromArtifact(rows);
+  assert.equal(tags.length, rows.length);
+  const obligations = candidateRowsToObligations(
+    rows.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row })),
+    rows.map((row) => row.text),
+    tags,
+  );
+  const folded = foldObligationDispositions(
+    obligations,
+    [
+      { check: NPM1819_ROWS[1]!.text, status: "satisfied" },
+      { check: NPM1819_ROWS[2]!.text, status: "satisfied" },
+      { check: sourceRow, status: "satisfied" },
+    ],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  // The code-owned comparison settles the release-delta row.
+  assert.equal(byId(folded, "obligation-2").status, "satisfied");
+  // The certified corpus diff settles the source-identity row — the exact
+  // false-INCOMPLETE the round-10 early return introduced.
+  assert.equal(byId(folded, "obligation-4").status, "satisfied");
+  // The advisory row stays genuinely unsupported: the shared derivation
+  // launders nothing.
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.reason === "receipt-absent" || advisory.reason === "receipt-mismatch", `got ${advisory.reason}`);
+  // The #750 completeness fold agrees row-for-row on the same dispositions.
+  const coverage = evaluateRequiredCheckCoverage(rows.map((row) => row.text), [
+    { check: NPM1819_ROWS[1]!.text, status: "satisfied", rationale: null },
+    { check: NPM1819_ROWS[2]!.text, status: "satisfied", rationale: null },
+    { check: sourceRow, status: "satisfied", rationale: null },
+  ], ledger, tags);
+  assert.equal(coverage.checks.find((row) => row.check === sourceRow)!.status, "satisfied");
+  assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[1]!.text)!.status, "satisfied");
+  assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[2]!.text)!.status !== "satisfied", true);
 });

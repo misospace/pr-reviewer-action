@@ -39,6 +39,9 @@ import {
 } from "../context/index.js";
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
+import { parseDependencyScope, type DependencyScopeSideProvenance } from "../classification/classify.js";
+import { MAX_NPM_COMPARISONS, buildNpmPackageProvenance, npmComparisonsArtifactJson } from "../context/npm-package-provenance.js";
+import { createNpmFetches, npmPackageDeadline } from "../context/npm-package-transport.js";
 import {
   MAX_SYNTAX_BYTES,
   buildSyntaxContext,
@@ -356,6 +359,103 @@ export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, en
   return markdown;
 }
 
+/** The npm package changes an exact-published-package comparison can attempt
+ * from a dependency-scope result: every npm entry (no `kind`, the pre-#1763
+ * spelling) whose exact version tokens describe a real old→new transition —
+ * EXACTLY two tokens, one contributed ONLY by removed lines and the other
+ * ONLY by added lines (#1821 review round 2). A dependency-range edit is NOT
+ * a transition: `">=1.0.0 <2.0.0"` tokenizes to two exact versions nobody
+ * installed their way from, and a single added/removed line or a chart-manifest
+ * version carries no npm install transition at all — every such entry is
+ * skipped, never compared. The `MAX_NPM_COMPARISONS` cap is applied by the
+ * phase (which discloses what it drops), not here, so the pure decision
+ * stays unit-testable without a network. */
+export function npmPackageChangesFromDiff(diffText: string): Array<{ slug: string; oldVersion: string; newVersion: string }> {
+  const npmSides = new Map<string, DependencyScopeSideProvenance>();
+  const scope = parseDependencyScope(diffText, npmSides);
+  if (!scope.available) return [];
+  const changes: Array<{ slug: string; oldVersion: string; newVersion: string }> = [];
+  for (const entry of scope.entries) {
+    // npm-era entries leave `kind` undefined; image/chart kinds never do.
+    if (entry.kind !== undefined) continue;
+    if (entry.versions.length !== 2) continue;
+    // #1821 review round 2: two tokens are a bump only with side provenance —
+    // exactly one token recorded ONLY on the removed side and exactly one
+    // ONLY on the added side, and the pair IS the entry's whole token set.
+    // Direction comes from the sides, never from first-seen order (a cross-
+    // file bump can record the '+' line before the '-' line). No capture
+    // (e.g. a chart-manifest version) or any range-shaped value
+    // (`matches >= 2` on one line) disqualifies the entry.
+    const sides = npmSides.get(entry.slug);
+    if (sides === undefined || sides.multiToken) continue;
+    // #1826 (review of #1825): a slug whose tokens were recorded from blocks
+    // spelled with different case (`@Foo/Bar` removed, `@foo/bar` added)
+    // merges two differently-named blocks through the case-folded key — the
+    // PR re-spelled a dependency, it did not bump one. Never compare, so a
+    // forged framing can never settle a release-delta row.
+    if (sides.caseCollision) continue;
+    // Review of #1825: the recorded token is already case-folded, and npm
+    // publishes case-sensitively — `1.0.0-RC1` could settle against a real
+    // lowercase `1.0.0-rc1` release. Never compare a noncanonical spelling.
+    if (sides.noncanonicalVersion) continue;
+    const removedOnly = entry.versions.filter((version) => sides.minus.has(version) && !sides.plus.has(version));
+    const addedOnly = entry.versions.filter((version) => sides.plus.has(version) && !sides.minus.has(version));
+    // The two filters are complementary by construction, so exactly one
+    // token on each side is the whole clean transition.
+    if (removedOnly.length !== 1 || addedOnly.length !== 1) continue;
+    changes.push({ slug: entry.slug, oldVersion: removedOnly[0]!, newVersion: addedOnly[0]! });
+  }
+  return changes;
+}
+
+/** #1821: deterministic exact-published-package comparison for npm bumps. Reads
+ * both version documents + tarballs through the SSRF-gated npm transport, under
+ * the NPM_PACKAGE_BUDGET_SEC deadline, and writes `npm-package-provenance.md`.
+ * Empty (and no network) when the diff carries no comparable npm bump. When the
+ * registry host is not in the operator's `allowed-source-hosts`, the reads fail
+ * closed and the section reports every version unresolved — never a fabricated
+ * delta. */
+export async function runNpmPackageProvenancePhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
+  // Clear any prior same-head derivation FIRST (#1821 AC1): the settlement
+  // artifact rides the shared run directory, so a stale verified list must
+  // never survive into — or past — this run's ledger, on every path.
+  ws.write("npm-package-comparisons.json", "");
+  const comparable = npmPackageChangesFromDiff(diffText);
+  if (comparable.length === 0) {
+    ws.write("npm-package-provenance.md", "");
+    return "";
+  }
+  // #1821 review round 2: the per-run cap keeps a pathological multi-bump PR
+  // bounded, but dropping the excess silently overstates the section's
+  // coverage — everything past the cap is passed to the renderer and
+  // disclosed there, unfetched.
+  const changes = comparable.slice(0, MAX_NPM_COMPARISONS);
+  const skipped = comparable.slice(MAX_NPM_COMPARISONS);
+  const allowedHosts = parseAllowedHosts(env.ALLOWED_SOURCE_HOSTS ?? "");
+  // One deadline, computed once (#1821 review round 3): the phase stops
+  // starting new reads past it, and the transport additionally clamps every
+  // in-flight read to the time left under it.
+  const deadline = npmPackageDeadline(env as NodeJS.ProcessEnv);
+  const { fetchJson, fetchBytes } = createNpmFetches({
+    allowedHosts,
+    deadline,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  const { markdown, comparisons } = await buildNpmPackageProvenance(changes, {
+    fetchJson,
+    fetchBytes,
+    deadline,
+  }, skipped);
+  // #1821 AC1: the structured comparison FACT rides its own artifact so the
+  // evidence-receipt ledger (the settlement contract) credits the exact
+  // published-package comparison — advisory Markdown alone left the mandatory
+  // release-delta row unsettled when no Git tag/compare exists (independent
+  // review). Failed/partial comparisons are simply absent from the list.
+  ws.write("npm-package-comparisons.json", npmComparisonsArtifactJson(comparisons));
+  ws.write("npm-package-provenance.md", markdown);
+  return markdown;
+}
+
 export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void, signal?: AbortSignal): Promise<string> {
   const outcome = await runEvidenceProvidersPhase({
     env: env as NodeJS.ProcessEnv,
@@ -656,6 +756,7 @@ export function assembleCorpus(
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
       dependencyCoverageMd: ws.read("dependency-coverage.md"),
+      npmPackageProvenanceMd: ws.read("npm-package-provenance.md"),
       reReviewScopeMd: ws.read("re-review-scope.md"),
       reReviewEvidenceMd: ws.read("re-review-evidence.md"),
       linkedSourcesMd: ws.read("linked-sources.md"),

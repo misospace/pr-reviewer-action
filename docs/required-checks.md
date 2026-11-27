@@ -730,7 +730,12 @@ The rules this buys, and their limits:
   round-trip reader, `unavailable` explicit rather than inferred); the
   required-evidence sentinel rows carry `row_class`. Nothing here decides
   APPROVE/INCOMPLETE — the disposition layer consumes the reason-coded state.
-- **Compatibility**: without a ledger (fresh standard-call and fork paths)
+- **Compatibility**: without a ledger, or with an `unavailable` one (fresh
+  standard-call and fork paths with nothing code-owned derived — #1821's
+  verified comparison receipts make a no-trace ledger valid and active, and
+  #1836: an activated no-trace ledger derives the same certified corpus-diff
+  and CI receipts as the traced path, so rows covered otherwise never read
+  as missing-receipt under the gate it opens)
   the receipt gate is INERT — satisfaction folds on the pre-#1627
   presence-and-shape rule — but trusted producer tags still intentionally
   govern which rows are merge-affecting: tagged review-prompt/attention rows

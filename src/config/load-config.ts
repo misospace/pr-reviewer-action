@@ -122,6 +122,7 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
       if (input.id === "ai-primary-retries" && number < 0) throw new Error("Input 'ai-primary-retries' must be at least 0");
       if (input.id === "ai-primary-retry-delay-sec" && number < 0) throw new Error("Input 'ai-primary-retry-delay-sec' must be at least 0");
       if (input.id === "image-digest-budget-sec" && number < 0) throw new Error("Input 'image-digest-budget-sec' must be at least 0");
+      if (input.id === "npm-package-budget-sec" && number < 0) throw new Error("Input 'npm-package-budget-sec' must be at least 0");
       value = number;
     } else if (FLOAT_INPUTS.has(input.id) && text !== "") {
       const number = Number(text);
