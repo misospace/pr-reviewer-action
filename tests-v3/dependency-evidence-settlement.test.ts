@@ -1980,3 +1980,59 @@ test("#1821 no-trace control: nothing derived keeps the fold byte-identical to t
   assert.equal(byId(folded, "obligation-3").status, "satisfied");
   assert.equal(byId(folded, "obligation-3").reason, "ok");
 });
+
+// Review of #1825 (round 11, #1836): the code-owned no-trace ledger activates
+// the gate for EVERY objective row, so the run's OTHER recorded facts — a
+// certified complete corpus diff — must stay legible to it. A no-tool mixed
+// run (verified npm comparison + certified source diff) must not newly read
+// its covered source-identity row as missing-receipt, while a row the
+// comparison genuinely does not prove stays rejected.
+test("#1821/#1836 no-trace mixed replay: certified corpus evidence stays legible to the gate the code-owned receipts open", () => {
+  const rawDiff = "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n-x\n+y\n";
+  const ledger = buildEvidenceLedger({
+    npmPackageComparisons: { schema: "npm-package-comparisons/v1", verified: [{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }] },
+    certifiedDiffPayloads: [rawDiff],
+    rawDiff,
+    candidatePaths: ["src/auth.ts"],
+    reviewedHeadSha: HEAD,
+  });
+  assert.equal(ledger.state, "valid");
+  const sourceRow = "check the auth path in src/auth.ts";
+  const rows = [...NPM1819_ROWS, { text: sourceRow, row_class: "objective", gate: "source-identity" }];
+  const tags = checkEvidenceTagsFromArtifact(rows);
+  assert.equal(tags.length, rows.length);
+  const obligations = candidateRowsToObligations(
+    rows.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row })),
+    rows.map((row) => row.text),
+    tags,
+  );
+  const folded = foldObligationDispositions(
+    obligations,
+    [
+      { check: NPM1819_ROWS[1]!.text, status: "satisfied" },
+      { check: NPM1819_ROWS[2]!.text, status: "satisfied" },
+      { check: sourceRow, status: "satisfied" },
+    ],
+    ledger,
+    { readPaths: new Set<string>() },
+  );
+  // The code-owned comparison settles the release-delta row.
+  assert.equal(byId(folded, "obligation-2").status, "satisfied");
+  // The certified corpus diff settles the source-identity row — the exact
+  // false-INCOMPLETE the round-10 early return introduced.
+  assert.equal(byId(folded, "obligation-4").status, "satisfied");
+  // The advisory row stays genuinely unsupported: the shared derivation
+  // launders nothing.
+  const advisory = byId(folded, "obligation-3");
+  assert.equal(advisory.status, "unresolved");
+  assert.ok(advisory.reason === "receipt-absent" || advisory.reason === "receipt-mismatch", `got ${advisory.reason}`);
+  // The #750 completeness fold agrees row-for-row on the same dispositions.
+  const coverage = evaluateRequiredCheckCoverage(rows.map((row) => row.text), [
+    { check: NPM1819_ROWS[1]!.text, status: "satisfied", rationale: null },
+    { check: NPM1819_ROWS[2]!.text, status: "satisfied", rationale: null },
+    { check: sourceRow, status: "satisfied", rationale: null },
+  ], ledger, tags);
+  assert.equal(coverage.checks.find((row) => row.check === sourceRow)!.status, "satisfied");
+  assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[1]!.text)!.status, "satisfied");
+  assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[2]!.text)!.status !== "satisfied", true);
+});

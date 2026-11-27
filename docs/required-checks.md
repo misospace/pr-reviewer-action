@@ -732,7 +732,10 @@ The rules this buys, and their limits:
   APPROVE/INCOMPLETE — the disposition layer consumes the reason-coded state.
 - **Compatibility**: without a ledger, or with an `unavailable` one (fresh
   standard-call and fork paths with nothing code-owned derived — #1821's
-  verified comparison receipts make a no-trace ledger valid and active)
+  verified comparison receipts make a no-trace ledger valid and active, and
+  #1836: an activated no-trace ledger derives the same certified corpus-diff
+  and CI receipts as the traced path, so rows covered otherwise never read
+  as missing-receipt under the gate it opens)
   the receipt gate is INERT — satisfaction folds on the pre-#1627
   presence-and-shape rule — but trusted producer tags still intentionally
   govern which rows are merge-affecting: tagged review-prompt/attention rows

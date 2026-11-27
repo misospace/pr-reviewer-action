@@ -904,8 +904,11 @@ function receiptForTraceCall(
  * REFUSES the whole ledger (gate active, nothing usable, code-owned facts
  * included — nothing settles behind an unreadable trace); an absent or empty
  * trace is `unavailable` UNLESS the run derived code-owned comparison
- * receipts, which ride a `valid` ledger on their own (#1821 review of
- * #1825). An over-cap trace is bounded by PREFIX truncation so the 1-based
+ * receipts, which ride a `valid` ledger that carries the same certified
+ * corpus-diff and CI receipts the trace-present path derives (#1821 review
+ * of #1825; #1836 — the code-owned activation must not hide the run's other
+ * recorded facts from the gate it opens). An over-cap trace is bounded by
+ * PREFIX truncation so the 1-based
  * positional ids keep their exact alignment (#1627 m1). Never throws.
  */
 export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger {
@@ -914,51 +917,56 @@ export function buildEvidenceLedger(input: EvidenceLedgerInput): EvidenceLedger 
   // run must not discard receipts it already holds.
   const derivedNpm = npmComparisonReceipts(input.npmPackageComparisons);
   const toolCalls = input.toolCalls;
-  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
-    return derivedNpm.length > 0
-      ? { state: "valid", receipts: derivedNpm }
-      : { state: "unavailable", receipts: [] };
-  }
-  const boundedCalls = toolCalls.length > MAX_EXECUTED_CALL_INDEX
-    ? toolCalls.slice(0, MAX_EXECUTED_CALL_INDEX)
-    : toolCalls;
-  const toolResults = input.toolResults;
-  if (!Array.isArray(toolResults) || toolResults.length < boundedCalls.length) {
-    // The executor writes an index-aligned result per executed call; a
-    // present trace without its aligned results cannot be validated —
-    // refuse (fail closed), never infer acquisition state.
-    return { state: "refused", receipts: [] };
+  const tracePresent = Array.isArray(toolCalls) && toolCalls.length > 0;
+  if (!tracePresent && derivedNpm.length === 0) {
+    return { state: "unavailable", receipts: [] };
   }
   const reviewedHeadSha = (input.reviewedHeadSha ?? "").toLowerCase();
   const receipts: EvidenceReceipt[] = [];
-  for (let position = 0; position < boundedCalls.length; position++) {
-    const entry = boundedCalls[position];
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+  // #1836: code-owned receipts ACTIVATE the objective-row gate for the whole
+  // ledger, so a no-trace run must derive the same corpus-diff and CI
+  // receipts a trace-present run does — otherwise rows the run already
+  // covered read as missing-receipt and newly reject.
+  if (tracePresent) {
+    const boundedCalls = toolCalls.length > MAX_EXECUTED_CALL_INDEX
+      ? toolCalls.slice(0, MAX_EXECUTED_CALL_INDEX)
+      : toolCalls;
+    const toolResults = input.toolResults;
+    if (!Array.isArray(toolResults) || toolResults.length < boundedCalls.length) {
+      // The executor writes an index-aligned result per executed call; a
+      // present trace without its aligned results cannot be validated —
+      // refuse (fail closed), never infer acquisition state.
       return { state: "refused", receipts: [] };
     }
-    const record = entry as Record<string, unknown>;
-    if (typeof record.tool !== "string" || record.tool === "" || typeof record.status !== "string") {
-      return { state: "refused", receipts: [] };
+    for (let position = 0; position < boundedCalls.length; position++) {
+      const entry = boundedCalls[position];
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return { state: "refused", receipts: [] };
+      }
+      const record = entry as Record<string, unknown>;
+      if (typeof record.tool !== "string" || record.tool === "" || typeof record.status !== "string") {
+        return { state: "refused", receipts: [] };
+      }
+      const args = record.args !== null && typeof record.args === "object" && !Array.isArray(record.args)
+        ? record.args as Record<string, unknown>
+        : {};
+      const result = traceResultAt(toolResults, position);
+      if (result === null) {
+        // An aligned result the runtime cannot read is evidence of nothing —
+        // refuse the whole ledger before constructing any receipt.
+        return { state: "refused", receipts: [] };
+      }
+      if (result.ok && evidencePayloadShape(record.tool, result.payload) === "invalid") {
+        // A SUCCESS whose payload cannot hold the observation the tool name
+        // claims (the executor's minimum output shape is absent or wrongly
+        // typed) is state the runtime cannot read — refuse the whole ledger
+        // rather than credit the call's arguments with the acquisition they
+        // merely requested.
+        return { state: "refused", receipts: [] };
+      }
+      const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);
+      if (receipt !== null) receipts.push(receipt);
     }
-    const args = record.args !== null && typeof record.args === "object" && !Array.isArray(record.args)
-      ? record.args as Record<string, unknown>
-      : {};
-    const result = traceResultAt(toolResults, position);
-    if (result === null) {
-      // An aligned result the runtime cannot read is evidence of nothing —
-      // refuse the whole ledger before constructing any receipt.
-      return { state: "refused", receipts: [] };
-    }
-    if (result.ok && evidencePayloadShape(record.tool, result.payload) === "invalid") {
-      // A SUCCESS whose payload cannot hold the observation the tool name
-      // claims (the executor's minimum output shape is absent or wrongly
-      // typed) is state the runtime cannot read — refuse the whole ledger
-      // rather than credit the call's arguments with the acquisition they
-      // merely requested.
-      return { state: "refused", receipts: [] };
-    }
-    const receipt = receiptForTraceCall(executedCallId(position + 1), record.tool, args, result, reviewedHeadSha);
-    if (receipt !== null) receipts.push(receipt);
   }
   // Corpus-diff credit receipts (#921's byte-exact rule): a path whose
   // complete head diff rode a certified corpus payload was IN the reviewer's
