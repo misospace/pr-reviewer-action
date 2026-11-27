@@ -2969,7 +2969,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
   // #978: persist whether this verdict can bypass fail-on-request-changes,
-  // not merely whether some part of the tool loop degraded.
+  // not merely whether some part of the tool loop degraded. #1837: the
+  // harness records `native_loop_degraded` only for a zero-call stop the
+  // LOOP chose (transport failure, deadline) — the model's deliberate
+  // no-tool-calls reply is a corpus-direct completion, so the marker's
+  // absence settles that run the way `tool-mode: off` settles.
   const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
   const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
   // #1656: the loop's own recorded no-evidence reason — an evidence-

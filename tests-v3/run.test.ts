@@ -2415,18 +2415,23 @@ test("#1305: a primary HTTP 524 gets one short retry, then hands off to fallback
 });
 
 test("#978: native-loop fallback request_changes without deterministic blockers passes the gate by default", async () => {
-  const primaryServer = await startMockServer((_req, body, res) => {
-    const request = JSON.parse(body) as { tools?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      // The planning turn gets no tool calls and records native_loop_degraded.
-      res.end(verdictBody(baseVerdict()));
-      return;
-    }
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    // #1837: the primary lane fails BEFORE any investigation reply — the loop
+    // turn and the corpus review alike — so the #978 no-evidence eligibility
+    // comes from a genuine unavailability, never from a deliberate zero-call
+    // completion (which is not a degradation at all).
     res.statusCode = 500;
     res.end(JSON.stringify({ error: "primary unavailable" }));
   });
-  const fallbackServer = await startMockServer((_req, _body, res) => {
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The failover loop's planning turn fails too: the fallback lane
+      // gathers no evidence, which is #978's eligibility precondition.
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: "fallback investigation unavailable" }));
+      return;
+    }
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict({ verdict: "request_changes", review_markdown: "Fallback request-changes review.\n" })));
   });
@@ -2449,10 +2454,11 @@ test("#978: native-loop fallback request_changes without deterministic blockers 
       sleep: async () => {},
       quiet: true,
     });
-    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
-    assert.equal(harness.native_loop_degraded, "no-tool-calls", "the planning turn must exercise degraded native-loop coverage");
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string; executed_request_count?: number };
+    assert.equal(harness.native_loop_degraded, "request-error", "the primary loop stopped on a transport failure before any reply");
+    assert.equal(harness.executed_request_count, 0, "the primary investigation dispatched zero calls");
     assert.ok(primaryServer.requests.length >= 2, "the primary must serve its native-loop turn and fail over to the fallback");
-    assert.equal(fallbackServer.requests.length, 1, "fallback must provide the final verdict");
+    assert.equal(fallbackServer.requests.length, 2, "the failover runs a fallback-lane loop turn, then the fallback corpus review");
     assert.equal(result.outputs.verdict, "request_changes");
     assert.equal(result.outputs.verdictSource, "model", "the fallback itself returned request_changes");
     assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
@@ -2562,8 +2568,13 @@ test("#978: primary no-evidence review does not qualify for the fallback gate by
       sleep: async () => {},
       quiet: true,
     });
-    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
-    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string; stop_reason?: string; executed_request_count?: number };
+    // #1837: the model's own no-tool-calls reply is a deliberate corpus-direct
+    // completion, not a zero-evidence degradation — so the primary review is
+    // enforced like any corpus review, with zero calls still recorded.
+    assert.equal(harness.native_loop_degraded, undefined);
+    assert.equal(harness.stop_reason, "no-tool-calls");
+    assert.equal(harness.executed_request_count, 0);
     assert.equal(result.outputs.verdict, "request_changes");
     assert.equal(result.outputs.degradedGateBypass, false);
     assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
@@ -2574,17 +2585,21 @@ test("#978: primary no-evidence review does not qualify for the fallback gate by
 });
 
 test("#978: fallback no-evidence does not bypass when requirement-trace enforcement adds a finding", async () => {
-  const primaryServer = await startMockServer((_req, body, res) => {
-    const request = JSON.parse(body) as { tools?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      res.end(verdictBody(baseVerdict()));
-      return;
-    }
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    // #1837: a genuine primary-lane unavailability (never a deliberate
+    // zero-call completion) establishes the fallback's no-evidence eligibility.
     res.statusCode = 500;
     res.end(JSON.stringify({ error: "primary unavailable" }));
   });
   const fallbackServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The failover loop's planning turn fails too: the fallback lane
+      // gathers no evidence, which is #978's eligibility precondition.
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: "fallback investigation unavailable" }));
+      return;
+    }
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict({
@@ -2622,7 +2637,8 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
-    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(harness.native_loop_degraded, "request-error");
+    assert.equal(fallbackServer.requests.length, 2, "the failover runs a fallback-lane loop turn, then the fallback corpus review");
     assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
     assert.equal(result.outputs.verdict, "request_changes");
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
@@ -2641,17 +2657,21 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
 });
 
 test("#978: fallback no-evidence unverifiable trace blocks bypass without synthesizing a finding", async () => {
-  const primaryServer = await startMockServer((_req, body, res) => {
-    const request = JSON.parse(body) as { tools?: unknown[] };
-    res.setHeader("Content-Type", "application/json");
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
-      res.end(verdictBody(baseVerdict()));
-      return;
-    }
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    // #1837: a genuine primary-lane unavailability (never a deliberate
+    // zero-call completion) establishes the fallback's no-evidence eligibility.
     res.statusCode = 500;
     res.end(JSON.stringify({ error: "primary unavailable" }));
   });
   const fallbackServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The failover loop's planning turn fails too: the fallback lane
+      // gathers no evidence, which is #978's eligibility precondition.
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: "fallback investigation unavailable" }));
+      return;
+    }
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict({
@@ -2690,7 +2710,8 @@ test("#978: fallback no-evidence unverifiable trace blocks bypass without synthe
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
     const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string; resolution: string }>; incomplete: boolean };
-    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(harness.native_loop_degraded, "request-error");
+    assert.equal(fallbackServer.requests.length, 2, "the failover runs a fallback-lane loop turn, then the fallback corpus review");
     // #1658: the unverifiable row is a material unknown on the trace
     // artifact, not an incomplete that blocks.
     assert.equal(trace.incomplete, false);
@@ -2769,8 +2790,12 @@ async function runFallbackFindingEscalation(
 
 test("#978: strict blocker finding from fallback cannot bypass fail-on-request-changes", async () => {
   const result = await runFallbackFindingEscalation("strict", "major");
-  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
-  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string; stop_reason?: string };
+  // #1837: the planning turn's no-tool-calls reply is a deliberate
+  // corpus-direct completion — no degradation marker; the finding-driven
+  // block is enforced (bypass stays ineligible).
+  assert.equal(harness.native_loop_degraded, undefined);
+  assert.equal(harness.stop_reason, "no-tool-calls");
   assert.equal(result.outputs.verdict, "request_changes");
   assert.equal(result.outputs.verdictSource, "findings");
   assert.equal(result.outputs.degradedGateBypass, false);
@@ -2780,13 +2805,295 @@ test("#978: strict blocker finding from fallback cannot bypass fail-on-request-c
 
 test("#978: findings_severity_gated blocker from fallback cannot bypass fail-on-request-changes", async () => {
   const result = await runFallbackFindingEscalation("findings_severity_gated", "blocker");
-  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
-  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string; stop_reason?: string };
+  // #1837: deliberate corpus-direct completion — no degradation marker.
+  assert.equal(harness.native_loop_degraded, undefined);
+  assert.equal(harness.stop_reason, "no-tool-calls");
   assert.equal(result.outputs.verdict, "request_changes");
   assert.equal(result.outputs.verdictSource, "findings");
   assert.equal(result.outputs.degradedGateBypass, false);
   assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
   assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+});
+
+// ── #1837: a deliberate zero-tool-call completion settles like tool-mode: off ──
+//
+// The native loop's `no-tool-calls` stop is the model's own reply: it read
+// the corpus and chose to review it directly — the same evidence surface a
+// `tool-mode: off` run has. The zero-evidence degradation marker is
+// reserved for the zero-call stops the LOOP chose (transport failure,
+// deadline), and investigation adequacy — never the call count — decides
+// approval eligibility.
+
+/** The native loop's planning-turn reply: the model read the corpus and
+ * answered without issuing a single tool call. */
+function zeroCallLoopReply(): string {
+  return JSON.stringify({
+    content: [{ type: "text", text: "no tools needed" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 10, output_tokens: 3 },
+  });
+}
+
+/** One mock serving both native-loop turns and the corpus review: a
+ * tool-bearing request (the loop) gets the loop reply; everything else (the
+ * corpus review) gets `corpusVerdict`. `loopReply: null` simulates a
+ * provider failure before any reply. */
+async function runZeroCallNativeReview(options: {
+  corpusVerdict: Record<string, unknown>;
+  loopReply?: string | null;
+  platform?: PlatformReadAdapter;
+  extraInputs?: Record<string, string>;
+}): Promise<Awaited<ReturnType<typeof runReview>>> {
+  const server = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      if (options.loopReply === null) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: "provider 503" }));
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(options.loopReply ?? zeroCallLoopReply());
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(options.corpusVerdict));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    return await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "publish-mode": "review_verdict",
+        ...options.extraInputs,
+      },
+      runDir, workspace: runDir,
+      platformAdapter: options.platform ?? mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#1837: an adequate corpus, a deliberate zero-call completion and a clean verdict reach native APPROVE", async () => {
+  const { runDir, cleanup } = withRunDir();
+  let server: Awaited<ReturnType<typeof startMockServer>> | null = null;
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    server = await startMockServer((_req, body, res) => {
+      const request = JSON.parse(body) as { tools?: unknown[] };
+      if (Array.isArray(request.tools) && request.tools.length > 0) {
+        res.setHeader("Content-Type", "application/json");
+        res.end(zeroCallLoopReply());
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict()));
+    });
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "publish-mode": "review_verdict",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    // The loop's own artifact: zero calls recorded truthfully, and NO
+    // degradation marker — the deliberate reply is a corpus-direct completion.
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+      native_loop_degraded?: string;
+      stop_reason?: string;
+      executed_request_count?: number;
+      successful_request_count?: number;
+    };
+    assert.equal(harness.native_loop_degraded, undefined);
+    assert.equal(harness.stop_reason, "no-tool-calls");
+    assert.equal(harness.executed_request_count, 0);
+    assert.equal(harness.successful_request_count, 0);
+    // The corpus review a `tool-mode: off` run would have produced settles on
+    // its own merits: certified APPROVE, not INCOMPLETE over an investigation
+    // that did finish.
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "clean", "the marker no longer reads review_result partial for a completed corpus review");
+    assert.equal(result.finalDisposition?.kind, "approve", "approval eligibility is decided by investigation adequacy, not the call count");
+    assert.equal(result.finalDisposition?.reason, "approval_certified");
+    assert.equal(result.finalDisposition?.nativeEvent, "APPROVE");
+    // The authoritative disposition drives the published native event.
+    const api = await publishRunHandoff(result);
+    assertDispositionAgreement(result, api);
+    assert.equal(api.submitted[0]!.event, "APPROVE");
+  } finally {
+    await server?.close();
+    cleanup();
+  }
+});
+
+test("#1837: parity — the same adequate corpus approves with tools disabled and with tools available but unused", async () => {
+  const runCorpusApprove = async (toolMode: string): Promise<Awaited<ReturnType<typeof runReview>>> => {
+    const server = await startMockServer((_req, body, res) => {
+      const request = JSON.parse(body) as { tools?: unknown[] };
+      if (Array.isArray(request.tools) && request.tools.length > 0) {
+        res.setHeader("Content-Type", "application/json");
+        res.end(zeroCallLoopReply());
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict()));
+    });
+    const { runDir, cleanup } = withRunDir();
+    try {
+      writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+      gitInit(runDir);
+      return await runReview({
+        env: { IS_FORK_PR: "false" },
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+          "ai-stream": "false", "review-routing-mode": "off", "tool-max-requests": "1",
+          "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+          "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+          "ci-status-check": "false", "publish-mode": "review_verdict",
+          "tool-mode": toolMode,
+        },
+        runDir, workspace: runDir,
+        platformAdapter: mockPlatform(),
+        sleep: async () => {},
+        quiet: true,
+      });
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  };
+  // Same corpus, same verdict, same evidentiary standard: the tools-disabled
+  // run and the native-loop run that deliberately made no calls settle
+  // identically.
+  const disabled = await runCorpusApprove("off");
+  const unused = await runCorpusApprove("native_loop");
+  assert.equal(disabled.finalDisposition?.kind, "approve");
+  assert.equal(disabled.finalDisposition?.nativeEvent, "APPROVE");
+  assert.equal(unused.finalDisposition?.kind, disabled.finalDisposition?.kind);
+  assert.equal(unused.finalDisposition?.nativeEvent, disabled.finalDisposition?.nativeEvent);
+  assert.equal(unused.finalDisposition?.reason, disabled.finalDisposition?.reason);
+});
+
+test("#1837: a deliberate zero-call completion with a supported major finding is REQUEST_CHANGES", async () => {
+  const result = await runZeroCallNativeReview({
+    corpusVerdict: baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "The grant widens access without a constraint.\n",
+      findings: [{
+        severity: "major",
+        category: "bug",
+        title: "Unconstrained grant",
+        detail: "The grant widens access without a constraint.",
+        file: "README.md",
+        line: 2,
+      }],
+    }),
+    extraInputs: { "tool-mode": "native_loop" },
+  });
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.finalDisposition?.kind, "request_changes", "the grounded major blocks through the finding path — the zero-call completion never suppressed it");
+  assert.equal(result.finalDisposition?.reason, "blocker_proven");
+  assert.equal(result.finalDisposition?.nativeEvent, "REQUEST_CHANGES");
+  const api = await publishRunHandoff(result);
+  assertDispositionAgreement(result, api);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+});
+
+test("#1837: a transport failure before any reply still withholds as investigation unavailable", async () => {
+  // The negative control: the LOOP chose the zero-call stop (request-error),
+  // so the degradation marker and its material investigation-unavailable
+  // evidence stay exactly as before — the fix never suppresses genuine
+  // unavailability.
+  const result = await runZeroCallNativeReview({
+    corpusVerdict: baseVerdict(),
+    loopReply: null,
+    extraInputs: { "tool-mode": "native_loop" },
+  });
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string; executed_request_count?: number };
+  assert.equal(harness.native_loop_degraded, "request-error");
+  assert.equal(harness.executed_request_count, 0);
+  assert.equal(result.outputs.verdict, "approve", "the corpus verdict itself was clean");
+  assert.equal(result.finalDisposition?.kind, "incomplete");
+  assert.equal(result.finalDisposition?.reason, "material_unknown");
+  assert.equal(result.finalDisposition?.nativeEvent, "COMMENT");
+  assert.ok(result.finalDisposition?.materialUnknowns.some((entry) => entry.code === "investigation_unavailable" && entry.subject === "request-error"),
+    "the provider failure stays a material investigation_unavailable");
+});
+
+test("#1837: a deliberate zero-call completion with an unresolved applicable requirement stays INCOMPLETE", async () => {
+  // The requirement trace's own material unknown survives untouched: zero
+  // tool calls add nothing, and remove nothing.
+  const platform = requirementTracePlatform();
+  platform.getPrDiff = async () => `diff --git a/src/context.ts b/src/context.ts\n--- /dev/null\n+++ b/src/context.ts\n@@ -0 +1 @@\n+// resolution must compare the source SHA against the resolved pull\n`;
+  const server = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.setHeader("Content-Type", "application/json");
+      res.end(zeroCallLoopReply());
+      return;
+    }
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        status: "unknown",
+        evidence: [{ kind: "tool", ref: "assessment", detail: "The available evidence does not establish that source SHA is checked." }],
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true", "publish-mode": "review_verdict",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.finalDisposition?.kind, "incomplete");
+    assert.equal(result.finalDisposition?.reason, "material_unknown");
+    // EXACTLY the trace's material unknown: the deliberate zero-call added
+    // no investigation-unavailable entry of its own.
+    assert.deepEqual(result.finalDisposition?.materialUnknowns.map((entry) => entry.code), ["mandatory_requirement_unresolved"]);
+    assert.match(result.finalDisposition?.materialUnknowns[0]!.subject ?? "", /requirement-trace/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
 });
 
 test("#940: the declared fallback capacity bounds primary and recovery corpora", async () => {
@@ -3973,15 +4280,16 @@ test("#875 negative: with equivalent-paths on, grouped equivalent paths never ma
   assert.equal(result.outputs.requiredChecks, "none");
   // The #875 property: the hint manufactured nothing — no findings, no
   // escalation, no issues. #1656 audit round 3: the marker's review_result
-  // is a projection of the authoritative disposition, and this run's
-  // native loop recorded a zero-evidence degradation (the model answered
-  // from the corpus without issuing tool calls) — a MATERIAL unknown that
-  // withholds certification regardless of the hint. The review is
-  // therefore `partial`, never `issues`, and the hint's innocence is
-  // pinned by the empty findings set above.
+  // is a projection of the authoritative disposition. #1837: the model's
+  // corpus-direct completion is a complete review of this corpus, so the
+  // clean review carries NO material unknown at all — it withholds only the
+  // comment-mode certification gate (`approval_withheld`, recommendation
+  // APPROVE) and reads `clean`, never `issues` or `partial`.
   assert.equal(result.finalDisposition?.kind, "incomplete");
-  assert.ok(result.finalDisposition?.materialUnknowns.some((entry) => entry.code === "investigation_unavailable"));
-  assert.match(result.marker, /"review_result":"partial"/);
+  assert.equal(result.finalDisposition?.reason, "approval_withheld");
+  assert.deepEqual(result.finalDisposition?.materialUnknowns, []);
+  assert.match(result.finalDisposition?.recommendation ?? "", /APPROVE/);
+  assert.match(result.marker, /"review_result":"clean"/);
   assert.ok(!result.marker.includes('"review_result":"issues"'));
 });
 

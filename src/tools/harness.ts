@@ -88,6 +88,7 @@ DEPENDENCY_EVIDENCE_OBLIGATIONS,
 DEPENDENCY_EVIDENCE_RESERVE,
 STOP_BUDGET,
 STOP_INVESTIGATION_COMPLETE,
+STOP_NO_TOOL_CALLS,
 STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   STOP_WALL_CLOCK_RESERVE,
@@ -4359,12 +4360,21 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   return false;
 }
   if (outcome.degraded) {
+    // #1837: the model's own no-tool-calls reply is a deliberate corpus-direct
+    // completion — the same evidence surface a `tool-mode: off` run has — so
+    // the degradation marker (whose downstream meaning is "the investigation
+    // did not finish") is reserved for the zero-call stops the LOOP chose: a
+    // transport failure or deadline before any reply. Telemetry stays truthful
+    // either way: the stop reason and the zero counters are still recorded.
+    const deliberateNoCallStop = outcome.stopReason === STOP_NO_TOOL_CALLS;
     log(
-      "  native_loop degraded: the model issued no tool calls" +
-        (outcome.error ? ` (${outcome.error})` : "") +
-        " — reviewing the corpus directly (no evidence gathered)",
+      deliberateNoCallStop
+        ? "  native_loop: the model replied without tool calls — reviewing the corpus directly"
+        : "  native_loop degraded: the model issued no tool calls" +
+            (outcome.error ? ` (${outcome.error})` : "") +
+            " — reviewing the corpus directly (no evidence gathered)",
     );
-    input.result.native_loop_degraded = outcome.stopReason;
+    if (!deliberateNoCallStop) input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
     // #1598: a degraded run dispatched no call at all (the model issued

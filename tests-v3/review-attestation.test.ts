@@ -859,14 +859,15 @@ function gitInit(dir: string): void {
 }
 
 test("#1576: the #1565 shape - primary 429 after a zero-evidence loop, fallback advisory approve - never attests approved", async () => {
-  // The #1565 scenario end to end: the primary answers the native-loop
-  // planning turn with no tool calls (the loop records
-  // `native_loop_degraded`, zero evidence gathered), then every final
-  // verdict request to the primary hits HTTP 429 (provider exhausted). The
-  // FALLBACK supplies the authoritative `approve` verdict. The degraded gate
-  // bypass marks the run zero-evidence, the publish boundary withholds the
-  // native approval, and the attestation reads the capability failure —
-  // never `approved`, even though the run exits 0 green.
+  // The #1565 scenario end to end: the primary lane is quota-exhausted
+  // before any investigation reply (the native loop records
+  // `native_loop_degraded` = request-error, zero evidence gathered), the
+  // failover investigation on the fallback lane fails the same way, and then
+  // the FALLBACK supplies the authoritative `approve` verdict from the
+  // corpus. The degraded gate bypass marks the run zero-evidence, the
+  // publish boundary withholds the native approval, and the attestation
+  // reads the capability failure — never `approved`, even though the run
+  // exits 0 green.
   const workspace = mkdtempSync(join(tmpdir(), "attestation-1565-workspace-"));
   const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-1565-temp-"));
   const github = await startGithubMock();
@@ -875,17 +876,21 @@ test("#1576: the #1565 shape - primary 429 after a zero-evidence loop, fallback 
   writeFileSync(join(workspace, "README.md"), "hello\nworld\n");
   gitInit(workspace);
   // One model server hosts both tiers, routed by the request's `model`:
-  // the primary ("m") answers tool-bearing (native-loop) turns with a plain
-  // no-tool-call verdict and 429s every final verdict request; the fallback
-  // ("fb") always answers with the advisory approve.
+  // the primary ("m") is quota-exhausted on EVERY request (the native-loop
+  // turn and the corpus verdict call alike), and the fallback ("fb") fails
+  // its own investigation turn too — the #1565 withholding requires a run
+  // that gathered no evidence on ANY lane. (#1837: a model that merely
+  // replies without tool calls is a deliberate corpus-direct completion,
+  // not a degradation, so the zero-evidence signal cannot rest on it.)
   const model = await startMockServer((_req, body, res) => {
     const request = JSON.parse(String(body)) as { model?: string; tools?: unknown[] };
     res.setHeader("Content-Type", "application/json");
     if (request.model === "fb") {
-      res.end(verdictBody());
-      return;
-    }
-    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      if (Array.isArray(request.tools) && request.tools.length > 0) {
+        res.statusCode = 429;
+        res.end(JSON.stringify({ error: { message: "Token Plan rate limit exhausted" } }));
+        return;
+      }
       res.end(verdictBody());
       return;
     }
