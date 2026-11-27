@@ -1,11 +1,19 @@
 /**
- * Static operations dashboard shell (#742), redesigned for #1717.
+ * Static operations dashboard shell (#742), redesigned for #1717, with the
+ * explicit login state machine from #1771.
  * The shell carries zero dynamic data and lives outside `/admin/`, preserving
  * the rule that every admin route remains authenticated. The script has one
  * fetch site, constrained by `connect-src 'self'`, and keeps the token only in
  * memory. Every dynamic value is rendered through `document.createTextNode`;
  * runtime classes come only from fixed whitelist vocabularies so API data can
  * never choose a class. Mutations are gated by `confirm()`.
+ * The visible surface is one of three screens driven by a single state
+ * variable: `restoring` (session probe), `unauthenticated`/`authenticating`
+ * (the login screen), and `authenticated` (the operations shell). The shell
+ * and its mutation controls stay hidden until identity is proven, a 401/403
+ * from any data route returns the operator to the login screen with every
+ * data panel cleared, and no unauthenticated view ever renders a data-panel
+ * placeholder.
  */
 import { createHash } from "node:crypto";
 
@@ -91,6 +99,9 @@ main { max-width:1440px; margin:auto; padding:28px clamp(16px,4vw,48px) 60px; }
 .view { display:none; animation:appear .22s ease-out; }
 .view-active { display:block; }
 .hidden { display:none; }
+.screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:clamp(16px,6vw,64px); }
+.screen.hidden { display:none; }
+.login-card { width:min(440px,100%); display:grid; gap:12px; }
 @keyframes appear { from { opacity:0; transform:translateY(5px); }
 to { opacity:1; transform:none; }
 } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--space); }
@@ -182,6 +193,23 @@ const DASHBOARD_HTML = `<!doctype html>
   <style>${DASHBOARD_CSS}</style>
 </head>
 <body>
+  <section id="screen-restoring" class="screen" aria-label="Session status">
+    <div class="card login-card">
+      <h1>pr-reviewer</h1>
+      <p class="caption">controller console</p>
+      <div class="loading" role="status">Restoring session…</div>
+    </div>
+  </section>
+  <section id="screen-login" class="screen hidden">
+    <div class="card login-card">
+      <h1>pr-reviewer</h1>
+      <p class="caption">controller console</p>
+      <p class="muted">Sign in to reach the controller operations console.</p>
+      <div id="login-form" class="stack"></div>
+      <span id="login-msg" role="status"></span>
+    </div>
+  </section>
+  <div id="shell" class="hidden">
   <header class="topbar">
     <div class="brand">pr-reviewer<small>controller console</small></div>
     <nav aria-label="Main navigation">
@@ -197,7 +225,7 @@ const DASHBOARD_HTML = `<!doctype html>
   <main>
     <section id="view-overview" class="view view-active">
       <h1>Operations overview</h1>
-      <div id="status" class="grid"><div class="empty card-wide">Connect to load controller status.</div></div>
+      <div id="status" class="grid"></div>
       <div id="overview-runs" class="card"></div>
       <div id="overview-failures" class="card"></div>
       <section id="actions">
@@ -221,6 +249,7 @@ const DASHBOARD_HTML = `<!doctype html>
       <div id="diagnostics" class="card"></div>
     </section>
   </main>
+  </div>
   <script src="/dashboard/app.js"><\/script>
 </body>
 </html>`;
@@ -231,6 +260,15 @@ const DASHBOARD_JS = `"use strict";
   let cursorStack = [];
   let currentCursor = "";
   let nextCursor = "";
+  // #1771: exactly one screen is visible, chosen by uiState. "restoring"
+  // probes a session; "authenticating" is a sign-in request in flight;
+  // "authenticated" is the operations shell; anything else is the login screen.
+  let uiState = "restoring";
+  let oidcIdentity = "Signed in";
+  // Bumped whenever a session ends: every request carries the epoch it was
+  // issued under, and a response from a dead session never renders, denies,
+  // or clears anything in the one that replaced it.
+  let sessionEpoch = 0;
   // The PR key grammar the controller enforces: an owner, a repository, a
   // "#", and a positive PR number, and never a dot-only segment ("." or
   // "..") — the platform's repo-ref rule the controller applies at its
@@ -300,12 +338,15 @@ const DASHBOARD_JS = `"use strict";
     parent.replaceChildren();
     const box = el("div", "error-state", parent);
     const h = el("strong", "", box);
-    text(h, result.status === 0 ? "Can't reach the controller" : result.status === 401 || result.status === 403 ? "Authorization required" : "Controller request failed");
+    text(h, result.status === 0 ? "Can't reach the controller" : "Controller request failed");
     const detail = el("span", "muted", box);
-    text(detail, result.status === 0 ? "Check the controller connection and try again." : result.status === 401 || result.status === 403 ? authMode === "oidc" ? "The session expired or was revoked. Sign in again." : "Enter an admin token in the header, then connect." : "HTTP " + result.status + (result.body ? ": " + result.body : ""));
+    // A 401/403 never renders here: handleSessionLost returns the operator to
+    // the login screen instead of a stale error card.
+    text(detail, result.status === 0 ? "Check the controller connection and try again." : "HTTP " + result.status + (result.body ? ": " + result.body : ""));
   }
   // The only fetch site. Rejections become a synthetic offline result.
   async function api(path, options) {
+    const epoch = sessionEpoch;
     let response;
     try {
       const requestOptions = Object.assign({}, options || {});
@@ -315,18 +356,20 @@ const DASHBOARD_JS = `"use strict";
       requestOptions.headers = headers;
       response = await fetch(path, requestOptions);
     } catch {
-      return { ok: false, status: 0, body: "network error" };
+      return { ok: false, status: 0, body: "network error", epoch: epoch };
     }
-    // An expired or revoked session must return the shell to the sign-in
-    // state instead of leaving a stale authenticated look. /auth/* paths
-    // are exempt: /auth/session answers 401 itself and re-renders the box.
-    if (response.status === 401 && authMode === "oidc" && !path.startsWith("/auth/")) { csrfToken = ""; void refreshOidcSession(); }
+    // 401/403 handling lives with the callers: every data-route caller answers
+    // a denial with handleSessionLost, so no stale authenticated panel remains.
+    // /auth/* answers 401 itself and is judged by the session logic, not here.
     let body = "";
     try {
       body = await response.text();
     } catch {
     }
-    return { ok: response.ok, status: response.status, body };
+    return { ok: response.ok, status: response.status, body, epoch: epoch };
+  }
+  function isStale(result) {
+    return result.epoch !== sessionEpoch;
   }
   async function apiJson(path, options) {
     const result = await api(path, options);
@@ -358,6 +401,143 @@ const DASHBOARD_JS = `"use strict";
     if (status === 400) return { headline: headlines.invalid, fallback: "The request was invalid." };
     if (status === 409) return { headline: headlines.refused, fallback: "The request was refused." };
     return { headline: headlines.unknown, fallback: "The request did not succeed." };
+  }
+  // The #1771 screen machine. One state owns which screen is visible, so an
+  // unauthenticated operator never sees the operations shell or a data-panel
+  // placeholder, and a lost session always lands back on the same login card.
+  function isDenied(result) {
+    return result.status === 401 || result.status === 403;
+  }
+  function setUiState(state) {
+    uiState = state;
+    document.getElementById("screen-restoring").className = state === "restoring" ? "screen" : "screen hidden";
+    document.getElementById("screen-login").className = state === "unauthenticated" || state === "authenticating" ? "screen" : "screen hidden";
+    document.getElementById("shell").className = state === "authenticated" ? "" : "hidden";
+  }
+  function loginMessage(reason) {
+    const message = document.getElementById("login-msg");
+    message.replaceChildren();
+    if (reason) {
+      const note = el("span", "failure", message);
+      text(note, reason);
+    }
+  }
+  function showLogin(reason) {
+    setUiState("unauthenticated");
+    const box = document.getElementById("login-form");
+    box.replaceChildren();
+    loginMessage("");
+    if (authMode === "oidc") {
+      const hint = el("p", "muted", box);
+      text(hint, "Sign in with your configured identity provider.");
+      const login = el("button", "primary", box);
+      text(login, "Sign in");
+      login.addEventListener("click", () => { window.location.href = "/auth/login"; });
+    } else {
+      const hint = el("p", "muted", box);
+      text(hint, "Enter the admin bearer token for this controller.");
+      const input = el("input", "", box);
+      input.type = "password"; input.id = "token"; input.autocomplete = "new-password"; input.ariaLabel = "Admin bearer token"; input.placeholder = "Bearer token";
+      const button = el("button", "primary", box);
+      button.id = "load";
+      text(button, "Sign in");
+      button.addEventListener("click", submitToken);
+      input.addEventListener("keydown", (event) => { if (event.key === "Enter") submitToken(); });
+    }
+    if (reason) loginMessage(reason);
+    else if (new URLSearchParams(window.location.search).get("login") === "failed") loginMessage("Sign in failed.");
+  }
+  async function submitToken() {
+    if (uiState === "authenticating") return;
+    const input = document.getElementById("token");
+    const value = input ? input.value || "" : "";
+    if (value === "") { loginMessage("Enter the admin bearer token."); return; }
+    token = value;
+    // The credential lives only in the in-memory variable: drop it from the
+    // field the moment the sign-in request starts.
+    if (input) input.value = "";
+    setUiState("authenticating");
+    const button = document.getElementById("load");
+    if (button) {
+      button.disabled = true;
+      button.className = "primary disabled";
+      button.replaceChildren();
+      text(button, "Signing in…");
+    }
+    await loadAll();
+  }
+  function deniedReason() {
+    if (uiState === "authenticating") return "The token was rejected.";
+    if (authMode === "oidc") return "Your session expired. Sign in again.";
+    return "The controller rejected the credentials. Sign in again.";
+  }
+  function forgetCredentials() {
+    token = "";
+    csrfToken = "";
+    oidcIdentity = "Signed in";
+  }
+  function clearOperationalPanels() {
+    for (const id of ["status", "overview-runs", "overview-failures", "runs", "run-detail", "diagnostics"]) {
+      const panel = document.getElementById(id);
+      if (panel) panel.replaceChildren();
+    }
+    document.getElementById("runs-page").replaceChildren();
+    disablePagination();
+  }
+  function handleSessionLost(reason) {
+    if (uiState === "unauthenticated") return;
+    // Retire this session first: any request still in flight under it may
+    // land after the operator has signed in again, and must stay silent.
+    sessionEpoch += 1;
+    forgetCredentials();
+    clearOperationalPanels();
+    document.getElementById("auth").replaceChildren();
+    setConnection("disconnected", "chip chip-none");
+    showLogin(reason);
+  }
+  function enterAuthenticated() {
+    setUiState("authenticated");
+    renderHeaderAuth();
+  }
+  // The signed-in header names the identity and how to leave it. Token mode
+  // has no server session, so signing out forgets the in-memory credential.
+  function renderHeaderAuth() {
+    const box = document.getElementById("auth");
+    box.replaceChildren();
+    const who = el("span", "", box);
+    text(who, authMode === "oidc" ? oidcIdentity : "Signed in with a bearer token");
+    const logout = el("button", "", box);
+    text(logout, "Sign out");
+    logout.addEventListener("click", async () => {
+      if (authMode !== "oidc") { handleSessionLost("You are signed out."); return; }
+      const result = await api("/auth/logout", { method: "POST" });
+      if (result.ok || result.status === 401) { handleSessionLost("You are signed out."); return; }
+      const error = el("span", "failure", box);
+      text(error, "Sign out failed. The session is still signed in.");
+    });
+  }
+  async function restoreOidcSession() {
+    const result = await apiJson("/auth/session");
+    if (!result.ok || !result.parsed || result.parsed.authenticated !== true || typeof result.parsed.csrfToken !== "string") { csrfToken = ""; return false; }
+    csrfToken = result.parsed.csrfToken;
+    oidcIdentity = result.parsed.email || result.parsed.subject || "Signed in";
+    return true;
+  }
+  // Boot is the whole startup story: read the mode, restore a live OIDC
+  // session straight into the shell, and otherwise land on the login screen.
+  // No data route is fetched before identity is proven.
+  async function boot() {
+    setUiState("restoring");
+    const config = await apiJson("/auth/config");
+    authMode = config.parsed && config.parsed.mode === "oidc" ? "oidc" : "token";
+    if (authMode === "oidc" && await restoreOidcSession()) {
+      enterAuthenticated();
+      void loadAll();
+      return;
+    }
+    // A sign-in already in flight must not be pulled back to the login card
+    // when boot settles: only the initial screens hand control over.
+    if (uiState === "restoring" || uiState === "unauthenticated") showLogin("");
   }
   function relative(ms) {
     const n = Number(ms);
@@ -519,12 +699,13 @@ const DASHBOARD_JS = `"use strict";
     loading(parent);
     const path = cursor ? "/admin/runs?limit=50&cursor=" + encodeURIComponent(cursor) : "/admin/runs?limit=50";
     const result = await apiJson(path);
+    if (isStale(result)) return null;
+    if (isDenied(result)) { handleSessionLost(deniedReason()); return null; }
     if (!result.ok || !result.parsed) {
       errorState(parent, result);
       disablePagination();
       document.getElementById("runs-page").replaceChildren();
-      if (result.status === 401 || result.status === 403) setConnection("unauthorized", "chip chip-failed");
-      else if (result.status === 0) setConnection("offline", "chip chip-failed");
+      if (result.status === 0) setConnection("offline", "chip chip-failed");
       return null;
     }
     try {
@@ -564,8 +745,10 @@ const DASHBOARD_JS = `"use strict";
     }
   }
   async function loadAll() {
-    const tokenInput = document.getElementById("token");
-    token = tokenInput ? tokenInput.value || "" : "";
+    // A data load is also the proof of identity: from the login card (or a
+    // probe started before boot settled) it enters "authenticating", so boot
+    // can never pull the screen back out from under it.
+    if (uiState === "unauthenticated" || uiState === "restoring") setUiState("authenticating");
     setConnection("loading", "chip chip-pending");
     const statusNode = document.getElementById("status");
     loading(statusNode);
@@ -576,6 +759,10 @@ const DASHBOARD_JS = `"use strict";
     const status = results[0];
     const runs = results[1];
     const diagnostics = results[2];
+    if (isStale(status) || isStale(runs) || isStale(diagnostics)) return;
+    if (isDenied(status) || isDenied(runs) || isDenied(diagnostics)) { handleSessionLost(deniedReason()); return; }
+    if (uiState === "authenticating" && status.status === 0 && runs.status === 0 && diagnostics.status === 0) { handleSessionLost("The controller could not be reached."); return; }
+    enterAuthenticated();
     if (!status.ok || !status.parsed) errorState(statusNode, status);
     else {
       try {
@@ -624,8 +811,7 @@ const DASHBOARD_JS = `"use strict";
         errorState(document.getElementById("diagnostics"), { status: 500, body: "Diagnostics data could not be rendered." });
       }
     } else errorState(document.getElementById("diagnostics"), diagnostics);
-    if (status.status === 401 || status.status === 403 || runs.status === 401 || runs.status === 403 || diagnostics.status === 401 || diagnostics.status === 403) setConnection("unauthorized", "chip chip-failed");
-    else if (status.status === 0 || runs.status === 0 || diagnostics.status === 0) setConnection("offline", "chip chip-failed");
+    if (status.status === 0 || runs.status === 0 || diagnostics.status === 0) setConnection("offline", "chip chip-failed");
     else if (status.ok && runs.ok && diagnostics.ok) setConnection("connected", "chip chip-ok");
     else setConnection("error", "chip chip-failed");
   }
@@ -635,6 +821,8 @@ const DASHBOARD_JS = `"use strict";
     const parent = document.getElementById("run-detail");
     loading(parent);
     const result = await apiJson("/admin/runs/" + encodeURIComponent(runId));
+    if (isStale(result)) return;
+    if (isDenied(result)) { handleSessionLost(deniedReason()); return; }
     if (!result.ok || !result.parsed) {
       errorState(parent, result);
       return;
@@ -722,7 +910,12 @@ const DASHBOARD_JS = `"use strict";
       text(cancel, "Cancel run");
       cancel.addEventListener("click", async () => {
         if (!confirm("Cancel run " + run.runId + "?")) return;
+        // Only a proven session mutates: a handler fired while the shell is
+        // hidden (restoring, authenticating, or after loss) stops here.
+        if (uiState !== "authenticated") return;
         const outcome = await apiJson("/admin/runs/" + encodeURIComponent(run.runId) + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (isStale(outcome)) return;
+        if (isDenied(outcome)) { handleSessionLost(deniedReason()); return; }
         feedback.replaceChildren();
         if (outcome.ok) {
           // 202: the cancellation is REGISTERED, but the publication was
@@ -749,10 +942,11 @@ const DASHBOARD_JS = `"use strict";
     const parent = document.getElementById("diagnostics");
     loading(parent);
     const result = await apiJson("/admin/diagnostics");
+    if (isStale(result)) return;
+    if (isDenied(result)) { handleSessionLost(deniedReason()); return; }
     if (!result.ok || !result.parsed) {
       errorState(parent, result);
-      if (result.status === 401 || result.status === 403) setConnection("unauthorized", "chip chip-failed");
-      else if (result.status === 0) setConnection("offline", "chip chip-failed");
+      if (result.status === 0) setConnection("offline", "chip chip-failed");
       return;
     }
     try {
@@ -794,37 +988,9 @@ const DASHBOARD_JS = `"use strict";
       text(small, detail);
     }
   }
-  function renderTokenAuth() {
-    const box = document.getElementById("auth");
-    box.replaceChildren();
-    const input = el("input", "", box);
-    input.type = "password"; input.id = "token"; input.autocomplete = "new-password"; input.ariaLabel = "Admin bearer token"; input.placeholder = "Bearer token";
-    const button = el("button", "primary", box); button.id = "load"; text(button, "Connect");
-    button.addEventListener("click", loadAll);
-    input.addEventListener("keydown", (event) => { if (event.key === "Enter") loadAll(); });
-  }
-  async function refreshOidcSession() {
-    const result = await apiJson("/auth/session");
-    if (!result.ok || !result.parsed || result.parsed.authenticated !== true || typeof result.parsed.csrfToken !== "string") { csrfToken = ""; renderOidcAuth(false); return false; }
-    csrfToken = result.parsed.csrfToken;
-    renderOidcAuth(true, result.parsed.email || result.parsed.subject || "Signed in");
-    return true;
-  }
-  function renderOidcAuth(connected, identity) {
-    const box = document.getElementById("auth"); box.replaceChildren();
-    if (connected) { const who = el("span", "", box); text(who, identity); const logout = el("button", "", box); text(logout, "Logout"); logout.addEventListener("click", async () => { const result = await api("/auth/logout", { method: "POST" }); if (result.ok || result.status === 401) { csrfToken = ""; renderOidcAuth(false); setConnection("disconnected", "chip chip-none"); return; } renderOidcAuth(true, identity); const error = el("span", "failure", document.getElementById("auth")); text(error, "Sign out failed. The session is still signed in."); }); }
-    else { const login = el("button", "primary", box); text(login, "Sign in"); login.addEventListener("click", () => { window.location.href = "/auth/login"; }); }
-    if (new URLSearchParams(window.location.search).get("login") === "failed") { const error = el("span", "failure", box); text(error, "Sign in failed."); }
-  }
   disablePagination();
-  empty(document.getElementById("runs"), "Connect to load runs.");
-  renderTokenAuth();
-  apiJson("/auth/config").then((configResult) => {
-    const config = configResult.parsed || {};
-    authMode = config.mode === "oidc" ? "oidc" : "token";
-    if (authMode === "oidc") { renderOidcAuth(false); void refreshOidcSession().then((ok) => { if (ok) void loadAll(); }); }
-    else renderTokenAuth();
-  }).catch(() => { authMode = "token"; renderTokenAuth(); });
+  setUiState("restoring");
+  void boot();
   document.getElementById("nav-overview").addEventListener("click", () => showView("overview"));
   document.getElementById("nav-runs").addEventListener("click", () => showView("runs"));
   document.getElementById("nav-diagnostics").addEventListener("click", () => {
@@ -885,7 +1051,12 @@ const DASHBOARD_JS = `"use strict";
       return;
     }
     if (!confirm("Force a rereview of " + prKey + "?")) return;
+    // Only a proven session mutates: a handler fired while the shell is
+    // hidden (restoring, authenticating, or after loss) stops here.
+    if (uiState !== "authenticated") return;
     const outcome = await apiJson("/admin/rereview", { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ prKey, reason }) });
+    if (isStale(outcome)) return;
+    if (isDenied(outcome)) { handleSessionLost(deniedReason()); return; }
     if (outcome.ok) {
       const parsed = outcome.parsed;
       const jobId = parsed && typeof parsed === "object" && typeof parsed.jobId === "string" ? parsed.jobId : "";

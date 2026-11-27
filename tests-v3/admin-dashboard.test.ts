@@ -18,7 +18,7 @@ import type { ControllerAdminDeps } from "../src/admin/types.js";
  * Pins route/auth/CSP integrity, escaping/XSS fences, exact admin-API
  * compatibility, hostile EXECUTION boundaries, and operator UI states.
  */
-const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-2UPZoIdLr/DB0rB7iH8yqCXgjRaaF654c+JAFCZDcgM='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-4Brxc2ifc6C3EXO7KMXKzYrkjZBj/kwDpp9TUk1ierU='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const deps = {
   readiness: async () => ({ components: [{ name: "store", ok: true }] }),
   listRuns: async () => ({ runs: [] }),
@@ -376,6 +376,15 @@ function harness(options: HarnessOptions = {}) {
   }
   return { textData, attributeCalls, propertyWrites, listeners, paths, elements, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled, handlerForLabel };
 }
+function uiStateOf(h: { sandbox: vm.Context }): string {
+  return vm.runInContext("uiState", h.sandbox) as string;
+}
+async function bootSettled(h: { sandbox: vm.Context; untilSettled: (pred: () => boolean, what: string) => Promise<void> }): Promise<void> {
+  await h.untilSettled(() => uiStateOf(h) !== "restoring", "boot settled");
+}
+function authenticate(h: { sandbox: vm.Context }): void {
+  vm.runInContext("token = 'test-token'; enterAuthenticated(); undefined", h.sandbox);
+}
 test("execution fence: hostile API values appear verbatim in text nodes only", async () => {
   const h = harness({
     payloads: {
@@ -405,11 +414,16 @@ test("execution fence: hostile API values appear verbatim in text nodes only", a
   vm.runInContext("loadAll(); undefined", h.sandbox);
   vm.runInContext(`loadRunDetail(${JSON.stringify(MARKERS[2])}); undefined`, h.sandbox);
   vm.runInContext("loadDiagnostics(); undefined", h.sandbox);
+  await h.untilSettled(() => uiStateOf(h) === "authenticated" && h.handlerForLabel("Cancel run") !== undefined, "hostile data rendered");
   assert.equal(h.listeners["#rereview:click"]?.length, 1);
   await h.listeners["#rereview:click"]![0]!();
   await h.untilSettled(() => MARKERS.every((x) => h.textData.some((t) => t.includes(x))), "marker renders");
-  const detailHandlers = h.listeners["button:click"] ?? [];
-  for (const handler of detailHandlers) await handler();
+  // Drive the run-detail cancel button BY LABEL: the shell also creates a
+  // sign-out control, and firing every button handler would end the session
+  // and clear the panels this test is reading.
+  const cancelHostile = h.handlerForLabel("Cancel run");
+  assert.ok(cancelHostile, "the hostile run detail renders its cancel control");
+  await cancelHostile();
   await h.untilSettled(() => h.paths.some((path) => path.endsWith("/cancel")), "hostile detail cancel request");
   for (const marker of MARKERS) assert.ok(h.textData.some((x) => x.includes(marker)), marker);
   for (const write of h.propertyWrites) {
@@ -448,20 +462,23 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await h.listeners["#runs-prev:click"]![0]!();
   await h.untilSettled(() => h.paths.filter((x) => x === "/admin/runs?limit=50").length > 1, "previous page");
   assert.ok(h.paths.includes("/admin/runs?limit=50"));
+  // A denied data route is a lost session: the shell hands the operator back
+  // to the login screen with a reason, never a stale "Authorization required"
+  // card inside the operations layout.
   const unauthorized = harness({ responses: { "/admin/status": { status: 401, body: '{"error":"no"}' }, "/admin/runs?limit=50": { status: 401, body: '{"error":"no"}' }, "/admin/diagnostics": { status: 401, body: '{"error":"no"}' } } });
   vm.runInContext("loadAll(); undefined", unauthorized.sandbox);
-  await unauthorized.untilSettled(() => unauthorized.textData.includes("Authorization required"), "unauthorized");
-  assert.ok(unauthorized.textData.includes("unauthorized"));
+  await unauthorized.untilSettled(() => uiStateOf(unauthorized) === "unauthenticated" && unauthorized.textData.includes("The token was rejected."), "denied load returns to login");
+  assert.equal(uiStateOf(unauthorized), "unauthenticated");
+  assert.equal(vm.runInContext("token", unauthorized.sandbox), "");
+  assert.ok(unauthorized.containerText("login-msg").includes("The token was rejected."));
   assert.ok(!unauthorized.textData.includes("ready"));
   const offline = harness({ reject: "/admin/status" });
   vm.runInContext("loadAll(); undefined", offline.sandbox);
   await offline.untilSettled(() => offline.textData.includes("Can't reach the controller"), "offline");
   assert.ok(offline.textData.includes("Can't reach the controller"));
-  const existingButtonHandlers = h.listeners["button:click"]?.length ?? 0;
   vm.runInContext("loadRunDetail('active'); undefined", h.sandbox);
-  await h.untilSettled(() => (h.listeners["button:click"]?.length ?? 0) > existingButtonHandlers, "cancel registration");
-  const cancelHandlers = h.listeners["button:click"]!;
-  await cancelHandlers[cancelHandlers.length - 1]!();
+  await h.untilSettled(() => h.handlerForLabel("Cancel run") !== undefined, "cancel registration");
+  await h.handlerForLabel("Cancel run")!();
   await h.untilSettled(() => h.paths.includes("/admin/runs/active/cancel"), "cancel request");
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(h.textData.includes("Cancellation accepted."));
@@ -470,7 +487,8 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   await h.untilSettled(() => h.textData.includes("Rereview accepted."), "rereview accepted");
   assert.ok(h.textData.includes("Rereview accepted."));
   const refused = harness({ responses: { "/admin/rereview": { status: 409, body: '{"error":"refused-rereview-sentinel"}' } } });
-  vm.runInContext("document.getElementById('token').value='token'; undefined", refused.sandbox);
+  await bootSettled(refused);
+  authenticate(refused);
   await refused.listeners["#rereview:click"]![0]!();
   await refused.untilSettled(() => refused.textData.includes("Rereview was refused."), "rereview refusal");
   assert.ok(refused.paths.includes("/admin/rereview"));
@@ -478,11 +496,12 @@ test("ui states: empty, auth, offline, pagination, and mutation feedback", async
   // The controller's own reason reaches the operator, not a bare status.
   assert.ok(refused.textData.some((x) => x.includes("refused-rereview-sentinel")));
   const cancelRefused = harness({ payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } }, responses: { "/auth/config": { status: 200, body: '{"mode":"token"}' }, "/admin/runs/refused/cancel": { status: 409, body: '{"error":"cancel-refusal-sentinel"}' } } });
+  await bootSettled(cancelRefused);
+  authenticate(cancelRefused);
   vm.runInContext("loadRunDetail('refused'); undefined", cancelRefused.sandbox);
   await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused"), "cancel refusal detail");
-  await cancelRefused.untilSettled(() => (cancelRefused.listeners["button:click"]?.length ?? 0) >= 2, "cancel refusal button");
-  const refusalButton = cancelRefused.listeners["button:click"]!;
-  await refusalButton[refusalButton.length - 1]!();
+  await cancelRefused.untilSettled(() => cancelRefused.handlerForLabel("Cancel run") !== undefined, "cancel refusal button");
+  await cancelRefused.handlerForLabel("Cancel run")!();
   await cancelRefused.untilSettled(() => cancelRefused.paths.includes("/admin/runs/refused/cancel"), "cancel refusal request");
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(cancelRefused.textData.some((x) => x.includes("HTTP 409")));
@@ -510,6 +529,8 @@ test("the controller's refusal reason reaches the operator (409)", async () => {
   const h = harness({
     responses: { "/admin/rereview": { status: 409, body: JSON.stringify({ error: "request refused", detail: "the repository is not adopted for review" }) } },
   });
+  await bootSettled(h);
+  authenticate(h);
   await h.listeners["#rereview:click"]![0]!();
   await h.untilSettled(() => h.textData.includes("Rereview was refused."), "rereview refusal");
   assert.ok(h.paths.includes("/admin/rereview"), "a well-formed request reaches the controller");
@@ -523,6 +544,8 @@ test("a refused cancellation shows the controller's reason (409)", async () => {
     payloads: { "/admin/runs/refused": { runId: "refused", state: "running", usage: [], publication: {} } },
     responses: { "/admin/runs/refused/cancel": { status: 409, body: JSON.stringify({ error: "cancellation refused", detail: "the run has no queued generation" }) } },
   });
+  await bootSettled(h);
+  authenticate(h);
   vm.runInContext("loadRunDetail('refused'); undefined", h.sandbox);
   await h.untilSettled(() => h.handlerForLabel("Cancel run") !== undefined, "cancel refusal button");
   await h.handlerForLabel("Cancel run")!();
@@ -545,6 +568,8 @@ test("a cancellation whose publication is in flight is reported as undetermined 
       },
     },
   });
+  await bootSettled(h);
+  authenticate(h);
   vm.runInContext("loadRunDetail('pending'); undefined", h.sandbox);
   await h.untilSettled(() => h.handlerForLabel("Cancel run") !== undefined, "cancel pending button");
   await h.handlerForLabel("Cancel run")!();
@@ -576,6 +601,8 @@ test("an invalid rereview form never reaches the controller", async () => {
   // And the mirror positive: a dot-CONTAINING identity passes the client
   // gate, so a future over-tightened rule fails here, not at the controller.
   const dottedKey = harness({ form: { prKey: "owner.io/sub.name#7" }, responses: { "/admin/rereview": { status: 202, body: '{"jobId":"dotted-rereview-sentinel"}' } } });
+  await bootSettled(dottedKey);
+  authenticate(dottedKey);
   await dottedKey.listeners["#rereview:click"]![0]!();
   assert.ok(dottedKey.paths.includes("/admin/rereview"), "a dotted repository identity is not refused by the form gate");
 });
@@ -620,6 +647,108 @@ test("OIDC logout: a refused logout keeps the signed-in identity; a 401 signs ou
   await expired.untilSettled(() => expired.containerText("auth").includes("sub-1"), "oidc identity renders");
   const expiredClicks = expired.listeners["button:click"]!;
   await expiredClicks[expiredClicks.length - 1]!();
-  await expired.untilSettled(() => expired.containerText("auth").includes("Sign in"), "sign-in state renders");
-  assert.ok(!expired.containerText("auth").includes("sub-1"));
+  await expired.untilSettled(() => expired.containerText("login-form").includes("Sign in"), "sign-in screen renders");
+  assert.ok(!expired.containerText("auth").includes("sub-1"), "the signed-in header identity leaves the DOM");
+  assert.equal(uiStateOf(expired), "unauthenticated");
+});
+
+test("#1771: the unauthenticated screen is one login card, not the operations shell", async () => {
+  assert.match(DASHBOARD_HTML, /id="shell" class="hidden"/, "the served shell starts hidden until identity is proven");
+  assert.ok(!DASHBOARD_HTML.includes("Connect to load"), "the served shell carries no data-panel placeholder");
+  const h = harness();
+  assert.equal(uiStateOf(h), "restoring", "boot starts on the session-restore screen");
+  await bootSettled(h);
+  assert.equal(uiStateOf(h), "unauthenticated");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden", "the operations shell stays hidden before identity is proven");
+  assert.equal(h.elements.get("screen-restoring")!.raw.className, "screen hidden", "the restore screen hands over exactly once");
+  assert.equal(h.elements.get("screen-login")!.raw.className, "screen");
+  assert.deepEqual(h.paths, ["/auth/config"], "no data route is fetched before identity is proven");
+  assert.ok(h.containerText("login-form").includes("Enter the admin bearer token for this controller."), "the login card names the available auth method");
+  assert.ok(!h.textData.some((x) => x.includes("Connect to load")), "no data-panel placeholder renders unauthenticated");
+  await h.listeners["#rereview:click"]![0]!();
+  assert.ok(!h.paths.includes("/admin/rereview"), "a hidden shell never mutates");
+});
+
+test("#1771: token sign-in pins unauthenticated -> authenticating -> authenticated", async () => {
+  const h = harness();
+  await bootSettled(h);
+  vm.runInContext("document.getElementById('token').value = 'pasted-admin-token'; undefined", h.sandbox);
+  const signIn = h.handlerForLabel("Sign in");
+  assert.ok(signIn, "the token login card offers a Sign in button");
+  const pending = signIn();
+  assert.equal(uiStateOf(h), "authenticating", "the in-flight sign-in is its own state");
+  assert.equal(h.elements.get("token")!.raw.value, "", "the pasted credential leaves the DOM when the request starts");
+  await pending;
+  assert.equal(uiStateOf(h), "authenticated");
+  assert.equal(h.elements.get("shell")!.raw.className, "");
+  assert.equal(h.elements.get("screen-login")!.raw.className, "screen hidden");
+  assert.ok(h.paths.includes("/admin/status"), "the dashboard loads from the sign-in, no second click");
+  assert.ok(h.containerText("auth").includes("Signed in with a bearer token"));
+});
+
+test("#1771: a rejected token stays on the login screen with a reason", async () => {
+  const h = harness({
+    responses: {
+      "/admin/status": { status: 401, body: '{"error":"unauthorized"}' },
+      "/admin/runs?limit=50": { status: 401, body: '{"error":"unauthorized"}' },
+      "/admin/diagnostics": { status: 401, body: '{"error":"unauthorized"}' },
+    },
+  });
+  await bootSettled(h);
+  vm.runInContext("document.getElementById('token').value = 'wrong-token'; undefined", h.sandbox);
+  await h.handlerForLabel("Sign in")!();
+  assert.equal(uiStateOf(h), "unauthenticated");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden", "a rejected sign-in never opens the shell");
+  assert.equal(vm.runInContext("token", h.sandbox), "", "the rejected credential is forgotten");
+  assert.ok(h.containerText("login-msg").includes("The token was rejected."));
+});
+
+test("#1771: token-mode sign out and a 403 mid-session both return to login", async () => {
+  const h = harness();
+  await bootSettled(h);
+  authenticate(h);
+  assert.equal(uiStateOf(h), "authenticated");
+  await h.handlerForLabel("Sign out")!();
+  assert.equal(uiStateOf(h), "unauthenticated", "signing out returns to the login card");
+  assert.equal(vm.runInContext("token", h.sandbox), "", "the in-memory credential is forgotten");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden");
+  const forbidden = harness({ responses: { "/admin/diagnostics": { status: 403, body: '{"error":"forbidden"}' } } });
+  await bootSettled(forbidden);
+  authenticate(forbidden);
+  vm.runInContext("loadDiagnostics(); undefined", forbidden.sandbox);
+  await forbidden.untilSettled(() => uiStateOf(forbidden) === "unauthenticated", "403 is a denial like 401");
+  assert.ok(forbidden.containerText("login-msg").includes("The controller rejected the credentials."));
+});
+
+test("#1771: a live OIDC session restores automatically and a later 401 returns to login", async () => {
+  const h = harness({
+    payloads: {
+      "/admin/status": { readiness: { components: [] }, queue: { depthByState: {}, activeWorkersByExecutor: {} }, adoption: { repositories: [] } },
+      "/admin/runs?limit=50": { runs: [{ runId: "r-restore-1", state: "completed" }], nextCursor: "c2" },
+      "/admin/diagnostics": {},
+    },
+    responses: {
+      "/auth/config": { status: 200, body: '{"mode":"oidc"}' },
+      "/auth/session": { status: 200, body: '{"authenticated":true,"subject":"sub-9","csrfToken":"csrf-9"}' },
+      "/admin/runs?limit=50&cursor=c2": { status: 401, body: '{"error":"session expired"}' },
+    },
+  });
+  await h.untilSettled(() => uiStateOf(h) === "authenticated" && h.containerText("overview-failures").includes("No recent failures."), "oidc session restores with no Connect action");
+  assert.ok(h.paths.includes("/admin/status"), "the dashboard loads automatically after the restore");
+  assert.ok(h.containerText("auth").includes("sub-9"));
+  assert.equal(vm.runInContext("csrfToken", h.sandbox), "csrf-9");
+  assert.equal(h.elements.get("screen-login")!.raw.className, "screen hidden");
+  assert.ok(h.containerText("runs").includes("r-restore-1"));
+  // Semantic empty states for genuinely empty datasets, distinct from any
+  // unauthenticated or unloaded look.
+  assert.ok(h.containerText("overview-failures").includes("No recent failures."));
+  assert.ok(h.containerText("status").includes("No active workers."));
+  assert.ok(h.containerText("status").includes("No adopted repositories."));
+  assert.ok(h.containerText("diagnostics").includes("No diagnostics available."));
+  await h.listeners["#runs-next:click"]![0]!();
+  await h.untilSettled(() => uiStateOf(h) === "unauthenticated", "a 401 mid-session returns to login");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden");
+  assert.equal(h.containerText("runs"), "", "stale run rows do not survive the session loss");
+  assert.equal(vm.runInContext("csrfToken", h.sandbox), "", "the session material is forgotten");
+  assert.ok(h.containerText("login-msg").includes("Your session expired. Sign in again."));
 });
