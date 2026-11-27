@@ -56,10 +56,10 @@ const policyOptions = { nonBlockingCategories: new Set(["tests", "docs"]), secur
 
 test("#1835: material_unknowns maps onto the artifact only when declared, and reads back defensively", () => {
   const declared = reviewArtifactFromParsed(parsed({
-    materialUnknowns: ["the canonical reference could not be fetched; the comparison was not performed"],
+    materialUnknowns: [{ subject: "the canonical reference could not be fetched; the comparison was not performed", affects: "LICENSE:1" }],
   }));
-  assert.deepEqual(declared.material_unknowns, ["the canonical reference could not be fetched; the comparison was not performed"]);
-  assert.deepEqual(declaredMaterialUnknownsOf(declared), ["the canonical reference could not be fetched; the comparison was not performed"]);
+  assert.deepEqual(declared.material_unknowns, [{ subject: "the canonical reference could not be fetched; the comparison was not performed", affects: "LICENSE:1" }]);
+  assert.deepEqual(declaredMaterialUnknownsOf(declared), [{ subject: "the canonical reference could not be fetched; the comparison was not performed", affects: "LICENSE:1" }]);
   // A null/empty declaration writes no key: a run that declared nothing
   // stays byte-identical.
   const clean = reviewArtifactFromParsed(parsed({ materialUnknowns: [] }));

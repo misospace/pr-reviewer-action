@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type PinnedActionWitness, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
-import { hasAttestedBlockingFinding, hasBlockingOpenFinding, isUnattestedBlockingFinding } from "../src/enforcement/verdict-policy.js";
+import { hasBlockingOpenFinding, hasUnunderminedBlockingFinding, isBlockingOpenFinding, isUnattestedBlockingFinding, underminedBlockingFindingIndexes } from "../src/enforcement/verdict-policy.js";
 import { ACTION_GATES } from "../src/enforcement/action-gates.js";
 import type { ActionSourceReader } from "../src/enforcement/action-source.js";
 import type { ArtifactFinding } from "../src/enforcement/artifact.js";
+import type { DeclaredMaterialUnknown } from "../src/model/types.js";
 
 const revision = "a".repeat(40);
 const source = (text: string): SourceReadResult => ({ status: "ok", text, provenance: committedSourceProvenance("src/a.ts", revision) });
@@ -2966,8 +2967,30 @@ test("#1835: an unclassified blocker/major finding is unattested; a grounded or 
   assert.equal(isUnattestedBlockingFinding(capped), false);
   assert.equal(isUnattestedBlockingFinding(requirements), true);
   assert.equal(isUnattestedBlockingFinding(verificationAsk), false);
-  assert.equal(hasAttestedBlockingFinding([grounded, undecided]), true);
-  assert.equal(hasAttestedBlockingFinding([undecided]), false);
-  assert.equal(hasAttestedBlockingFinding([]), false);
+  assert.equal(isBlockingOpenFinding(grounded), true);
+  assert.equal(hasBlockingOpenFinding([]), false);
   assert.equal(hasBlockingOpenFinding([undecided]), true);
+});
+
+test("#1835 round 2: the affects association undermines exactly the finding it names — never review-wide", async () => {
+  const undecided = markerFinding({ severity: "major", message: "the handler interpolates the request body unsanitized", file: "src/auth.ts", line: 42 });
+  const other = markerFinding({ severity: "major", message: "an unrelated categorical claim", file: "src/other.ts", line: 7 });
+  const declaration = (affects: string | null): DeclaredMaterialUnknown[] => [{ subject: "the comparison was not performed", affects }];
+  // `path:LINE` associates only with the finding at that location.
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided, other], declaration("src/auth.ts:42"))], [0]);
+  // A different file, a different line, an unparseable citation and no
+  // association at all reach nothing.
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("src/other.ts:42"))], []);
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("src/auth.ts:43"))], []);
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("not a citation"))], []);
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration(null))], []);
+  // A bare `path` names the file: any undecided blocker there.
+  assert.deepEqual([...underminedBlockingFindingIndexes([undecided], declaration("src/auth.ts"))], [0]);
+  // The boundary's recorded "grounded" decision is immune to self-doubt.
+  const grounded = markerFinding({ severity: "major" });
+  await verify([grounded], async () => source("const value = '⟦redacted:credential⟧';"));
+  assert.deepEqual([...underminedBlockingFindingIndexes([grounded], declaration("src/a.ts:1"))], []);
+  assert.equal(hasUnunderminedBlockingFinding([grounded], declaration("src/a.ts:1")), true);
+  assert.equal(hasUnunderminedBlockingFinding([undecided, other], declaration("src/auth.ts:42")), true, "the unassociated finding keeps the authority");
+  assert.equal(hasUnunderminedBlockingFinding([undecided], declaration("src/auth.ts:42")), false);
 });

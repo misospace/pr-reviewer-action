@@ -154,14 +154,23 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         },
         // #1835: the reviewer's declared materially-relevant unresolved
         // questions — the structured counterpart of the Unknowns or Needs
-        // Verification section. Each entry is one concise subject sentence;
-        // the authoritative disposition consumes them as material unknowns,
-        // so a question whose answer could change the verdict must be
+        // Verification section. Each entry is one concise subject sentence
+        // plus the optional `affects` association: the reviewer's own answer
+        // to WHICH finding the question undermines, as a repository-relative
+        // citation. A question whose answer could change the verdict must be
         // declared here rather than left in prose.
         material_unknowns: {
           type: ["array", "null"],
-          description: "Declare each unresolved question that materially bears on the verdict — the reference unavailable, the comparison not performed — as one concise subject sentence. Null when none. Do not declare routine tool unavailability, or a question required_check_dispositions already carries.",
-          items: { type: "string" },
+          description: "Declare each unresolved question that materially bears on the verdict — the reference unavailable, the comparison not performed — as one object per question: subject (one concise sentence) and affects (the path or path:LINE citation of the location whose finding the question undermines; null when it ties to no specific location). Null when none; at most 8 are kept. Declare a question required_check_dispositions also carries as unresolved; do not declare routine tool unavailability that bore on no conclusion.",
+          items: {
+            type: "object",
+            properties: {
+              subject: { type: "string" },
+              affects: { type: ["string", "null"] },
+            },
+            required: ["subject", "affects"],
+            additionalProperties: false,
+          },
         },
       },
       required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage", "material_unknowns"],

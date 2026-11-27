@@ -87,10 +87,11 @@ export const MATERIAL_DISPOSITION_CODES = [
    * unresolved (the structured counterpart of the Unknowns or Needs
    * Verification section, `ruledBy: "reviewer"`). The reviewer's own
    * materiality judgment: its answer could change the verdict, so the run
-   * can neither certify an approval nor — together with an open
-   * blocker/major finding the verification boundary never decided
-   * (`attestedBlockingFindingOpen === false`) — certify the categorical
-   * defect that finding alone would carry. */
+   * can never certify an approval while it stands. A declaration whose
+   * `affects` citation names the location of an open blocker/major finding
+   * the verification boundary never decided also undermines THAT finding's
+   * categorical authority — upstream, per finding (`hasUnunderminedBlockingFinding`),
+   * never review-wide. */
   "reviewer_declared_unknown",
   /** #1678 hardening: the authoritative closing verdict failed the exact
    * requirement-decision contract (missing/duplicate/unexpected/malformed
@@ -283,16 +284,6 @@ export interface FinalDispositionInput {
   /** True when a grounded current-head blocker/major finding is still open
    * (after verification, demotions and negative evidence). */
   blockingFindingOpen: boolean;
-  /**
-   * #1835: true when at least one open blocker/major finding carries the
-   * deterministic verification boundary's own positive attestation — a
-   * recorded `grounding_status: "grounded"` decision, or a deterministic
-   * capping path's decision — and false when every open blocker/major
-   * finding is UNATTESTED (the boundary classified none of them). Absent
-   * means the caller cannot say (legacy callers): no #1835 undermining runs,
-   * so the finding's standing authority is unchanged. The engine always
-   * passes the field. */
-  attestedBlockingFindingOpen?: boolean;
   /** True when a configured evidence provider reported blocker-level
    * findings. */
   evidenceProviderBlocker: boolean;
@@ -456,24 +447,13 @@ export function computeFinalDisposition(input: FinalDispositionInput): FinalDisp
     // conclusion with no grounded/proven claim behind it is an UNVERIFIED
     // BLOCKING CLAIM — a material unknown (INCOMPLETE/COMMENT), never a
     // fabricated block and never a silent approve.
-    //
-    // #1835: the reviewer's own declared material unknown undermines the
-    // categorical authority of an open blocker/major finding the boundary
-    // never decided — its establishment rests on exactly the investigation
-    // the reviewer disclosed as unresolved. The disposition withholds as a
-    // material unknown (the finding keeps its severity and stays listed);
-    // an attested finding or a proven provider/requirement signal keeps
-    // REQUEST_CHANGES, and a caller that cannot attest (input absent) keeps
-    // the standing authority.
-    const reviewerDeclaredUnknown = materialUnknowns.some(
-      (entry) => entry.code === "reviewer_declared_unknown" && entry.ruledBy === "reviewer",
-    );
-    const unattestedUndermining = reviewerDeclaredUnknown
-      && input.attestedBlockingFindingOpen === false
-      && !input.evidenceProviderBlocker
-      && !input.provenUnmetRequirement;
-    const findingBlocker = !unattestedUndermining
-      && (input.blockingFindingOpen || input.evidenceProviderBlocker);
+    // #1835 round 2: the per-finding undermining lives UPSTREAM — the
+    // engine's `blockingFindingOpen` excludes exactly the open blocker/major
+    // findings a reviewer-declared `affects` association undermines
+    // (`hasUnunderminedBlockingFinding`; attested findings are immune), so
+    // the disposition's own rule stays the plain severity-only read of a
+    // set the association has already narrowed.
+    const findingBlocker = input.blockingFindingOpen || input.evidenceProviderBlocker;
     if (findingBlocker || input.provenUnmetRequirement) {
       kind = "request_changes";
       reason = findingBlocker || !input.provenUnmetRequirement ? "blocker_proven" : "requirement_unmet";

@@ -1,4 +1,5 @@
 import type {
+  DeclaredMaterialUnknown,
   NormalizedFinding,
   ParsedReviewVerdict,
   ReviewTriageDecision,
@@ -95,12 +96,14 @@ export interface ArtifactFinding {
    * questions — the structured counterpart of the Unknowns or Needs
    * Verification section, normalized fail-closed by the parser (present but
    * unusable serializations collapse to one generic bounded subject). Each
-   * entry is a bounded, content-free subject sentence. The authoritative
-   * disposition consumes them as `reviewer_declared_unknown` material
-   * evidence: they withhold certification and, together with an open
-   * blocker/major finding the verification boundary never decided, withhold
-   * the categorical REQUEST_CHANGES the finding alone would carry. */
-  material_unknowns?: string[];
+   * entry is a bounded subject sentence plus the optional `affects`
+   * association — the reviewer's own citation naming the location whose
+   * finding the question undermines. The authoritative disposition consumes
+   * them as `reviewer_declared_unknown` material evidence: they withhold
+   * certification, and a declaration associated with an open blocker/major
+   * finding the verification boundary never decided withholds that finding's
+   * categorical REQUEST_CHANGES — that finding alone, never review-wide. */
+  material_unknowns?: Array<{ subject: string; affects?: string | null }>;
 }
 
 export interface ArtifactThreadDisposition {
@@ -337,14 +340,25 @@ export function serializeReviewArtifact(artifact: ReviewArtifact): string {
 
 /**
  * #1835: the run's declared materially-relevant unresolved questions, read
- * defensively from the artifact (the engine's working record is an
- * untyped readback). The parser already fail-closed the unusable
- * serializations to the generic bounded subject, so a missing or malformed
- * array here reads as no declaration — the disposition never re-derives one.
+ * defensively from the artifact (the engine's working record is an untyped
+ * readback). The parser already fail-closed the unusable serializations to
+ * the generic bounded subject, so a missing or malformed array here reads as
+ * no declaration — the disposition never re-derives one.
  */
-export function declaredMaterialUnknownsOf(record: unknown): string[] {
+export function declaredMaterialUnknownsOf(record: unknown): DeclaredMaterialUnknown[] {
   const value = (record as { material_unknowns?: unknown } | null | undefined)?.material_unknowns;
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  if (!Array.isArray(value)) return [];
+  const unknowns: DeclaredMaterialUnknown[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record0 = entry as { subject?: unknown; affects?: unknown };
+    if (typeof record0.subject !== "string") continue;
+    unknowns.push({
+      subject: record0.subject,
+      affects: typeof record0.affects === "string" ? record0.affects : null,
+    });
+  }
+  return unknowns;
 }
 
 /**

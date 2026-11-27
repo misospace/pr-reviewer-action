@@ -1375,28 +1375,83 @@ test("#1645: thread reconciliation is provenance at the seam — an unverifiable
   assert.equal(decide(hostile.evidence).nativeEvent, "APPROVE");
 });
 
+
 // ---------------------------------------------------------------------------
-// #1835 — unsupported categorical findings vs. the establishment record.
-// The #712 incident shape: the reviewer asserted a categorical mismatch
-// (LICENSE vs. the canonical upstream text) while its own record showed the
-// comparison was never performed, and the sole major published native
-// REQUEST_CHANGES. Deterministic code cannot decide the truth of an
-// arbitrary natural-language claim; what it CAN establish is (a) the
-// verification boundary's own per-claim decision — recorded on the finding
-// since #1835, so an open blocker/major with no recorded decision is
-// UNATTESTED — and (b) the reviewer's own declared materially-relevant
-// unresolved questions. Together they decide whether the disposition may
-// certify the categorical defect.
+// #1835 — unsupported categorical findings vs. the establishment record,
+// round 2: the withholding is PER FINDING. The reviewer's declaration carries
+// its own `affects` citation — the reviewer's answer to WHICH location's
+// finding the unresolved question contradicts — matched structurally by the
+// canonical citation grammar; a deterministically attested finding is immune
+// and an unrelated declaration never touches another finding's authority.
+// Every control below runs the PRODUCTION path: `applyBlockerVerification`
+// decides the grounding statuses at the exact head, and the declarations
+// come from the parser's normalization of model output — no grounding status
+// or attestation boolean is ever hand-supplied.
 // ---------------------------------------------------------------------------
 
-/** The #712-shaped finding set: one undecided major (no claim kind matched,
- * so the boundary never decided it) plus ordinary minors. */
-const UNDECIDED_MAJOR = {
-  severity: "major", category: "docs", file: "LICENSE", line: 1,
-  message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file",
-} as const;
-const DECLARED_COMPARISON_UNKNOWN =
+import { applyBlockerVerification } from "../src/enforcement/blocker-verification.js";
+import { committedSourceProvenance } from "../src/context/evidence-provenance.js";
+import { parseVerdictResponse } from "../src/model/verdict.js";
+import { reviewArtifactFromParsed, declaredMaterialUnknownsOf } from "../src/enforcement/artifact.js";
+import { hasUnunderminedBlockingFinding, underminedBlockingFindingIndexes } from "../src/enforcement/verdict-policy.js";
+import type { ArtifactFinding } from "../src/enforcement/artifact.js";
+import type { DeclaredMaterialUnknown } from "../src/model/types.js";
+
+/** The exact-head source the verification boundary reads. The quoted marker
+ * at `src/a.ts:8` is what the supported major's committed-literal claim
+ * cites; the comparative major never classifies against any witness. */
+const VERIFIED_SOURCE = "const value = '⟦redacted:credential⟧';\n";
+const COMPARISON_SUBJECT =
   "the canonical AGPL-3.0 text could not be fetched, so the byte comparison was not performed";
+
+/** The production finding-validation + declaration path: the boundary runs
+ * for real over the findings at the exact head, the model output (verdict +
+ * declarations) parses through the real parser and maps onto the artifact.
+ * Returns exactly what the disposition seam consumes. */
+async function productionReview(
+  findings: ArtifactFinding[],
+  modelOutput: Record<string, unknown>,
+): Promise<{ findings: ArtifactFinding[]; declared: DeclaredMaterialUnknown[] }> {
+  const verified = findings.map((finding) => ({ ...finding }));
+  await applyBlockerVerification(verified, {
+    readSource: async () => ({ status: "ok", text: VERIFIED_SOURCE, provenance: committedSourceProvenance("src/a.ts", HEAD) }),
+    expectedRevision: HEAD,
+    declaredActionInputs: new Set(["github-token"]),
+    readActionSource: null,
+    workflowInputsByFile: null,
+  });
+  const parsed = parseVerdictResponse({
+    choices: [{ message: { content: JSON.stringify(modelOutput) }, finish_reason: "stop" }],
+    usage: { completion_tokens: 10 },
+  });
+  const artifact = reviewArtifactFromParsed(parsed);
+  return { findings: verified, declared: declaredMaterialUnknownsOf(artifact) };
+}
+
+/** The disposition seam fed exactly as the engine feeds it: the production
+ * verdict object, the blocking set narrowed by the reviewer's own
+ * associations, and the reason-coded evidence built from the same parts. */
+function dispositionInput(
+  findings: ArtifactFinding[],
+  declared: DeclaredMaterialUnknown[],
+  verdict: string,
+  evidenceOverrides: Partial<DispositionEvidenceParts> = {},
+): { input: FinalDispositionInput; evidence: DispositionEvidence[] } {
+  const build = buildDispositionEvidence({
+    ...EVIDENCE_BASE,
+    findings,
+    declaredMaterialUnknowns: declared,
+    ...evidenceOverrides,
+  });
+  return {
+    evidence: build.evidence,
+    input: input({
+      verdict: verdict as "approve" | "request_changes",
+      blockingFindingOpen: hasUnunderminedBlockingFinding(findings, declared),
+      evidence: build.evidence,
+    }),
+  };
+}
 
 const EVIDENCE_BASE = {
   completenessChecks: [],
@@ -1413,208 +1468,216 @@ const EVIDENCE_BASE = {
   ciEvidenceContractActive: false,
 };
 
-test("#1835: the #712 shape — declared comparison unknown + undecided major => INCOMPLETE, never REQUEST_CHANGES", () => {
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [UNDECIDED_MAJOR, { severity: "minor", category: "docs", file: "LICENSE", line: 9, message: "minor" }],
-    obligations: [
-      { id: "obligation-3", source: "must_check", status: "unresolved", text: "establish upstream provenance" },
-      { id: "obligation-4", source: "must_check", status: "unresolved", text: "inspect the upstream release delta" },
-    ] as never,
-    partialCoverageStopReason: "request-error",
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
-  // The reviewer's own declaration arrives as reviewer-ruled material
-  // evidence, and the undecided major is disclosed as an unverified claim.
-  assert.ok(build.evidence.some((entry) => entry.code === "reviewer_declared_unknown" && entry.ruledBy === "reviewer"));
-  assert.ok(build.evidence.some((entry) => entry.code === "unverified_blocking_claim" && entry.subject === "LICENSE:1"));
-  const disposition = computeFinalDisposition({
-    ...input({
+test("#1835 control: a genuine semantic major outside the claim classifier + an unrelated declared unknown => REQUEST_CHANGES", async () => {
+  // The major is a real lifecycle/authorization defect the four claim kinds
+  // cannot witness (no quoted marker, no gate/input/requirement shape), so
+  // the boundary leaves it with no recorded decision — and the declared
+  // unknown names a DIFFERENT location, so nothing undermines the major.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/auth/session.ts", line: 42, message: "the session middleware interpolates the request body into the token lookup unsanitized" },
+      { severity: "minor", category: "docs", file: "README.md", line: 4, message: "the setup steps are out of order" },
+    ],
+    {
       verdict: "request_changes",
-      blockingFindingOpen: true,
-      attestedBlockingFindingOpen: false,
-      evidence: build.evidence,
-    }),
-  });
-  assert.equal(disposition.kind, "incomplete");
-  assert.equal(disposition.reason, "material_unknown");
-  assert.equal(disposition.nativeEvent, "COMMENT");
-  assert.equal(disposition.blockerProven, false);
-  assert.equal(disposition.approvalCertified, false);
-  // Round-trips through the serialized disposition contract.
-  const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
-  assert.equal(parsed?.kind, "incomplete");
-  assert.equal(parsed?.nativeEvent, "COMMENT");
-});
-
-test("#1835: a genuinely verified material mismatch still drives REQUEST_CHANGES", () => {
-  // The claim boundary positively grounded the finding (grounding_status
-  // recorded on the artifact since #1835): deterministic attestation beats
-  // the reviewer's unrelated declared unknown.
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [{ ...UNDECIDED_MAJOR, grounding_status: "grounded" as const }],
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
-  assert.ok(!build.evidence.some((entry) => entry.code === "unverified_blocking_claim"));
-  const disposition = computeFinalDisposition({
-    ...input({
-      verdict: "request_changes",
-      blockingFindingOpen: true,
-      attestedBlockingFindingOpen: true,
-      evidence: build.evidence,
-    }),
-  });
+      review_markdown: "## Review\nThe token lookup is unsanitized.",
+      material_unknowns: [{ subject: "the pinned setuptools version could not be read, so the deprecation severity is unconfirmed", affects: "pyproject.toml:10" }],
+    },
+  );
+  // Production verification: the semantic major stays undecided (no status),
+  // and the association points elsewhere.
+  assert.equal(findings[0]!.grounding_status, undefined);
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], []);
+  const { input } = dispositionInput(findings, declared, "request_changes");
+  const { evidence } = dispositionInput(findings, declared, "request_changes");
+  assert.ok(evidence.some((entry) => entry.code === "reviewer_declared_unknown"));
+  assert.ok(!evidence.some((entry) => entry.code === "unverified_blocking_claim"), "an unrelated declaration reaches no finding");
+  const disposition = computeFinalDisposition(input);
   assert.equal(disposition.kind, "request_changes");
   assert.equal(disposition.reason, "blocker_proven");
   assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
 });
 
-test("#1835: verified identical artifact, no remaining material concern => APPROVE", () => {
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [{ severity: "info", category: "docs", file: "LICENSE", line: 1, message: "byte-identical to the canonical text" }],
-    declaredMaterialUnknowns: [],
+test("#1835 control: an unsupported comparative major whose required comparison remains unresolved => INCOMPLETE", async () => {
+  // The #712 shape end to end: the comparative major never classifies (no
+  // recorded decision), the reviewer declares the comparison unresolved AND
+  // associates it with the finding's own location, and the required
+  // comparison check stays unresolved in the completeness fold.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file, contradicting the PR's canonical-text claim" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nThe canonical text could not be diffed.",
+      material_unknowns: [{ subject: COMPARISON_SUBJECT, affects: "LICENSE:1" }],
+    },
+  );
+  assert.equal(findings[0]!.grounding_status, undefined, "the comparative claim matches no claim kind");
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [0], "the reviewer's own association names this finding");
+  const { evidence, input } = dispositionInput(findings, declared, "request_changes", {
+    completenessChecks: [{ check: "confirm the committed LICENSE text matches the canonical upstream file", status: "unresolved", reason: null }],
   });
-  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  assert.ok(evidence.some((entry) => entry.code === "unverified_blocking_claim" && entry.subject === "LICENSE:1"));
+  assert.ok(evidence.some((entry) => entry.code === "mandatory_requirement_unresolved"));
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+  assert.equal(disposition.blockerProven, false);
+  const parsed = parseFinalDisposition(JSON.parse(JSON.stringify(disposition)));
+  assert.equal(parsed?.kind, "incomplete");
+});
+
+test("#1835 control: mixed supported and unsupported majors — the supported finding keeps REQUEST_CHANGES", async () => {
+  // The supported major is positively grounded by the boundary at the exact
+  // head (a committed-literal claim the witness substantiates); the
+  // unsupported comparative major is undermined by its own association. The
+  // supported finding's categorical authority survives the declaration.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/a.ts", line: 8, message: "line 8 commits the sanitizer placeholder `⟦redacted:credential⟧`" },
+      { severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nThe placeholder commits and the license comparison.",
+      material_unknowns: [{ subject: COMPARISON_SUBJECT, affects: "LICENSE:1" }],
+    },
+  );
+  assert.equal(findings[0]!.grounding_status, "grounded", "the witness substantiated the supported claim");
+  assert.equal(findings[1]!.grounding_status, undefined);
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [1], "only the associated unsupported finding is undermined; the grounded one is immune");
+  const { evidence, input } = dispositionInput(findings, declared, "request_changes");
+  const claims = evidence.filter((entry) => entry.code === "unverified_blocking_claim");
+  assert.deepEqual(claims.map((entry) => entry.subject), ["LICENSE:1"], "the supported major is never disclosed as unverified");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835: an association that misses — wrong path, wrong line, or unparseable — leaves the standing authority untouched", async () => {
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nMissing comparisons.",
+      material_unknowns: [
+        { subject: "the comparison was not performed", affects: "NOTICE:1" },
+        { subject: "the comparison was not performed at another line", affects: "LICENSE:9" },
+        { subject: "the association is not a citation", affects: "the canonical upstream file" },
+        { subject: "no association at all", affects: null },
+      ],
+    },
+  );
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [], "no declaration reaches the finding");
+  const { input } = dispositionInput(findings, declared, "request_changes");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835: an associated bare-path declaration undermines the file's undecided blocker; a grounded one stays immune", async () => {
+  // The two independent associations from the same declaration set: a bare
+  // `path` names the file (any undecided blocker there), while the
+  // boundary's recorded "grounded" decision is immune to self-doubt.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "major", category: "bug", file: "src/a.ts", line: 8, message: "line 8 commits the sanitizer placeholder `⟦redacted:credential⟧`" },
+      { severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file" },
+    ],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nOne comparison outstanding.",
+      material_unknowns: [{ subject: COMPARISON_SUBJECT, affects: "LICENSE" }],
+    },
+  );
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], [1]);
+  assert.equal(hasUnunderminedBlockingFinding(findings, declared), true, "the grounded finding keeps the categorical authority");
+  const { input } = dispositionInput(findings, declared, "request_changes");
+  assert.equal(computeFinalDisposition(input).kind, "request_changes");
+});
+
+test("#1835: without a declaration the standing authority of an undecided blocker is byte-identical", () => {
+  const build = buildDispositionEvidence({ ...EVIDENCE_BASE, findings: [{ severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped variant" }] });
+  assert.deepEqual(build.evidence, []);
+  const disposition = computeFinalDisposition(input({
+    verdict: "request_changes",
+    blockingFindingOpen: true,
+    evidence: build.evidence,
+  }));
+  assert.equal(disposition.kind, "request_changes");
+  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
+});
+
+test("#1835: a declaration without an association still withholds certification — and never touches a finding", async () => {
+  // An otherwise clean review (no blocker/major) with one outstanding
+  // material question: the declaration withholds the approval on its own.
+  const { findings, declared } = await productionReview(
+    [
+      { severity: "minor", category: "docs", file: "README.md", line: 4, message: "the setup steps are out of order" },
+    ],
+    {
+      verdict: "approve",
+      review_markdown: "## Review\nOne question outstanding.",
+      material_unknowns: [{ subject: "the upstream release delta could not be inspected", affects: null }],
+    },
+  );
+  assert.deepEqual([...underminedBlockingFindingIndexes(findings, declared)], []);
+  const { input } = dispositionInput(findings, declared, "approve");
+  const disposition = computeFinalDisposition(input);
+  assert.equal(disposition.kind, "incomplete");
+  assert.equal(disposition.reason, "material_unknown");
+  assert.equal(disposition.nativeEvent, "COMMENT");
+});
+
+test("#1835: a verified identical artifact with no remaining material concern => APPROVE", async () => {
+  const { findings, declared } = await productionReview(
+    [{ severity: "info", category: "docs", file: "LICENSE", line: 1, message: "the committed text is byte-identical to the canonical file" }],
+    { verdict: "approve", review_markdown: "## Review\nByte-identical.", material_unknowns: null },
+  );
+  assert.deepEqual(declared, []);
+  const build = buildDispositionEvidence({ ...EVIDENCE_BASE, findings, declaredMaterialUnknowns: declared });
+  const disposition = computeFinalDisposition(input({ verdict: "approve", blockingFindingOpen: false, evidence: build.evidence }));
   assert.equal(disposition.kind, "approve");
   assert.equal(disposition.nativeEvent, "APPROVE");
   assert.equal(disposition.approvalCertified, true);
 });
 
-test("#1835: a required comparison that remains genuinely unresolved => INCOMPLETE, not automatic APPROVE", () => {
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
-  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
-  assert.equal(disposition.kind, "incomplete");
-  assert.equal(disposition.reason, "material_unknown");
-  assert.equal(disposition.nativeEvent, "COMMENT");
-  assert.match(disposition.recommendation, /INCOMPLETE/);
-  assert.ok(disposition.recommendation.includes(MATERIAL_CODE_CLAUSES.reviewer_declared_unknown));
-});
-
-test("#1835: a valid independent major survives an unrelated request-error stop", () => {
-  // The finding is deterministically attested (grounded from the exact-head
-  // source); the loop's later transport failure is disclosed, and it does
-  // not downgrade the finding — and with no declared unknown the finding's
-  // standing authority is exactly what it was before #1835.
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [{ ...UNDECIDED_MAJOR, grounding_status: "grounded" as const }],
-    partialCoverageStopReason: "request-error",
-    declaredMaterialUnknowns: [],
-  });
-  assert.ok(build.evidence.some((entry) => entry.code === "investigation_unavailable"));
-  const disposition = computeFinalDisposition({
-    ...input({
-      verdict: "request_changes",
-      blockingFindingOpen: true,
-      attestedBlockingFindingOpen: true,
-      evidence: build.evidence,
-    }),
-  });
-  assert.equal(disposition.kind, "request_changes");
-  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
-});
-
 test("#1835: a clean review with a non-material acquisition failure stays APPROVE", () => {
-  // The configured call-count floor is advisory — a count never defines
-  // adequacy — and the reviewer declared no material unknown, so the
-  // approval certifies.
   const build = buildDispositionEvidence({ ...EVIDENCE_BASE, toolFloorUnmet: true });
   assert.deepEqual(build.evidence.map((entry) => entry.code), ["investigation_floor_unmet"]);
-  const disposition = computeFinalDisposition(input({ evidence: build.evidence }));
+  const disposition = computeFinalDisposition(input({ verdict: "approve", blockingFindingOpen: false, evidence: build.evidence }));
   assert.equal(disposition.kind, "approve");
   assert.equal(disposition.nativeEvent, "APPROVE");
 });
 
-test("#1835: a material unknown rides the existing structured contract too", () => {
-  // The pre-#1835 route: an unresolved must_check obligation is already a
-  // material unknown that withholds certification.
-  const existing = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    completenessChecks: [{ check: "establish upstream provenance for the updated dependency", status: "unresolved", reason: null }],
-  });
-  assert.ok(existing.evidence.some((entry) => entry.code === "mandatory_requirement_unresolved" && entry.materiality === "material"));
-  assert.equal(computeFinalDisposition(input({ evidence: existing.evidence })).kind, "incomplete");
-  // The #1842-encouraged route: the reviewer reports the unresolved
-  // question with a conservative verdict and NO categorical finding.
-  const declared = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
+test("#1835: same object — the undermined major publishes COMMENT, INCOMPLETE wording and handoff agreement", async () => {
+  const { findings, declared } = await productionReview(
+    [{ severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped/retyped variant of the FSF AGPL-3.0 text rather than the verbatim canonical file" }],
+    {
+      verdict: "request_changes",
+      review_markdown: "## Review\nThe canonical text could not be diffed.",
+      material_unknowns: [{ subject: COMPARISON_SUBJECT, affects: "LICENSE:1" }],
+    },
+  );
   const disposition = computeFinalDisposition(input({
     verdict: "request_changes",
-    evidence: declared.evidence,
+    blockingFindingOpen: hasUnunderminedBlockingFinding(findings, declared),
+    evidence: buildDispositionEvidence({ ...EVIDENCE_BASE, findings, declaredMaterialUnknowns: declared }).evidence,
   }));
-  assert.equal(disposition.kind, "incomplete");
-  assert.ok(disposition.materialUnknowns.some((entry) => entry.code === "unverified_blocking_claim"));
-});
-
-test("#1835: without a declared unknown the standing authority of an undecided blocker is unchanged", () => {
-  // Back-compat pin: #1835 adds NO new evidence and NO new withholding for
-  // runs that never declare an unknown (every pre-#1835 artifact).
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [UNDECIDED_MAJOR],
-    declaredMaterialUnknowns: [],
-  });
-  assert.deepEqual(build.evidence, []);
-  const disposition = computeFinalDisposition({
-    ...input({
-      verdict: "request_changes",
-      blockingFindingOpen: true,
-      attestedBlockingFindingOpen: false,
-      evidence: build.evidence,
-    }),
-  });
-  assert.equal(disposition.kind, "request_changes");
-  assert.equal(disposition.nativeEvent, "REQUEST_CHANGES");
-  // A legacy caller that cannot attest (the input absent) keeps the
-  // standing authority even with a declaration on the artifact.
-  const legacy = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [UNDECIDED_MAJOR],
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
-  const legacyDisposition = computeFinalDisposition({
-    ...input({
-      verdict: "request_changes",
-      blockingFindingOpen: true,
-      evidence: legacy.evidence,
-    }),
-  });
-  assert.equal(legacyDisposition.kind, "request_changes");
-});
-
-test("#1835: same object — the undermined major publishes COMMENT, INCOMPLETE wording and handoff agreement", async () => {
-  const build = buildDispositionEvidence({
-    ...EVIDENCE_BASE,
-    findings: [UNDECIDED_MAJOR],
-    declaredMaterialUnknowns: [DECLARED_COMPARISON_UNKNOWN],
-  });
-  const disposition = computeFinalDisposition({
-    ...input({
-      verdict: "request_changes",
-      blockingFindingOpen: true,
-      attestedBlockingFindingOpen: false,
-      evidence: build.evidence,
-    }),
-  });
   const api = new MockPublishApi();
   await publishReview(publishInput({
     finalDisposition: disposition,
     verdict: "request_changes",
     reviewResult: reviewResultFromDisposition(disposition, { strict: true, openFindings: 1 }),
-    findings: [{ ...UNDECIDED_MAJOR }],
+    findings: [{ severity: "major", category: "docs", file: "LICENSE", line: 1, message: "LICENSE is a rewrapped variant" }],
   }), api, { diffText: "" });
   assert.equal(api.submitted[0]!.event, "COMMENT");
   const body = api.submitted[0]!.body;
   assert.ok(body.includes(disposition.recommendation));
   const handoff = handoffPayload(body);
-  // The marker/handoff word for a material-unknown abstention is `partial`,
-  // derived from the SAME disposition — never the proven-defect word.
   assert.equal(handoff.review_result, "partial");
 });

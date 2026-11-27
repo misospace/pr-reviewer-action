@@ -1,4 +1,5 @@
-import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckDispositionDrop, RequiredCheckDispositionDropReason, RequiredCheckDispositionReceipt, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import type { DeclaredMaterialUnknown, NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckDispositionDrop, RequiredCheckDispositionDropReason, RequiredCheckDispositionReceipt, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import { parseCitationLocation } from "../enforcement/citations.js";
 import { resolveReviewTriageDecision } from "./triage.js";
 import { normalizeDependencyCoverage } from "./dependency-coverage.js";
 import { VerdictParseFailure } from "./types.js";
@@ -204,24 +205,45 @@ const MATERIAL_UNKNOWNS_UNUSABLE = "material_unknowns present but unusable";
  * present-but-malformed-is-structured-incomplete precedent of
  * `required_check_dispositions`: a declaration the run cannot read must
  * still withhold certification, never read as "no unknowns".
+ *
+ * A usable entry carries `subject` plus the optional `affects` association —
+ * the reviewer's own answer to WHICH finding the question undermines, a
+ * repository-relative citation parsed by the one canonical grammar. A
+ * malformed `affects` drops only the association (the withholding survives;
+ * a citation that parses as nothing can never be allowed to accidentally
+ * match a finding), never the subject. Bare-string entries are tolerated as
+ * subject-only declarations (prompt-only models), never rejected: the
+ * material unknown is the reviewer's judgment, not the link's.
  */
 function normalizeMaterialUnknowns(
   value: unknown,
   present: boolean,
-): { present: boolean; unknowns: string[] } {
+): { present: boolean; unknowns: DeclaredMaterialUnknown[] } {
   if (!present) return { present: false, unknowns: [] };
   if (value === null) return { present: true, unknowns: [] };
-  if (!Array.isArray(value)) return { present: true, unknowns: [MATERIAL_UNKNOWNS_UNUSABLE] };
-  const unknowns: string[] = [];
+  if (!Array.isArray(value)) {
+    return { present: true, unknowns: [{ subject: MATERIAL_UNKNOWNS_UNUSABLE, affects: null }] };
+  }
+  const unknowns: DeclaredMaterialUnknown[] = [];
   for (const item of value) {
-    if (typeof item !== "string") continue;
-    const subject = item.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_MATERIAL_UNKNOWN_CHARS);
+    const rawSubject = typeof item === "string"
+      ? item
+      : isRecord(item) && typeof item.subject === "string" ? item.subject : undefined;
+    if (typeof rawSubject !== "string") continue;
+    const subject = rawSubject.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_MATERIAL_UNKNOWN_CHARS);
     if (subject === "") continue;
-    unknowns.push(subject);
+    let affects: string | null = null;
+    if (isRecord(item) && typeof item.affects === "string") {
+      const cleaned = item.affects.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
+      affects = cleaned !== "" && cleaned.length <= MAX_MATERIAL_UNKNOWN_CHARS && parseCitationLocation(cleaned) !== null
+        ? cleaned
+        : null;
+    }
+    unknowns.push({ subject, affects });
     if (unknowns.length >= MAX_MATERIAL_UNKNOWNS) break;
   }
   if (value.length > 0 && unknowns.length === 0) {
-    return { present: true, unknowns: [MATERIAL_UNKNOWNS_UNUSABLE] };
+    return { present: true, unknowns: [{ subject: MATERIAL_UNKNOWNS_UNUSABLE, affects: null }] };
   }
   return { present: true, unknowns };
 }

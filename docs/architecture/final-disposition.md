@@ -163,20 +163,22 @@ settle a state:
   the verdict — the structured counterpart of the Unknowns or Needs
   Verification section) each become a MATERIAL `reviewer_declared_unknown`
   entry ruled by the reviewer. The disposition never validates the subject:
-  the reviewer judges what relevant evidence means. Their presence also
-  discloses every open blocker/major finding the verification boundary
-  never decided (`grounding_status` absent — since #1835 the boundary
-  records every classified claim's decision, including "grounded") as an
-  `unverified_blocking_claim`. The decision-table consequence: with a
-  declared unknown and `attestedBlockingFindingOpen === false`, an open
-  blocker/major finding can no longer carry `request_changes` on its own —
-  the reviewer's own record contradicts the categorical establishment — so
-  the disposition withholds as INCOMPLETE/COMMENT (the finding keeps its
-  severity and stays listed; approval is withheld either way). A
-  deterministically attested finding, an evidence-provider blocker or a
-  mechanically proven requirement keeps REQUEST_CHANGES; a caller that
-  cannot attest (the input absent, legacy readbacks) keeps the standing
-  authority, and runs that never declare unknowns are behavior-identical.
+  the reviewer judges what relevant evidence means. Round 2 made the
+  undermining PER FINDING: a declaration's own `affects` citation — the
+  reviewer's answer to WHICH location's finding the question contradicts —
+  is matched structurally by the one canonical citation grammar against the
+  open blocker/major findings; a matched finding that the verification
+  boundary never positively grounded (`grounding_status` recorded per
+  classified claim since #1835; "grounded", a capping path, or an
+  evidence-provider signal is immune) is excluded from
+  `blockingFindingOpen` upstream (`hasUnunderminedBlockingFinding`), so the
+  disposition's own rule stays severity-only over a set the association has
+  already narrowed. The undermined finding keeps its severity and stays
+  listed, disclosed as `unverified_blocking_claim`; the disposition
+  publishes INCOMPLETE/COMMENT. An unrelated declared unknown never touches
+  another finding's standing authority, a declaration without an
+  association never touches any finding, and runs that never declare
+  unknowns are behavior-identical.
 
 The historical enforcement layer may keep rendering the model-authored
 `unmet` rows and forcing the artifact verdict (telemetry), but it is never a

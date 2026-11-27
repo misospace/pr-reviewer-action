@@ -988,17 +988,51 @@ test("#1835: subjects are bounded single lines; the array is capped", () => {
     verdict: "approve",
     review_markdown: "## OK",
     material_unknowns: [
-      "the canonical upstream text could not be fetched, so the byte comparison was not performed",
-      `padded subject ${"x".repeat(500)}`,
-      "another question",
+      { subject: "the canonical upstream text could not be fetched, so the byte comparison was not performed", affects: null },
+      { subject: `padded subject ${"x".repeat(500)}`, affects: null },
+      { subject: "another question", affects: null },
     ],
   })));
   assert.deepEqual(verdict.materialUnknowns, [
-    "the canonical upstream text could not be fetched, so the byte comparison was not performed",
-    `padded subject ${"x".repeat(185)}`,
-    "another question",
+    { subject: "the canonical upstream text could not be fetched, so the byte comparison was not performed", affects: null },
+    { subject: `padded subject ${"x".repeat(185)}`, affects: null },
+    { subject: "another question", affects: null },
   ]);
   assert.equal(verdict.materialUnknownsEmitted, true);
+});
+
+test("#1835: the affects association survives only a canonical citation; a malformed one drops the link, never the subject", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: [
+      { subject: "the byte comparison was not performed", affects: "LICENSE:1" },
+      { subject: "a bare path names the file", affects: "LICENSE" },
+      { subject: "a diff anchor parses", affects: "src/a.ts:+4-9" },
+      { subject: "prose is not a citation", affects: "the canonical upstream file" },
+      { subject: "an absolute path is not a citation", affects: "/etc/passwd:1" },
+      { subject: "an oversized association drops", affects: `x${":".repeat(1)}${"y".repeat(500)}` },
+      { subject: "a non-string association drops", affects: 42 },
+    ],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [
+    { subject: "the byte comparison was not performed", affects: "LICENSE:1" },
+    { subject: "a bare path names the file", affects: "LICENSE" },
+    { subject: "a diff anchor parses", affects: "src/a.ts:+4-9" },
+    { subject: "prose is not a citation", affects: null },
+    { subject: "an absolute path is not a citation", affects: null },
+    { subject: "an oversized association drops", affects: null },
+    { subject: "a non-string association drops", affects: null },
+  ]);
+});
+
+test("#1835: a bare-string entry is a subject-only declaration", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## OK",
+    material_unknowns: ["the comparison was not performed"],
+  })));
+  assert.deepEqual(verdict.materialUnknowns, [{ subject: "the comparison was not performed", affects: null }]);
 });
 
 test("#1835: a present but unusable serialization fails closed to one generic subject", () => {
@@ -1006,17 +1040,17 @@ test("#1835: a present but unusable serialization fails closed to one generic su
   const nonArray = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve", review_markdown: "## OK", material_unknowns: "the comparison was not performed",
   })));
-  assert.deepEqual(nonArray.materialUnknowns, ["material_unknowns present but unusable"]);
+  assert.deepEqual(nonArray.materialUnknowns, [{ subject: "material_unknowns present but unusable", affects: null }]);
   // A non-empty array from which no usable subject survives.
   const unusable = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve", review_markdown: "## OK", material_unknowns: [42, null, "   "],
   })));
-  assert.deepEqual(unusable.materialUnknowns, ["material_unknowns present but unusable"]);
+  assert.deepEqual(unusable.materialUnknowns, [{ subject: "material_unknowns present but unusable", affects: null }]);
   // Mixed: usable entries survive alongside dropped ones.
   const mixed = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve", review_markdown: "## OK", material_unknowns: [7, "real question"],
   })));
-  assert.deepEqual(mixed.materialUnknowns, ["real question"]);
+  assert.deepEqual(mixed.materialUnknowns, [{ subject: "real question", affects: null }]);
 });
 
 test("#1835: material_unknowns never rides the model-extras passthrough", () => {

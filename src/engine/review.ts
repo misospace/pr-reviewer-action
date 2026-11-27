@@ -107,7 +107,7 @@ import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTe
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, declaredMaterialUnknownsOf, type ArtifactFinding } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, hasAttestedBlockingFinding, hasBlockingOpenFinding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, hasUnunderminedBlockingFinding, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
@@ -3163,12 +3163,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     degraded: degradedGateBypass,
     exactHead: dispositionExactHead,
     publicationHeadBound: dispositionExactHead && isNativeVerdictMode(env.PUBLISH_MODE ?? ""),
-    blockingFindingOpen: hasBlockingOpenFinding(reviewRecord.findings),
-    // #1835: the deterministic attestation split over the same final
-    // findings set — when the reviewer declared a material unknown, an
-    // unattested blocker/major finding can no longer carry the categorical
-    // REQUEST_CHANGES on its own (see computeFinalDisposition).
-    attestedBlockingFindingOpen: hasAttestedBlockingFinding(reviewRecord.findings),
+    // #1835 round 2: per-finding undermining — an open blocker/major finding
+    // a reviewer-declared `affects` association names (and that the
+    // verification boundary never positively grounded) loses its categorical
+    // authority HERE, so the disposition's own rule stays severity-only over
+    // a set the association has already narrowed.
+    blockingFindingOpen: hasUnunderminedBlockingFinding(reviewRecord.findings, declaredMaterialUnknownsOf(reviewRecord)),
     evidenceProviderBlocker: enforcementInputs.evidenceBlockerEnabled === true && enforcementInputs.evidence?.has_blocker === true,
     provenUnmetRequirement: dispositionBuild.provenUnmetRequirement,
     verdictBearing: isNativeVerdictMode(env.PUBLISH_MODE ?? ""),

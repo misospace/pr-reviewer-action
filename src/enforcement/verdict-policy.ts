@@ -22,7 +22,8 @@ import {
   REFUTED_GROUNDING_RELAXATION_NOTE,
   VERIFICATION_ONLY_RELAXATION_NOTE,
 } from "./artifact.js";
-import type { VerdictValue } from "../model/types.js";
+import type { DeclaredMaterialUnknown, VerdictValue } from "../model/types.js";
+import { parseCitationLocation } from "./citations.js";
 
 /**
  * Categories a consumer may declare non-blocking (`non_blocking_finding_categories`,
@@ -312,26 +313,70 @@ export function isUnattestedBlockingFinding(finding: ArtifactFinding): boolean {
   return finding.grounding_status === undefined;
 }
 
+/** The open blocker/major finding predicate behind `hasBlockingOpenFinding`
+ * (#811): blocker/major severity, in a category that can carry a verdict. */
+export function isBlockingOpenFinding(finding: ArtifactFinding): boolean {
+  return (finding.severity === "blocker" || finding.severity === "major")
+    && !isAlwaysNonBlockingCategory(finding.category);
+}
+
 /**
- * #1835: whether any open blocker/major finding carries the deterministic
- * boundary's own attestation — a recorded `grounding_status: "grounded"`
- * decision, or a deterministic capping path. The authoritative disposition
- * consumes this as `attestedBlockingFindingOpen`: when the reviewer itself
- * declared a material unknown, an UNATTESTED blocker/major finding can no
- * longer carry `request_changes` on its own (its establishment rests on
- * exactly the investigation the reviewer disclosed as unresolved), while an
- * attested one keeps the categorical event. `hasBlockingOpenFinding`
- * restricted to the deterministically attested subset, over the same final
- * findings array.
+ * #1835 round 2: the indexes of open blocker/major findings a reviewer's
+ * OWN declared association undermines. The association is the declaration's
+ * `affects` citation — the reviewer's answer to WHICH location's finding the
+ * unresolved question contradicts — matched structurally against the
+ * finding's cited file and line by the one canonical citation grammar. No
+ * subject-text comparison ever runs. A deterministically attested finding
+ * (the boundary's recorded "grounded" decision, or a capping path) is
+ * immune: the witness beats the reviewer's self-doubt. A declaration whose
+ * citation parses as nothing associates with nothing — it withholds
+ * certification on its own and can never reach a finding by accident.
  */
-export function hasAttestedBlockingFinding(findings: unknown): boolean {
-  return Array.isArray(findings) && findings.some((finding) => {
+export function underminedBlockingFindingIndexes(
+  findings: unknown,
+  declared: ReadonlyArray<DeclaredMaterialUnknown>,
+): Set<number> {
+  const undermined = new Set<number>();
+  if (!Array.isArray(findings) || declared.length === 0) return undermined;
+  const targets: Array<{ file: string; line: number; explicitLine: boolean }> = [];
+  for (const unknown of declared) {
+    if (unknown.affects === null) continue;
+    const loc = parseCitationLocation(unknown.affects);
+    if (loc === null) continue;
+    // `path:LINE` (or the range/diff-anchor spelling) names a line; a bare
+    // `path` names the file. parseCitationLocation defaults a bare path to
+    // line 1, so the explicit-line probe distinguishes the two forms.
+    targets.push({ file: loc.file, line: loc.line, explicitLine: /:\d/.test(unknown.affects.trim()) });
+  }
+  if (targets.length === 0) return undermined;
+  findings.forEach((finding, index) => {
     const record = (finding ?? {}) as ArtifactFinding;
-    if (record.severity !== "blocker" && record.severity !== "major") return false;
-    if (isAlwaysNonBlockingCategory(record.category)) return false;
-    if (record.capped_from !== undefined || record.ci_capped === true) return true;
-    return record.grounding_status === "grounded";
+    if (!isBlockingOpenFinding(record)) return;
+    if (record.grounding_status === "grounded" || record.capped_from !== undefined || record.ci_capped === true) return;
+    for (const target of targets) {
+      if (record.file !== target.file) continue;
+      if (target.explicitLine && record.line !== null && record.line !== target.line) continue;
+      undermined.add(index);
+      break;
+    }
   });
+  return undermined;
+}
+
+/**
+ * #1835 round 2: whether any open blocker/major finding still carries the
+ * categorical authority to drive `request_changes` — every finding a
+ * reviewer-declared association undermines is excluded (per finding, never
+ * review-wide), computed over the same final findings array the
+ * disposition's `blockingFindingOpen` input reads.
+ */
+export function hasUnunderminedBlockingFinding(
+  findings: unknown,
+  declared: ReadonlyArray<DeclaredMaterialUnknown>,
+): boolean {
+  if (!Array.isArray(findings)) return false;
+  const undermined = underminedBlockingFindingIndexes(findings, declared);
+  return findings.some((finding, index) => isBlockingOpenFinding((finding ?? {}) as ArtifactFinding) && !undermined.has(index));
 }
 
 /**
@@ -457,12 +502,7 @@ export type StrictReviewResult = "issues" | "partial" | "findings" | "clean";
 /** The open finding severities that can request changes (#811): blocker and
  * major only. Minor and info can never request changes on their own. */
 export function hasBlockingOpenFinding(findings: unknown): boolean {
-  return Array.isArray(findings) && findings.some((finding) => {
-    const severity = (finding as { severity?: unknown } | null)?.severity;
-    const category = (finding as { category?: unknown } | null)?.category;
-    return (severity === "blocker" || severity === "major")
-      && !isAlwaysNonBlockingCategory(category);
-  });
+  return Array.isArray(findings) && findings.some((finding) => isBlockingOpenFinding((finding ?? {}) as ArtifactFinding));
 }
 
 /**
