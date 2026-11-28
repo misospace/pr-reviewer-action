@@ -4292,7 +4292,7 @@ function isProjectLicenseTomlAssignment(key: string, value: string): boolean {
     if (textValue !== null) return isProjectLicenseString(textValue[1] ?? "");
     const table = /^\{\s*(?:text|file)\s*=\s*(?:"[^"]*"|'[^']*')(?:\s*,\s*files\s*=\s*\[[^[\]]*\])?\s*,?\s*\}$/.exec(value);
     if (table === null) return false;
-    const files = /files\s*=\s*\[([^[[\]]*)\]/.exec(value);
+    const files = /files\s*=\s*\[([^[\]]*)\]/.exec(value);
     return files === null || tomlGlobArrayIsClean(files[1] ?? "");
   }
   // license-files: an array of plain glob strings (no nested tables, no
