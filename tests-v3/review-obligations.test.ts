@@ -1268,3 +1268,28 @@ test("#1822: the reason suffix does not repeat the derived coverage marker's own
   assert.match(artifact.review_markdown, /derived-1 \(derived, unresolved, cause: derivation-incomplete\):/);
   assert.ok(!artifact.review_markdown.includes("reason: derivation-incomplete"));
 });
+
+// #1822 (round 2): a run with NO acquisition record and a missing reviewer
+// disposition must disclose BOTH facts — the disposition answer must not
+// swallow the missing-evidence one.
+test("#1822 (round 2): no-ledger renders beside no-disposition", () => {
+  const objectiveCheck = "verify the vendored version 1.2.3 wiring in src/paths.ts";
+  // A ledger object whose trace is absent: the acquisition record itself is
+  // unavailable (the zero-tool-call corpus-review shape, #1846).
+  const ledger = buildEvidenceLedger({});
+  assert.equal(ledger.state, "unavailable");
+  const rows = [{ id: "obligation-1", source: "must_check", text: objectiveCheck, row_class: "objective", gate: "source-identity" }];
+  const folded = foldObligationDispositions(
+    candidateRowsToObligations(rows, rows.map((row) => row.text)),
+    [],
+    ledger,
+    { readPaths: new Set<string>() },
+  ).map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: "missing-source-evidence" as const } : obligation
+  ));
+  assert.equal(folded[0]?.reason, "no-disposition");
+  assert.equal(folded[0]?.evidence?.state, "no-ledger");
+  const artifact = base();
+  applyReviewObligationEnforcement(artifact, folded);
+  assert.match(artifact.review_markdown, /obligation-1 \(must_check, unresolved, cause: missing-source-evidence, reason: no-disposition, evidence: no-ledger\):/);
+});

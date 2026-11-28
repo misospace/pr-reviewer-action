@@ -11,6 +11,7 @@ import {
   executedCallId,
   MAX_EXECUTED_CALL_INDEX,
   rowEvidenceStateToArtifact,
+  UNCOVERED_CELL_RE,
   type CheckEvidenceTag,
   type CheckEvidenceTagWithText,
   type DependencyScopeEntry,
@@ -1366,4 +1367,45 @@ test("#1821/#1836: a no-trace code-owned ledger carries the same corpus-diff and
   // Nothing derived: certified payloads and CI rows alone do NOT activate
   // the gate — the unavailable case stays byte-identical.
   assert.equal(buildEvidenceLedger({ ...shared }).state, "unavailable");
+});
+
+// #1822 (round 2): the writer side of the uncovered-cell boundary — a
+// corrupted in-memory state cannot publish a cell the grammar would refuse,
+// so neither the fenced body rows nor the UNFENCED completeness bullets can
+// carry hostile content.
+test("#1822 (round 2): the artifact writer filters hostile uncovered cells through the shared grammar", () => {
+  const written = rowEvidenceStateToArtifact({
+    rowClass: "objective",
+    gate: "dependency-evidence",
+    state: "receipt-mismatch",
+    receipts: [],
+    uncoveredCells: [
+      "security_advisory:ok-slug",
+      "security_advisory:types/node`",
+      "release_delta:bad slug",
+      "provenance:x\u0000y",
+      "security_advisory:UPPER",
+      "bogus_kind:slug",
+      "",
+    ],
+  });
+  assert.deepEqual(written?.uncovered_cells, ["security_advisory:ok-slug"]);
+  // The production producer builds cells from the trusted scope parse, so a
+  // real fold can only ever emit grammar-safe identities: a wrong-pair
+  // compare asserts release_delta, carries the slug, misses 4.17.21 —
+  // receipt-mismatch whose every disclosed cell matches the grammar.
+  const wrongPair = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.20" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.20\n", truncated: false } }],
+  });
+  const state = evaluateRowEvidence(
+    tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE]),
+    "inspect the exact old→new upstream release delta for the updated dependency",
+    wrongPair,
+  );
+  assert.equal(state.state, "receipt-mismatch");
+  assert.deepEqual([...state.uncoveredCells], ["release_delta:lodash"]);
+  for (const cell of state.uncoveredCells) {
+    assert.match(cell, UNCOVERED_CELL_RE);
+  }
 });

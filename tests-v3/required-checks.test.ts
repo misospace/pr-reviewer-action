@@ -466,7 +466,7 @@ test("#1657: an objective satisfied claim is receipt-backed by a validated head-
   assert.equal(coverage.checks[0]!.reason, "ok");
   assert.equal(coverage.checks[0]!.rowClass, "objective");
   assert.deepEqual(coverage.checks[0]!.evidence, {
-    rowClass: "objective", gate: "source-identity", state: "receipt-backed", receipts: ["call-1"],
+    rowClass: "objective", gate: "source-identity", state: "receipt-backed", receipts: ["call-1"], uncoveredCells: [],
   });
 });
 
@@ -643,9 +643,18 @@ test("#1657: without a ledger at all (no trace) a bare satisfied still discharge
     const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied")], absent as never);
     assert.equal(coverage.status, "complete");
     assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
-    // No-ledger rows are untagged here: `legacy`, with no evidence projection.
+    // No-ledger rows are untagged here: `legacy`. The gate stays inert
+    // either way; with a ledger OBJECT the #1822 (round 2) disclosure
+    // projects the honest `not-required` state (no receipt demand applies),
+    // and with no ledger at all the row carries no projection.
     assert.equal(coverage.checks[0]!.rowClass, "legacy");
-    assert.equal(coverage.checks[0]!.evidence, undefined);
+    if (absent === undefined) {
+      assert.equal(coverage.checks[0]!.evidence, undefined);
+    } else {
+      assert.deepEqual(coverage.checks[0]!.evidence, {
+        rowClass: "legacy", gate: null, state: "not-required", receipts: [], uncoveredCells: [],
+      });
+    }
   }
 });
 

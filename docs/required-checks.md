@@ -315,11 +315,14 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
-  version-tagged); the standalone `publish` CLI reads it back (strictly, and
-  only when its status matches the recorded `required_check_fold_status`)
-  instead of recomputing the raw #750 coverage — which would re-list a
-  CI-discharged row as unresolved and omit a contradicted one. A run dir
-  without the artifact keeps the pre-#1594 recompute exactly.
+  version-tagged, rows carrying the canonical nested `evidence` projection —
+  #1822 round 2); the standalone `publish` CLI reads it back (strictly,
+  through the same shared `rowEvidenceStateFromArtifact` validator the
+  obligations artifact uses, and only when its status matches the recorded
+  `required_check_fold_status`) instead of recomputing the raw #750
+  coverage — which would re-list a CI-discharged row as unresolved and omit
+  a contradicted one. A run dir without the artifact keeps the pre-#1594
+  recompute exactly.
 
 ## Trusted explicit CI test-job identities (#1820)
 

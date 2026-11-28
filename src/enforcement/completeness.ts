@@ -29,7 +29,7 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
-import { evidenceTagIndex, type CheckEvidenceTagWithText, type EvidenceLedger } from "./evidence-receipts.js";
+import { evidenceTagIndex, rowEvidenceStateToArtifact, type CheckEvidenceTagWithText, type EvidenceLedger } from "./evidence-receipts.js";
 import { isMergeAffectingRowClass } from "./required-checks.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
@@ -179,13 +179,15 @@ export function applyRequiredCheckValidation(
         rationale: row.rationale,
         reason: row.reason,
         row_class: row.rowClass,
-        ...(row.evidence !== undefined
-          ? {
-              gate: row.evidence.gate,
-              evidence_state: row.evidence.state,
-              ...(row.evidence.receipts.length > 0 ? { receipt_ids: row.evidence.receipts } : {}),
-            }
-          : {}),
+        // #1822 (round 2): the row evidence rides the CANONICAL nested
+        // serialization (`rowEvidenceStateToArtifact` — the shape the
+        // obligations artifact and `requiredCheckCoverageToArtifact` write
+        // and the publish-side strict reader validates), not a flat private
+        // projection. Since #1657 the flat `gate`/`evidence_state` keys here
+        // were refused by that reader's unknown-key check, silently sending
+        // every ledger-active run's reconciled coverage back to the raw
+        // re-fold the #1594 readback exists to prevent.
+        ...(row.evidence !== undefined ? { evidence: rowEvidenceStateToArtifact(row.evidence) } : {}),
       })),
       dropped_unknown: coverage.droppedUnknown,
     };
@@ -202,8 +204,10 @@ export function applyRequiredCheckValidation(
         const parts: string[] = [];
         if (row?.reason !== undefined && row.reason !== "ok") parts.push(`reason: ${row.reason}`);
         const evidenceState = row?.evidence?.state;
-        if (evidenceState !== undefined && evidenceState !== "not-required" && evidenceState !== "no-ledger"
-          && evidenceState !== row?.reason) {
+        // #1822 (round 2): `no-ledger` renders here too — these bullets are
+        // unfenced, so the missing-acquisition-record fact must not be
+        // swallowed by the missing-disposition reason.
+        if (evidenceState !== undefined && evidenceState !== "not-required" && evidenceState !== row?.reason) {
           parts.push(`evidence: ${evidenceState}`);
         }
         const uncovered = row?.evidence?.uncoveredCells ?? [];

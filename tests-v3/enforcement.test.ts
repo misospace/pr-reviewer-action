@@ -2180,3 +2180,22 @@ test("#1822: the Unaddressed-required-checks bullets name the row's own rejectio
   assert.match(claimed.review_markdown, /\(reason: receipt-unverified, uncovered: security_advisory:types\/node\)/);
   assert.ok(!claimed.review_markdown.includes("evidence: receipt-unverified"));
 });
+
+test("#1822 (round 2): the Unaddressed-required-checks bullets disclose no-ledger beside the missing disposition", () => {
+  const objectiveCheck = "verify the vendored version 1.2.3 wiring in src/paths.ts";
+  // A run whose acquisition record is unavailable (no executed-call trace).
+  const ledger = buildEvidenceLedger({});
+  assert.equal(ledger.state, "unavailable");
+  const warn = artifact({ required_check_dispositions: [] });
+  applyRequiredCheckValidation(warn, {
+    enabled: "true",
+    mode: "warn",
+    mustCheck: [objectiveCheck],
+    ledger,
+    mustCheckEvidence: checkEvidenceTagsFromArtifact([
+      { text: objectiveCheck, row_class: "objective", gate: "source-identity" },
+    ]),
+  });
+  assert.equal(warn.required_checks, "incomplete");
+  assert.match(warn.review_markdown, /\(reason: no-disposition, evidence: no-ledger\)/);
+});

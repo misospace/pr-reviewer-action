@@ -2093,3 +2093,37 @@ test("#1822: the uncovered gap survives the strict obligation artifact reader an
   advisoryRow.evidence = { ...(advisoryRow.evidence as Record<string, unknown>), uncovered_cells: "security_advisory" };
   assert.equal(reviewObligationsFromArtifact(corrupted), null);
 });
+
+// #1822 (round 2): the uncovered-cell boundary — the #252 rule that a
+// hostile input tests the fence itself, not just benign content.
+test("#1822 (round 2): hostile uncovered-cell content refuses the artifact", () => {
+  const advisoryLedger = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  const rows = NPM1819_ROWS.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row }));
+  const tags = checkEvidenceTagsFromArtifact(NPM1819_ROWS);
+  const folded = foldObligationDispositions(candidateRowsToObligations(rows, NPM1819_ROWS.map((row) => row.text), tags), [], advisoryLedger, { readPaths: new Set<string>() });
+  const base = reviewObligationsToArtifact(folded, null);
+  const advisoryRow = (base.obligations as Array<Record<string, unknown>>).find((row) => row.id === "obligation-3");
+  assert.ok(advisoryRow !== undefined);
+  const baseEvidence = advisoryRow.evidence as Record<string, unknown>;
+  // Each hostile token aims at the unfenced completeness bullets or the
+  // fenced body rows: a backtick breaks fence discipline, whitespace and
+  // control characters smuggle structure, uppercase/unknown kinds and empty
+  // strings are outside the scope-parse vocabulary entirely.
+  const hostile = [
+    "security_advisory:types/node`",
+    "release_delta:bad slug",
+    "provenance:x\u0000y",
+    "security_advisory:types/node\u007f",
+    "security_advisory:UPPER",
+    "bogus_kind:slug",
+    "security_advisory:",
+    "",
+  ];
+  for (const cell of hostile) {
+    advisoryRow.evidence = { ...baseEvidence, uncovered_cells: [cell] };
+    assert.equal(reviewObligationsFromArtifact(base), null, JSON.stringify(cell));
+  }
+  // A list over the cap is corruption too.
+  advisoryRow.evidence = { ...baseEvidence, uncovered_cells: Array.from({ length: 13 }, () => "security_advisory:types/node") };
+  assert.equal(reviewObligationsFromArtifact(base), null);
+});

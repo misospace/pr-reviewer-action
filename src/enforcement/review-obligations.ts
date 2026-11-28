@@ -80,6 +80,7 @@ import {
   evaluateRowEvidence,
   receiptRefusalReason,
   rowEvidenceStateToArtifact,
+  UNCOVERED_CELL_RE,
   dependencyScopeEntriesFromArtifact,
   type CheckEvidenceTagWithText,
   type DependencyEvidenceObligation,
@@ -1016,7 +1017,10 @@ function obligationDiagnosticSuffix(obligation: ReviewObligation): string {
   }
   const evidence = obligation.evidence;
   if (evidence !== undefined) {
-    if (evidence.state !== "not-required" && evidence.state !== "no-ledger" && evidence.state !== obligation.reason) {
+    // #1822 (round 2): `no-ledger` renders too — a run with NO acquisition
+    // record and a missing reviewer disposition must disclose BOTH facts,
+    // not let the disposition answer swallow the missing-evidence one.
+    if (evidence.state !== "not-required" && evidence.state !== obligation.reason) {
       parts.push(`evidence: ${evidence.state}`);
     }
     if (evidence.uncoveredCells.length > 0) {
@@ -1365,13 +1369,13 @@ const EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-
 const EVIDENCE_STATES: ReadonlySet<string> = new Set([
   "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
 ]);
-/** #1822: one disclosed uncovered-cell identity — a closed obligation kind,
- * a colon, and a bounded slug with no control or fence-breaking characters. */
-const UNCOVERED_CELL_RE = /^(?:provenance|release_delta|security_advisory):[^\s\u0000-\u001f`]{1,120}$/;
 /** #1657: read the per-row evidence projection back strictly (the shape
  * `rowEvidenceStateToArtifact` writes). `rowClass` comes from the row's own
- * `row_class` field. Anything else refuses the artifact. */
-function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidenceRowClass): RowEvidenceState | null {
+ * `row_class` field. Anything else refuses the artifact. Exported as THE one
+ * validator of this projection — the publish-side coverage readback
+ * (`src/run/entrypoints.ts`) shares it, so the shape the fold writes and the
+ * shape the reader accepts cannot drift apart (#1822 round 2). */
+export function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidenceRowClass): RowEvidenceState | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
@@ -1385,10 +1389,11 @@ function rowEvidenceStateFromArtifact(value: unknown, rowClass: RequiredEvidence
       || !record.receipt_ids.every((id) => typeof id === "string" && id !== "")) return null;
     receipts = record.receipt_ids as string[];
   }
-  // #1822: the bounded per-cell dependency gap — `kind:slug` identities
-  // from the closed obligation vocabulary and the trusted producer scope.
-  // Anything else (arbitrary text, control characters, an unknown kind) is
-  // corruption, not diagnostics; the row still reads, without a gap list.
+  // #1822: the bounded per-cell dependency gap — `kind:slug` identities in
+  // the ONE shared `UNCOVERED_CELL_RE` grammar (closed obligation kinds,
+  // scope-parse slug characters, no whitespace/control/backtick). Anything
+  // else is corruption, not diagnostics; the row still reads, without a gap
+  // list.
   let uncoveredCells: string[] = [];
   if (record.uncovered_cells !== undefined) {
     if (!Array.isArray(record.uncovered_cells) || record.uncovered_cells.length > 12

@@ -1141,9 +1141,26 @@ export interface RowEvidenceState {
 const MAX_UNCOVERED_CELLS = 12;
 const MAX_UNCOVERED_CELL_CHARS = 120;
 
-/** Bound one uncovered cell identity: `kind:slug`, both producer-trusted. */
-function uncoveredCellIdentity(kind: DependencyEvidenceObligation, entry: DependencyScopeEntry): string {
-  return `${kind}:${entry.slug.slice(0, MAX_UNCOVERED_CELL_CHARS)}`;
+/**
+ * #1822 (round 2): the ONE grammar a disclosed uncovered-cell identity may
+ * carry — a closed obligation kind, a colon, and a slug from the SAME
+ * character class the trusted scope parse accepts (`DEPENDENCY_SCOPE_SLUG_RE`
+ * — lowercase, no whitespace, no control characters, no backticks). The
+ * producer builds cells through `uncoveredCellIdentity` (hostile or
+ * unparseable input yields NO cell, never a rendered one — the completeness
+ * bullets ride the review body UNFENCED), the artifact writer filters
+ * through it, and the strict artifact readers re-validate the persisted
+ * bytes against it: a run-dir file is a file any earlier tool could have
+ * written.
+ */
+export const UNCOVERED_CELL_RE = /^(?:provenance|release_delta|security_advisory):[a-z0-9@/._-]{1,120}$/;
+
+/** Bound one uncovered cell identity: `kind:slug`, both producer-trusted.
+ * A cell the shared grammar cannot express is DROPPED — a diagnostic never
+ * publishes content the validation boundary would refuse. */
+function uncoveredCellIdentity(kind: DependencyEvidenceObligation, entry: DependencyScopeEntry): string | null {
+  const cell = `${kind}:${entry.slug.slice(0, MAX_UNCOVERED_CELL_CHARS)}`;
+  return UNCOVERED_CELL_RE.test(cell) ? cell : null;
 }
 
 const MAX_ROW_RECEIPT_IDS = 20;
@@ -1551,7 +1568,10 @@ function dependencyReceiptCoverage(
   return {
     state: unverifiedFill ? "receipt-unverified" : "receipt-mismatch",
     receipts: [],
-    uncoveredCells: uncovered.slice(0, MAX_UNCOVERED_CELLS).map((cell) => uncoveredCellIdentity(cell.kind, cell.entry)),
+    uncoveredCells: uncovered
+      .slice(0, MAX_UNCOVERED_CELLS)
+      .map((cell) => uncoveredCellIdentity(cell.kind, cell.entry))
+      .filter((cell): cell is string => cell !== null),
   };
 }
 
@@ -1565,7 +1585,8 @@ function uncoveredCellIdentities(
   for (const entry of scope) {
     for (const kind of kinds) {
       if (cells.length >= MAX_UNCOVERED_CELLS) return cells;
-      cells.push(uncoveredCellIdentity(kind, entry));
+      const cell = uncoveredCellIdentity(kind, entry);
+      if (cell !== null) cells.push(cell);
     }
   }
   return cells;
@@ -1896,13 +1917,16 @@ export function evidenceLedgerFromArtifact(value: unknown): EvidenceLedger | nul
 
 /** The per-row evidence projection serialized onto the coverage and
  * obligation artifact rows (snake_case; `receipts` → `receipt_ids`; the
- * #1822 uncovered-cell gap rides only when the row is uncovered). */
+ * #1822 uncovered-cell gap rides only when the row is uncovered, through the
+ * shared `UNCOVERED_CELL_RE` grammar — a corrupted in-memory state cannot
+ * publish a cell the strict readers would refuse). */
 export function rowEvidenceStateToArtifact(state: RowEvidenceState | undefined): Record<string, unknown> | undefined {
   if (state === undefined) return undefined;
+  const uncoveredCells = state.uncoveredCells.filter((cell) => typeof cell === "string" && UNCOVERED_CELL_RE.test(cell));
   return {
     gate: state.gate,
     state: state.state,
     ...(state.receipts.length > 0 ? { receipt_ids: state.receipts } : {}),
-    ...(state.uncoveredCells.length > 0 ? { uncovered_cells: [...state.uncoveredCells] } : {}),
+    ...(uncoveredCells.length > 0 ? { uncovered_cells: uncoveredCells } : {}),
   };
 }
