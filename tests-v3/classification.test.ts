@@ -3336,6 +3336,23 @@ test("#1834 control: dependency-shaped license-key values fail the TOML shape gu
     ['"0a1"', '"0a2"'],
     ['"1rc2"', '"1rc3"'],
     ['"2dev1"', '"2dev2"'],
+    // Keyword-ENDING spellings of the same pins (`0a`, `1rc`, `2dev`) and
+    // PEP 440's insignificant `v` prefix: still resolvable pins, rejected by
+    // the segment-keyword check or, for the dotted rows, by the dot itself.
+    ['"0a"', '"0b"'],
+    ['"1rc"', '"2rc"'],
+    ['"2dev"', '"3dev"'],
+    ['"1alpha"', '"2alpha"'],
+    ['"1beta"', '"2beta"'],
+    ['"1c"', '"2c"'],
+    ['"1pre"', '"2pre"'],
+    ['"1preview"', '"2preview"'],
+    ['"1r"', '"2r"'],
+    ['"1rev"', '"2rev"'],
+    ['"1BETA"', '"2BETA"'],
+    ['"V2dev"', '"V3dev"'],
+    ['"v1.0"', '"v2.0"'],
+    ['"1.post"', '"2.post"'],
   ]) {
     const result = classifyPr({
       prFiles: files("pyproject.toml"),

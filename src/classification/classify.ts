@@ -4265,18 +4265,28 @@ const PROJECT_LICENSE_TOML_TABLES: ReadonlySet<string> = new Set([
   "project", "project.license", "tool.poetry",
 ]);
 
+/** PEP 440 pre-release/dev/post segment keywords; the dotless-pin shape is
+ * digits followed by one of these (optionally then digits, e.g. `0a1`). */
+const PEP440_SEGMENT_KEYWORD_RE = /^(?:a|b|c|rc|alpha|beta|pre|preview|dev|post|r|rev)$/i;
+
 /** True when a quoted TOML string is a license expression, never a package
  * version specifier. Every PEP 440 / Poetry specifier starts with a digit or
- * spells an operator (`*`, `^`, `~`, `<`, `>`, `=`, `!`) or contains `|`;
- * no SPDX expression does — the one documented license spelling with angle
- * brackets ("SEE LICENSE IN <file>") is allowed by exact prefix, and the
- * only SPDX ids starting with a digit ("0BSD") are digit-then-LETTERS-END,
- * which is what admits them while rejecting every dotless prerelease/dev
- * pin (`0a1`, `1rc2`, `2dev1`) a package named `license` could be pinned to. */
+ * spells an operator (`*`, `^`, `~`, `<`, `>`, `=`, `!`) or contains `|`,
+ * possibly behind PEP 440's insignificant leading `v`; no SPDX expression
+ * does — the one documented license spelling with angle brackets
+ * ("SEE LICENSE IN <file>") is allowed by exact prefix. A digit-leading
+ * value is admitted only as digit-then-LETTERS-END whose letters are not a
+ * PEP 440 segment keyword: that admits the digit-leading SPDX ids ("0BSD")
+ * while rejecting every dotless prerelease/dev pin (`0a`, `0a1`, `1rc`,
+ * `2dev1`, `v2dev`) a package named `license` could be pinned to. */
 function isProjectLicenseString(value: string): boolean {
   if (value.startsWith("SEE LICENSE IN ")) return true;
   if (/[<>=~^!|*]/.test(value)) return false;
-  if (/^[0-9]/.test(value)) return /^[0-9]+[A-Za-z]+$/.test(value);
+  const version = /^[vV](?=[0-9])/.test(value) ? value.slice(1) : value;
+  if (/^[0-9]/.test(version)) {
+    const pin = /^([0-9]+)([A-Za-z]+)$/.exec(version);
+    return pin !== null && !PEP440_SEGMENT_KEYWORD_RE.test(pin[2] ?? "");
+  }
   return value !== "";
 }
 
