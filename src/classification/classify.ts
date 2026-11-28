@@ -4250,14 +4250,25 @@ const PROJECT_LICENSE_JSON_LINE_RE = /^"license"\s*:\s*"[^"]*"\s*,?$/;
  * changes an opener or a body line and fails closed. */
 const PROJECT_LICENSE_TOML_LINE_RE = /^(license-files|license)\s*=\s*(.+)$/;
 
-/** A TOML table header line (`[table]` / `[[array.of.tables]]`). */
-const PROJECT_METADATA_TOML_TABLE_RE = /^\[\[?\s*([A-Za-z0-9_.-]+)\s*\]\]?$/;
+/** A TOML table header line (`[table]` / `[[array.of.tables]]`) in full
+ * dotted-key grammar, quoted key components included — a quoted header is
+ * real table context, never an invisible line. Escapes inside a quoted
+ * component are treated as unparseable (fail closed). */
+const PROJECT_METADATA_TOML_TABLE_RE =
+  /^\[\[?\s*((?:[A-Za-z0-9_-]+|"[^"\\]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"\\]*"|'[^']*'))*)\s*\]\]?$/;
+
+/** A quoted header spelling (`["project"]`, `[project."optional-dependencies"]`)
+ * or a bracketed line this grammar cannot parse leaves the enclosing table
+ * uncertain, so it scopes nothing the allowlist below can accept. */
+const UNATTRIBUTED_TOML_TABLE = "\u0000uncertain-table";
 
 /** The TOML tables whose `license`/`license-files` key is project license
  * metadata. EVERYWHERE ELSE the same keys carry dependency semantics:
  * `[tool.poetry.dependencies]`, `[project.optional-dependencies]` and
  * `[dependency-groups]` entries are keyed by PACKAGE name (a package may be
- * named `license`), so any other visible table fails the proof closed. No
+ * named `license`), so any other visible table fails the proof closed —
+ * including its quoted key spellings (`["project.optional-dependencies"]`
+ * and `[project."optional-dependencies"]` are the same tables). No
  * visible table (a deep single-line hunk) stays accepted, but only through
  * the value-shape guard, which no specifier, source table or dep list
  * matches. */
@@ -4381,11 +4392,18 @@ function countProjectMetadataLines(region: string, filename: string): number | n
     if (content === "") continue;
     if (toml) {
       const table = PROJECT_METADATA_TOML_TABLE_RE.exec(content);
-      if (table !== null) {
+      if (table !== null || content.startsWith("[")) {
         // A changed table header is a shape change; a context header scopes
-        // every following line of this hunk.
+        // every following line of this hunk. Any quoting, mismatched bracket
+        // pairing, or unparseable bracket line scopes an unattributable
+        // table — even `["project"]`, whose quoting means the same table —
+        // and never inherits the previously visible one.
         if (sign !== "") return null;
-        tomlTable = table[1] ?? "";
+        const name = (table?.[1] ?? "").replace(/\s*\.\s*/g, ".");
+        const paired = content.startsWith("[[") === content.endsWith("]]");
+        tomlTable = table === null || !paired || /["']/.test(name)
+          ? UNATTRIBUTED_TOML_TABLE
+          : name;
         continue;
       }
       if (sign === "") continue;

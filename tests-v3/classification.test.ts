@@ -3324,6 +3324,85 @@ test("#1834 control: a Poetry source-table entry for a package named license is 
   assert.equal(result.prKind, "dependency_upgrade");
 });
 
+test("#1834 control: a quoted TOML table header is visible table context, not an invisible line", () => {
+  // The allowlist must read `[project."optional-dependencies"]` and
+  // `["project.optional-dependencies"]` as the dependency-keyed tables they
+  // are, and any other bracketed spelling as uncertain — never inherit the
+  // previous visible table or the no-visible-table value guard.
+  for (const header of [
+    '["project.optional-dependencies"]',
+    '[project."optional-dependencies"]',
+    '["project"]',
+    "[project.'license']",
+    "[[dependency-groups]]",
+  ]) {
+    const result = classifyPr({
+      prFiles: files("pyproject.toml"),
+      authoritativeChangedFiles: 1,
+      diffText: surfaceFileDiff("pyproject.toml", "@@ -40,2 +40,3 @@\n"
+        + ` ${header}\n`
+        + '-license = "MIT"\n'
+        + '+license = "0BSD"\n'),
+    });
+    assert.equal(result.prKind, "dependency_upgrade", `${header} must fail the proof closed`);
+  }
+});
+
+test("#1834 control: an unparseable bracketed context line fails the proof closed", () => {
+  for (const header of [
+    "[project] # trailing comment",
+    "[project",
+    "[ ]",
+    "[project]]",
+    "[[project]",
+  ]) {
+    const result = classifyPr({
+      prFiles: files("pyproject.toml"),
+      authoritativeChangedFiles: 1,
+      diffText: surfaceFileDiff("pyproject.toml", "@@ -40,2 +40,3 @@\n"
+        + ` ${header}\n`
+        + '-license = "MIT"\n'
+        + '+license = "0BSD"\n'),
+    });
+    assert.equal(result.prKind, "dependency_upgrade", `${header} must fail the proof closed`);
+  }
+});
+
+test("#1834 control: a quoted header scopes changed license-files lines too", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("pyproject.toml", "@@ -40,2 +40,3 @@\n"
+      + ' ["project.optional-dependencies"]\n'
+      + '+license-files = ["LICENSES/*"]\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a changed quoted table header is a shape change", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("pyproject.toml", "@@ -40,2 +40,2 @@\n"
+      + '-[project.optional-dependencies]\n'
+      + '+["project.optional-dependencies"]\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834: a bare dotted header with spaces around the dot still scopes the allowlist", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("pyproject.toml", "@@ -30,2 +30,3 @@\n"
+      + " [tool . poetry]\n"
+      + '-license = "MIT"\n'
+      + '+license = "AGPL-3.0-only"\n'),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+});
+
 test("#1834 control: dependency-shaped license-key values fail the TOML shape guard with no visible table", () => {
   for (const [oldValue, newValue] of [
     ['"1.0.0"', '"2.0.0"'],
