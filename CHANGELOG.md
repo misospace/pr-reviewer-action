@@ -1,5 +1,60 @@
 # Changelog
 
+## [3.11.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.10.0...source-v3.11.0) (2026-11-28)
+
+
+### Features
+
+* **#1761:** make Kubernetes worker execution inherit chart deployment defaults ([#1795](https://github.com/misospace/pr-reviewer-action/issues/1795)) ([4272b8d](https://github.com/misospace/pr-reviewer-action/commit/4272b8da290efee5f036a122d18b5baa8573af4d))
+* **#1762:** default the controller image to the chart's own release coordinate ([#1809](https://github.com/misospace/pr-reviewer-action/issues/1809)) ([5d58741](https://github.com/misospace/pr-reviewer-action/commit/5d58741d5adb0b1956c1a2efd9311a9df8dfd413))
+* **#1767:** define shared worker/controller storage once in Helm values and derive the rest ([#1796](https://github.com/misospace/pr-reviewer-action/issues/1796)) ([e65abcc](https://github.com/misospace/pr-reviewer-action/commit/e65abccba2c870baaa9781e6b5963824e44be27a))
+* **#1768:** Helm standard mode (webhook, admin, Service, HTTPRoute plumbing) and native root dashboard ([#1805](https://github.com/misospace/pr-reviewer-action/issues/1805)) ([0c83f98](https://github.com/misospace/pr-reviewer-action/commit/0c83f98b1d49e571e65ef7074ab497ee990e056e))
+* **#1800:** reconcile discovered counterexamples against the merge contract before downgrading ([#1804](https://github.com/misospace/pr-reviewer-action/issues/1804)) ([78dc4f5](https://github.com/misospace/pr-reviewer-action/commit/78dc4f5989100e82e256e8d2ebf598c3266a5caf))
+* **#1800:** settle change requests and unverified allegations against current-head evidence ([#1842](https://github.com/misospace/pr-reviewer-action/issues/1842)) ([e63681a](https://github.com/misospace/pr-reviewer-action/commit/e63681aabcda5fcdb346b4d25a02df1852e7aea7))
+* **#1821:** default-enable npm registry evidence and compare exact published versions ([#1825](https://github.com/misospace/pr-reviewer-action/issues/1825)) ([e364df0](https://github.com/misospace/pr-reviewer-action/commit/e364df031fc6eb219eb1e2e9795b7a9f56c170e5))
+* **admin:** OIDC browser sessions for the operations dashboard ([#1770](https://github.com/misospace/pr-reviewer-action/issues/1770)) ([#1785](https://github.com/misospace/pr-reviewer-action/issues/1785)) ([dc04355](https://github.com/misospace/pr-reviewer-action/commit/dc0435528aae2bb56d16e0135cfd5e7edbc7b486))
+* **admin:** wire force-rereview and cancel to the real controller seams ([#1781](https://github.com/misospace/pr-reviewer-action/issues/1781)) ([3cf2170](https://github.com/misospace/pr-reviewer-action/commit/3cf2170cd78ba83d97f37fd16f7edb41b5ddbbe7))
+* assess source comments by semantic maintainability impact ([#1828](https://github.com/misospace/pr-reviewer-action/issues/1828)) ([a1f5189](https://github.com/misospace/pr-reviewer-action/commit/a1f5189c1c992fc598fa52bc99a4397d5b235e88))
+
+
+### Bug Fixes
+
+* **#1763:** parse image/OCI-chart identities into the trusted dependency scope and settle their evidence rows ([#1782](https://github.com/misospace/pr-reviewer-action/issues/1782)) ([4e672b8](https://github.com/misospace/pr-reviewer-action/commit/4e672b82178ed96402017ddecfd77bb3bd38c607))
+* **#1773:** derive the API TLS SNI so an IP-literal KUBERNETES_SERVICE_HOST verifies against kubernetes.default.svc ([#1778](https://github.com/misospace/pr-reviewer-action/issues/1778)) ([9f046f8](https://github.com/misospace/pr-reviewer-action/commit/9f046f8fc4fef26d0d454fe0b03b12889ae565d2))
+* **#1784:** recognize release-named Flux manifests in the remaining name-only surface patterns ([#1815](https://github.com/misospace/pr-reviewer-action/issues/1815)) ([934e16c](https://github.com/misospace/pr-reviewer-action/commit/934e16c0ddbc979bcbf97c9220fa5a487e1160ad))
+* **#1820:** settle test-run obligations from trusted explicit CI job identities ([#1823](https://github.com/misospace/pr-reviewer-action/issues/1823)) ([29f916e](https://github.com/misospace/pr-reviewer-action/commit/29f916e812353e5634872b0cbc5798e34b410294))
+* **#1822:** render per-obligation settlement rejection diagnostics ([#1848](https://github.com/misospace/pr-reviewer-action/issues/1848)) ([3d66dfa](https://github.com/misospace/pr-reviewer-action/commit/3d66dfa9f54debf153fb84b682832a2e5bab3503))
+* **#1835:** withhold certification when the reviewer's own record contradicts a categorical blocker ([#1843](https://github.com/misospace/pr-reviewer-action/issues/1843)) ([5167b70](https://github.com/misospace/pr-reviewer-action/commit/5167b70c6993f40cad780c55e0fe329a2c89b506))
+* **#1837:** settle a deliberate zero-tool-call native-loop review as a complete corpus review ([#1846](https://github.com/misospace/pr-reviewer-action/issues/1846)) ([67cc09e](https://github.com/misospace/pr-reviewer-action/commit/67cc09e8092c7e79e09b803a76365d0180f37a02))
+* **#1845:** define the material-unknowns materiality bar in the declaration guidance ([#1849](https://github.com/misospace/pr-reviewer-action/issues/1849)) ([cff26d5](https://github.com/misospace/pr-reviewer-action/commit/cff26d5b36bb253c9692bd6e19fdc29adbd55fdd))
+* **config:** canonicalize adoption allowlist/denylist entry case ([#1783](https://github.com/misospace/pr-reviewer-action/issues/1783)) ([#1811](https://github.com/misospace/pr-reviewer-action/issues/1811)) ([d268465](https://github.com/misospace/pr-reviewer-action/commit/d268465edcec67e5e43d6e0dc10c464e57ad3813))
+* **controller:** authenticate the GitHub publication-gate head read ([#1780](https://github.com/misospace/pr-reviewer-action/issues/1780)) ([#1813](https://github.com/misospace/pr-reviewer-action/issues/1813)) ([08a8199](https://github.com/misospace/pr-reviewer-action/commit/08a81999692a2226f4789a6b5b686a8fc80246e9))
+* **deps:** update dependency @types/node (26.6.10 → 26.6.11) ([#1824](https://github.com/misospace/pr-reviewer-action/issues/1824)) ([65616e5](https://github.com/misospace/pr-reviewer-action/commit/65616e52c872f877242ac6fc2dc153038c34e6ea))
+* **deps:** update dependency @types/node (26.6.6 → 26.6.7) ([#1818](https://github.com/misospace/pr-reviewer-action/issues/1818)) ([e8245a4](https://github.com/misospace/pr-reviewer-action/commit/e8245a407b42ecd11af92fb9e979f3503f6649f7))
+* **deps:** update dependency @types/node (26.6.7 → 26.6.10) ([#1819](https://github.com/misospace/pr-reviewer-action/issues/1819)) ([d13c53b](https://github.com/misospace/pr-reviewer-action/commit/d13c53b9f58e7150ae41c305b3984ab3335099cd))
+* **evals:** replay the agentic corpus from pinned fixtures ([#1799](https://github.com/misospace/pr-reviewer-action/issues/1799)) ([#1803](https://github.com/misospace/pr-reviewer-action/issues/1803)) ([da3a509](https://github.com/misospace/pr-reviewer-action/commit/da3a50901fbf22a7c244939072936cccc4bfc83e))
+* **images:** ship ca-certificates and surface git stderr in acquisition failures ([#1775](https://github.com/misospace/pr-reviewer-action/issues/1775)) ([#1786](https://github.com/misospace/pr-reviewer-action/issues/1786)) ([b4245a5](https://github.com/misospace/pr-reviewer-action/commit/b4245a502e2c714c80ea36009504384c73c4e464))
+* **platform:** route GitHub ancillary forge writes through the platform seam ([#1798](https://github.com/misospace/pr-reviewer-action/issues/1798)) ([770b432](https://github.com/misospace/pr-reviewer-action/commit/770b432d38b2e1840d3071b271e5a46124c35e8e))
+
+
+### Chores
+
+* **#1788:** run the JS alert-suppression query so in-source codeql comments take effect ([#1816](https://github.com/misospace/pr-reviewer-action/issues/1816)) ([9610917](https://github.com/misospace/pr-reviewer-action/commit/9610917c291b95a7cd9b78ecaf817d7fc5573837))
+* adopt AGPL-3.0-only ([#1832](https://github.com/misospace/pr-reviewer-action/issues/1832)) ([62234e7](https://github.com/misospace/pr-reviewer-action/commit/62234e7c58cb1e9a9f114f730abe2fd12326171e))
+* **container:** update image node (0c6375b → abe7e5a) ([#1839](https://github.com/misospace/pr-reviewer-action/issues/1839)) ([86b02d4](https://github.com/misospace/pr-reviewer-action/commit/86b02d4f7432efb4be2ef44764d1d0dac8de842f))
+* **container:** update image node (e6bedef → 0c6375b) ([#1814](https://github.com/misospace/pr-reviewer-action/issues/1814)) ([a2217a8](https://github.com/misospace/pr-reviewer-action/commit/a2217a898c571b209ed20f41d0516f9cfab803a8))
+* **deps:** lock file maintenance ([#1794](https://github.com/misospace/pr-reviewer-action/issues/1794)) ([3379161](https://github.com/misospace/pr-reviewer-action/commit/3379161b402f52684343f82af848c4c381dd8e92))
+
+
+### Documentation
+
+* require concise source comments ([#1827](https://github.com/misospace/pr-reviewer-action/issues/1827)) ([ed1a0a2](https://github.com/misospace/pr-reviewer-action/commit/ed1a0a20b5a37cd6b08b7d913e2df667c90aa53a))
+
+
+### Refactors
+
+* **model:** re-export the pinned verdict schema from its one definition ([#1817](https://github.com/misospace/pr-reviewer-action/issues/1817)) ([c9192dd](https://github.com/misospace/pr-reviewer-action/commit/c9192dde091451db91f4c35f805be57d539ebac7))
+
 ## [3.10.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.9.0...source-v3.10.0) (2026-11-21)
 
 
