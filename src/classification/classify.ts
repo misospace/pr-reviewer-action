@@ -4269,13 +4269,14 @@ const PROJECT_LICENSE_TOML_TABLES: ReadonlySet<string> = new Set([
  * version specifier. Every PEP 440 / Poetry specifier starts with a digit or
  * spells an operator (`*`, `^`, `~`, `<`, `>`, `=`, `!`) or contains `|`;
  * no SPDX expression does — the one documented license spelling with angle
- * brackets ("SEE LICENSE IN <file>") is allowed by exact prefix, and SPDX
- * ids starting with a digit ("0BSD") survive the digit rule only in their
- * letter-qualified form. */
+ * brackets ("SEE LICENSE IN <file>") is allowed by exact prefix, and the
+ * only SPDX ids starting with a digit ("0BSD") are digit-then-LETTERS-END,
+ * which is what admits them while rejecting every dotless prerelease/dev
+ * pin (`0a1`, `1rc2`, `2dev1`) a package named `license` could be pinned to. */
 function isProjectLicenseString(value: string): boolean {
   if (value.startsWith("SEE LICENSE IN ")) return true;
   if (/[<>=~^!|*]/.test(value)) return false;
-  if (/^[0-9]/.test(value)) return /^[0-9]+[A-Za-z]/.test(value);
+  if (/^[0-9]/.test(value)) return /^[0-9]+[A-Za-z]+$/.test(value);
   return value !== "";
 }
 
@@ -4302,14 +4303,20 @@ function isProjectLicenseTomlAssignment(key: string, value: string): boolean {
 }
 
 /** One-line TOML string-array body: every element a quoted path/glob with no
- * version-specifier or source characters (globs may keep `*` and `?`). */
+ * version-specifier or source characters (globs may keep `*` and `?`), and a
+ * path SHAPE — a `/`, `.`, glob char, or an uppercase run the way license
+ * files are actually named — so an array under a dependency-group or Poetry
+ * key that merely happens to spell `license-files` cannot carry bare
+ * package names through as metadata. */
 function tomlGlobArrayIsClean(body: string): boolean {
   const trimmed = body.trim();
   if (trimmed === "") return true;
   for (const element of trimmed.split(",")) {
     const item = /^"([^"]*)"$/.exec(element.trim()) ?? /^'([^']*)'$/.exec(element.trim());
     if (item === null) return false;
-    if (/[<>=~^!|]/.test(item[1] ?? "")) return false;
+    const path = item[1] ?? "";
+    if (/[<>=~^!|]/.test(path)) return false;
+    if (!/[*?/.]|[A-Z]/.test(path)) return false;
   }
   return true;
 }

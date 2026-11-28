@@ -3330,6 +3330,12 @@ test("#1834 control: dependency-shaped license-key values fail the TOML shape gu
     ['">=1.0,<2"', '">=2.0,<3"'],
     ['["evil-pkg>=1"]', '["evil-pkg>=2"]'],
     ['{ version = "^1.0" }', '{ version = "^2.0" }'],
+    // Dotless PEP 440 prerelease/dev pins: resolvable dependency identities
+    // for a package named `license`, admitted only by the old digit-then-
+    // letter rule before the value guard was end-anchored.
+    ['"0a1"', '"0a2"'],
+    ['"1rc2"', '"1rc3"'],
+    ['"2dev1"', '"2dev2"'],
   ]) {
     const result = classifyPr({
       prFiles: files("pyproject.toml"),
@@ -3340,6 +3346,16 @@ test("#1834 control: dependency-shaped license-key values fail the TOML shape gu
     });
     assert.equal(result.prKind, "dependency_upgrade", `${oldValue} -> ${newValue} must keep the lane`);
   }
+});
+
+test("#1834: digit-leading SPDX ids (0BSD) stay accepted while dotless pins do not", () => {
+  const accepted = classifyPr({
+    prFiles: files("pyproject.toml"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("pyproject.toml", "@@ -8,1 +8,1 @@\n-license = \"GPL-3.0\"\n+license = \"0BSD\"\n"),
+  });
+  assert.equal(accepted.prKind, "app_code");
+  assertNoDependencyObligations(accepted);
 });
 
 test("#1834 control: a renamed surface is not a metadata edit", () => {
