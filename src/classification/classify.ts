@@ -4511,6 +4511,19 @@ function isProjectMetadataSurface(filename: string): boolean {
     || PROJECT_METADATA_TOML_RE.test(filename);
 }
 
+/** Basename that advertises dependency pins in a spelling this grammar cannot
+ * read — a template or variant of a known manifest/lockfile name
+ * (`package.json.tmpl`, `pyproject.toml.orig`, `requirements-dev.txt`) — so a
+ * touched one breaks the license-metadata claim instead of sitting outside it.
+ * A prefix match by design: only the name's own spelling is required, so every
+ * suffix (`*.tmpl`, `*.j2`, `*.orig`, `*-Lock.json`) is a surface too. */
+const DEPENDENCY_ADVERTISEMENT_SHAPE_RE =
+  /(^|\/)(?:package[.-]json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.ya?ml|bun\.lock|deno\.(?:jsonc?|lock)|poetry\.lock|pipfile(?:\.lock)?|requirements[-\w.]*\.txt|conda-lock\.ya?ml|pyproject\.toml|setup\.(?:py|cfg)|go\.(?:mod|sum)|cargo\.(?:toml|lock)|gemfile(?:\.lock)?|composer\.(?:json|lock)|mix\.lock|pubspec\.(?:ya?ml|lock)|(?:build|settings)\.gradle(?:\.kts)?|gradle\.libs\.toml|versions\.toml|pom\.xml|project\.assets\.json|packages\.config)/i;
+
+function isDependencyAdvertisementSurface(filename: string): boolean {
+  return DEPENDENCY_ADVERTISEMENT_SHAPE_RE.test(filename);
+}
+
 /** Evaluate the #1834 first-party license-metadata proof over the COMPLETE
  * diff. Non-null ONLY when at least one license metadata line was attributed
  * and every changed line on every touched dependency surface is such a line
@@ -4522,7 +4535,9 @@ export function evaluateFirstPartyMetadataEdits(
   authoritativeChangedFiles: number | undefined,
 ): FirstPartyMetadataEdits | null {
   const touched = files.filter((file) =>
-    isProjectMetadataSurface(file.filename) || matchesAny(file.filename, DEPENDENCY_PATTERNS));
+    isProjectMetadataSurface(file.filename)
+    || matchesAny(file.filename, DEPENDENCY_PATTERNS)
+    || isDependencyAdvertisementSurface(file.filename));
   if (touched.length === 0) return null;
   // "No dependency delta anywhere" is an only-claim: it needs the proven-
   // complete listing and the untruncated diff, exactly like the #909 rules.

@@ -3265,6 +3265,34 @@ test("#1834 control: a touched surface this grammar cannot parse keeps the depen
   assert.equal(result.prKind, "dependency_upgrade");
 });
 
+test("#1834 control: a dependency range in an advertised template surface keeps the lane", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json", "templates/package.json.tmpl"),
+    authoritativeChangedFiles: 2,
+    diffText:
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("templates/package.json.tmpl", "@@ -10,5 +10,5 @@\n"
+        + '   "dependencies": {\n'
+        + '-    "hono": "^4.0.0",\n'
+        + '+    "hono": "^5.0.0",\n'
+        + "   }\n"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  assert.ok(!("first_party_metadata_edits" in classificationToArtifact(result)));
+});
+
+test("#1834 control: a variant manifest spelling the grammar cannot read keeps the lane", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml", "requirements-dev.txt"),
+    authoritativeChangedFiles: 2,
+    diffText:
+      surfaceFileDiff("pyproject.toml", LICENSE_PYPROJECT_BODY)
+      + surfaceFileDiff("requirements-dev.txt", "@@ -1,3 +1,3 @@\n"
+        + " pytest==8.3.0\n-ruff==0.6.0\n+ruff==0.7.0\n"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
 test("#1834 control: a truncated diff fails the metadata proof closed", () => {
   const result = classifyPr({
     prFiles: files("package-lock.json"),
