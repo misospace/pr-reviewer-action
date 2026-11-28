@@ -1,4 +1,4 @@
-# Operations dashboard (#742, redesigned #1717)
+# Operations dashboard (#742, redesigned #1717, login state machine #1771)
 
 The operations dashboard is a static web shell served by the controller
 admin listener. It gives an operator a browser view over the existing
@@ -50,6 +50,54 @@ The dashboard reads the public `/auth/config` mode. In OIDC mode the browser use
 
 Authorization policy: the subject, email, and group allowlists combine as OR, and an email entry matches only with `email_verified: true`. See the admin API document for the full claim-validation rules. The displayed identity follows the same rule: `/auth/session` carries the email only when the provider attested it, and an unverified or absent claim renders the signed subject instead. An expired or revoked session answers `401`, and the shell returns to the sign-in state on the next request instead of showing stale authenticated data.
 
+## The login state machine (#1771)
+
+One script variable (`uiState`) owns which screen the operator sees. The
+served HTML starts on the `restoring` screen: one centered card. The
+operations shell (`#shell`, which holds the navigation, every data panel, and
+the mutation controls) ships hidden, and the login screen ships hidden.
+
+The transitions are fixed:
+
+- Boot reads `GET /auth/config`. In OIDC mode it then probes
+  `GET /auth/session`. A valid session moves straight to `authenticated` and
+  loads the dashboard data, so a reload with a live session cookie never
+  asks for a second action. No `/admin/*` route is fetched before identity
+  is proven.
+- Any other outcome lands on `unauthenticated`: one login card that names
+  the available method. OIDC mode offers a "Sign in" action to `/auth/login`.
+  Token mode shows the bearer-token field as the login form, not as a header
+  control above an unusable dashboard.
+- Submitting the token moves to `authenticating` (button and field disabled,
+  credential removed from the field). The shell opens only on proof: at least
+  one admin data route answering `2xx`. A `401`/`403` returns to the login
+  card with "The token was rejected."; any other non-proving outcome — `5xx`
+  answers (an unconfigured controller answers `503` before it ever checks a
+  credential), proxy failures, or network failures — returns to the login card
+  with an unavailable reason and forgets the token. No combination of failures
+  can show a signed-in shell without one authenticated response.
+- A `401` or `403` from any data route while authenticated is a lost session:
+  the script forgets the token and CSRF value, clears every data panel, the
+  rereview feedback, PR-key and reason inputs, the header identity, and the
+  runs pagination and navigation state, and returns to the login card. No
+  stale operational data, prior-session job ID, or operator-entered reason
+  keeps a current look or resurfaces after the next sign-in, and no credential
+  or identity material stays in the DOM. Signing out performs the same
+  transition on purpose. A proven session (restored OIDC, or a token that
+  already produced a `2xx`) is never pulled back to login by ordinary data
+  errors.
+- Each request carries the number of the session that issued it. When a
+  session ends, the number changes, and a late response from the dead
+  session neither renders nor reports a denial: it stays silent, so it can
+  never tear down a sign-in that replaced it. Only an authenticated session
+  fires a mutation, so a control inside the hidden shell never posts.
+
+Cards inside the authenticated shell answer only with real states: loading
+while a request is in flight, then data, a semantic empty state ("No runs
+yet.", "No recent failures."), or an error. The unauthenticated view never
+renders a data-panel placeholder, and the old "Connect to load ..." strings
+are gone from the shell.
+
 ## Why the shell is unauthenticated but carries no data
 
 The dashboard paths sit OUTSIDE the `/admin/` namespace. This is what
@@ -58,20 +106,20 @@ bearer token, and the dashboard mount does not change that rule or add an
 exception to it. The shell itself needs no auth because it carries nothing: it is static structure,
 styles, and rendering code.
 
-The operator enters the admin bearer token in the browser. The script
-keeps the token in one in-memory JavaScript variable and in the token
-input's value: it is never written to browser storage, never set as a
-cookie, never placed in a URL, and read from the input field only when
-loading. All data access uses relative `fetch` calls under `/admin/` with
-the token in the `Authorization` header, so the browser only ever talks
-to the same listener the shell came from.
+The operator enters the admin bearer token on the login card. The script
+reads the field once when sign-in starts, clears the field, and keeps the
+token in one in-memory JavaScript variable: it is never written to browser
+storage, never set as a cookie, never placed in a URL, and forgotten when
+the session ends. All data access uses relative `fetch` calls under
+`/admin/` with the token in the `Authorization` header, so the browser only
+ever talks to the same listener the shell came from.
 
 ## The CSP fence
 
 Every dashboard response carries:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-2UPZoIdLr/DB0rB7iH8yqCXgjRaaF654c+JAFCZDcgM='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-4Brxc2ifc6C3EXO7KMXKzYrkjZBj/kwDpp9TUk1ierU='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 ```
 
 `style-src` names the SHA-256 hash of the style block in the shell, and
@@ -97,7 +145,9 @@ of any framing host (clickjacking). The responses also carry
 ## Operator console
 
 The header carries product identity, overview/runs/diagnostics navigation,
-connection state, a system/dark/light theme cycle, and a compact token control.
+connection state, a system/dark/light theme cycle, and the signed-in identity
+with a Sign out control. The header exists only inside the authenticated
+shell; before authentication the operator sees the login card alone.
 Theme preference is held only in memory. The overview composes readiness,
 queue counters, workers, adoption, recent runs, actionable failures, and a
 rereview action. Runs use a horizontally scrollable table with status chips,
@@ -145,9 +195,20 @@ path discipline, inert shell behavior, structural fences, and the
 admin-API-compatibility pin. Its hostile execution fence runs the script in a
 `node:vm` DOM harness and proves one hostile marker per render path reaches only
 text nodes: readiness, adoption, queue workers key, runs rows, failures list,
-run-detail publication/usage, diagnostics, and mutation error bodies. UI-state
+run-detail publication/usage, diagnostics, and mutation error bodies. The #1771
+state-machine pins walk the full transition chain: boot shows the restore
+screen, an unauthenticated token boot renders only the login card (no `/admin/*`
+request, hidden shell, and a fired rereview handler posts nothing), token sign-in
+passes through `authenticating` with the field credential cleared and the field
+disabled, a rejected token returns to the login card with its reason, and a live
+OIDC session restores, auto-loads the data, then a mid-session 401 clears the
+panels and returns to login. Proof pins keep failure from impersonating identity:
+all-`503` and mixed `5xx`/network sign-in answers return to login with an
+unavailable reason and a forgotten token, one authenticated `2xx` opens the shell
+and a proven session survives later data errors, and session loss additionally
+clears the rereview feedback/inputs and the pagination and navigation state. UI-state
 coverage pins the `confirm()` refusal gate (no mutation request), asserts the
-cancel call, and exercises empty runs, auth/offline responses, pagination, and
+cancel call, and exercises empty runs, denied/offline responses, pagination, and
 accepted/refused mutation feedback. The mutation coverage pins the refusal
 REASON: a `409` carries the controller's `detail` into the feedback element,
 and an empty reason or a malformed PR key names the offending field and posts
