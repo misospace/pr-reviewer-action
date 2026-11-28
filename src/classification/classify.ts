@@ -4245,14 +4245,74 @@ const PROJECT_METADATA_TOML_RE = /(^|\/)pyproject\.toml$/;
  * changes an opener or a body line and fails closed. */
 const PROJECT_LICENSE_JSON_LINE_RE = /^"license"\s*:\s*"[^"]*"\s*,?$/;
 
-/** A license metadata value line in pyproject.toml: a one-line
- * `license = "…"`, `license = { inline table }`, or
- * `license-files = [ inline array ]` assignment. These keys spell no
- * dependency semantics in any TOML table, so no table attribution is needed
- * — every OTHER changed key (dependencies, build-system requires, versions)
- * fails the proof. */
-const PROJECT_LICENSE_TOML_LINE_RE =
-  /^(?:license-files|license)\s*=\s*(?:"[^"]*"|'[^']*'|\[[^[\]]*\]|\{[^{}]*\})\s*$/;
+/** A one-line `license`/`license-files` assignment in pyproject.toml; the
+ * captured VALUE is then classified by shape (below). A multi-line spelling
+ * changes an opener or a body line and fails closed. */
+const PROJECT_LICENSE_TOML_LINE_RE = /^(license-files|license)\s*=\s*(.+)$/;
+
+/** A TOML table header line (`[table]` / `[[array.of.tables]]`). */
+const PROJECT_METADATA_TOML_TABLE_RE = /^\[\[?\s*([A-Za-z0-9_.-]+)\s*\]\]?$/;
+
+/** The TOML tables whose `license`/`license-files` key is project license
+ * metadata. EVERYWHERE ELSE the same keys carry dependency semantics:
+ * `[tool.poetry.dependencies]`, `[project.optional-dependencies]` and
+ * `[dependency-groups]` entries are keyed by PACKAGE name (a package may be
+ * named `license`), so any other visible table fails the proof closed. No
+ * visible table (a deep single-line hunk) stays accepted, but only through
+ * the value-shape guard, which no specifier, source table or dep list
+ * matches. */
+const PROJECT_LICENSE_TOML_TABLES: ReadonlySet<string> = new Set([
+  "project", "project.license", "tool.poetry",
+]);
+
+/** True when a quoted TOML string is a license expression, never a package
+ * version specifier. Every PEP 440 / Poetry specifier starts with a digit or
+ * spells an operator (`*`, `^`, `~`, `<`, `>`, `=`, `!`) or contains `|`;
+ * no SPDX expression does — the one documented license spelling with angle
+ * brackets ("SEE LICENSE IN <file>") is allowed by exact prefix, and SPDX
+ * ids starting with a digit ("0BSD") survive the digit rule only in their
+ * letter-qualified form. */
+function isProjectLicenseString(value: string): boolean {
+  if (value.startsWith("SEE LICENSE IN ")) return true;
+  if (/[<>=~^!|*]/.test(value)) return false;
+  if (/^[0-9]/.test(value)) return /^[0-9]+[A-Za-z]/.test(value);
+  return value !== "";
+}
+
+/** True when `key = value` on a pyproject.toml line is a first-party license
+ * metadata assignment by VALUE SHAPE: `license` takes an SPDX string or a
+ * `{ text|file = "…" }` table (optionally with a glob `files` array);
+ * `license-files` takes an array of glob strings. Source tables
+ * (`{ git = … }`), version ranges, marker arrays and dependency lists — the
+ * spellings of a dependency named `license` — match nothing here. */
+function isProjectLicenseTomlAssignment(key: string, value: string): boolean {
+  const textValue = /^"(.*)"$/.exec(value) ?? /^'(.*)'$/.exec(value);
+  if (key === "license") {
+    if (textValue !== null) return isProjectLicenseString(textValue[1] ?? "");
+    const table = /^\{\s*(?:text|file)\s*=\s*(?:"[^"]*"|'[^']*')(?:\s*,\s*files\s*=\s*\[[^[\]]*\])?\s*,?\s*\}$/.exec(value);
+    if (table === null) return false;
+    const files = /files\s*=\s*\[([^[[\]]*)\]/.exec(value);
+    return files === null || tomlGlobArrayIsClean(files[1] ?? "");
+  }
+  // license-files: an array of plain glob strings (no nested tables, no
+  // unquoted tokens).
+  const array = /^\[\s*([^[\]]*)\s*\]$/.exec(value);
+  if (array === null) return false;
+  return tomlGlobArrayIsClean(array[1] ?? "");
+}
+
+/** One-line TOML string-array body: every element a quoted path/glob with no
+ * version-specifier or source characters (globs may keep `*` and `?`). */
+function tomlGlobArrayIsClean(body: string): boolean {
+  const trimmed = body.trim();
+  if (trimmed === "") return true;
+  for (const element of trimmed.split(",")) {
+    const item = /^"([^"]*)"$/.exec(element.trim()) ?? /^'([^']*)'$/.exec(element.trim());
+    if (item === null) return false;
+    if (/[<>=~^!|]/.test(item[1] ?? "")) return false;
+  }
+  return true;
+}
 
 /** A pretty-printed JSON object opener (`"key": {`), the empty key included —
  * the lockfile root-project entry is keyed `""`. */
@@ -4284,6 +4344,9 @@ function countProjectMetadataLines(region: string, filename: string): number | n
   const toml = PROJECT_METADATA_TOML_RE.test(filename);
   const isLockfile = NPM_LOCKFILE_SHAPE_RE.test(filename);
   let frames: string[] = [];
+  // The last TOML table header VISIBLE in this hunk (null = none visible —
+  // e.g. the deep single-line change the real miso-gallery diff shows).
+  let tomlTable: string | null = null;
   let licenseLines = 0;
   let lines = 0;
   for (const raw of region.split("\n")) {
@@ -4291,6 +4354,7 @@ function countProjectMetadataLines(region: string, filename: string): number | n
     if (raw.startsWith("@@") || raw.startsWith("diff --git ")
       || raw.startsWith("--- ") || raw.startsWith("+++ ")) {
       frames = [];
+      tomlTable = null;
       continue;
     }
     if (BINARY_DIFF_LINE_RE.test(raw)) return null;
@@ -4299,8 +4363,19 @@ function countProjectMetadataLines(region: string, filename: string): number | n
     const content = (sign === "" ? raw : raw.slice(1)).trim();
     if (content === "") continue;
     if (toml) {
+      const table = PROJECT_METADATA_TOML_TABLE_RE.exec(content);
+      if (table !== null) {
+        // A changed table header is a shape change; a context header scopes
+        // every following line of this hunk.
+        if (sign !== "") return null;
+        tomlTable = table[1] ?? "";
+        continue;
+      }
       if (sign === "") continue;
-      if (!PROJECT_LICENSE_TOML_LINE_RE.test(content)) return null;
+      const assignment = PROJECT_LICENSE_TOML_LINE_RE.exec(content);
+      if (assignment === null) return null;
+      if (tomlTable !== null && !PROJECT_LICENSE_TOML_TABLES.has(tomlTable)) return null;
+      if (!isProjectLicenseTomlAssignment(assignment[1] ?? "", (assignment[2] ?? "").trim())) return null;
       licenseLines += 1;
       continue;
     }
@@ -4418,6 +4493,21 @@ export function evaluateFirstPartyMetadataEdits(
   // complete listing and the untruncated diff, exactly like the #909 rules.
   if (!fileListComplete(files, authoritativeChangedFiles)) return null;
   if (DIFF_TRUNCATION_MARKER_RE.test(fullDiffText)) return null;
+  // Listing-vs-diff reconciliation: a file the diff names but the
+  // proven-complete listing does not means the two reads disagree, and the
+  // claim surface is then not the reviewed change set. An unresolvable
+  // `diff --git` header (git's quoted-path form) names no file at all and
+  // fails closed exactly like the scope parser's rule for the same shape.
+  const listed = new Set(files.map((file) => file.filename));
+  for (const line of fullDiffText.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const header = DIFF_GIT_HEADER.exec(line);
+      if (header === null || !listed.has(header[2] ?? "")) return null;
+    } else if (line.startsWith("+++ b/")) {
+      const path = line.slice(6).trim();
+      if (path !== "/dev/null" && !listed.has(path)) return null;
+    }
+  }
   const regions = diffFileRegions(fullDiffText, files);
   let surfaces = 0;
   let metadataLines = 0;
