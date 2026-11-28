@@ -2999,6 +2999,291 @@ test("artifact serializers emit the v2 snake_case schema and round-trip", () => 
   );
 });
 
+// ── #1834: first-party license metadata edits are not dependency upgrades ──
+// Fixtures mirror the real AGPL-migration diffs named in #1834 (dispatch
+// #1717, musebridge #272, miso-gallery #712, this repo's own #1832): a
+// `"license"` field added to an npm manifest, mirrored into the lockfile's
+// root-project `""` entry and a workspace entry, and a pyproject.toml inline
+// table `license` change. None of them changes a dependency declaration,
+// resolved identity, version, source, or integrity, so the dependency-
+// upgrade obligations must not be created.
+const surfaceFileDiff = (path: string, body: string): string =>
+  `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n${body}`;
+const LICENSE_MANIFEST_BODY =
+  "@@ -1,5 +1,6 @@\n {\n" +
+  '   "name": "dispatch",\n' +
+  '+  "license": "AGPL-3.0-only",\n' +
+  '   "version": "0.5.76",\n' +
+  '   "private": true,\n';
+const LICENSE_LOCKFILE_ROOT_BODY =
+  "@@ -6,6 +6,7 @@\n" +
+  '   "packages": {\n' +
+  '     "": {\n' +
+  '       "name": "dispatch",\n' +
+  '+      "license": "AGPL-3.0-only",\n' +
+  '       "version": "0.5.76",\n' +
+  '       "dependencies": {\n';
+const LICENSE_LOCKFILE_WORKSPACE_BODY =
+  "@@ -2886,6 +2887,7 @@\n" +
+  "     },\n" +
+  '     "services/marketplace": {\n' +
+  '       "name": "marketplace-mcp",\n' +
+  '+      "license": "AGPL-3.0-only",\n' +
+  '       "version": "0.1.0",\n' +
+  '       "dependencies": {\n';
+const LICENSE_PYPROJECT_BODY =
+  '@@ -7,7 +7,7 @@ name = "miso-gallery"\n' +
+  ' version = "0.4.0"\n' +
+  ' readme = "README.md"\n' +
+  '-license = {text = "GPL-3.0"}\n' +
+  '+license = {text = "AGPL-3.0-only"}\n' +
+  ' requires-python = ">=3.11"\n' +
+  " dependencies = [\n";
+
+function assertNoDependencyObligations(result: ReturnType<typeof classifyPr>): void {
+  assert.notEqual(result.prKind, "dependency_upgrade");
+  // The #1379 upstream-evidence obligations plus the two local upgrade asks
+  // that only make sense with an actual dependency delta.
+  for (const check of [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ]) {
+    assert.ok(!result.mustCheck.includes(check), `unexpected must_check row: ${check}`);
+  }
+  const artifact = classificationToArtifact(result);
+  for (const tag of artifact["must_check_evidence"] as Array<Record<string, unknown>>) {
+    assert.notEqual(tag["gate"], "dependency-evidence");
+  }
+  assert.ok(!("lockfile_only_refresh" in artifact));
+}
+
+test("#1834 shape 1: an npm manifest license-field edit creates no dependency obligation", () => {
+  const changed = [...files("package.json"), canonicalChangedFile({ filename: "LICENSE", status: "added" })];
+  const result = classifyPr({
+    prFiles: changed,
+    authoritativeChangedFiles: 2,
+    diffText: surfaceFileDiff("package.json", LICENSE_MANIFEST_BODY),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+  assert.deepEqual(result.routeSignals, []);
+  // The decision stays explainable from the bounded artifact provenance.
+  assert.deepEqual(classificationToArtifact(result)["first_party_metadata_edits"], {
+    surfaces: 1,
+    metadata_lines: 1,
+  });
+});
+
+test("#1834 shape 2: a lockfile root-project license mirror creates no dependency obligation", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+  assert.deepEqual(classificationToArtifact(result)["first_party_metadata_edits"], {
+    surfaces: 1,
+    metadata_lines: 1,
+  });
+});
+
+test("#1834 shape 3: a lockfile workspace-entry license edit creates no dependency obligation", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_WORKSPACE_BODY),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+});
+
+test("#1834 shape 4: a pyproject.toml project.license edit creates no dependency obligation", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("pyproject.toml", LICENSE_PYPROJECT_BODY),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+});
+
+test("#1834: the real combined AGPL-migration shape stays an ordinary review", () => {
+  // The dispatch #1717 file set: license edits across two manifests and two
+  // lockfiles next to LICENSE/Dockerfile/site changes.
+  const changed = [
+    canonicalChangedFile({ filename: "Dockerfile", status: "modified" }),
+    canonicalChangedFile({ filename: "LICENSE", status: "added" }),
+    ...files("package-lock.json", "package.json", "site/package-lock.json", "site/package.json"),
+    canonicalChangedFile({ filename: "site/src/layouts/Base.astro", status: "modified" }),
+  ];
+  const result = classifyPr({
+    prFiles: changed,
+    authoritativeChangedFiles: changed.length,
+    diffText:
+      "diff --git a/Dockerfile b/Dockerfile\n--- a/Dockerfile\n+++ b/Dockerfile\n@@ -55,6 +55,7 @@\n" +
+      " FROM base AS runner\n" +
+      '+LABEL org.opencontainers.image.licenses="AGPL-3.0-only" \\\n' +
+      " WORKDIR /app\n" +
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("package.json", LICENSE_MANIFEST_BODY)
+      + surfaceFileDiff("site/package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("site/package.json", LICENSE_MANIFEST_BODY)
+      + "diff --git a/LICENSE b/LICENSE\n--- /dev/null\n+++ b/LICENSE\n@@ -0,0 +1,2 @@\n+GNU AFFERO GENERAL PUBLIC LICENSE\n+Version 3\n",
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+  assert.deepEqual(classificationToArtifact(result)["first_party_metadata_edits"], {
+    surfaces: 4,
+    metadata_lines: 4,
+  });
+});
+
+// Positive controls: every real dependency delta must keep the historical
+// dependency_upgrade classification with its obligation set.
+
+test("#1834 control: a license edit plus a lockfile version bump stays dependency_upgrade", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText:
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("package-lock.json", lockfileBump("ms", "2.1.2", "2.1.3")),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  for (const check of [...DEPENDENCY_EVIDENCE_CHECKS]) {
+    assert.ok(result.mustCheck.includes(check), `missing must_check row: ${check}`);
+  }
+  assert.ok(!("first_party_metadata_edits" in classificationToArtifact(result)));
+});
+
+test("#1834 control: a manifest direct-dependency range change riding with a lockfile license edit stays dependency_upgrade", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json", "package.json"),
+    authoritativeChangedFiles: 2,
+    diffText:
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("package.json", "@@ -10,5 +10,5 @@\n"
+        + '   "dependencies": {\n'
+        + '-    "hono": "^4.0.0",\n'
+        + '+    "hono": "^5.0.0",\n'
+        + "   }\n"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a license change on a third-party node_modules entry is not exempt", () => {
+  // A third-party entry's license changed alongside its resolved identity is
+  // package-entry content (#1595 counts it material), never project metadata.
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", "@@ -300,7 +300,7 @@\n"
+      + '     "node_modules/left-pad": {\n'
+      + '       "version": "1.3.0",\n'
+      + '-      "license": "MIT",\n'
+      + '+      "license": "SEE LICENSE IN LICENSE.txt",\n'
+      + '       "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a license-named package range inside the root entry's dependencies map is not exempt", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", "@@ -6,7 +6,7 @@\n"
+      + '   "packages": {\n'
+      + '     "": {\n'
+      + '       "dependencies": {\n'
+      + '-        "license": "1.0.0",\n'
+      + '+        "license": "2.0.0",\n'
+      + "       }\n"),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a JSON-escaped third-party key cannot spoof the first-party attribution", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", "@@ -300,6 +300,7 @@\n"
+      + '     "node_modules\\u002Fevil": {\n'
+      + '       "version": "1.0.0",\n'
+      + '+      "license": "AGPL-3.0-only",\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a license edit whose structural context is missing fails closed", () => {
+  // Context-0 hunk: no `"packages": {`/entry opener visible, so the changed
+  // line cannot be attributed to a first-party entry — keep the lane.
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: surfaceFileDiff("package-lock.json", "@@ -9,0 +10 @@\n"
+      + '+      "license": "AGPL-3.0-only",\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a touched surface this grammar cannot parse keeps the dependency lane", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml", "poetry.lock"),
+    authoritativeChangedFiles: 2,
+    diffText:
+      surfaceFileDiff("pyproject.toml", LICENSE_PYPROJECT_BODY)
+      + surfaceFileDiff("poetry.lock", '@@ -10,7 +10,7 @@\n'
+        + ' name = "flask"\n- version = "3.1.0"\n+ version = "3.1.3"\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a truncated diff fails the metadata proof closed", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 1,
+    diffText: `${surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)}…[diff truncated]`,
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: an incomplete file listing fails the metadata proof closed", () => {
+  // authoritativeChangedFiles > supplied list: the platform read is a capped
+  // page, so no "only metadata changed" claim is safe.
+  const result = classifyPr({
+    prFiles: files("package-lock.json"),
+    authoritativeChangedFiles: 42,
+    diffText: surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: an added lockfile carrying a license is not a metadata edit", () => {
+  const result = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "package-lock.json", status: "added" })],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/package-lock.json b/package-lock.json\n--- /dev/null\n+++ b/package-lock.json\n@@ -0,0 +1,4 @@\n+{\n+  \"name\": \"new-app\",\n+  \"license\": \"AGPL-3.0-only\",\n+  \"lockfileVersion\": 3\n",
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
+test("#1834 control: a pyproject dependency-list edit riding with the license change keeps the lane", () => {
+  const result = classifyPr({
+    prFiles: files("pyproject.toml", "package-lock.json"),
+    authoritativeChangedFiles: 2,
+    diffText:
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("pyproject.toml", "@@ -12,3 +12,4 @@\n"
+        + " dependencies = [\n"
+        + '     "Flask>=3.1.3,<4",\n'
+        + '+    "pillow>=11.0",\n'),
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+});
+
 // ── Renovate image/chart updates and dependency risk signals (#1336) ──────
 const TAG_OLD = "v1.106.5";
 const TAG_NEW = "v1.106.6";

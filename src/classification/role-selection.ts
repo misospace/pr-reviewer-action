@@ -214,6 +214,8 @@ export function classificationFromArtifact(raw: unknown): PRClassification | nul
     // #1595 lockfile-only triage is likewise a diagnostic — the harness reads
     // it straight off the persisted artifact, never through this seam.
     lockfileOnlyRefresh: null,
+    // #1834 metadata-edit provenance is likewise a diagnostic.
+    firstPartyMetadataEdits: null,
     // #871: not part of the persisted artifact (see the PRClassification
     // field doc) — the specialists gate overrides this on the rebuilt
     // classification from the SUBSTANTIAL_CODE_CHANGE env var instead of

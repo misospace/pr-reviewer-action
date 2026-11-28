@@ -2517,6 +2517,14 @@ export interface PRClassification {
    * contains untrusted text. Persisted additively as `lockfile_only_refresh`
    * by `classificationToArtifact` only when non-null. */
   lockfileOnlyRefresh: LockfileOnlyRefresh | null;
+  /** #1834: the exact-shape proof that every changed line on the touched
+   * dependency surfaces is first-party project license metadata (see
+   * {@link evaluateFirstPartyMetadataEdits}); non-null only when the proof
+   * holds, in which case the dependency-upgrade kind does not fire from a
+   * manifest/lockfile file name. Persisted additively as
+   * `first_party_metadata_edits` only when non-null. Counts only — never
+   * untrusted text. */
+  firstPartyMetadataEdits: FirstPartyMetadataEdits | null;
   /** #871: true when the PR's non-test source footprint is substantial — a
    * new non-test source module, or non-test source lines changed over
    * SUBSTANTIAL_SOURCE_LINE_THRESHOLD. role-selection forces the correctness
@@ -2603,6 +2611,15 @@ export function classificationToArtifact(classification: PRClassification): Reco
       parseable: classification.lockfileOnlyRefresh.parseable,
     };
   }
+  // #1834: persisted additively only when the first-party license-metadata
+  // proof held (a dependency-surface edit that is not a dependency upgrade);
+  // counts only, appended after the existing optional key.
+  if (classification.firstPartyMetadataEdits !== null) {
+    artifact["first_party_metadata_edits"] = {
+      surfaces: classification.firstPartyMetadataEdits.surfaces,
+      metadata_lines: classification.firstPartyMetadataEdits.metadataLines,
+    };
+  }
   return artifact;
 }
 
@@ -2618,6 +2635,9 @@ type KindPredicate = (
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
   metadata: PrMetadata,
+  /** #1834: the precomputed first-party license-metadata proof (consumed
+   * only by the dependency-upgrade rule). */
+  firstPartyMetadataEdits: FirstPartyMetadataEdits | null,
 ) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
@@ -3004,13 +3024,19 @@ function isDependencyUpgrade(
   _diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
+  _metadata: PrMetadata,
+  firstPartyMetadataEdits: FirstPartyMetadataEdits | null,
 ): boolean {
   const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
   if (hasDepFile) {
     // #1784: a lockfile plus a release-named Flux manifest stays in the k8s lane.
     const hasK8s = isK8sManifest(files, _diffText, fullDiffText);
-    return !hasK8s;
+    // #1834: a proven first-party license-metadata edit pins no dependency,
+    // so the file name alone must not take the dependency lane; every other
+    // shape (proof null — uncertain, unparsed, or carrying a real change)
+    // keeps the historical classification.
+    return !hasK8s && firstPartyMetadataEdits === null;
   }
   // #1379: Terraform provider/module version bumps. Every changed file must
   // be a modified `.tf` file — one resource file in the mix is a mixed PR.
@@ -3756,9 +3782,12 @@ function classifyPrKind(
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
   metadata: PrMetadata,
+  firstPartyMetadataEdits: FirstPartyMetadataEdits | null,
 ): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles, metadata)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles, metadata, firstPartyMetadataEdits)) {
+      return rule.kind;
+    }
   }
   return DEFAULT_PR_KIND;
 }
@@ -4177,6 +4206,235 @@ export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyR
  * proved an all-low-risk, parseable lockfile-only refresh. */
 function isLowRiskLockfileOnlyRefresh(triage: LockfileOnlyRefresh | null): boolean {
   return triage !== null && triage.parseable && triage.material === 0;
+}
+
+// ---------------------------------------------------------------------------
+// First-party project license metadata edits (#1834)
+// ---------------------------------------------------------------------------
+
+/** #1834: the exact-shape proof that every changed line on the PR's touched
+ * dependency surfaces is FIRST-PARTY project license metadata — the project's
+ * own `license` in an npm manifest, the mirror of that field in a lockfile
+ * root-project or workspace package entry, or a pyproject.toml
+ * `license`/`license-files` key. Such a PR pins no dependency declaration,
+ * resolved identity, version, source, or integrity, so it is not a dependency
+ * upgrade and must not enter the upstream-evidence obligation lane (the
+ * AGPL-migration PRs whose license-field edits were read as upgrades).
+ *
+ * The proof FAILS CLOSED — no exemption, the historical filename-driven
+ * classification stands — for every shape it cannot attribute exactly: any
+ * other changed line on a dependency surface (a version, range, source,
+ * integrity or relation edit), a license line whose enclosing object is a
+ * third-party `node_modules` entry or a dependency map, a license edit whose
+ * structural context is missing from its hunk, an added/removed/renamed
+ * surface, a touched surface this grammar cannot parse (any other lockfile or
+ * manifest), a truncated diff, or an incomplete file listing. Counts only:
+ * no package name, key, or license value is ever retained. */
+export interface FirstPartyMetadataEdits {
+  /** Dependency-surface files the proof covered. */
+  surfaces: number;
+  /** First-party license value lines the proof attributed. */
+  metadataLines: number;
+}
+
+/** pyproject.toml joins the npm shapes as a surface this grammar reads. */
+const PROJECT_METADATA_TOML_RE = /(^|\/)pyproject\.toml$/;
+
+/** A license metadata value line in an npm JSON surface: exactly one
+ * `"license": "<string>"` pair. An object-valued or multi-line spelling
+ * changes an opener or a body line and fails closed. */
+const PROJECT_LICENSE_JSON_LINE_RE = /^"license"\s*:\s*"[^"]*"\s*,?$/;
+
+/** A license metadata value line in pyproject.toml: a one-line
+ * `license = "…"`, `license = { inline table }`, or
+ * `license-files = [ inline array ]` assignment. These keys spell no
+ * dependency semantics in any TOML table, so no table attribution is needed
+ * — every OTHER changed key (dependencies, build-system requires, versions)
+ * fails the proof. */
+const PROJECT_LICENSE_TOML_LINE_RE =
+  /^(?:license-files|license)\s*=\s*(?:"[^"]*"|'[^']*'|\[[^[\]]*\]|\{[^{}]*\})\s*$/;
+
+/** A pretty-printed JSON object opener (`"key": {`), the empty key included —
+ * the lockfile root-project entry is keyed `""`. */
+const PROJECT_METADATA_OPENER_RE = /^"((?:[^"\\]|\\.)*)"\s*:\s*\{$/;
+/** A pretty-printed array opener — elements are content, not metadata. */
+const PROJECT_METADATA_ARRAY_OPENER_RE = /^"((?:[^"\\]|\\.)*)"\s*:\s*\[$/;
+/** A one-line scalar pair: string (escapes allowed), number, boolean, null. */
+const PROJECT_METADATA_PAIR_RE =
+  /^"((?:[^"\\]|\\.)+)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)\s*,?$/;
+/** A one-line balanced inline object/array value — opens no frame. */
+const PROJECT_METADATA_INLINE_RE = /^"[^"]*"\s*:\s*[\[{].*[}\]]\s*,?$/;
+/** A bare string element inside a pretty-printed array. */
+const PROJECT_METADATA_ARRAY_ITEM_RE = /^"(?:[^"\\]|\\.)*"\s*,?$/;
+/** A close/punctuation-only line. */
+const PROJECT_METADATA_CLOSE_RE = /^[}\],]+$/;
+/** Frame labels: the file's root object (a bare `{` seen with an empty
+ * stack), an anonymous object (a bare `{` nested — never attributable), and
+ * the suffix marking an array frame. */
+const METADATA_ROOT_FRAME = "\u0000root";
+const METADATA_ANON_FRAME = "\u0000anon";
+const METADATA_ARRAY_SUFFIX = "\u0000arr";
+
+/** The file's project-license metadata line count, or null when the region
+ * holds a changed line this grammar cannot attribute to first-party license
+ * metadata. Attribution is hunk-local (frame state resets at every `@@`, the
+ * #1657 discipline): a JSON license line counts only when the hunk's visible
+ * structure places it directly inside a first-party object. */
+function countProjectMetadataLines(region: string, filename: string): number | null {
+  const toml = PROJECT_METADATA_TOML_RE.test(filename);
+  const isLockfile = NPM_LOCKFILE_SHAPE_RE.test(filename);
+  let frames: string[] = [];
+  let licenseLines = 0;
+  let lines = 0;
+  for (const raw of region.split("\n")) {
+    if (++lines > DEPENDENCY_SCOPE_MAX_LINES) return null;
+    if (raw.startsWith("@@") || raw.startsWith("diff --git ")
+      || raw.startsWith("--- ") || raw.startsWith("+++ ")) {
+      frames = [];
+      continue;
+    }
+    if (BINARY_DIFF_LINE_RE.test(raw)) return null;
+    if (raw.startsWith("\\")) continue; // "\ No newline at end of file"
+    const sign = raw.startsWith("-") ? "-" : raw.startsWith("+") ? "+" : "";
+    const content = (sign === "" ? raw : raw.slice(1)).trim();
+    if (content === "") continue;
+    if (toml) {
+      if (sign === "") continue;
+      if (!PROJECT_LICENSE_TOML_LINE_RE.test(content)) return null;
+      licenseLines += 1;
+      continue;
+    }
+    if (content === "{") {
+      // A changed structural opener is a shape change, never metadata.
+      if (sign !== "") return null;
+      frames.push(frames.length === 0 ? METADATA_ROOT_FRAME : METADATA_ANON_FRAME);
+      continue;
+    }
+    if (PROJECT_METADATA_CLOSE_RE.test(content)) {
+      if (sign !== "") return null;
+      for (const ch of content) {
+        if ((ch === "}" || ch === "]") && frames.length > 0) frames.pop();
+      }
+      continue;
+    }
+    if (PROJECT_METADATA_INLINE_RE.test(content)) {
+      // A changed inline object/array value could be anything; context
+      // opens no frame.
+      if (sign !== "") return null;
+      continue;
+    }
+    const opener = PROJECT_METADATA_OPENER_RE.exec(content);
+    if (opener !== null) {
+      if (sign !== "") return null;
+      const key = opener[1] ?? "";
+      // JSON-escaped key spellings (`\u002f`-style path re-spellings) hide
+      // which entry a line belongs to — never attributable.
+      if (key.includes("\\")) return null;
+      frames.push(key);
+      continue;
+    }
+    const arrayOpener = PROJECT_METADATA_ARRAY_OPENER_RE.exec(content);
+    if (arrayOpener !== null) {
+      if (sign !== "") return null;
+      const key = arrayOpener[1] ?? "";
+      if (key.includes("\\")) return null;
+      frames.push(`${key}${METADATA_ARRAY_SUFFIX}`);
+      continue;
+    }
+    const pair = PROJECT_METADATA_PAIR_RE.exec(content);
+    if (pair !== null) {
+      if (sign === "") continue;
+      if (!PROJECT_LICENSE_JSON_LINE_RE.test(content)) return null;
+      const top = frames[frames.length - 1] ?? "";
+      if (top.endsWith(METADATA_ARRAY_SUFFIX)) return null;
+      if (isLockfile ? !lockfileLicenseFramesAreFirstParty(frames)
+        : !(frames.length === 1 && frames[0] === METADATA_ROOT_FRAME)) return null;
+      licenseLines += 1;
+      continue;
+    }
+    if (PROJECT_METADATA_ARRAY_ITEM_RE.test(content)
+      && (frames[frames.length - 1] ?? "").endsWith(METADATA_ARRAY_SUFFIX)) {
+      if (sign !== "") return null;
+      continue;
+    }
+    // A changed line this grammar cannot place is never silently ignored.
+    if (sign !== "") return null;
+  }
+  return licenseLines;
+}
+
+/** The license line's enclosing entry inside an npm lockfile is provably the
+ * project's own: the full chain `packages → entry` (a `packages` child that
+ * is not a `node_modules/…` package is the root-project mirror or a
+ * workspace), or — for deep hunks that show the entry opener but never the
+ * `packages` header — a lone `""` opener (only the root project's entry is
+ * keyed `""`) or a repo-relative directory path (every third-party package
+ * under `packages` is keyed `node_modules/…`, and the legacy `dependencies`
+ * mirror keys bare or `@`-scoped names, neither an unscoped path). Anything
+ * else — including a license line nested inside an entry's own
+ * `dependencies` map, where a package could be named `license` — fails. */
+function lockfileLicenseFramesAreFirstParty(frames: readonly string[]): boolean {
+  const firstPartyEntryKey = (key: string): boolean =>
+    !key.endsWith(METADATA_ARRAY_SUFFIX) && !key.startsWith("@")
+    && !key.startsWith(METADATA_ROOT_FRAME) && !key.startsWith(METADATA_ANON_FRAME)
+    && !/(^|\/)node_modules(\/|$)/.test(key);
+  if (frames.length === 2 && frames[0] === "packages") {
+    const entry = frames[1] ?? "";
+    return firstPartyEntryKey(entry) && !entry.startsWith("\u0000");
+  }
+  if (frames.length === 1) {
+    const entry = frames[0] ?? "";
+    if (entry === "") return true;
+    // A lone path-key frame proves a workspace entry ONLY because the
+    // third-party spellings above are excluded; the root `{` was not
+    // visible, so `entry.includes("/")` is what separates a workspace path
+    // from a bare legacy-section package name.
+    return firstPartyEntryKey(entry) && entry.includes("/");
+  }
+  return false;
+}
+
+function isProjectMetadataSurface(filename: string): boolean {
+  if (/(^|\/)node_modules\//.test(filename)) return false;
+  return NPM_MANIFEST_SHAPE_RE.test(filename)
+    || NPM_LOCKFILE_SHAPE_RE.test(filename)
+    || PROJECT_METADATA_TOML_RE.test(filename);
+}
+
+/** Evaluate the #1834 first-party license-metadata proof over the COMPLETE
+ * diff. Non-null ONLY when at least one license metadata line was attributed
+ * and every changed line on every touched dependency surface is such a line
+ * (see {@link FirstPartyMetadataEdits}); every uncertain shape returns null
+ * so the caller keeps the historical `dependency_upgrade` classification. */
+export function evaluateFirstPartyMetadataEdits(
+  files: readonly ChangedFile[],
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): FirstPartyMetadataEdits | null {
+  const touched = files.filter((file) =>
+    isProjectMetadataSurface(file.filename) || matchesAny(file.filename, DEPENDENCY_PATTERNS));
+  if (touched.length === 0) return null;
+  // "No dependency delta anywhere" is an only-claim: it needs the proven-
+  // complete listing and the untruncated diff, exactly like the #909 rules.
+  if (!fileListComplete(files, authoritativeChangedFiles)) return null;
+  if (DIFF_TRUNCATION_MARKER_RE.test(fullDiffText)) return null;
+  const regions = diffFileRegions(fullDiffText, files);
+  let surfaces = 0;
+  let metadataLines = 0;
+  for (const file of touched) {
+    // A surface this grammar cannot read (any other lockfile or manifest)
+    // breaks the claim; so does a surface the edit did not merely modify.
+    if (!isProjectMetadataSurface(file.filename)) return null;
+    if (file.status !== "modified") return null;
+    const region = regions.get(file.filename);
+    if (region === undefined) return null;
+    const counted = countProjectMetadataLines(region, file.filename);
+    if (counted === null) return null;
+    surfaces += 1;
+    metadataLines += counted;
+  }
+  if (metadataLines === 0) return null;
+  return { surfaces, metadataLines };
 }
 
 // ---------------------------------------------------------------------------
@@ -5470,7 +5728,22 @@ export function classifyPr(input: ClassifyInput): PRClassification {
   };
 
   const metadata = classifyPrMetadata(prAuthor, headBranch, prTitle);
-  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
+  // #1834: evaluate the first-party license-metadata proof once over the
+  // complete diff and share it between the dependency kind rule and the
+  // artifact provenance (same compute-once discipline as #749).
+  const firstPartyMetadataEdits = evaluateFirstPartyMetadataEdits(
+    prFiles,
+    fullDiffText ?? diffText,
+    authoritativeChangedFiles,
+  );
+  const prKind = classifyPrKind(
+    prFiles,
+    diffText,
+    fullDiffText ?? diffText,
+    authoritativeChangedFiles,
+    metadata,
+    firstPartyMetadataEdits,
+  );
   // #1595: bounded lockfile-only triage — only for a dependency_upgrade PR
   // whose every changed file is a lockfile, over the complete diff (the same
   // completeness surface the digest rules use). "Every changed file is a
@@ -5522,6 +5795,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,
     lockfileOnlyRefresh,
+    firstPartyMetadataEdits,
     substantialCodeChange,
   };
 }
