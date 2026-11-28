@@ -4515,10 +4515,12 @@ function isProjectMetadataSurface(filename: string): boolean {
  * read — a template or variant of a known manifest/lockfile name
  * (`package.json.tmpl`, `pyproject.toml.orig`, `requirements-dev.txt`) — so a
  * touched one breaks the license-metadata claim instead of sitting outside it.
- * A prefix match by design: only the name's own spelling is required, so every
- * suffix (`*.tmpl`, `*.j2`, `*.orig`, `*-Lock.json`) is a surface too. */
+ * The name itself is required but not its ending: `(?![A-Za-z0-9])` lets any
+ * suffix through (`*.tmpl`, `*.orig`, `*.j2`) while a longer word
+ * (`go.model.ts`, `setup.pytorch.md`) stays a non-surface. Kept a superset of
+ * {@link UNPARSED_DEPENDENCY_SURFACE_RES}. */
 const DEPENDENCY_ADVERTISEMENT_SHAPE_RE =
-  /(^|\/)(?:package[.-]json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.ya?ml|bun\.lock|deno\.(?:jsonc?|lock)|poetry\.lock|pipfile(?:\.lock)?|requirements[-\w.]*\.txt|conda-lock\.ya?ml|pyproject\.toml|setup\.(?:py|cfg)|go\.(?:mod|sum)|cargo\.(?:toml|lock)|gemfile(?:\.lock)?|composer\.(?:json|lock)|mix\.lock|pubspec\.(?:ya?ml|lock)|(?:build|settings)\.gradle(?:\.kts)?|gradle\.libs\.toml|versions\.toml|pom\.xml|project\.assets\.json|packages\.config)/i;
+  /(^|\/)(?:package[.-]json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.ya?ml|pnpm-workspace\.ya?ml|bun\.lockb?|deno\.(?:jsonc?|lock)|poetry\.lock|uv\.lock|pipfile(?:\.lock)?|requirements[-\w.]*\.txt|conda-lock\.ya?ml|pyproject\.toml|setup\.(?:py|cfg)|go\.(?:mod|sum)|cargo\.(?:toml|lock)|gemfile(?:\.lock)?|composer\.(?:json|lock)|mix\.(?:exs|lock)|pubspec\.(?:ya?ml|lock)|(?:build|settings)\.gradle(?:\.kts)?|(?:libs\.versions|versions)\.toml|podfile(?:\.lock)?|packages\.lock\.json|pom\.xml|project\.assets\.json|packages\.config)(?![A-Za-z0-9])/i;
 
 function isDependencyAdvertisementSurface(filename: string): boolean {
   return DEPENDENCY_ADVERTISEMENT_SHAPE_RE.test(filename);

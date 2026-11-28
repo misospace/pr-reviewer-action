@@ -3293,6 +3293,39 @@ test("#1834 control: a variant manifest spelling the grammar cannot read keeps t
   assert.equal(result.prKind, "dependency_upgrade");
 });
 
+test("#1834 control: a pin change in another ecosystem's lockfile keeps the lane", () => {
+  for (const [path, removed, added] of [
+    ["uv.lock", 'version = "0.5.1"', 'version = "0.5.2"'],
+    ["gradle/libs.versions.toml", 'hono = "1.0.0"', 'hono = "2.0.0"'],
+    ["ios/Podfile.lock", "  Foo (1.0.0)", "  Foo (2.0.0)"],
+    ["pnpm-workspace.yaml", "  hono: 1.0.0", "  hono: 2.0.0"],
+  ] as const) {
+    const result = classifyPr({
+      prFiles: files("package-lock.json", path),
+      authoritativeChangedFiles: 2,
+      diffText:
+        surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+        + surfaceFileDiff(path, `@@ -4,3 +4,3 @@\n ${removed}\n ${added}\n`),
+    });
+    assert.equal(result.prKind, "dependency_upgrade", `${path} must keep the lane`);
+    assert.ok(!("first_party_metadata_edits" in classificationToArtifact(result)), path);
+  }
+});
+
+test("#1834: a file merely resembling a manifest name does not break the proof", () => {
+  const result = classifyPr({
+    prFiles: files("package-lock.json", "src/app.ts", "notes/uv.lockey.md", "notes/podfiles.md"),
+    authoritativeChangedFiles: 4,
+    diffText:
+      surfaceFileDiff("package-lock.json", LICENSE_LOCKFILE_ROOT_BODY)
+      + surfaceFileDiff("src/app.ts", "@@ -1,1 +1,1 @@\n-export const a = 1;\n+export const a = 2;\n")
+      + surfaceFileDiff("notes/uv.lockey.md", "@@ -1,1 +1,1 @@\n-old\n+new\n")
+      + surfaceFileDiff("notes/podfiles.md", "@@ -1,1 +1,1 @@\n-old\n+new\n"),
+  });
+  assert.equal(result.prKind, "app_code");
+  assertNoDependencyObligations(result);
+});
+
 test("#1834 control: a truncated diff fails the metadata proof closed", () => {
   const result = classifyPr({
     prFiles: files("package-lock.json"),
