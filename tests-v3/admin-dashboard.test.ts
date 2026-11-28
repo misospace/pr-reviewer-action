@@ -309,6 +309,8 @@ function harness(options: HarnessOptions = {}) {
     const proxy = new Proxy(raw, { set(target: any, prop: string | symbol, value: unknown) {
       propertyWrites.push({ prop: String(prop), value });
       target[prop] = value;
+      // A fake DOM resolves getElementById to the element that set its id.
+      if (prop === "id" && typeof value === "string") elements.set(value, { proxy, raw });
       return true;
     } });
     // Elements the page creates carry a label, so a test can name the
@@ -374,7 +376,7 @@ function harness(options: HarnessOptions = {}) {
     walk(elements.get(id)?.raw);
     return out;
   }
-  return { textData, attributeCalls, propertyWrites, listeners, paths, elements, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled, handlerForLabel };
+  return { textData, attributeCalls, propertyWrites, listeners, paths, elements, created, containerText, documentElement: document.documentElement, sandbox, responses: options.responses ?? {}, untilSettled, handlerForLabel };
 }
 function uiStateOf(h: { sandbox: vm.Context }): string {
   return vm.runInContext("uiState", h.sandbox) as string;
@@ -753,7 +755,7 @@ test("#1771: a live OIDC session restores automatically and a later 401 returns 
   assert.ok(h.containerText("login-msg").includes("Your session expired. Sign in again."));
 });
 
-test("#1771 review: all-503 answers never prove the sign-in and open the shell", async () => {
+test("#1771: all-503 answers never prove the sign-in and open the shell", async () => {
   // An unconfigured controller answers 503 BEFORE checking any credential,
   // and a proxy fails the same way: three of them prove nothing, so the
   // operator returns to the login card with an unavailable reason and the
@@ -779,9 +781,15 @@ test("#1771 review: all-503 answers never prove the sign-in and open the shell",
   assert.equal(vm.runInContext("token", h.sandbox), "", "the unproven credential is forgotten");
   assert.equal(vm.runInContext("authProven", h.sandbox), false);
   assert.ok(h.containerText("login-msg").includes("The controller could not verify the sign-in."), h.containerText("login-msg"));
+  // Recovery is a rebuilt card: the disabled in-flight field is not re-enabled
+  // in place, and a fresh field takes the retry.
+  const fields = h.created.filter((node) => node.type === "password");
+  assert.equal(fields.length, 2, "the failed sign-in rebuilds the login card with a fresh field");
+  assert.equal(fields[0].disabled, true, "the in-flight field stays disabled");
+  assert.equal(fields[1].disabled, false, "the fresh field accepts a retry");
 });
 
-test("#1771 review: mixed 5xx and network failures never prove the sign-in", async () => {
+test("#1771: mixed 5xx and network failures never prove the sign-in", async () => {
   const h = harness({
     reject: "/admin/diagnostics",
     responses: {
@@ -799,7 +807,7 @@ test("#1771 review: mixed 5xx and network failures never prove the sign-in", asy
   assert.ok(h.containerText("login-msg").includes("The controller could not verify the sign-in."), h.containerText("login-msg"));
 });
 
-test("#1771 review: one authenticated 2xx proves the sign-in and survives later data errors", async () => {
+test("#1771: one authenticated 2xx proves the sign-in and survives later data errors", async () => {
   const h = harness({
     responses: {
       "/auth/config": { status: 200, body: '{"mode":"token"}' },
@@ -820,7 +828,7 @@ test("#1771 review: one authenticated 2xx proves the sign-in and survives later 
   assert.equal(uiStateOf(h), "authenticated", "a proven session survives ordinary data errors");
 });
 
-test("#1771 review: session loss clears mutation feedback, form fields, and pagination", async () => {
+test("#1771: session loss clears mutation feedback, form fields, and pagination", async () => {
   const h = harness({
     payloads: {
       "/admin/runs?limit=50": { runs: [{ runId: "r1", state: "completed" }], nextCursor: "c2" },

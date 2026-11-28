@@ -429,6 +429,8 @@ const DASHBOARD_JS = `"use strict";
     }
   }
   function showLogin(reason) {
+    // The login card is by definition an unproven session.
+    authProven = false;
     setUiState("unauthenticated");
     const box = document.getElementById("login-form");
     box.replaceChildren();
@@ -487,16 +489,16 @@ const DASHBOARD_JS = `"use strict";
     authProven = false;
   }
   function clearOperationalPanels() {
-    for (const id of ["status", "overview-runs", "overview-failures", "runs", "run-detail", "diagnostics"]) {
+    for (const id of ["status", "overview-runs", "overview-failures", "runs", "run-detail", "diagnostics", "runs-page", "rereview-msg"]) {
       const panel = document.getElementById(id);
       if (panel) panel.replaceChildren();
     }
-    document.getElementById("runs-page").replaceChildren();
-    // A prior session's mutation feedback, job IDs, and typed reason must not
-    // resurface after the next sign-in: they are session data like the panels.
-    document.getElementById("rereview-msg").replaceChildren();
-    document.getElementById("rereview-key").value = "";
-    document.getElementById("rereview-reason").value = "";
+    // A prior session's mutation receipt and typed inputs must not resurface
+    // after the next sign-in: they are session data like the panels.
+    const prKey = document.getElementById("rereview-key");
+    if (prKey) prKey.value = "";
+    const prReason = document.getElementById("rereview-reason");
+    if (prReason) prReason.value = "";
     cursorStack = [];
     currentCursor = "";
     disablePagination();
