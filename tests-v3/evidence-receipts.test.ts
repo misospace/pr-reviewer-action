@@ -11,6 +11,7 @@ import {
   executedCallId,
   MAX_EXECUTED_CALL_INDEX,
   rowEvidenceStateToArtifact,
+  UNCOVERED_CELL_RE,
   type CheckEvidenceTag,
   type CheckEvidenceTagWithText,
   type DependencyScopeEntry,
@@ -43,15 +44,15 @@ test("#1657 (review): row class is trusted PRODUCER metadata — no prose classi
   // consulted for materiality.
   assert.deepEqual(evaluateRowEvidence(tag("verify the vendored version 1.2.3 wiring in src/paths.ts", "objective", "source-identity"),
     "verify the vendored version 1.2.3 wiring in src/paths.ts", { state: "valid", receipts: [] }),
-  { rowClass: "objective", gate: "source-identity", state: "receipt-absent", receipts: [] });
+  { rowClass: "objective", gate: "source-identity", state: "receipt-absent", receipts: [], uncoveredCells: [] });
   // The SAME wording, tagged review-prompt by its producer, is a non-gating
   // review question — the text does not re-classify it.
   assert.deepEqual(evaluateRowEvidence(tag("verify the vendored version 1.2.3 wiring in src/paths.ts", "review-prompt"),
     "verify the vendored version 1.2.3 wiring in src/paths.ts", { state: "valid", receipts: [] }),
-  { rowClass: "review-prompt", gate: null, state: "not-required", receipts: [] });
+  { rowClass: "review-prompt", gate: null, state: "not-required", receipts: [], uncoveredCells: [] });
   // Untagged rows are LEGACY: pre-#1657 gating semantics, no receipt demand.
   assert.deepEqual(evaluateRowEvidence(null, "review auth flow for regression", { state: "valid", receipts: [] }),
-  { rowClass: "legacy", gate: null, state: "not-required", receipts: [] });
+  { rowClass: "legacy", gate: null, state: "not-required", receipts: [], uncoveredCells: [] });
 });
 
 test("#1657 (review): the strict tag parser drops unparseable rows (those checks stay legacy/gating) and never promotes a gateless objective tag", () => {
@@ -340,7 +341,7 @@ test("#1657 (round 11): a SUCCESS lacking the tool's minimum output payload REFU
   assert.equal(emptyTrace.state, "refused");
   assert.deepEqual(
     evaluateRowEvidence(deltaTag, "inspect the exact old→new upstream release delta for the updated dependency", emptyTrace),
-    { rowClass: "objective", gate: "dependency-evidence", state: "trace-refused", receipts: [] },
+    { rowClass: "objective", gate: "dependency-evidence", state: "trace-refused", receipts: [], uncoveredCells: [] },
   );
 });
 
@@ -503,7 +504,7 @@ test("#1657: stale/wrong-head provenance is objectively invalid — a relevant-b
     reviewedHeadSha: HEAD,
   });
   assert.deepEqual(evaluateRowEvidence(HEAD_TAG, row, staleLedger), {
-    rowClass: "objective", gate: "source-identity", state: "receipt-unverified", receipts: [],
+    rowClass: "objective", gate: "source-identity", state: "receipt-unverified", receipts: [], uncoveredCells: [],
   });
 });
 
@@ -630,7 +631,7 @@ test("#1657: malformed provenance is visible and reason-coded — trace-refused,
   const refused = buildEvidenceLedger({ toolCalls: [{ tool: "read_file" }], toolResults: [{ status: "ok" }] });
   assert.equal(refused.state, "refused");
   assert.deepEqual(evaluateRowEvidence(tag(CONFIG_ROW, "objective", "source-identity"), CONFIG_ROW, refused), {
-    rowClass: "objective", gate: "source-identity", state: "trace-refused", receipts: [],
+    rowClass: "objective", gate: "source-identity", state: "trace-refused", receipts: [], uncoveredCells: [],
   });
   // Review prompts are not-required even behind a refused ledger.
   assert.equal(evaluateRowEvidence(tag("review auth flow for regression", "review-prompt"), "review auth flow for regression", refused).state, "not-required");
@@ -713,11 +714,15 @@ test("#1657: the ledger artifact round-trips exactly what the writer wrote; anyt
 });
 
 test("#1657: the per-row evidence projection serializes reason-coded state with bounded receipt ids", () => {
-  assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "objective", gate: "source-identity", state: "receipt-backed", receipts: ["call-1", "call-2"] }), {
+  assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "objective", gate: "source-identity", state: "receipt-backed", receipts: ["call-1", "call-2"], uncoveredCells: [] }), {
     gate: "source-identity", state: "receipt-backed", receipt_ids: ["call-1", "call-2"],
   });
-  assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "review-prompt", gate: null, state: "not-required", receipts: [] }), {
+  assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "review-prompt", gate: null, state: "not-required", receipts: [], uncoveredCells: [] }), {
     gate: null, state: "not-required",
+  });
+  // #1822: an uncovered dependency row discloses its per-cell gap.
+  assert.deepEqual(rowEvidenceStateToArtifact({ rowClass: "objective", gate: "dependency-evidence", state: "receipt-mismatch", receipts: [], uncoveredCells: ["security_advisory:types/node"] }), {
+    gate: "dependency-evidence", state: "receipt-mismatch", uncovered_cells: ["security_advisory:types/node"],
   });
 });
 
@@ -1362,4 +1367,45 @@ test("#1821/#1836: a no-trace code-owned ledger carries the same corpus-diff and
   // Nothing derived: certified payloads and CI rows alone do NOT activate
   // the gate — the unavailable case stays byte-identical.
   assert.equal(buildEvidenceLedger({ ...shared }).state, "unavailable");
+});
+
+// #1822 (round 2): the writer side of the uncovered-cell boundary — a
+// corrupted in-memory state cannot publish a cell the grammar would refuse,
+// so neither the fenced body rows nor the UNFENCED completeness bullets can
+// carry hostile content.
+test("#1822 (round 2): the artifact writer filters hostile uncovered cells through the shared grammar", () => {
+  const written = rowEvidenceStateToArtifact({
+    rowClass: "objective",
+    gate: "dependency-evidence",
+    state: "receipt-mismatch",
+    receipts: [],
+    uncoveredCells: [
+      "security_advisory:ok-slug",
+      "security_advisory:types/node`",
+      "release_delta:bad slug",
+      "provenance:x\u0000y",
+      "security_advisory:UPPER",
+      "bogus_kind:slug",
+      "",
+    ],
+  });
+  assert.deepEqual(written?.uncovered_cells, ["security_advisory:ok-slug"]);
+  // The production producer builds cells from the trusted scope parse, so a
+  // real fold can only ever emit grammar-safe identities: a wrong-pair
+  // compare asserts release_delta, carries the slug, misses 4.17.21 —
+  // receipt-mismatch whose every disclosed cell matches the grammar.
+  const wrongPair = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_fetch", args: { url: "https://github.com/lodash/lodash/compare/v4.17.15...v4.17.20" }, status: "ok" }],
+    toolResults: [{ status: "ok", result: { content: "Compare 4.17.15...4.17.20\n", truncated: false } }],
+  });
+  const state = evaluateRowEvidence(
+    tag("inspect the exact old→new upstream release delta for the updated dependency", "objective", "dependency-evidence", ["release_delta"], [LODASH_UPDATE]),
+    "inspect the exact old→new upstream release delta for the updated dependency",
+    wrongPair,
+  );
+  assert.equal(state.state, "receipt-mismatch");
+  assert.deepEqual([...state.uncoveredCells], ["release_delta:lodash"]);
+  for (const cell of state.uncoveredCells) {
+    assert.match(cell, UNCOVERED_CELL_RE);
+  }
 });

@@ -36,7 +36,7 @@ import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } fro
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../confidence/telemetry.js";
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
-import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
+import { blockingReviewObligations, reviewObligationsFromArtifact, rowEvidenceStateFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
 import { checkEvidenceTagsFromArtifact, evidenceLedgerFromArtifact, type EvidenceLedger, type RequiredEvidenceRowClass } from "../enforcement/evidence-receipts.js";
 import { isMergeAffectingRowClass } from "../enforcement/required-checks.js";
@@ -469,7 +469,16 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
     if (typeof row.reason !== "string" || row.reason === "") return null;
     if (row.row_class !== undefined
       && !(typeof row.row_class === "string" && REQUIRED_CHECK_ROW_CLASSES.has(row.row_class))) return null;
-    if (row.evidence !== undefined && !rowEvidenceProjectionReadable(row.evidence)) return null;
+    // #1657: the additive per-row evidence projection validates through THE
+    // canonical strict reader (`rowEvidenceStateFromArtifact` — the same
+    // validator the obligations artifact uses), so the shape the engine
+    // writes (`rowEvidenceStateToArtifact`, nested, `uncovered_cells`
+    // included) and the shape this reader accepts cannot drift apart
+    // (#1822 round 2 — the flat #1657 keys the engine used to write here
+    // were refused by the unknown-key checks on BOTH sides of the row and
+    // silently sent every ledger-active run back to the raw re-fold).
+    if (row.evidence !== undefined
+      && rowEvidenceStateFromArtifact(row.evidence, (row.row_class as RequiredEvidenceRowClass) ?? "legacy") === null) return null;
     // #1657 (publish parity): the validated row class is PRESERVED — the
     // merge-affecting filter needs it, and a pre-#1657 artifact without
     // the field at all is exactly the all-legacy case (pre-#1657 gating).
@@ -480,28 +489,6 @@ function readReconciledRequiredCheckCoverage(path: string): { status: string; ch
 
 /** #1657: the closed `row_class` vocabulary the coverage artifact carries. */
 const REQUIRED_CHECK_ROW_CLASSES: ReadonlySet<string> = new Set(["attention", "objective", "review-prompt", "legacy"]);
-/** #1657: the closed per-row evidence-state vocabulary. */
-const ROW_EVIDENCE_STATES: ReadonlySet<string> = new Set([
-  "not-required", "no-ledger", "trace-refused", "receipt-backed", "receipt-absent", "receipt-mismatch", "receipt-unverified",
-]);
-/** #1657: the closed per-row evidence-gate vocabulary. */
-const ROW_EVIDENCE_GATES: ReadonlySet<string> = new Set(["ci-evidence", "dependency-evidence", "source-identity"]);
-
-/** Strict shape check for the additive #1657 `evidence` projection on a
- * coverage row (`{gate, state, receipt_ids?}`). */
-function rowEvidenceProjectionReadable(value: unknown): boolean {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  for (const key of Object.keys(record)) {
-    if (key !== "gate" && key !== "state" && key !== "receipt_ids") return false;
-  }
-  if (record.gate !== null && !(typeof record.gate === "string" && ROW_EVIDENCE_GATES.has(record.gate))) return false;
-  if (typeof record.state !== "string" || !ROW_EVIDENCE_STATES.has(record.state)) return false;
-  if (record.receipt_ids !== undefined
-    && !(Array.isArray(record.receipt_ids) && record.receipt_ids.length <= 20
-      && record.receipt_ids.every((id) => typeof id === "string" && id !== ""))) return false;
-  return true;
-}
 
 /**
  * #1537: the three merge-gating members the Action path holds in memory

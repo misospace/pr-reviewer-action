@@ -2036,3 +2036,94 @@ test("#1821/#1836 no-trace mixed replay: certified corpus evidence stays legible
   assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[1]!.text)!.status, "satisfied");
   assert.equal(coverage.checks.find((row) => row.check === NPM1819_ROWS[2]!.text)!.status !== "satisfied", true);
 });
+
+// ---------------------------------------------------------------------------
+// #1822: the per-cell uncovered diagnostic. The aggregate row state
+// (receipt-absent / receipt-unverified / receipt-mismatch) cannot say WHICH
+// obligation kind × scope entry the validated receipts do not cover; the
+// coverage projection now carries the bounded `kind:slug` gap list so an
+// unresolved row names the acquisition it still lacks.
+// ---------------------------------------------------------------------------
+
+test("#1822: an uncovered dependency row discloses the exact cells its receipts do not cover", () => {
+  // (a) WRONG version pair: provenance still binds (the document is for
+  // THIS slug) but the asserted old→new pair never appears — the gap names
+  // exactly the release-delta cell.
+  const deltaTag = npm1819Tags(NPM1819_ROWS[1]!.text);
+  const wrongPair = evaluateRowEvidence(deltaTag, deltaTag.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.9" }]));
+  assert.equal(wrongPair.state, "receipt-mismatch");
+  assert.deepEqual([...wrongPair.uncoveredCells], ["release_delta:types/node"]);
+  // (b) A covered row discloses no gap.
+  const provenance = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[0]!.text), NPM1819_ROWS[0]!.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.equal(provenance.state, "receipt-backed");
+  assert.deepEqual([...provenance.uncoveredCells], []);
+  // (c) An aggregate row naming two packages names the UNCOVERED package —
+  // not one undifferentiated failure for the whole scope.
+  const aggregateTags = checkEvidenceTagsFromArtifact([
+    { text: NPM1819_ROWS[1]!.text, row_class: "objective", gate: "dependency-evidence", obligations: ["release_delta"], dependency_scope: [TYPES_NODE[0]!, { slug: "lodash", versions: ["4.17.21", "4.18.0"] }] },
+  ]);
+  assert.equal(aggregateTags.length, 1);
+  const partial = evaluateRowEvidence(aggregateTags[0]!, NPM1819_ROWS[1]!.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.equal(partial.state, "receipt-mismatch");
+  assert.deepEqual([...partial.uncoveredCells], ["release_delta:lodash"]);
+  // (d) The #1819 advisory row's gap names the advisory cell. NO receipt in
+  // the run attributes security_advisory (the registry documents the
+  // comparison acquired attribute provenance/release_delta), so the state is
+  // receipt-absent — and the gap still names the exact cell the run must
+  // still acquire, never an undifferentiated failure.
+  const advisory = evaluateRowEvidence(npm1819Tags(NPM1819_ROWS[2]!.text), NPM1819_ROWS[2]!.text, npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]));
+  assert.equal(advisory.state, "receipt-absent");
+  assert.deepEqual([...advisory.uncoveredCells], ["security_advisory:types/node"]);
+});
+
+test("#1822: the uncovered gap survives the strict obligation artifact reader and refuses malformed shapes", () => {
+  const advisoryLedger = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  const rows = NPM1819_ROWS.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row }));
+  const tags = checkEvidenceTagsFromArtifact(NPM1819_ROWS);
+  const folded = foldObligationDispositions(candidateRowsToObligations(rows, NPM1819_ROWS.map((row) => row.text), tags), [], advisoryLedger, { readPaths: new Set<string>() });
+  const readBack = reviewObligationsFromArtifact(reviewObligationsToArtifact(folded, null));
+  assert.ok(readBack !== null);
+  const advisory = readBack.find((row) => row.id === "obligation-3");
+  assert.equal(advisory?.status, "unresolved");
+  assert.deepEqual([...advisory?.evidence?.uncoveredCells ?? []], ["security_advisory:types/node"]);
+  // A hand-edited gap list this runtime did not write refuses the artifact.
+  const corrupted = reviewObligationsToArtifact(folded, null);
+  const advisoryRow = (corrupted.obligations as Array<Record<string, unknown>>).find((row) => row.id === "obligation-3");
+  assert.ok(advisoryRow !== undefined);
+  advisoryRow.evidence = { ...(advisoryRow.evidence as Record<string, unknown>), uncovered_cells: "security_advisory" };
+  assert.equal(reviewObligationsFromArtifact(corrupted), null);
+});
+
+// #1822 (round 2): the uncovered-cell boundary — the #252 rule that a
+// hostile input tests the fence itself, not just benign content.
+test("#1822 (round 2): hostile uncovered-cell content refuses the artifact", () => {
+  const advisoryLedger = npm1819Ledger([{ slug: "types/node", oldVersion: "26.6.7", newVersion: "26.6.10" }]);
+  const rows = NPM1819_ROWS.map((row, index) => ({ id: `obligation-${index + 1}`, source: "must_check", ...row }));
+  const tags = checkEvidenceTagsFromArtifact(NPM1819_ROWS);
+  const folded = foldObligationDispositions(candidateRowsToObligations(rows, NPM1819_ROWS.map((row) => row.text), tags), [], advisoryLedger, { readPaths: new Set<string>() });
+  const base = reviewObligationsToArtifact(folded, null);
+  const advisoryRow = (base.obligations as Array<Record<string, unknown>>).find((row) => row.id === "obligation-3");
+  assert.ok(advisoryRow !== undefined);
+  const baseEvidence = advisoryRow.evidence as Record<string, unknown>;
+  // Each hostile token aims at the unfenced completeness bullets or the
+  // fenced body rows: a backtick breaks fence discipline, whitespace and
+  // control characters smuggle structure, uppercase/unknown kinds and empty
+  // strings are outside the scope-parse vocabulary entirely.
+  const hostile = [
+    "security_advisory:types/node`",
+    "release_delta:bad slug",
+    "provenance:x\u0000y",
+    "security_advisory:types/node\u007f",
+    "security_advisory:UPPER",
+    "bogus_kind:slug",
+    "security_advisory:",
+    "",
+  ];
+  for (const cell of hostile) {
+    advisoryRow.evidence = { ...baseEvidence, uncovered_cells: [cell] };
+    assert.equal(reviewObligationsFromArtifact(base), null, JSON.stringify(cell));
+  }
+  // A list over the cap is corruption too.
+  advisoryRow.evidence = { ...baseEvidence, uncovered_cells: Array.from({ length: 13 }, () => "security_advisory:types/node") };
+  assert.equal(reviewObligationsFromArtifact(base), null);
+});
