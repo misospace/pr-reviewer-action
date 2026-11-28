@@ -706,14 +706,7 @@ export function assembleCorpus(
   ws.write("repo-map.capped.md", repoMapCapped);
 
   const ciChecksFile = env.CI_CHECKS_FILE ?? "";
-  let ciChecksContent: Uint8Array | null = null;
-  if (ciChecksFile !== "") {
-    try {
-      ciChecksContent = readFileSync(ciChecksFile);
-    } catch {
-      ciChecksContent = null;
-    }
-  }
+  const ciChecksContent = ciChecksBytes(env);
   const tierBudgets = tier === "fallback"
     ? // #1598/#1256: the fallback corpus budget is the #1256 cap — the
       // historical re-truncation bound — narrowed by a declared fallback

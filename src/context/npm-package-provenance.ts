@@ -695,6 +695,17 @@ const REASON_TEXT: Record<NpmUnresolvedReason, string> = {
   "package-manifest-mismatch": "the manifest inside the published tarball names a different package/version than the registry document declares (fail closed)",
 };
 
+/** One bounded bullet list of delta rows, shared by the file and dependency
+ * delta renderers. Empty when there is nothing to list. */
+function renderDeltaList(label: string, items: readonly string[]): string[] {
+  if (items.length === 0) return [];
+  const shown = items.slice(0, MAX_NPM_DELTA_ROWS);
+  const lines = [`  - ${label} (${items.length}):`];
+  for (const item of shown) lines.push(`    - \`${safeInline(item)}\``);
+  if (items.length > shown.length) lines.push(`    - (+${items.length - shown.length} more)`);
+  return lines;
+}
+
 function renderDelta(delta: NpmPackageDelta): string[] {
   const lines: string[] = [];
   const total = delta.added.length + delta.removed.length + delta.changed.length;
@@ -702,16 +713,9 @@ function renderDelta(delta: NpmPackageDelta): string[] {
     lines.push("  - **No file-level difference** between the two published trees (identical contents).");
     return lines;
   }
-  const renderList = (label: string, items: string[]): void => {
-    if (items.length === 0) return;
-    const shown = items.slice(0, MAX_NPM_DELTA_ROWS);
-    lines.push(`  - ${label} (${items.length}):`);
-    for (const item of shown) lines.push(`    - \`${safeInline(item)}\``);
-    if (items.length > shown.length) lines.push(`    - (+${items.length - shown.length} more)`);
-  };
-  renderList("Added files", delta.added);
-  renderList("Removed files", delta.removed);
-  renderList("Changed files", delta.changed);
+  lines.push(...renderDeltaList("Added files", delta.added));
+  lines.push(...renderDeltaList("Removed files", delta.removed));
+  lines.push(...renderDeltaList("Changed files", delta.changed));
   return lines;
 }
 
@@ -721,16 +725,9 @@ function renderDependencyDelta(delta: NpmDependencyDelta): string[] {
   const lines: string[] = [];
   const total = delta.added.length + delta.removed.length + delta.changed.length;
   lines.push(`- Published \`dependencies\` declarations: ${total === 0 ? "**unchanged** (identical production dependency set)" : `${total} declaration change(s)`}`);
-  const renderList = (label: string, items: string[]): void => {
-    if (items.length === 0) return;
-    const shown = items.slice(0, MAX_NPM_DELTA_ROWS);
-    lines.push(`  - ${label} (${items.length}):`);
-    for (const item of shown) lines.push(`    - \`${safeInline(item)}\``);
-    if (items.length > shown.length) lines.push(`    - (+${items.length - shown.length} more)`);
-  };
-  renderList("Added dependencies", delta.added);
-  renderList("Removed dependencies", delta.removed);
-  renderList("Changed dependency ranges", delta.changed);
+  lines.push(...renderDeltaList("Added dependencies", delta.added));
+  lines.push(...renderDeltaList("Removed dependencies", delta.removed));
+  lines.push(...renderDeltaList("Changed dependency ranges", delta.changed));
   return lines;
 }
 

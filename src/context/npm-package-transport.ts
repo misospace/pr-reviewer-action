@@ -20,12 +20,7 @@
  * Refusals surface as `null` from `fetchBytes` / a throw from `fetchJson`, both
  * recorded by the comparison layer as an unresolved version — never a guess. */
 
-import {
-  SourceFetchError,
-  safeFetchLike,
-  type Exchange,
-  type Resolver,
-} from "../platform/safe-fetch.js";
+import { safeFetchLike, type Exchange, type Resolver } from "../platform/safe-fetch.js";
 import type { FetchLike } from "../platform/http.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { pyIntFromText } from "../evidence/pyjson.js";
@@ -165,8 +160,7 @@ export function createNpmFetches(options: NpmTransportOptions): NpmFetches {
       let response: Response;
       try {
         response = await fetchImpl(current, { method: "GET", headers: { "User-Agent": USER_AGENT }, redirect: "manual", signal });
-      } catch (error) {
-        if (error instanceof SourceFetchError) return null;
+      } catch {
         return null;
       }
       const location = response.headers.get("location");
