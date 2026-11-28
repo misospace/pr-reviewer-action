@@ -383,7 +383,7 @@ async function bootSettled(h: { sandbox: vm.Context; untilSettled: (pred: () => 
   await h.untilSettled(() => uiStateOf(h) !== "restoring", "boot settled");
 }
 function authenticate(h: { sandbox: vm.Context }): void {
-  vm.runInContext("token = 'test-token'; enterAuthenticated(); undefined", h.sandbox);
+  vm.runInContext("token = 'test-token'; authProven = true; enterAuthenticated(); undefined", h.sandbox);
 }
 test("execution fence: hostile API values appear verbatim in text nodes only", async () => {
   const h = harness({
@@ -751,4 +751,109 @@ test("#1771: a live OIDC session restores automatically and a later 401 returns 
   assert.equal(h.containerText("runs"), "", "stale run rows do not survive the session loss");
   assert.equal(vm.runInContext("csrfToken", h.sandbox), "", "the session material is forgotten");
   assert.ok(h.containerText("login-msg").includes("Your session expired. Sign in again."));
+});
+
+test("#1771 review: all-503 answers never prove the sign-in and open the shell", async () => {
+  // An unconfigured controller answers 503 BEFORE checking any credential,
+  // and a proxy fails the same way: three of them prove nothing, so the
+  // operator returns to the login card with an unavailable reason and the
+  // token is forgotten.
+  const h = harness({
+    responses: {
+      "/auth/config": { status: 200, body: '{"mode":"token"}' },
+      "/admin/status": { status: 503, body: '{"error":"not configured"}' },
+      "/admin/runs?limit=50": { status: 503, body: '{"error":"not configured"}' },
+      "/admin/diagnostics": { status: 503, body: '{"error":"not configured"}' },
+    },
+  });
+  await bootSettled(h);
+  vm.runInContext("document.getElementById('token').value = 'unproven-token'; undefined", h.sandbox);
+  const signIn = h.handlerForLabel("Sign in");
+  assert.ok(signIn, "the token login card offers a Sign in button");
+  const pending = signIn();
+  assert.equal(uiStateOf(h), "authenticating");
+  assert.equal(h.elements.get("token")!.raw.disabled, true, "no second credential can be typed mid-sign-in");
+  await pending;
+  assert.equal(uiStateOf(h), "unauthenticated", "503s prove nothing: the shell never opens");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden");
+  assert.equal(vm.runInContext("token", h.sandbox), "", "the unproven credential is forgotten");
+  assert.equal(vm.runInContext("authProven", h.sandbox), false);
+  assert.ok(h.containerText("login-msg").includes("The controller could not verify the sign-in."), h.containerText("login-msg"));
+});
+
+test("#1771 review: mixed 5xx and network failures never prove the sign-in", async () => {
+  const h = harness({
+    reject: "/admin/diagnostics",
+    responses: {
+      "/auth/config": { status: 200, body: '{"mode":"token"}' },
+      "/admin/status": { status: 502, body: "" },
+      "/admin/runs?limit=50": { status: 503, body: "" },
+    },
+  });
+  await bootSettled(h);
+  vm.runInContext("document.getElementById('token').value = 'unproven-token'; undefined", h.sandbox);
+  await h.handlerForLabel("Sign in")!();
+  assert.equal(uiStateOf(h), "unauthenticated", "a mixed failure is not an authentication");
+  assert.equal(h.elements.get("shell")!.raw.className, "hidden");
+  assert.equal(vm.runInContext("token", h.sandbox), "", "the unproven credential is forgotten");
+  assert.ok(h.containerText("login-msg").includes("The controller could not verify the sign-in."), h.containerText("login-msg"));
+});
+
+test("#1771 review: one authenticated 2xx proves the sign-in and survives later data errors", async () => {
+  const h = harness({
+    responses: {
+      "/auth/config": { status: 200, body: '{"mode":"token"}' },
+      "/admin/runs?limit=50": { status: 503, body: "" },
+      "/admin/diagnostics": { status: 503, body: "" },
+    },
+  });
+  await bootSettled(h);
+  vm.runInContext("document.getElementById('token').value = 'proven-token'; undefined", h.sandbox);
+  await h.handlerForLabel("Sign in")!();
+  assert.equal(uiStateOf(h), "authenticated", "a 2xx from a data route proves the token");
+  assert.equal(vm.runInContext("token", h.sandbox), "proven-token", "the proven credential is kept");
+  assert.ok(h.containerText("runs").includes("Controller request failed"), "the failing panel renders its error inside the shell");
+  // A proven session refreshes through ordinary data errors without being
+  // pulled back to the login card.
+  vm.runInContext("loadAll(); undefined", h.sandbox);
+  await h.untilSettled(() => h.textData.filter((x) => x === "Controller request failed").length >= 6, "second refresh settles");
+  assert.equal(uiStateOf(h), "authenticated", "a proven session survives ordinary data errors");
+});
+
+test("#1771 review: session loss clears mutation feedback, form fields, and pagination", async () => {
+  const h = harness({
+    payloads: {
+      "/admin/runs?limit=50": { runs: [{ runId: "r1", state: "completed" }], nextCursor: "c2" },
+      "/admin/runs?limit=50&cursor=c2": { runs: [{ runId: "r2", state: "completed" }] },
+    },
+    responses: {
+      "/admin/rereview": { status: 202, body: '{"jobId":"prior-session-job"}' },
+      "/admin/runs/blocked": { status: 401, body: '{"error":"unauthorized"}' },
+    },
+  });
+  await bootSettled(h);
+  authenticate(h);
+  vm.runInContext("loadAll(); undefined", h.sandbox);
+  await h.untilSettled(() => h.containerText("overview-runs").includes("r1"), "first page renders");
+  // Leave a mutation receipt, typed inputs, a second page, and the run view
+  // behind from this session.
+  await h.listeners["#rereview:click"]![0]!();
+  await h.untilSettled(() => h.containerText("rereview-msg").includes("Rereview accepted."), "rereview receipt");
+  await h.untilSettled(() => h.containerText("rereview-msg").includes("prior-session-job"), "prior job id renders");
+  await h.listeners["#runs-next:click"]![0]!();
+  await h.untilSettled(() => h.paths.includes("/admin/runs?limit=50&cursor=c2"), "second page");
+  await h.handlerForLabel("View")!();
+  assert.equal(h.elements.get("view-run")!.raw.className, "view view-active");
+  vm.runInContext("loadRunDetail('blocked'); undefined", h.sandbox);
+  await h.untilSettled(() => uiStateOf(h) === "unauthenticated", "the 401 ends the session");
+  assert.equal(h.containerText("rereview-msg"), "", "the prior session's mutation feedback is gone");
+  assert.equal(h.elements.get("rereview-key")!.raw.value, "", "the prior session's PR key is gone");
+  assert.equal(h.elements.get("rereview-reason")!.raw.value, "", "the operator's typed reason is gone");
+  assert.equal(vm.runInContext("cursorStack.length", h.sandbox), 0, "the pagination cursor stack is reset");
+  assert.equal(vm.runInContext("currentCursor", h.sandbox), "");
+  assert.equal(vm.runInContext("nextCursor", h.sandbox), "");
+  assert.equal(h.elements.get("runs-prev")!.raw.disabled, true);
+  assert.equal(h.elements.get("runs-next")!.raw.disabled, true);
+  assert.equal(h.elements.get("view-overview")!.raw.className, "view view-active", "navigation returns to the overview");
+  assert.equal(h.elements.get("view-run")!.raw.className, "view");
 });

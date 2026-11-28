@@ -68,15 +68,24 @@ The transitions are fixed:
   the available method. OIDC mode offers a "Sign in" action to `/auth/login`.
   Token mode shows the bearer-token field as the login form, not as a header
   control above an unusable dashboard.
-- Submitting the token moves to `authenticating` (button disabled, credential
-  removed from the field), then to `authenticated` when a data route answers,
-  or back to the login card with a reason ("The token was rejected.",
-  "The controller could not be reached.").
+- Submitting the token moves to `authenticating` (button and field disabled,
+  credential removed from the field). The shell opens only on proof: at least
+  one admin data route answering `2xx`. A `401`/`403` returns to the login
+  card with "The token was rejected."; any other non-proving outcome — `5xx`
+  answers (an unconfigured controller answers `503` before it ever checks a
+  credential), proxy failures, or network failures — returns to the login card
+  with an unavailable reason and forgets the token. No combination of failures
+  can show a signed-in shell without one authenticated response.
 - A `401` or `403` from any data route while authenticated is a lost session:
-  the script forgets the token and CSRF value, clears every data panel and
-  the header identity, and returns to the login card. No stale operational
-  data keeps a current look, and no credential or identity material stays in
-  the DOM. Signing out performs the same transition on purpose.
+  the script forgets the token and CSRF value, clears every data panel, the
+  rereview feedback, PR-key and reason inputs, the header identity, and the
+  runs pagination and navigation state, and returns to the login card. No
+  stale operational data, prior-session job ID, or operator-entered reason
+  keeps a current look or resurfaces after the next sign-in, and no credential
+  or identity material stays in the DOM. Signing out performs the same
+  transition on purpose. A proven session (restored OIDC, or a token that
+  already produced a `2xx`) is never pulled back to login by ordinary data
+  errors.
 - Each request carries the number of the session that issued it. When a
   session ends, the number changes, and a late response from the dead
   session neither renders nor reports a denial: it stays silent, so it can
@@ -190,10 +199,14 @@ run-detail publication/usage, diagnostics, and mutation error bodies. The #1771
 state-machine pins walk the full transition chain: boot shows the restore
 screen, an unauthenticated token boot renders only the login card (no `/admin/*`
 request, hidden shell, and a fired rereview handler posts nothing), token sign-in
-passes through `authenticating` with the field credential cleared, a rejected
-token returns to the login card with its reason, and a live OIDC session
-restores, auto-loads the data, then a mid-session 401 clears the panels and
-returns to login. UI-state
+passes through `authenticating` with the field credential cleared and the field
+disabled, a rejected token returns to the login card with its reason, and a live
+OIDC session restores, auto-loads the data, then a mid-session 401 clears the
+panels and returns to login. Proof pins keep failure from impersonating identity:
+all-`503` and mixed `5xx`/network sign-in answers return to login with an
+unavailable reason and a forgotten token, one authenticated `2xx` opens the shell
+and a proven session survives later data errors, and session loss additionally
+clears the rereview feedback/inputs and the pagination and navigation state. UI-state
 coverage pins the `confirm()` refusal gate (no mutation request), asserts the
 cancel call, and exercises empty runs, denied/offline responses, pagination, and
 accepted/refused mutation feedback. The mutation coverage pins the refusal

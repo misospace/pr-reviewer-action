@@ -10,10 +10,11 @@
  * The visible surface is one of three screens driven by a single state
  * variable: `restoring` (session probe), `unauthenticated`/`authenticating`
  * (the login screen), and `authenticated` (the operations shell). The shell
- * and its mutation controls stay hidden until identity is proven, a 401/403
- * from any data route returns the operator to the login screen with every
- * data panel cleared, and no unauthenticated view ever renders a data-panel
- * placeholder.
+ * and its mutation controls stay hidden until identity is proven by a
+ * successful authenticated response (never a 5xx or a network failure), a
+ * 401/403 from any data route returns the operator to the login screen with
+ * every data panel, mutation feedback, and pagination state cleared, and no
+ * unauthenticated view ever renders a data-panel placeholder.
  */
 import { createHash } from "node:crypto";
 
@@ -265,6 +266,11 @@ const DASHBOARD_JS = `"use strict";
   // "authenticated" is the operations shell; anything else is the login screen.
   let uiState = "restoring";
   let oidcIdentity = "Signed in";
+  // Identity is only proven by a successful authenticated response: a proven
+  // OIDC session, or one 2xx from an admin data route under the bearer token.
+  // 5xx, rejections, and network failures prove nothing, so the shell stays
+  // behind this flag until proof exists.
+  let authProven = false;
   // Bumped whenever a session ends: every request carries the epoch it was
   // issued under, and a response from a dead session never renders, denies,
   // or clears anything in the one that replaced it.
@@ -457,6 +463,9 @@ const DASHBOARD_JS = `"use strict";
     // field the moment the sign-in request starts.
     if (input) input.value = "";
     setUiState("authenticating");
+    // No second credential can be typed into the field while its fate is
+    // undecided; a failure rebuilds the card with a fresh, enabled field.
+    if (input) input.disabled = true;
     const button = document.getElementById("load");
     if (button) {
       button.disabled = true;
@@ -475,6 +484,7 @@ const DASHBOARD_JS = `"use strict";
     token = "";
     csrfToken = "";
     oidcIdentity = "Signed in";
+    authProven = false;
   }
   function clearOperationalPanels() {
     for (const id of ["status", "overview-runs", "overview-failures", "runs", "run-detail", "diagnostics"]) {
@@ -482,7 +492,15 @@ const DASHBOARD_JS = `"use strict";
       if (panel) panel.replaceChildren();
     }
     document.getElementById("runs-page").replaceChildren();
+    // A prior session's mutation feedback, job IDs, and typed reason must not
+    // resurface after the next sign-in: they are session data like the panels.
+    document.getElementById("rereview-msg").replaceChildren();
+    document.getElementById("rereview-key").value = "";
+    document.getElementById("rereview-reason").value = "";
+    cursorStack = [];
+    currentCursor = "";
     disablePagination();
+    showView("overview");
   }
   function handleSessionLost(reason) {
     if (uiState === "unauthenticated") return;
@@ -531,6 +549,7 @@ const DASHBOARD_JS = `"use strict";
     const config = await apiJson("/auth/config");
     authMode = config.parsed && config.parsed.mode === "oidc" ? "oidc" : "token";
     if (authMode === "oidc" && await restoreOidcSession()) {
+      authProven = true;
       enterAuthenticated();
       void loadAll();
       return;
@@ -749,6 +768,11 @@ const DASHBOARD_JS = `"use strict";
     // probe started before boot settled) it enters "authenticating", so boot
     // can never pull the screen back out from under it.
     if (uiState === "unauthenticated" || uiState === "restoring") setUiState("authenticating");
+    // While identity is unproven, this batch IS the sign-in: only a 2xx
+    // proves it. 5xx (an unconfigured server answers 503 before any credential
+    // check) and network failures prove nothing; a proven session keeps its
+    // shell through ordinary data errors.
+    const proving = !authProven;
     setConnection("loading", "chip chip-pending");
     const statusNode = document.getElementById("status");
     loading(statusNode);
@@ -761,7 +785,12 @@ const DASHBOARD_JS = `"use strict";
     const diagnostics = results[2];
     if (isStale(status) || isStale(runs) || isStale(diagnostics)) return;
     if (isDenied(status) || isDenied(runs) || isDenied(diagnostics)) { handleSessionLost(deniedReason()); return; }
-    if (uiState === "authenticating" && status.status === 0 && runs.status === 0 && diagnostics.status === 0) { handleSessionLost("The controller could not be reached."); return; }
+    if (proving && !authProven) {
+      if (status.ok || runs.ok || diagnostics.ok) authProven = true;
+      else if (status.status === 0 && runs.status === 0 && diagnostics.status === 0) handleSessionLost("The controller could not be reached.");
+      else handleSessionLost("The controller could not verify the sign-in. Try again.");
+      if (!authProven) return;
+    }
     enterAuthenticated();
     if (!status.ok || !status.parsed) errorState(statusNode, status);
     else {
