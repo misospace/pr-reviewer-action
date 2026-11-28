@@ -29,7 +29,7 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
-import { evidenceTagIndex, type CheckEvidenceTagWithText, type EvidenceLedger } from "./evidence-receipts.js";
+import { evidenceTagIndex, rowEvidenceStateToArtifact, type CheckEvidenceTagWithText, type EvidenceLedger } from "./evidence-receipts.js";
 import { isMergeAffectingRowClass } from "./required-checks.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
@@ -179,19 +179,41 @@ export function applyRequiredCheckValidation(
         rationale: row.rationale,
         reason: row.reason,
         row_class: row.rowClass,
-        ...(row.evidence !== undefined
-          ? {
-              gate: row.evidence.gate,
-              evidence_state: row.evidence.state,
-              ...(row.evidence.receipts.length > 0 ? { receipt_ids: row.evidence.receipts } : {}),
-            }
-          : {}),
+        // #1822 (round 2): the row evidence rides the CANONICAL nested
+        // serialization (`rowEvidenceStateToArtifact` — the shape the
+        // obligations artifact and `requiredCheckCoverageToArtifact` write
+        // and the publish-side strict reader validates), not a flat private
+        // projection. Since #1657 the flat `gate`/`evidence_state` keys here
+        // were refused by that reader's unknown-key check, silently sending
+        // every ledger-active run's reconciled coverage back to the raw
+        // re-fold the #1594 readback exists to prevent.
+        ...(row.evidence !== undefined ? { evidence: rowEvidenceStateToArtifact(row.evidence) } : {}),
       })),
       dropped_unknown: coverage.droppedUnknown,
     };
 
     if (status === "incomplete" && (mode === "warn" || mode === "fail")) {
-      const bullets = notClean.map((item) => `- ${item}`).join("\n");
+      // #1822: each bullet carries the row's own deterministic rejection
+      // reason (and the objective row's receipt state, when it says
+      // something the reason does not) instead of a bare check text — the
+      // same closed codes the obligation fold renders, so the two published
+      // sections cannot disagree about why a row stayed open.
+      const byCheck = new Map(coverage.checks.map((row) => [row.check, row]));
+      const bullets = notClean.map((item) => {
+        const row = byCheck.get(item);
+        const parts: string[] = [];
+        if (row?.reason !== undefined && row.reason !== "ok") parts.push(`reason: ${row.reason}`);
+        const evidenceState = row?.evidence?.state;
+        // #1822 (round 2): `no-ledger` renders here too — these bullets are
+        // unfenced, so the missing-acquisition-record fact must not be
+        // swallowed by the missing-disposition reason.
+        if (evidenceState !== undefined && evidenceState !== "not-required" && evidenceState !== row?.reason) {
+          parts.push(`evidence: ${evidenceState}`);
+        }
+        const uncovered = row?.evidence?.uncoveredCells ?? [];
+        if (uncovered.length > 0) parts.push(`uncovered: ${uncovered.join(", ")}`);
+        return `- ${item}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
+      }).join("\n");
       // #1594: when a validated head-bound CI contradiction downgraded a
       // row, the section must publish the mismatch explicitly — the reader
       // sees ONE disposition (the evidence), with the claimed one named as

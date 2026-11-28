@@ -113,7 +113,10 @@ The public `required-checks` output vocabulary is unchanged
 
 - `auto` — validate when `must_check` is non-empty;
 - `warn` — append an `### Unaddressed required checks` section listing the
-  unresolved checks; the completeness pass itself never flips the verdict
+  unresolved checks, each with its deterministic per-row rejection reason
+  (and, for an uncovered dependency row, the per-cell
+  `kind:slug` gap — #1822); the completeness pass itself never flips the
+  verdict
   (but see #1381 below — the review-obligation gate does, and it is not
   governed by this mode);
 - `fail` — additionally forces `request_changes` through the completeness
@@ -312,11 +315,14 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
   emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
-  version-tagged); the standalone `publish` CLI reads it back (strictly, and
-  only when its status matches the recorded `required_check_fold_status`)
-  instead of recomputing the raw #750 coverage — which would re-list a
-  CI-discharged row as unresolved and omit a contradicted one. A run dir
-  without the artifact keeps the pre-#1594 recompute exactly.
+  version-tagged, rows carrying the canonical nested `evidence` projection —
+  #1822 round 2); the standalone `publish` CLI reads it back (strictly,
+  through the same shared `rowEvidenceStateFromArtifact` validator the
+  obligations artifact uses, and only when its status matches the recorded
+  `required_check_fold_status`) instead of recomputing the raw #750
+  coverage — which would re-list a CI-discharged row as unresolved and omit
+  a contradicted one. A run dir without the artifact keeps the pre-#1594
+  recompute exactly.
 
 ## Trusted explicit CI test-job identities (#1820)
 
@@ -725,7 +731,9 @@ The rules this buys, and their limits:
 - **No repair from prose.** Malformed or stale provenance is visible and
   reason-coded; nothing rewrites a disposition.
 - **Surfaces for #1656/#1659**: every coverage and obligation row carries
-  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`); the
+  additive `row_class` and `evidence` (`{gate, state, receipt_ids}`, plus
+  `uncovered_cells` — the bounded `kind:slug` dependency cells the validated
+  receipts do NOT cover, #1822); the
   bounded ledger rides the run dir as `evidence-receipts.json` (strict
   round-trip reader, `unavailable` explicit rather than inferred); the
   required-evidence sentinel rows carry `row_class`. Nothing here decides

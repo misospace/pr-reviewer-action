@@ -246,15 +246,23 @@ export function evaluateRequiredCheckCoverage(
       }
     }
   }
-  // Reason-coded provenance disclosure for every row whenever a valid
-  // ledger was supplied — the #1656 disposition surface reads it; no policy
+  // Reason-coded provenance disclosure for every row whenever a ledger
+  // object was supplied — the #1656 disposition surface reads it; no policy
   // branch does. (Legacy rows project `not-required`: no receipt gate
-  // applies to them.)
-  if (ledger !== undefined && ledger.state === "valid") {
+  // applies to them.) An UNAVAILABLE ledger discloses `no-ledger` on its
+  // objective rows, exactly like the #1381 obligation fold's disclosed map:
+  // a run with no acquisition record must say so on the row (#1822 round 2
+  // — the missing-acquisition-record fact must not be swallowed by the
+  // missing-disposition reason in the published bullets).
+  if (ledger !== undefined) {
     for (const row of rows.values()) {
       if (row.evidence === undefined) {
         row.evidence = evaluateRowEvidence(evidenceTagFor(row.check, tagIndex), row.check, ledger);
       }
+    }
+  }
+  if (ledger !== undefined && ledger.state === "valid") {
+    for (const row of rows.values()) {
       // #1726: the deterministic dependency-evidence settlement — the SAME
       // settle the #1381 obligation fold applies (one evaluation, one
       // reason, so the two artifacts agree row-for-row). A valid ledger

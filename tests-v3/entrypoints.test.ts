@@ -10,8 +10,11 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { parseInlineFindingsMax } from "../src/publish/inline-findings.js";
-import { checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
+import { buildEvidenceLedger, checkEvidenceTagsFromArtifact } from "../src/enforcement/evidence-receipts.js";
 import { evaluateRequiredCheckCoverage, isMergeAffectingRowClass, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
+import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
+import { parseHeadBoundCiEvidenceValue } from "../src/enforcement/required-check-ci.js";
+import { boundedIdListWithTotal } from "../src/context/id-lists.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
@@ -1874,5 +1877,135 @@ test("#1543: the recorded fold status stops the recompute for a fold that never 
       partial_coverage: PARTIAL_COVERAGE,
     });
     assert.deepEqual(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, ["Check the auth path"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1822 (round 2): the engine's persisted coverage artifact drives the
+// publish readback. Since #1657 the engine writer serialized its reconciled
+// rows with FLAT `gate`/`evidence_state` keys while this module's strict
+// reader demanded the nested `evidence` shape — every ledger-active run's
+// artifact was refused on the unknown keys and the readback silently fell
+// back to the raw re-fold, re-listing CI-discharged rows as unresolved (the
+// exact behavior the #1594 readback exists to prevent). The writer now
+// emits the canonical nested shape (`rowEvidenceStateToArtifact`), the
+// reader validates through THE canonical strict reader
+// (`rowEvidenceStateFromArtifact`), and this regression consumes the actual
+// persisted engine artifact.
+// ---------------------------------------------------------------------------
+
+const COVERAGE_HEAD = "b".repeat(40);
+const SUITE_ROW = "run full test suite after upgrade";
+const ADVISORY_ROW = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+
+/** The engine-side fold for the two #1819-shaped rows: a validated head-bound
+ * green test-execution check discharges the suite row; the advisory
+ * acquisition FAILED, so the dependency row stays unresolved with its
+ * receipt state and per-cell gap. */
+function engineCoverageResult() {
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "types/node 26.6.7 26.6.10 security advisory" }, status: "error" }],
+    toolResults: [{ status: "error", result: { error: "source host refused" } }],
+    reviewedHeadSha: COVERAGE_HEAD,
+  });
+  assert.equal(ledger.state, "valid");
+  const tags = checkEvidenceTagsFromArtifact([
+    { text: SUITE_ROW, row_class: "objective", gate: "ci-evidence" },
+    { text: ADVISORY_ROW, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }] },
+  ]);
+  assert.equal(tags.length, 2);
+  const ciEvidence = parseHeadBoundCiEvidenceValue({
+    version: 1, head_sha: COVERAGE_HEAD, final_state: "success",
+    checks: [{ name: "test", state: "success", conclusion: "success" }],
+  });
+  assert.ok(ciEvidence !== null);
+  return applyRequiredCheckValidation(
+    { verdict: "approve", review_markdown: "", findings: [] } as never,
+    {
+      enabled: "true", mode: "warn",
+      mustCheck: [SUITE_ROW, ADVISORY_ROW],
+      ciEvidence,
+      reviewedHeadSha: COVERAGE_HEAD,
+      ledger,
+      mustCheckEvidence: tags,
+    },
+  );
+}
+
+test("#1822 (round 2): the persisted engine coverage artifact drives the readback — CI discharge preserved, no raw re-fold", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+    });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: [SUITE_ROW, ADVISORY_ROW],
+      must_check_evidence: [
+        { text: SUITE_ROW, row_class: "objective", gate: "ci-evidence" },
+        { text: ADVISORY_ROW, row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"], dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }] },
+      ],
+    }));
+    const coverage = engineCoverageResult();
+    assert.equal(coverage.status, "incomplete");
+    // Persist EXACTLY as the engine writer does (review.ts: the result
+    // object spread under the version tag).
+    writeFileSync(join(dir, "required-check-coverage.json"), JSON.stringify({ version: 1, ...coverage.result }));
+    // The persisted rows carry the canonical nested evidence — the
+    // dependency row with its per-cell gap, the CI-discharged row without a
+    // flat `evidence_state` remnant.
+    const persisted = JSON.parse(readFileSync(join(dir, "required-check-coverage.json"), "utf8")) as {
+      checks: Array<{ check: string; status: string; evidence?: Record<string, unknown> }>;
+    };
+    const suiteCheck = persisted.checks.find((row) => row.check === SUITE_ROW)!;
+    assert.equal(suiteCheck.status, "satisfied");
+    assert.equal(suiteCheck.evidence?.gate, "ci-evidence");
+    const advisoryCheck = persisted.checks.find((row) => row.check === ADVISORY_ROW)!;
+    assert.equal(advisoryCheck.status, "unresolved");
+    assert.equal(advisoryCheck.evidence?.state, "receipt-unverified");
+    assert.deepEqual(advisoryCheck.evidence?.uncovered_cells, ["security_advisory:types/node"]);
+    assert.equal("evidence_state" in advisoryCheck, false);
+    // The raw re-fold inputs DISAGREE with the reconciled truth: no model
+    // dispositions at all, so a fallback to the re-fold would list BOTH
+    // rows unresolved. The readback must preserve the reconciled set.
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes", required_check_dispositions: [] }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    // The reconciled artifact is the source: the CI-discharged suite row
+    // stays discharged and only the genuinely unresolved dependency row is
+    // listed — never the re-fold's two-row set. Ids ride the shared bounded
+    // list, exactly as the engine's own projection carries them.
+    assert.deepEqual(input.unresolvedRequiredChecks, boundedIdListWithTotal([ADVISORY_ROW]).ids);
+  });
+});
+
+test("#1822 (round 2): a legacy FLAT coverage artifact still falls back to the raw re-fold — compatibility unchanged", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      partial_coverage: PARTIAL_COVERAGE,
+    });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({
+      must_check: [SUITE_ROW, ADVISORY_ROW],
+    }));
+    // A pre-#1822-round-2 run dir: the flat keys the old writer emitted.
+    // The strict reader refuses the artifact (unknown row keys) exactly as
+    // it has since #1657, and the raw re-fold fallback runs — the same
+    // behavior existing artifacts have always had.
+    writeFileSync(join(dir, "required-check-coverage.json"), JSON.stringify({
+      version: 1,
+      status: "incomplete",
+      checks: [
+        { check: SUITE_ROW, status: "unresolved", rationale: null, reason: "no-structured-dispositions", row_class: "objective", gate: "ci-evidence", evidence_state: "receipt-absent" },
+        { check: ADVISORY_ROW, status: "unresolved", rationale: null, reason: "no-structured-dispositions", row_class: "objective", gate: "dependency-evidence", evidence_state: "receipt-unverified" },
+      ],
+    }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes", required_check_dispositions: [] }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, boundedIdListWithTotal([SUITE_ROW, ADVISORY_ROW]).ids);
   });
 });

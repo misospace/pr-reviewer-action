@@ -545,7 +545,10 @@ test("regression fixture (real home-ops#11668 wording): budget-exhausted review 
   const outcome = applyStrictVerdictPolicy(review, { modelVerdict: "approve", forced: false });
   assert.equal(outcome.verdict, "approve");
   assert.match(review.review_markdown, /## Unresolved Required Review Evidence/);
-  assert.match(review.review_markdown, /obligation-1 \(trusted_base_guidance, unresolved, cause: budget-exhausted\)/);
+  // #1822: the row's own deterministic rejection reason rides beside the
+  // cause — this run never produced structured dispositions at all, which is
+  // a different failure from a receipt-refused claim.
+  assert.match(review.review_markdown, /obligation-1 \(trusted_base_guidance, unresolved, cause: budget-exhausted, reason: no-structured-dispositions\)/);
   assert.match(review.review_markdown, /no defect is claimed here/);
   // The marker reads partial — the review never calls itself clean while
   // required evidence stayed ungathered (#752) — and a partial review is an
@@ -1171,4 +1174,122 @@ test("#1657 (round 9): a versionless scoped release-delta row stays unresolved i
   const pairTag = etag(row, "objective", "dependency-evidence", ["release_delta"], [{ slug: "lodash", versions: ["4.17.15", "4.17.21"] }]);
   const settledFold = foldObligationDispositions(candidateRowsToObligations([], [row], [pairTag]), dispositions, ledger);
   assert.deepEqual(settledFold.map((r) => [r.status, r.reason, r.evidence?.state]), [["satisfied", "ok", "receipt-backed"]]);
+});
+
+// ---------------------------------------------------------------------------
+// #1822: the published unresolved rows carry the fold's own per-row rejection
+// diagnostics — the generic `missing-source-evidence` cause is a
+// completion-state label; the reason code, the acquisition-coverage state
+// and the per-cell dependency gap say WHY the row stayed open. The #1819
+// incident rendered four materially different failures as one identical
+// cause.
+// ---------------------------------------------------------------------------
+
+test("#1822: an unresolved row renders its reason, evidence state and per-cell uncovered gap", () => {
+  const advisoryCheck = "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed";
+  const plainCheck = "Before approval, verify the Kubernetes version against the published Talos support matrix.";
+  // The production acquisition path: the run's scoped advisory query FAILED
+  // (a relevant receipt exists — the query names the slug and both versions —
+  // but nothing was acquired), and the run echoed no structured disposition.
+  const ledger = buildEvidenceLedger({
+    toolCalls: [{ tool: "web_search", args: { query: "types/node 26.6.7 26.6.10 security advisory" }, status: "error" }],
+    toolResults: [{ status: "error", result: { error: "source host refused" } }],
+  });
+  assert.equal(ledger.state, "valid");
+  // The trusted producer metadata rides the candidate row itself (the shape
+  // `candidateToObligation` parses; tags feed only the fallback path).
+  const rows = [
+    {
+      id: "obligation-1", source: "must_check", text: advisoryCheck,
+      row_class: "objective", gate: "dependency-evidence", obligations: ["security_advisory"],
+      dependency_scope: [{ slug: "types/node", versions: ["26.6.7", "26.6.10"] }],
+    },
+    { id: "obligation-2", source: "must_check", text: plainCheck },
+  ];
+  const folded = foldObligationDispositions(
+    candidateRowsToObligations(rows, rows.map((row) => row.text)),
+    [],
+    ledger,
+    { readPaths: new Set<string>() },
+  ).map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: "missing-source-evidence" as const } : obligation
+  ));
+  const advisory = folded.find((obligation) => obligation.id === "obligation-1")!;
+  assert.equal(advisory.status, "unresolved");
+  assert.equal(advisory.reason, "no-disposition");
+  assert.equal(advisory.evidence?.state, "receipt-unverified");
+  assert.deepEqual([...advisory.evidence?.uncoveredCells ?? []], ["security_advisory:types/node"]);
+  // The published coverage section names the rejection reason, the evidence
+  // state and the uncovered cell for the objective row, and stays at the
+  // cause for the legacy row that carries no evidence metadata.
+  const artifact = base();
+  const enforced = applyReviewObligationEnforcement(artifact, folded);
+  assert.equal(enforced.applied, false);
+  assert.match(artifact.review_markdown, /obligation-1 \(must_check, unresolved, cause: missing-source-evidence, reason: no-disposition, evidence: receipt-unverified, uncovered: security_advisory:types\/node\)/);
+  // The untagged legacy row carries no evidence metadata, but the fold still
+  // records that the run never dispositioned it.
+  assert.match(artifact.review_markdown, /obligation-2 \(must_check, unresolved, cause: missing-source-evidence, reason: no-disposition\):/);
+  // A receipt-refused `satisfied` claim renders its refusal reason once —
+  // the evidence state byte-equals the reason and is not repeated.
+  const claimed = foldObligationDispositions(
+    candidateRowsToObligations([rows[0]!], [advisoryCheck]),
+    [{ check: advisoryCheck, status: "satisfied" }],
+    ledger,
+    { readPaths: new Set<string>() },
+  ).map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: "missing-source-evidence" as const } : obligation
+  ));
+  const refused = claimed.find((obligation) => obligation.id === "obligation-1")!;
+  assert.equal(refused.reason, "receipt-unverified");
+  assert.equal(refused.evidence?.state, "receipt-unverified");
+  const refusedArtifact = base();
+  applyReviewObligationEnforcement(refusedArtifact, claimed);
+  assert.match(refusedArtifact.review_markdown, /reason: receipt-unverified/);
+  assert.ok(!refusedArtifact.review_markdown.includes("evidence: receipt-unverified"));
+});
+
+test("#1822: the reason suffix does not repeat the derived coverage marker's own cause", () => {
+  // The synthetic coverage marker is BORN with its cause (the derivation
+  // resolver stamps it before the fold), and the fold restates that cause as
+  // the row's reason — the renderer must not say the same thing twice.
+  const marker: ReviewObligation = {
+    id: "derived-1",
+    source: "derived",
+    text: "the reconciliation mint site must place the identity before hashing",
+    status: "unresolved",
+    cause: "derivation-incomplete",
+    anchors: ["src/reconcile.ts:mint"],
+  };
+  const folded = foldObligationDispositions([marker], []);
+  assert.equal(folded[0]?.cause, "derivation-incomplete");
+  assert.equal(folded[0]?.reason, "derivation-incomplete");
+  const artifact = base();
+  applyReviewObligationEnforcement(artifact, folded);
+  assert.match(artifact.review_markdown, /derived-1 \(derived, unresolved, cause: derivation-incomplete\):/);
+  assert.ok(!artifact.review_markdown.includes("reason: derivation-incomplete"));
+});
+
+// #1822 (round 2): a run with NO acquisition record and a missing reviewer
+// disposition must disclose BOTH facts — the disposition answer must not
+// swallow the missing-evidence one.
+test("#1822 (round 2): no-ledger renders beside no-disposition", () => {
+  const objectiveCheck = "verify the vendored version 1.2.3 wiring in src/paths.ts";
+  // A ledger object whose trace is absent: the acquisition record itself is
+  // unavailable (the zero-tool-call corpus-review shape, #1846).
+  const ledger = buildEvidenceLedger({});
+  assert.equal(ledger.state, "unavailable");
+  const rows = [{ id: "obligation-1", source: "must_check", text: objectiveCheck, row_class: "objective", gate: "source-identity" }];
+  const folded = foldObligationDispositions(
+    candidateRowsToObligations(rows, rows.map((row) => row.text)),
+    [],
+    ledger,
+    { readPaths: new Set<string>() },
+  ).map((obligation) => (
+    obligation.status === "unresolved" ? { ...obligation, cause: "missing-source-evidence" as const } : obligation
+  ));
+  assert.equal(folded[0]?.reason, "no-disposition");
+  assert.equal(folded[0]?.evidence?.state, "no-ledger");
+  const artifact = base();
+  applyReviewObligationEnforcement(artifact, folded);
+  assert.match(artifact.review_markdown, /obligation-1 \(must_check, unresolved, cause: missing-source-evidence, reason: no-disposition, evidence: no-ledger\):/);
 });

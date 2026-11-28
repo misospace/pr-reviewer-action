@@ -554,6 +554,7 @@ export function reconcileObligationsWithCiEvidence(
         gate: "ci-evidence",
         state: "receipt-backed",
         receipts: [`ci:${discharge.check.name.slice(0, 100)}`],
+        uncoveredCells: [],
       };
       return {
         ...obligation,

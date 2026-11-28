@@ -114,10 +114,13 @@ export interface DispositionEvidenceParts {
    * ever answered. Optional so pre-#1678 callers compile; absent = no signal. */
   verdictContractIncomplete?: boolean;
   /** The harness's recorded zero-evidence degradation reason
-   * (`native_loop_degraded` — the loop ran and the model issued no tool
-   * calls), or null. A recorded zero-evidence degradation is MATERIAL in
-   * either lane — the harness's own record, never a route/tier name
-   * (#1656 audit round 3). Distinct from the min-successful COUNT floor. */
+   * (`native_loop_degraded` — written only for a zero-call stop the LOOP
+   * chose: a transport failure or deadline before any model reply; the
+   * model's own no-tool-calls reply is a deliberate corpus-direct
+   * completion and is not recorded as a degradation, #1837), or null. A
+   * recorded zero-evidence degradation is MATERIAL in either lane — the
+   * harness's own record, never a route/tier name (#1656 audit round 3).
+   * Distinct from the min-successful COUNT floor. */
   noEvidenceReason: string | null;
   /** The count of requirements a MECHANICAL current-head refutation
    * proved false (the #1145 confirmed-unmet escalation, re-derived from
@@ -246,7 +249,20 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
     // provenance and the row stays a MATERIAL unknown — objective
     // unresolved receipt state remains material (#1657). A legacy row
     // keeps the TRANSITIONAL CONSERVATIVE mapping (pre-#1657 semantics).
-    evidence.push(dispositionEvidence("mandatory_requirement_unresolved", "deterministic", "material", check));
+    // #1822: the subject leads with the row's own deterministic rejection
+    // reason (the same closed code the obligation fold assigns — the
+    // disposition record names WHY the row stayed open, not only which
+    // requirement it was), falling back to the bare check when the row
+    // predates the reason vocabulary.
+    const reason = typeof row.reason === "string" && row.reason !== "" && row.reason !== "ok"
+      ? row.reason
+      : null;
+    evidence.push(dispositionEvidence(
+      "mandatory_requirement_unresolved",
+      "deterministic",
+      "material",
+      reason !== null ? `${reason}: ${check}` : check,
+    ));
   }
 
   // The obligation fold's rows. #1656 audit round 3: materiality is never
@@ -314,10 +330,12 @@ export function buildDispositionEvidence(parts: DispositionEvidenceParts): Dispo
   if (parts.toolFloorUnmet) {
     evidence.push(dispositionEvidence("investigation_floor_unmet", "deterministic", "advisory", "min-successful tool requests unmet"));
   }
-  // A RECORDED zero-evidence degradation (the loop ran; the model issued
-  // no tool calls) is a material unknown in either lane — the harness's
-  // own record, never a route/tier rule (#1656 audit round 3). Distinct
-  // from the advisory count floor above.
+  // A RECORDED zero-evidence degradation (a zero-call stop the loop chose —
+  // transport failure or deadline before any reply; the model's own
+  // no-tool-calls reply is never recorded as one, #1837) is a material
+  // unknown in either lane — the harness's own record, never a route/tier
+  // rule (#1656 audit round 3). Distinct from the advisory count floor
+  // above.
   if (parts.noEvidenceReason !== null) {
     evidence.push(dispositionEvidence("investigation_unavailable", "deterministic", "material", parts.noEvidenceReason));
   }

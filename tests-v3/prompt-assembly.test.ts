@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { VERDICT_USER_INSTRUCTION } from "../src/model/conversation.js";
+import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -787,3 +788,88 @@ test("#1835: the in-conversation verdict instruction carries the material_unknow
   assert.match(VERDICT_USER_INSTRUCTION, /do not declare routine tool unavailability that bore on no conclusion/);
   assert.doesNotMatch(VERDICT_USER_INSTRUCTION, /or a question required_check_dispositions already carries/);
 });
+
+test("#1845: the declaration route defines material unknowns by current-head contract, not by exhaustive verification", () => {
+  // Organic shape (#1843): the reviewer confirmed the implementation and the
+  // linked acceptance criteria, then withheld approval over questions that
+  // were not about the change — independently reproducing the historical
+  // incident that motivated the fix, and unchanged implementations it was
+  // never asked to re-prove — after the tool budget ran out. The declaration
+  // guidance must give the reviewer a materiality test instead of bridging
+  // every Unknowns-section question into the structured route. #1848 is the
+  // counterexample the same guidance must keep material: uncertainty about
+  // the actual changed contract is declared even under an approve verdict.
+  const materialityDefinition = [
+    "A question materially bears on the verdict only when the unresolved fact is about the implementation under review and leaves open a specific current-head contract",
+    "whose answer could change the merge recommendation",
+    // #1843: a failed attempt to reproduce the motivating incident must not
+    // withhold a review whose implementation contract is established.
+    "a historical incident that motivated the change is an investigation lead, not an approval prerequisite once the current fix and its acceptance criteria are established",
+    // #1847 vs the counterexample the rule must keep: no blanket
+    // unchanged-file exemption — dependence or a trust-boundary crossing
+    // still makes unverified unchanged behavior material.
+    "unchanged code you did not inspect is material only when the changed behavior depends on it, crosses its trust boundary, or could invalidate its guarantees",
+    // The #1843 run ended tool-call-budget-exhausted; the leftover questions
+    // did not thereby become material.
+    "an exhausted tool budget does not make every outstanding question material",
+  ];
+  withWorkspace({}, (dir) => {
+    const ws = workspaceAt(dir);
+    const assembled = applySystemPromptFragments(resolveSystemPrompt({}, ws), {}, ws).systemPrompt;
+    const harnessFallback = resolveReviewSystemPrompt({
+      env: {},
+      cwd: ".",
+      readText: () => null,
+      exists: () => false,
+      writeArtifact: () => undefined,
+      transport: async () => ({}),
+    });
+    for (const text of [assembled, harnessFallback]) {
+      for (const phrase of materialityDefinition) assert.equal(text.includes(phrase), true, phrase);
+      // #1848: an approve-shaped recommendation and green CI do not resolve a
+      // genuine material unknown — the declaration route stays open.
+      assert.equal(text.includes("declare a genuine material unknown even when your recommendation is approve"), true);
+      assert.equal(text.includes("green CI and the recommendation itself do not resolve it"), true);
+      // The conservative-recommendation instruction binds to materiality, not
+      // to any fetch failure.
+      assert.equal(
+        text.includes("keep the recommendation conservative when the missing evidence is material to the merge contract"),
+        true,
+      );
+      assert.doesNotMatch(text, /fetches fail, say exactly what is missing and keep the recommendation conservative\./);
+    }
+  });
+  // The in-conversation verdict turn (the native-loop declaration moment)
+  // carries the same definition, and its Unknowns-section bridge is
+  // conditional on it — the unconditional bridge is what made every
+  // disclosed fetch failure a structured material unknown.
+  for (const phrase of materialityDefinition) {
+    assert.equal(VERDICT_USER_INSTRUCTION.includes(phrase), true, phrase);
+  }
+  assert.match(
+    VERDICT_USER_INSTRUCTION,
+    /Declare an unresolved question you raise in the Unknowns or Needs Verification section there too only when it meets that bar/,
+  );
+  assert.doesNotMatch(VERDICT_USER_INSTRUCTION, /Needs Verification section there too, including/);
+  assert.equal(VERDICT_USER_INSTRUCTION.includes("declare a genuine material unknown even when your verdict is approve"), true);
+  // Definition sits between the affects clause and the bridge: the model
+  // reads the materiality test before the instruction that applies it.
+  const affects = VERDICT_USER_INSTRUCTION.indexOf("affects (the path or path:LINE");
+  const definition = VERDICT_USER_INSTRUCTION.indexOf("A question materially bears on the verdict only when");
+  const bridge = VERDICT_USER_INSTRUCTION.indexOf("Declare an unresolved question you raise in the Unknowns");
+  assert.ok(affects >= 0 && affects < definition && definition < bridge);
+  // The strict verdict schema's own description answers the same way.
+  const description = ((OPENAI_VERDICT_JSON_SCHEMA as {
+    json_schema?: { schema: { properties: { material_unknowns?: { description: string } } } };
+  }).json_schema?.schema.properties.material_unknowns ?? {}).description ?? "";
+  assert.equal(
+    description.includes("A question materially bears on the verdict only when the unresolved fact is about the implementation under review and leaves open a specific current-head contract"),
+    true,
+  );
+  assert.equal(
+    description.includes("historical motivation you need not independently reproduce, unchanged code with no material connection to the change, and an exhausted tool budget are not material unknowns"),
+    true,
+  );
+  assert.equal(description.includes("declare a genuine material unknown even when the verdict is approve"), true);
+});
+

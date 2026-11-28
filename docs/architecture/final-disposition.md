@@ -73,6 +73,10 @@ Materiality never derives from the `required_checks=incomplete` bit. The
 seam (`DispositionEvidence`) carries closed reason codes, WHO ruled the
 materiality (`deterministic` for the objective floors, `reviewer` for the
 genuinely semantic calls #1657/#1658/#1659 feed) and a bounded subject.
+For a deterministic unresolved requirement the subject leads with the row's
+own per-row rejection reason (the same closed code the obligation fold and
+the published body render — #1822), so the record names why the requirement
+stayed open, not only which one it was.
 
 Material codes (each can withhold approval when applicable to the changed
 behavior): `unread_affected_path`, `exact_head_evidence_unavailable`,
@@ -123,7 +127,14 @@ settle a state:
   stays disclosure-only and can never independently prevent APPROVE;
 - a tool CAPABILITY failure (planning/execution error, every call failed)
   and a RECORDED zero-evidence loop degradation (`native_loop_degraded`,
-  lane-independent — never a route/tier name) are MATERIAL;
+  lane-independent — never a route/tier name) are MATERIAL. #1837 narrows
+  the producer: the harness records the degradation only for a zero-call
+  stop the LOOP chose (a transport failure or deadline before any model
+  reply); the model's own `no-tool-calls` reply is a deliberate
+  corpus-direct completion — the same evidence surface a `tool-mode: off`
+  run has — and is not recorded, so that run settles the way the
+  tools-disabled run settles (investigation adequacy decides approval
+  eligibility, never the call count);
 - #1659's canonical per-question settlement record feeds the seam. Its two
   dimensions are deliberately separate: the loop writes EVIDENCE state
   (`acquired` / `cap-released` / `open` — the `obligations-settled` stop is
